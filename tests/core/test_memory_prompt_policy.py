@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -13,14 +14,93 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.memory_prompt_policy import (  # noqa: E402
     MEMORY_CONTEXT_USE_POLICY,
     MEMORY_PROMPT_MAX_CHARS,
+    memory_deletion_boundary_from_position,
+    memory_deletion_boundary_not_required,
+    normalize_memory_retrieval_mode,
     prepare_memory_context_for_prompt,
     reconcile_memory_receipt_for_prompt,
     validated_memory_grounding_state,
     wrap_memory_context_for_prompt,
 )
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionPosition,
+)
+from evelyn_core.memory_deletion_outbound import (  # noqa: E402
+    capture_memory_deletion_outbound_position,
+    current_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 
 
 class MemoryPromptPolicyTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        reset_memory_deletion_outbound_position()
+
+    def test_retrieval_mode_uses_closed_content_free_enum(self) -> None:
+        for value in (
+            "fts",
+            "scan",
+            "fts+vector",
+            "scan+vector",
+            "cache",
+            "unknown",
+        ):
+            self.assertEqual(
+                normalize_memory_retrieval_mode(value),
+                value,
+            )
+        private_canary = "PRIVATE retrieval mode transcript"
+        self.assertEqual(
+            normalize_memory_retrieval_mode(private_canary),
+            "unknown",
+        )
+        receipt = {
+            "state": "empty",
+            "retrievalMode": private_canary,
+        }
+        reconcile_memory_receipt_for_prompt(
+            receipt,
+            prepare_memory_context_for_prompt(
+                "",
+                grounding_state="empty",
+            ),
+        )
+        self.assertEqual(receipt["retrievalMode"], "unknown")
+        self.assertNotIn(private_canary, str(receipt))
+
+    def test_receipt_projects_legacy_identifiers_content_free(
+        self,
+    ) -> None:
+        private_evidence = "private-natural-language-evidence"
+        private_turn = "private-natural-language-turn"
+        receipt = {
+            "state": "provided",
+            "groundingState": "attributed",
+            "legacyEvidenceIds": [private_evidence],
+            "legacySourceEvidenceIds": [private_evidence],
+            "legacySourceTurnIds": [private_turn],
+        }
+
+        reconcile_memory_receipt_for_prompt(
+            receipt,
+            prepare_memory_context_for_prompt(
+                "grounded memory",
+                grounding_state="attributed",
+            ),
+        )
+
+        serialized = json.dumps(receipt, ensure_ascii=False)
+        self.assertNotIn(private_evidence, serialized)
+        self.assertNotIn(private_turn, serialized)
+        self.assertRegex(
+            receipt["legacyEvidenceIds"][0],
+            r"^opaque-evidence-[0-9a-f]{64}$",
+        )
+        self.assertRegex(
+            receipt["legacySourceTurnIds"][0],
+            r"^opaque-turn-[0-9a-f]{64}$",
+        )
+
     def test_unattributed_memory_body_is_withheld_from_model(self) -> None:
         wrapped = wrap_memory_context_for_prompt(
             "legacy memory",
@@ -92,6 +172,11 @@ class MemoryPromptPolicyTests(unittest.TestCase):
         self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertNotIn("privateBody", receipt)
         self.assertNotIn("PRIVATE_RECEIPT_BODY", str(receipt))
+        self.assertEqual(
+            receipt["deletionBoundary"],
+            memory_deletion_boundary_not_required(),
+        )
+        self.assertIsNone(current_memory_deletion_outbound_position())
 
     def test_empty_memory_does_not_create_a_prompt_section(self) -> None:
         self.assertEqual(
@@ -118,6 +203,10 @@ class MemoryPromptPolicyTests(unittest.TestCase):
         self.assertEqual(receipt["groundingState"], "empty")
         self.assertEqual(receipt["suppliedNoteIds"], [])
         self.assertEqual(receipt["suppliedNoteCount"], 0)
+        self.assertEqual(
+            receipt["deletionBoundary"]["state"],
+            "not_required",
+        )
 
     def test_oversized_memory_fails_closed_and_discards_attribution_claims(self) -> None:
         boundary = prepare_memory_context_for_prompt(
@@ -164,6 +253,73 @@ class MemoryPromptPolicyTests(unittest.TestCase):
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
         self.assertEqual(receipt["legacyEvidenceIds"], [])
         self.assertEqual(receipt["confirmOnlyItemCount"], 0)
+        self.assertEqual(
+            receipt["deletionBoundary"]["state"],
+            "not_required",
+        )
+
+    def test_attributed_prompt_preserves_public_boundary_and_internal_position(self) -> None:
+        position = MemoryDeletionPosition(
+            schema="memory.deletion.position.v1",
+            root_digest="c" * 64,
+            sequence=11,
+            position_digest="d" * 64,
+        )
+        capture_memory_deletion_outbound_position(position)
+        receipt = {
+            "state": "provided",
+            "groundingState": "attributed",
+            "suppliedNoteIds": ["note-1"],
+            "suppliedNoteCount": 1,
+            "legacyItemCount": 0,
+            "legacyAttributedItemCount": 0,
+            "legacyUnattributedItemCount": 0,
+            "legacyEvidenceIds": [],
+            "deletionBoundary": memory_deletion_boundary_from_position(
+                position
+            ),
+            "privateField": "PRIVATE_MUST_NOT_SURVIVE",
+        }
+        boundary = prepare_memory_context_for_prompt(
+            "grounded memory",
+            grounding_state="attributed",
+        )
+
+        reconcile_memory_receipt_for_prompt(receipt, boundary)
+
+        self.assertEqual(receipt["deletionBoundary"]["state"], "captured")
+        self.assertEqual(receipt["deletionBoundary"]["sequence"], 11)
+        self.assertNotIn("root", receipt["deletionBoundary"])
+        self.assertNotIn("c" * 64, json.dumps(receipt))
+        self.assertNotIn("PRIVATE_MUST_NOT_SURVIVE", str(receipt))
+        self.assertIs(current_memory_deletion_outbound_position(), position)
+
+    def test_attributed_prompt_without_internal_position_is_not_claimed_captured(self) -> None:
+        receipt = {
+            "state": "provided",
+            "groundingState": "attributed",
+            "suppliedNoteIds": ["note-1"],
+            "suppliedNoteCount": 1,
+            "deletionBoundary": {
+                "schema": "memory.deletion.position.v1",
+                "state": "captured",
+                "sequence": 1,
+                "positionDigest": "e" * 64,
+                "contentFree": True,
+            },
+        }
+        boundary = prepare_memory_context_for_prompt(
+            "grounded memory",
+            grounding_state="attributed",
+        )
+
+        reconcile_memory_receipt_for_prompt(receipt, boundary)
+
+        self.assertEqual(
+            receipt["deletionBoundary"],
+            memory_deletion_boundary_not_required(),
+        )
+        self.assertIsNone(current_memory_deletion_outbound_position())
 
     def test_grounding_state_is_recomputed_from_content_free_receipt_evidence(self) -> None:
         self.assertEqual(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -20,6 +21,16 @@ from evelyn_core.fast_context_contract import (  # noqa: E402
 )
 from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
 from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
+from evelyn_core.memory_prompt_policy import memory_deletion_boundary_from_position  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+    memory_deletion_ledger_note_id,
+)
+from evelyn_core.memory_deletion_outbound import (  # noqa: E402
+    capture_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
 
@@ -48,6 +59,19 @@ async def fake_search(query: str) -> tuple[str, list[dict[str, str]]]:
 
 async def fake_memory(_: str) -> str:
     return "Memory note: 정훈 prefers exact stabilization reports."
+
+
+TEST_DELETION_POSITION = MemoryDeletionPosition(
+    schema="memory.deletion.position.v1",
+    root_digest="a" * 64,
+    sequence=13,
+    position_digest="b" * 64,
+)
+
+
+def capture_test_deletion_boundary() -> dict[str, object]:
+    capture_memory_deletion_outbound_position(TEST_DELETION_POSITION)
+    return memory_deletion_boundary_from_position(TEST_DELETION_POSITION)
 
 
 async def fake_logs(_: str) -> str:
@@ -171,6 +195,9 @@ def fake_local_bridge_status() -> dict[str, object]:
 
 
 class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self) -> None:
+        reset_memory_deletion_outbound_position()
+
     def test_bot_api_requirements_include_memory_recall_dependency(self) -> None:
         requirements = (REPO_ROOT / "docker" / "requirements.bot-api.txt").read_text(encoding="utf-8")
 
@@ -338,6 +365,8 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.memory_receipt["contentFree"])
 
     async def test_fast_memory_receipt_keeps_note_ids_without_memory_text(self) -> None:
+        canonical_note_id = "opaque-" + ("a" * 64)
+
         async def grounded_memory(_text: str):
             return (
                 "PRIVATE_GROUNDED_MEMORY",
@@ -345,9 +374,16 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
                     "state": "provided",
                     "groundingState": "attributed",
                     "memoryVersion": 9,
-                    "retrievalMode": "fts",
-                    "noteIds": ["note-2", "note-1"],
+                    "retrievalMode": (
+                        "PRIVATE retrieval-mode transcript canary"
+                    ),
+                    "noteIds": [
+                        "note-2",
+                        "note-1",
+                        canonical_note_id,
+                    ],
                     "sourceTypeCounts": {"user": 2},
+                    "deletionBoundary": capture_test_deletion_boundary(),
                     "private": "MUST_NOT_SURVIVE",
                 },
             )
@@ -361,12 +397,61 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.memory_receipt["groundingState"], "attributed")
         self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 0)
-        self.assertEqual(context.memory_receipt["suppliedNoteIds"], ["note-1", "note-2"])
+        self.assertEqual(
+            context.memory_receipt["retrievalMode"],
+            "unknown",
+        )
+        self.assertNotIn(
+            "PRIVATE retrieval-mode transcript canary",
+            str(context.memory_receipt),
+        )
+        self.assertEqual(
+            context.memory_receipt["suppliedNoteIds"],
+            sorted(
+                {
+                    memory_deletion_ledger_note_id("note-1"),
+                    memory_deletion_ledger_note_id("note-2"),
+                    canonical_note_id,
+                }
+            ),
+        )
+        self.assertNotIn("note-1", str(context.memory_receipt))
+        self.assertNotIn("note-2", str(context.memory_receipt))
         self.assertEqual(context.memory_receipt["sourceTypeCounts"], {"user": 2})
+        self.assertEqual(
+            context.memory_receipt["deletionBoundary"]["state"],
+            "captured",
+        )
+        self.assertIs(
+            context.memory_deletion_position,
+            TEST_DELETION_POSITION,
+        )
         self.assertIn("MEMORY_DATA_RULE:", context.system_context)
         self.assertNotIn("MEMORY_CONFIRMATION_RULE:", context.system_context)
         self.assertNotIn("PRIVATE_GROUNDED_MEMORY", str(context.memory_receipt))
         self.assertNotIn("MUST_NOT_SURVIVE", str(context.memory_receipt))
+
+    async def test_memory_bearing_custom_provider_without_boundary_fails_closed(self) -> None:
+        async def unguarded_memory(_text: str):
+            return (
+                "PRIVATE_UNGUARDED_MEMORY",
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "noteIds": ["note-unguarded"],
+                },
+            )
+
+        with self.assertRaisesRegex(
+            MemoryDeletionJournalIntegrityError,
+            "^memory_deletion_journal_integrity_failed$",
+        ):
+            await build_fast_control_context(
+                "memory previous preference?",
+                source="control_page",
+                runtime_health_provider=fake_runtime_health,
+                memory_provider=unguarded_memory,
+            )
 
     async def test_fast_memory_cannot_claim_attribution_without_evidence_ids(self) -> None:
         async def falsely_grounded_memory(_text: str):
@@ -453,6 +538,23 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.memory_receipt["state"], "unavailable")
         self.assertNotIn("PRIVATE_MEMORY_FAILURE", context.system_context)
 
+    async def test_fast_memory_integrity_failure_is_not_downgraded(self) -> None:
+        async def failed_memory(_text: str):
+            raise MemoryDeletionJournalIntegrityError(
+                "PRIVATE_INTEGRITY_DETAIL"
+            )
+
+        with self.assertRaisesRegex(
+            MemoryDeletionJournalIntegrityError,
+            "^memory_deletion_journal_integrity_failed$",
+        ):
+            await build_fast_control_context(
+                "memory previous preference?",
+                source="control_page",
+                runtime_health_provider=fake_runtime_health,
+                memory_provider=failed_memory,
+            )
+
     async def test_fast_main_llm_messages_include_context_pipeline_contract(self) -> None:
         messages = await build_fast_main_llm_messages(
             base_system_prompt="base prompt",
@@ -472,6 +574,42 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("web_current_info", messages[0]["content"])
         self.assertIn("Weather Example", messages[0]["content"])
         self.assertEqual(messages[-1], {"role": "user", "content": "final user text"})
+
+    async def test_fast_request_carries_internal_position_outside_model_json(self) -> None:
+        async def grounded_memory(_text: str):
+            return (
+                "PRIVATE_GROUNDED_MEMORY",
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "noteIds": ["note-1"],
+                    "deletionBoundary": capture_test_deletion_boundary(),
+                },
+            )
+
+        request = await build_fast_main_llm_request(
+            base_system_prompt="base",
+            recent_messages=[],
+            user_text="memory previous preference?",
+            final_user_text="answer",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=grounded_memory,
+        )
+
+        serialized_messages = json.dumps(
+            request.messages,
+            ensure_ascii=False,
+        )
+        self.assertIs(
+            request.memory_deletion_position,
+            TEST_DELETION_POSITION,
+        )
+        self.assertNotIn(TEST_DELETION_POSITION.root_digest, serialized_messages)
+        self.assertNotIn(
+            TEST_DELETION_POSITION.position_digest,
+            serialized_messages,
+        )
 
     async def test_fast_main_preserves_unanswered_turn_and_adds_fixed_rule(self) -> None:
         private_text = "PRIVATE_FAST_UNANSWERED_TEXT"

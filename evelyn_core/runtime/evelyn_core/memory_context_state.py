@@ -3,11 +3,26 @@ from __future__ import annotations
 from typing import Any
 
 from .cognitive_policy_state import read_layered_cognitive_state
-from .config import MEMORY_RAW_CONTEXT_LIMIT, MEMORY_RETRIEVE_LIMIT, MEMORY_VAULT_RAW_RETRIEVE_LIMIT
+from .config import (
+    MEMORY_RAW_CONTEXT_LIMIT,
+    MEMORY_RETRIEVE_LIMIT,
+    MEMORY_ROOT,
+    MEMORY_VAULT_RAW_RETRIEVE_LIMIT,
+)
 from .memory import merge_memory_rows, normalize_cognitive_state, select_relevant_memory_rows
+from .memory_content_free_ids import memory_content_free_id
+from .memory_deletion_journal import memory_deletion_journal_guard
+from .memory_deletion_outbound import (
+    capture_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 from .memory_legacy_evidence import validate_legacy_memory_evidence
 from .memory_layers import collect_memory_layers
-from .memory_prompt_policy import MEMORY_CONTEXT_USE_POLICY
+from .memory_prompt_policy import (
+    MEMORY_CONTEXT_USE_POLICY,
+    memory_deletion_boundary_from_position,
+    memory_deletion_boundary_not_required,
+)
 from .memory_vault import build_memory_vault_context
 from .text import clean_text
 
@@ -269,7 +284,7 @@ def _annotate_memory_layers(
     return annotated
 
 
-def build_memory_context(
+def _build_memory_context_at_position(
     guild_id: int,
     user_text: str,
     cognitive_state: dict[str, Any] | None = None,
@@ -445,17 +460,31 @@ def build_memory_context(
         0,
         legacy_item_count - legacy_attributed_item_count,
     )
-    legacy_evidence_ids = sorted({item[0] for item in legacy_evidence})
+    legacy_evidence_ids = sorted(
+        {
+            memory_content_free_id(
+                item[0],
+                namespace="evidence",
+            )
+            for item in legacy_evidence
+        }
+    )
     legacy_source_turn_ids = sorted(
         {
-            source_turn_id
+            memory_content_free_id(
+                source_turn_id,
+                namespace="turn",
+            )
             for item in legacy_evidence
             for source_turn_id in item[2]
         }
     )
     legacy_source_evidence_ids = sorted(
         {
-            source_evidence_id
+            memory_content_free_id(
+                source_evidence_id,
+                namespace="evidence",
+            )
             for item in legacy_evidence
             for source_evidence_id in item[1]
         }
@@ -520,6 +549,58 @@ def build_memory_context(
             }
         )
     return context
+
+
+def build_memory_context(
+    guild_id: int,
+    user_text: str,
+    cognitive_state: dict[str, Any] | None = None,
+    *,
+    session_key: str | None = None,
+    session_state: dict[str, Any] | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    receipt: dict[str, Any] | None = None,
+) -> str:
+    """Build all legacy and vault memory at one verified deletion position."""
+
+    reset_memory_deletion_outbound_position()
+    try:
+        with memory_deletion_journal_guard(
+            MEMORY_ROOT / "memory_index",
+            require_stable=True,
+        ) as deletion_position:
+            context = _build_memory_context_at_position(
+                guild_id,
+                user_text,
+                cognitive_state,
+                session_key=session_key,
+                session_state=session_state,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                receipt=receipt,
+            )
+            if context:
+                capture_memory_deletion_outbound_position(
+                    deletion_position
+                )
+                deletion_boundary = (
+                    memory_deletion_boundary_from_position(
+                        deletion_position
+                    )
+                )
+            else:
+                deletion_boundary = (
+                    memory_deletion_boundary_not_required()
+                )
+            if receipt is not None:
+                receipt["deletionBoundary"] = deletion_boundary
+            return context
+    except Exception:
+        reset_memory_deletion_outbound_position()
+        raise
 
 
 __all__ = [

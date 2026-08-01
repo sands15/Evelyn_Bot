@@ -13,6 +13,12 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.turn_trace import TURN_SUMMARY_KEYS, build_turn_summary_payload, write_turn_trace_event  # noqa: E402
 from evelyn_core.assistant_contracts import AcceptedVoiceTurn  # noqa: E402
+from evelyn_core.memory_content_free_ids import (  # noqa: E402
+    memory_content_free_id,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    memory_deletion_ledger_note_id,
+)
 
 
 class TurnTraceSummaryTests(unittest.TestCase):
@@ -126,8 +132,12 @@ class TurnTraceSummaryTests(unittest.TestCase):
                     "memory_write_receipt": {
                         "schema": "memory.user-confirmation.v1",
                         "state": "stored",
-                        "noteId": "concept-confirmed",
-                        "sourceRef": "turn:turn-12345:user",
+                        "noteId": "concept-0123456789abcdef",
+                        "sourceRef": (
+                            "turn:opaque-turn-"
+                            + ("a" * 64)
+                            + ":user"
+                        ),
                         "confirmedAt": "2026-07-31T00:00:00+00:00",
                         "contentFree": True,
                     },
@@ -168,7 +178,13 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["memory_pretruncation_legacy_item_count"], 0)
         self.assertEqual(payload["memory_pretruncation_note_count"], 0)
         self.assertEqual(payload["memory_opaque_confirm_only_component_count"], 0)
-        self.assertEqual(payload["memory_supplied_note_ids"], ["note-2", "note-1"])
+        self.assertEqual(
+            payload["memory_supplied_note_ids"],
+            [
+                memory_deletion_ledger_note_id("note-2"),
+                memory_deletion_ledger_note_id("note-1"),
+            ],
+        )
         self.assertEqual(payload["memory_supplied_note_count"], 2)
         self.assertEqual(payload["memory_legacy_item_count"], 3)
         self.assertEqual(payload["memory_legacy_attributed_item_count"], 2)
@@ -176,20 +192,42 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["memory_legacy_confirm_only_item_count"], 1)
         self.assertEqual(
             payload["memory_legacy_evidence_ids"],
-            ["turn:a:user", "turn:a:assistant"],
+            [
+                memory_content_free_id(
+                    "turn:a:user",
+                    namespace="evidence",
+                ),
+                memory_content_free_id(
+                    "turn:a:assistant",
+                    namespace="evidence",
+                ),
+            ],
         )
         self.assertEqual(
             payload["memory_legacy_source_evidence_ids"],
-            ["turn:source:user"],
+            [
+                memory_content_free_id(
+                    "turn:source:user",
+                    namespace="evidence",
+                )
+            ],
         )
-        self.assertEqual(payload["memory_legacy_source_turn_ids"], ["a"])
+        self.assertEqual(
+            payload["memory_legacy_source_turn_ids"],
+            [
+                memory_content_free_id(
+                    "a",
+                    namespace="turn",
+                )
+            ],
+        )
         self.assertEqual(payload["memory_hot_context_state"], "provided")
         self.assertEqual(payload["memory_version"], 7)
         self.assertTrue(payload["memory_receipt_content_free"])
         self.assertEqual(payload["memory_write_state"], "stored")
         self.assertEqual(
             payload["memory_write_note_id"],
-            "concept-confirmed",
+            "concept-0123456789abcdef",
         )
         self.assertIsNone(payload["memory_write_error"])
         self.assertTrue(payload["memory_write_content_free"])

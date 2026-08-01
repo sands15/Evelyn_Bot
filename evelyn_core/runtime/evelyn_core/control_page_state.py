@@ -19,6 +19,10 @@ from .minecraft_mode_composition import (
     minecraft_stop_confirmed,
 )
 from .minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot
+from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalIntegrityError,
+)
 from .public_error_contract import public_error_code, public_failure_message
 from .text import clean_text
 
@@ -1022,7 +1026,14 @@ def parse_control_page_memory_note_action_payload(payload: Any) -> dict[str, Any
 
 
 def control_page_result_status(result: dict[str, Any], *, ok_status: int = 200, error_status: int = 404) -> int:
-    return int(ok_status if result.get("ok") else error_status)
+    if result.get("ok"):
+        return int(ok_status)
+    if (
+        clean_text(str(result.get("error") or ""))
+        == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+    ):
+        return 503
+    return int(error_status)
 
 
 def handle_control_page_memory_note_action_request(
@@ -1032,15 +1043,21 @@ def handle_control_page_memory_note_action_request(
     update_note: Any,
 ) -> tuple[dict[str, Any], int]:
     note_action = parse_control_page_memory_note_action_payload(payload)
-    result = update_note(
-        note_id,
-        note_action.get("action"),
-        title=note_action.get("title"),
-        body=note_action.get("body"),
-        expected_content_hash=note_action.get(
-            "expected_content_hash"
-        ),
-    )
+    try:
+        result = update_note(
+            note_id,
+            note_action.get("action"),
+            title=note_action.get("title"),
+            body=note_action.get("body"),
+            expected_content_hash=note_action.get(
+                "expected_content_hash"
+            ),
+        )
+    except MemoryDeletionJournalIntegrityError:
+        return {
+            "ok": False,
+            "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+        }, 503
     error = clean_text(str(result.get("error") or ""))
     status = (
         200
@@ -1061,7 +1078,11 @@ def handle_control_page_memory_note_action_request(
             "memory_confirmation_write_failed",
         }
         else 503
-        if error == "memory_edit_cleanup_required"
+        if error
+        in {
+            "memory_edit_cleanup_required",
+            MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+        }
         else 404
         if error == "note_not_found"
         else 400
@@ -1120,6 +1141,8 @@ async def handle_control_page_chat_request(
     error_code = ""
     try:
         reply_text = await handle_input(guild, text)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         error_code = "control_page_chat_failed"
         log("[CONTROL PAGE] chat_failed errorType=", type(exc).__name__)

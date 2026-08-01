@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
+from . import memory as memory_runtime
 from .memory import (
     append_unique_memory_rows,
     compact_working_summary,
@@ -20,6 +22,10 @@ from .memory_llm_context import (
     layered_summary_text,
     memory_scope_targets,
     recent_memory_groups,
+)
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_guard,
 )
 from .proactive_questions import promote_open_questions
 from .text import clean_text
@@ -264,6 +270,7 @@ async def run_long_term_memory_update(
     raw_limit: int,
     log: Callable[[str], None] | None = None,
     now: Callable[[], float] = time.monotonic,
+    memory_index_dir: Path | None = None,
 ) -> dict[str, Any]:
     started_at = now()
     scope_note = session_memory_key or room_key or "guild"
@@ -277,37 +284,51 @@ async def run_long_term_memory_update(
             turn_scope.raise_if_cancelled()
 
     raise_if_cancelled()
-    layers = collect_layers(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
+    deletion_index_dir = (
+        Path(memory_index_dir)
+        if memory_index_dir is not None
+        else Path(memory_runtime.MEMORY_ROOT) / "memory_index"
     )
-    current_summary = layered_summary_text(layers)
-    recent = recent_memory_groups(
-        layers,
-        raw_limit=raw_limit,
-        facts_limit=6,
-        questions_limit=4,
-    )
-    source_evidence_ids, source_turn_ids = _memory_input_evidence(
-        layers,
-        recent,
-        source_turn_id=source_turn_id,
-        user_text=user_text,
-        answer=answer,
-        include_recent=True,
-    )
+    with memory_deletion_journal_guard(
+        deletion_index_dir,
+        require_stable=True,
+    ) as memory_deletion_position:
+        layers = collect_layers(
+            guild_id,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+        current_summary = layered_summary_text(layers)
+        recent = recent_memory_groups(
+            layers,
+            raw_limit=raw_limit,
+            facts_limit=6,
+            questions_limit=4,
+        )
+        source_evidence_ids, source_turn_ids = _memory_input_evidence(
+            layers,
+            recent,
+            source_turn_id=source_turn_id,
+            user_text=user_text,
+            answer=answer,
+            include_recent=True,
+        )
 
-    messages = build_long_term_memory_messages(
-        current_summary=current_summary,
-        recent_raw=recent["raw"],
-        recent_facts=recent["facts"],
-        recent_questions=recent["questions"],
-        user_text=user_text,
-        answer=answer,
-        raw_limit=raw_limit,
-    )
+        messages = build_long_term_memory_messages(
+            current_summary=current_summary,
+            recent_raw=recent["raw"],
+            recent_facts=recent["facts"],
+            recent_questions=recent["questions"],
+            user_text=user_text,
+            answer=answer,
+            raw_limit=raw_limit,
+        )
+        compact_messages = build_compact_long_term_memory_messages(
+            current_summary=current_summary,
+            user_text=user_text,
+            answer=answer,
+        )
 
     result: dict[str, Any] | None = None
     failure: Exception | None = None
@@ -321,17 +342,17 @@ async def run_long_term_memory_update(
             session_key=session_memory_key,
             source="memory_writebehind",
             guild_id=guild_id,
+            memory_deletion_position=memory_deletion_position,
+            memory_boundary_required=True,
+            memory_deletion_index_dir=deletion_index_dir,
         )
         if isinstance(maybe_result, dict):
             result = maybe_result
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         failure = exc
         if is_context_size_error(exc):
-            compact_messages = build_compact_long_term_memory_messages(
-                current_summary=current_summary,
-                user_text=user_text,
-                answer=answer,
-            )
             try:
                 raise_if_cancelled()
                 maybe_result = await ask_summary_llm(
@@ -344,6 +365,9 @@ async def run_long_term_memory_update(
                     session_key=session_memory_key,
                     source="memory_writebehind",
                     guild_id=guild_id,
+                    memory_deletion_position=memory_deletion_position,
+                    memory_boundary_required=True,
+                    memory_deletion_index_dir=deletion_index_dir,
                 )
                 if isinstance(maybe_result, dict):
                     result = maybe_result
@@ -355,6 +379,8 @@ async def run_long_term_memory_update(
                         answer=answer,
                         include_recent=False,
                     )
+            except MemoryDeletionJournalIntegrityError:
+                raise
             except Exception as retry_exc:
                 failure = retry_exc
                 emit(f"[MEMORY] compact retry 실패: {retry_exc}")
@@ -369,18 +395,23 @@ async def run_long_term_memory_update(
         return {"ok": False, "elapsed_ms": elapsed_ms, "scope": scope_note}
 
     raise_if_cancelled()
-    applied = apply_long_term_memory_result(
-        guild_id,
-        result,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        memory_fact_limit=memory_fact_limit,
-        memory_loop_limit=memory_loop_limit,
-        source_evidence_ids=source_evidence_ids,
-        source_turn_ids=source_turn_ids,
-        log=log,
-    )
+    with memory_deletion_journal_guard(
+        deletion_index_dir,
+        expected_position=memory_deletion_position,
+        require_stable=True,
+    ):
+        applied = apply_long_term_memory_result(
+            guild_id,
+            result,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            memory_fact_limit=memory_fact_limit,
+            memory_loop_limit=memory_loop_limit,
+            source_evidence_ids=source_evidence_ids,
+            source_turn_ids=source_turn_ids,
+            log=log,
+        )
 
     elapsed_ms = (now() - started_at) * 1000.0
     if should_log_latency(elapsed_ms):

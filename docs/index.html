@@ -3878,7 +3878,22 @@
         response = await fetch(apiBase + path, requestOptions);
       }
       if (!response.ok) {
-        throw new Error(`api_error:${response.status}`);
+        let evelynErrorCode = "";
+        try {
+          const failure = await response.json();
+          const candidate = String(failure && failure.error || "");
+          if ([
+            "memory_deletion_journal_integrity_failed",
+            "memory_delete_cleanup_required"
+          ].includes(candidate)) {
+            evelynErrorCode = candidate;
+          }
+        } catch {
+          // Preserve only explicitly allowlisted public codes.
+        }
+        const apiError = new Error(`api_error:${response.status}`);
+        apiError.evelynErrorCode = evelynErrorCode;
+        throw apiError;
       }
       return await response.json();
     }
@@ -5242,8 +5257,20 @@
         const correctionCount = Number(memoryCorrectionSnapshot && memoryCorrectionSnapshot.relationshipCount || 0);
         const integrityInvalidCount = Number(memorySnapshot && memorySnapshot.counts && memorySnapshot.counts.integrityInvalid || 0);
         const confirmationStaleCount = Number(memorySnapshot && memorySnapshot.counts && memorySnapshot.counts.confirmationStale || 0);
+        const deletionIntegrity = memorySnapshot && memorySnapshot.deletionIntegrity
+          ? memorySnapshot.deletionIntegrity
+          : {};
+        const deletionIntegrityLabel = deletionIntegrity.rollbackProtected
+          ? "삭제 롤백 보호 활성"
+          : deletionIntegrity.state === "uninitialized"
+            ? deletionIntegrity.externalAnchorConfigured
+              ? "삭제 롤백 보호 초기화 대기"
+              : "삭제 journal 미초기화"
+            : deletionIntegrity.externalAnchorConfigured
+              ? "삭제 외부 anchor 미검증"
+              : "삭제 외부 anchor 없음";
         memoryHint.textContent = total
-          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · 근거 손상 ${integrityInvalidCount} · 재확인 ${confirmationStaleCount} · provenance 후보 ${candidateCount} · 연결 관리 ${correctionCount}`
+          ? `Graph ${graphCount || total} nodes, ${total} notes · ${deletionIntegrityLabel} · 격리 ${quarantineCount} · 근거 손상 ${integrityInvalidCount} · 재확인 ${confirmationStaleCount} · provenance 후보 ${candidateCount} · 연결 관리 ${correctionCount}`
           : "Waiting for memory_vault nodes.";
       }
       if (!cards.length) {
@@ -5428,6 +5455,18 @@
         const note = preview && preview.note ? preview.note : {};
         const provenance = note.provenance || {};
         const source = provenance.source || provenance.sourceType || "unknown";
+        const deletionIntegrity = preview && preview.deletionIntegrity
+          ? preview.deletionIntegrity
+          : {};
+        const rollbackLine = deletionIntegrity.rollbackProtected
+          ? "외부 anchor 롤백 보호: 활성"
+          : deletionIntegrity.state === "uninitialized"
+            ? deletionIntegrity.externalAnchorConfigured
+              ? "외부 anchor는 구성됐지만 삭제 journal의 신뢰 기준이 아직 초기화되지 않았습니다."
+              : "삭제 journal이 아직 초기화되지 않았고 외부 anchor 롤백 보호도 구성되지 않았습니다."
+            : deletionIntegrity.externalAnchorConfigured
+              ? "주의: 외부 anchor가 검증되지 않아 journal과 head의 동시 과거 재생은 탐지하지 못합니다."
+              : "주의: 외부 anchor가 구성되지 않아 journal과 head의 동시 과거 재생은 탐지하지 못합니다.";
         const impact = preview && preview.derivationImpact ? preview.derivationImpact : {};
         const cascade = Array.isArray(impact.cascadeDelete) ? impact.cascadeDelete : [];
         const quarantine = Array.isArray(impact.quarantine) ? impact.quarantine : [];
@@ -5452,6 +5491,7 @@
         const confirmed = window.confirm(
           `"${note.title || selectedMemoryCard.title || noteId}" 기억을 영구 삭제할까요?\n\n` +
           `출처: ${source}\n` +
+          rollbackLine + "\n" +
           impactLines.join("\n") + "\n\n" +
           "원문 파일, 사용자 상태, 검색 인덱스, 검색 캐시에서 제거되며 되돌릴 수 없습니다."
         );
@@ -5488,6 +5528,14 @@
           memoryCorrectionSnapshot = null;
           await loadMemoryVault({ force: true });
           setBubble("삭제 미리보기 뒤 기억이나 파생 근거가 바뀌어서 삭제하지 않았어. 다시 확인해줘.");
+          return;
+        }
+        if (String(error.evelynErrorCode || "") === "memory_deletion_journal_integrity_failed") {
+          setBubble("삭제 journal 무결성 검증이 실패해 요청을 차단했어. 재시도하지 말고 무결성 상태와 런타임 로그를 먼저 복구해줘.");
+          return;
+        }
+        if (String(error.evelynErrorCode || "") === "memory_delete_cleanup_required") {
+          setBubble("삭제 tombstone은 기록됐지만 원문 정리가 끝나지 않았을 수 있어. 자동 재시도하지 않았어. 최신 상태와 런타임 로그에서 cleanup을 확인해줘.");
           return;
         }
         setBubble(`기억 삭제에 실패했어. 다시 시도해줘: ${error.message}`);

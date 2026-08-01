@@ -160,6 +160,42 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
+            "preview.deletionIntegrity",
+            self.html,
+        )
+        self.assertIn(
+            "deletionIntegrity.rollbackProtected",
+            self.html,
+        )
+        self.assertIn(
+            "삭제 외부 anchor 없음",
+            self.html,
+        )
+        self.assertIn(
+            "삭제 롤백 보호 초기화 대기",
+            self.html,
+        )
+        self.assertIn(
+            "외부 anchor는 구성됐지만 삭제 journal의 신뢰 기준이 아직 초기화되지 않았습니다.",
+            self.html,
+        )
+        self.assertIn(
+            "journal과 head의 동시 과거 재생은 탐지하지 못합니다.",
+            self.html,
+        )
+        self.assertIn(
+            "memory_deletion_journal_integrity_failed",
+            self.html,
+        )
+        self.assertIn(
+            "memory_delete_cleanup_required",
+            self.html,
+        )
+        self.assertIn(
+            "자동 재시도하지 않았어.",
+            self.html,
+        )
+        self.assertIn(
             "impact.cascadeDelete",
             self.html,
         )

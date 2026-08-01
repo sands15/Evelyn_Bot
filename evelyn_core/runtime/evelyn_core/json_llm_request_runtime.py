@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_deletion_journal import MemoryDeletionPosition
+from .memory_deletion_outbound import memory_deletion_outbound_request
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,9 @@ async def ask_json_llm_from_runtime(
     session_key: str | None = None,
     source: str | None = None,
     guild_id: int | None = None,
+    memory_deletion_position: MemoryDeletionPosition | None = None,
+    memory_boundary_required: bool = False,
+    memory_deletion_index_dir: Path | None = None,
 ) -> dict:
     session = await deps.get_http_session()
     payload = {
@@ -42,7 +49,15 @@ async def ask_json_llm_from_runtime(
     timeout = deps.client_timeout_factory(total=timeout_seconds)
     started_at = deps.monotonic()
 
-    async with session.post(deps.endpoint, json=payload, timeout=timeout) as resp:
+    async with memory_deletion_outbound_request(
+        session.post,
+        deps.endpoint,
+        json=payload,
+        timeout=timeout,
+        expected_position=memory_deletion_position,
+        memory_boundary_required=memory_boundary_required,
+        memory_index_dir=memory_deletion_index_dir,
+    ) as resp:
         if resp.status != 200:
             error_text = await resp.text()
             raise RuntimeError(f"{deps.error_label} 서버 오류: {resp.status} / {error_text[:300]}")

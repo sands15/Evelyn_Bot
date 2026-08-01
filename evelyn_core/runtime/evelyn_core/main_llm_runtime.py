@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from .memory_deletion_outbound import memory_deletion_outbound_guard
 from .text import clean_text
 
 
@@ -197,11 +198,18 @@ async def execute_main_llm_once_from_runtime(
 ) -> tuple[str, str]:
     timeout = aiohttp.ClientTimeout(total=120)
     session = await deps.get_http_session()
-    async with session.post(deps.llm_server_url, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-        data = await resp.json()
+    with memory_deletion_outbound_guard():
+        async with session.post(
+            deps.llm_server_url,
+            json=payload,
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"LLM 서버 오류: {resp.status} / {error_text[:300]}"
+                )
+            data = await resp.json()
     choices = data.get("choices", [])
     if not choices:
         return deps.fallback_answer_for(user_text), "fallback_empty_choices"

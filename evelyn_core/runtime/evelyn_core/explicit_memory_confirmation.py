@@ -21,6 +21,13 @@ from .memory_confirmation_contract import (
     is_explicit_memory_confirmation_receipt,
     is_user_confirmed_memory_integrity_valid,
 )
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+    memory_deletion_ledger_note_id,
+)
+from .memory_content_free_ids import (
+    memory_content_free_source_ref,
+)
 from .text import clean_text
 
 
@@ -91,8 +98,8 @@ def _receipt(
     return {
         "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
         "state": state,
-        "noteId": note_id,
-        "sourceRef": source_ref,
+        "noteId": memory_deletion_ledger_note_id(note_id),
+        "sourceRef": memory_content_free_source_ref(source_ref),
         "confirmedAt": confirmed_at,
         "contentFree": True,
     }
@@ -328,6 +335,8 @@ def execute_explicit_memory_confirmation(
             },
             exc.code,
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         print(
             "[MEMORY CONFIRMATION] write_failed "

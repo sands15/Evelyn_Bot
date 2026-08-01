@@ -21,11 +21,29 @@ from .context_pipeline import (
     has_unanswered_user_turn,
     render_tool_use_context,
 )
+from .config import MEMORY_ROOT
 from .fast_action_runtime import compact_local_bridge_context
 from .fast_tool_planner import render_fast_tool_registry_context
 from .host_vision_client import HostVisionResult, request_host_vision
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+    memory_deletion_ledger_note_id,
+    memory_deletion_journal_guard,
+    memory_deletion_note_id_is_canonical,
+)
+from .memory_deletion_outbound import (
+    capture_memory_deletion_outbound_position,
+    current_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
+    memory_deletion_boundary_from_position,
+    memory_deletion_boundary_matches_position,
+    memory_deletion_boundary_not_required,
+    normalize_memory_deletion_boundary,
+    normalize_memory_retrieval_mode,
     prepare_memory_context_for_prompt,
     reconcile_memory_receipt_for_prompt,
     validated_memory_grounding_state,
@@ -52,6 +70,7 @@ class FastControlContext:
     search_context: str = ""
     memory_context: str = ""
     memory_receipt: dict[str, Any] = field(default_factory=dict)
+    memory_deletion_position: MemoryDeletionPosition | None = None
     log_context: str = ""
     local_bridge_context: str = ""
     vision_context: str = ""
@@ -65,6 +84,7 @@ class FastControlContext:
 class FastMainLlmRequest:
     context: FastControlContext
     messages: list[dict[str, Any]]
+    memory_deletion_position: MemoryDeletionPosition | None = None
 
 
 def build_required_evidence_failure_reply(
@@ -193,19 +213,30 @@ def _fast_memory_context_receipt(
     value: dict[str, Any] | None,
     *,
     has_context: bool,
+    position: MemoryDeletionPosition | None = None,
 ) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     raw_note_ids = source.get("suppliedNoteIds") or source.get("noteIds") or []
-    note_ids = sorted(
-        {
-            clean_text(str(item))
-            for item in raw_note_ids[:12]
-            if clean_text(str(item))
-        }
-    ) if isinstance(raw_note_ids, (list, tuple)) else []
+    note_ids: list[str] = []
+    if isinstance(raw_note_ids, (list, tuple)):
+        normalized_ids: set[str] = set()
+        for item in raw_note_ids[:12]:
+            raw_id = clean_text(str(item))
+            if not raw_id:
+                continue
+            normalized_ids.add(
+                raw_id
+                if memory_deletion_note_id_is_canonical(raw_id)
+                else memory_deletion_ledger_note_id(raw_id)
+            )
+        note_ids = sorted(normalized_ids)
     state = clean_text(str(source.get("state") or ("provided" if has_context else "empty")))
     if state not in {"provided", "empty", "unavailable", "withheld"}:
         state = "provided" if has_context else "empty"
+    elif has_context:
+        state = "provided"
+    elif state in {"provided", "withheld"}:
+        state = "empty"
     grounding_state = clean_text(str(source.get("groundingState") or ""))
     if grounding_state not in {"attributed", "partial", "unattributed", "empty", "unavailable"}:
         grounding_state = "attributed" if has_context and note_ids else ("unattributed" if has_context else state)
@@ -234,6 +265,18 @@ def _fast_memory_context_receipt(
         confirm_only_item_count = max(1, confirm_only_item_count)
     elif grounding_state == "attributed":
         confirm_only_item_count = 0
+    deletion_boundary = normalize_memory_deletion_boundary(
+        source.get("deletionBoundary"),
+        require_captured=False,
+    )
+    if (
+        deletion_boundary.get("state") == "captured"
+        and not memory_deletion_boundary_matches_position(
+            deletion_boundary,
+            position,
+        )
+    ):
+        raise MemoryDeletionJournalIntegrityError()
     return {
         "schema": "memory.context-receipt.v1",
         "state": state,
@@ -251,7 +294,9 @@ def _fast_memory_context_receipt(
         "opaqueConfirmOnlyComponentCount": 0,
         "vaultState": state,
         "memoryVersion": memory_version,
-        "retrievalMode": clean_text(str(source.get("retrievalMode") or "unknown"))[:40],
+        "retrievalMode": normalize_memory_retrieval_mode(
+            source.get("retrievalMode")
+        ),
         "cacheHit": bool(source.get("cacheHit")),
         "hotContextState": "not_requested",
         "suppliedNoteIds": note_ids,
@@ -265,11 +310,14 @@ def _fast_memory_context_receipt(
         "legacyEvidenceIds": [],
         "legacySourceEvidenceIds": [],
         "legacySourceTurnIds": [],
+        "deletionBoundary": deletion_boundary,
         "contentFree": True,
     }
 
 
-async def _default_memory_provider_result(user_text: str) -> tuple[str, dict[str, Any]]:
+async def _default_memory_provider_result(
+    user_text: str,
+) -> tuple[str, dict[str, Any]]:
     from .assistant_contracts import MemoryRecallRequest
     from .memory_vault import build_memory_recall_receipt, recall_memory_vault
 
@@ -283,11 +331,34 @@ async def _default_memory_provider_result(user_text: str) -> tuple[str, dict[str
         max_items=5,
         metadata={"active_project": "evelyn", "context_focus": ["control_page", "local_runtime"]},
     )
-    result = await asyncio.to_thread(recall_memory_vault, request)
-    context = clean_text(result.context_text) if result.ok else ""
+    def recall_at_verified_position() -> tuple[
+        str,
+        dict[str, Any],
+        MemoryDeletionPosition | None,
+    ]:
+        with memory_deletion_journal_guard(
+            MEMORY_ROOT / "memory_index",
+            require_stable=True,
+        ) as position:
+            result = recall_memory_vault(request)
+            context = clean_text(result.context_text) if result.ok else ""
+            receipt = build_memory_recall_receipt(result)
+            receipt["deletionBoundary"] = (
+                memory_deletion_boundary_from_position(position)
+                if context
+                else memory_deletion_boundary_not_required()
+            )
+            return context, receipt, position if context else None
+
+    context, recall_receipt, position = await asyncio.to_thread(
+        recall_at_verified_position
+    )
+    if position is not None:
+        capture_memory_deletion_outbound_position(position)
     return context, _fast_memory_context_receipt(
-        build_memory_recall_receipt(result),
+        recall_receipt,
         has_context=bool(context),
+        position=position,
     )
 
 
@@ -487,6 +558,7 @@ async def build_fast_control_context(
     local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
     vision_provider: VisionProvider | None = None,
 ) -> FastControlContext:
+    reset_memory_deletion_outbound_position()
     decision_text = clean_text(tool_user_text) or user_text
     policy = build_context_policy_for_turn(
         user_text=decision_text,
@@ -520,6 +592,7 @@ async def build_fast_control_context(
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
+        "deletionBoundary": memory_deletion_boundary_not_required(),
         "contentFree": True,
     }
     log_context = ""
@@ -662,6 +735,9 @@ async def build_fast_control_context(
                         memory_receipt = _fast_memory_context_receipt(
                             provider_result[1],
                             has_context=bool(memory_context),
+                            position=(
+                                current_memory_deletion_outbound_position()
+                            ),
                         )
                     else:
                         memory_context = clean_text(str(provider_result or ""))
@@ -671,6 +747,9 @@ async def build_fast_control_context(
                                 "groundingState": "unattributed" if memory_context else "empty",
                             },
                             has_context=bool(memory_context),
+                            position=(
+                                current_memory_deletion_outbound_position()
+                            ),
                         )
                 decision.status = (
                     "failed_or_unavailable"
@@ -685,8 +764,12 @@ async def build_fast_control_context(
                     f"grounding={memory_receipt['groundingState']}; "
                     f"note_count={memory_receipt['suppliedNoteCount']}"
                 )
+            except MemoryDeletionJournalIntegrityError:
+                reset_memory_deletion_outbound_position()
+                raise
             except Exception:
                 memory_context = ""
+                reset_memory_deletion_outbound_position()
                 memory_receipt = {
                     "schema": "memory.context-receipt.v1",
                     "state": "unavailable",
@@ -702,6 +785,9 @@ async def build_fast_control_context(
                     "preTruncationLegacyItemCount": 0,
                     "preTruncationNoteCount": 0,
                     "opaqueConfirmOnlyComponentCount": 0,
+                    "deletionBoundary": (
+                        memory_deletion_boundary_not_required()
+                    ),
                     "contentFree": True,
                 }
                 decision.status = "failed"
@@ -731,6 +817,19 @@ async def build_fast_control_context(
     )
     reconcile_memory_receipt_for_prompt(memory_receipt, memory_prompt_boundary)
     prompt_memory_context = memory_prompt_boundary.context
+    if (
+        prompt_memory_context
+        and not memory_prompt_boundary.evidence_withheld
+    ):
+        deletion_boundary = normalize_memory_deletion_boundary(
+            memory_receipt.get("deletionBoundary"),
+            require_captured=True,
+        )
+        if not memory_deletion_boundary_matches_position(
+            deletion_boundary,
+            current_memory_deletion_outbound_position(),
+        ):
+            raise MemoryDeletionJournalIntegrityError()
     for decision in decisions:
         if decision.tool_name != "memory_recall" or decision.status == "failed":
             continue
@@ -763,6 +862,9 @@ async def build_fast_control_context(
         search_context=search_context,
         memory_context=prompt_memory_context,
         memory_receipt=memory_receipt,
+        memory_deletion_position=(
+            current_memory_deletion_outbound_position()
+        ),
         log_context=log_context,
         local_bridge_context=local_bridge_context,
         vision_context=vision_context,
@@ -835,6 +937,7 @@ async def build_fast_main_llm_request(
             ],
             {"role": "user", "content": final_user_text},
         ],
+        memory_deletion_position=context.memory_deletion_position,
     )
 
 

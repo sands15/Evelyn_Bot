@@ -72,6 +72,9 @@ from evelyn_core.control_page_state import (  # noqa: E402
     parse_control_page_memory_snapshot_query,
     sanitize_control_page_welcome_text_payload,
 )
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+)
 
 
 class ControlPageStateModuleTests(unittest.TestCase):
@@ -638,6 +641,45 @@ class ControlPageStateModuleTests(unittest.TestCase):
         )
         self.assertEqual(control_page_result_status({"ok": True}), 200)
         self.assertEqual(control_page_result_status({"ok": False}, error_status=409), 409)
+        self.assertEqual(
+            control_page_result_status(
+                {
+                    "ok": False,
+                    "error": (
+                        "memory_deletion_journal_integrity_failed"
+                    ),
+                },
+                error_status=404,
+            ),
+            503,
+        )
+
+    def test_memory_note_action_integrity_failure_is_service_unavailable(
+        self,
+    ) -> None:
+        private_detail = "private note body and filesystem path"
+
+        def fail_integrity(*_args, **_kwargs):
+            raise MemoryDeletionJournalIntegrityError(private_detail)
+
+        result, status = handle_control_page_memory_note_action_request(
+            "private-note-id",
+            {
+                "action": "edit",
+                "body": "must never be returned",
+            },
+            update_note=fail_integrity,
+        )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_detail, str(result))
 
     def test_control_page_chat_request_handler_orchestrates_logs_refresh_and_state(self) -> None:
         guild = SimpleNamespace(id=7)

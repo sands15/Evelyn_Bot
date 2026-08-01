@@ -17,6 +17,10 @@ from .memory_integrity_authenticity import (
     MemoryIntegrityAuthenticityError,
     load_memory_integrity_authenticity,
 )
+from .memory_deletion_journal import (
+    memory_deletion_ledger_note_id,
+    memory_deletion_note_id_is_canonical,
+)
 from .paths import get_repo_root
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
@@ -61,6 +65,70 @@ MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_NAME = (
 MEMORY_PROVENANCE_CORRECTION_TOKEN_TTL_SECONDS = 120
 MEMORY_PROVENANCE_CORRECTION_MAX_SOURCES = 12
 MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS = "0" * 64
+MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS = (
+    "previousSourceIds",
+    "previousOriginSourceIds",
+    "newSourceIds",
+    "newOriginSourceIds",
+)
+
+_CORRECTION_CHAIN_FIELDS = frozenset(
+    {
+        "schema",
+        "sequence",
+        "previousHash",
+        "eventHash",
+    }
+)
+_CORRECTION_PREPARED_FIELDS = frozenset(
+    {
+        *_CORRECTION_CHAIN_FIELDS,
+        "eventType",
+        "changeId",
+        "action",
+        "targetNoteId",
+        *MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS,
+        "previousRevision",
+        "nextRevision",
+        "undoOfChangeId",
+        "actor",
+        "preparedAt",
+        "contentFree",
+    }
+)
+_CORRECTION_COMMITTED_FIELDS = frozenset(
+    {
+        *_CORRECTION_CHAIN_FIELDS,
+        "eventType",
+        "changeId",
+        "committedAt",
+        "recoveredAfterRestart",
+    }
+)
+_CORRECTION_FAILED_FIELDS = frozenset(
+    {
+        *_CORRECTION_CHAIN_FIELDS,
+        "eventType",
+        "changeId",
+        "failedAt",
+        "errorCode",
+    }
+)
+_CORRECTION_FAILED_ERROR_CODES = frozenset(
+    {"memory_provenance_correction_failed"}
+)
+_CORRECTION_WRITER_MARKER_FIELDS = frozenset(
+    {
+        "schema",
+        "state",
+        "processNonce",
+        "pid",
+        "acquiredAt",
+        "updatedAt",
+        "recoveredStaleOwner",
+        "contentFree",
+    }
+)
 
 _correction_lock = threading.RLock()
 _correction_tokens: dict[str, dict[str, Any]] = {}
@@ -137,6 +205,54 @@ def _canonical_json(payload: dict[str, Any]) -> str:
     )
 
 
+def _canonical_artifact_json(payload: dict[str, Any]) -> str:
+    """Return the exact serialization emitted by ``atomic_json_write``."""
+
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _strict_json_object(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate_json_key")
+        payload[key] = value
+    return payload
+
+
+def _strict_json_loads(encoded: str) -> Any:
+    return json.loads(
+        encoded,
+        object_pairs_hook=_strict_json_object,
+    )
+
+
+def _valid_hash(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and value == value.lower()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 20:
+        return False
+    try:
+        parsed = time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", parsed) == value
+
+
 def _event_hash(payload: dict[str, Any]) -> str:
     unsigned = {
         key: value
@@ -180,6 +296,41 @@ def _write_writer_marker(
         payload,
         durable=True,
     )
+
+
+def _read_valid_writer_marker(path: Path) -> dict[str, Any]:
+    raw = path.read_text(encoding="utf-8")
+    payload = _strict_json_loads(raw)
+    process_nonce = (
+        payload.get("processNonce")
+        if isinstance(payload, dict)
+        else None
+    )
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or raw != _canonical_artifact_json(payload)
+        or set(payload) != _CORRECTION_WRITER_MARKER_FIELDS
+        or payload.get("schema")
+        != MEMORY_PROVENANCE_CORRECTION_WRITER_SCHEMA
+        or payload.get("state") not in {"held", "released"}
+        or not isinstance(process_nonce, str)
+        or len(process_nonce) != 24
+        or process_nonce != process_nonce.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in process_nonce
+        )
+        or isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or not _valid_timestamp(payload.get("acquiredAt"))
+        or not _valid_timestamp(payload.get("updatedAt"))
+        or type(payload.get("recoveredStaleOwner")) is not bool
+        or payload.get("contentFree") is not True
+    ):
+        raise ValueError("invalid_writer_marker")
+    return payload
 
 
 def _lock_writer_handle(handle: Any) -> None:
@@ -254,16 +405,21 @@ def _writer_guard(root: Path | None = None):
             marker_path = _writer_marker_path(root)
             recovered_stale_owner = False
             try:
-                marker = json.loads(
-                    marker_path.read_text(encoding="utf-8")
-                )
+                marker = _read_valid_writer_marker(marker_path)
                 recovered_stale_owner = bool(
-                    isinstance(marker, dict)
-                    and marker.get("state") == "held"
+                    marker.get("state") == "held"
                     and marker.get("processNonce")
                     != _correction_process_nonce
                 )
-            except (FileNotFoundError, OSError, json.JSONDecodeError):
+            except (
+                FileNotFoundError,
+                OSError,
+                UnicodeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+                RecursionError,
+            ):
                 recovered_stale_owner = False
             try:
                 _write_writer_marker(
@@ -311,7 +467,7 @@ def _journal_snapshot(
     authenticity = _memory_authenticity(root)
     path = _journal_path(root)
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         if _chain_head_path(root).exists():
             raise MemoryProvenanceCorrectionJournalIntegrityError(
@@ -361,25 +517,43 @@ def _journal_snapshot(
             ),
             "externalAnchorState": anchor_state,
         }
-    except (OSError, UnicodeError) as exc:
+    except OSError as exc:
         raise MemoryProvenanceCorrectionJournalIntegrityError(
             "memory_provenance_correction_journal_unreadable"
         ) from exc
-    raw_lines = text.splitlines()
-    if any(not line.strip() for line in raw_lines):
-        raise MemoryProvenanceCorrectionJournalIntegrityError(
-            "memory_provenance_correction_journal_integrity_failed"
-        )
+    raw_records = raw.split(b"\n") if raw else []
+    if raw_records and raw_records[-1] == b"":
+        raw_records.pop()
+    journal_ends_with_lf = bool(raw.endswith(b"\n"))
     events: list[dict[str, Any]] = []
     legacy_lines: list[str] = []
     chain_hashes: dict[int, str] = {}
     chain_started = False
     sequence = 0
     expected_previous = MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
-    for raw_line in raw_lines:
+    for record_index, encoded_record in enumerate(raw_records):
+        terminated_with_lf = (
+            record_index < len(raw_records) - 1
+            or journal_ends_with_lf
+        )
+        # ``Path.read_text`` previously performed universal-newline
+        # translation. Keep that deliberate v1 compatibility while v2 rows
+        # below require the exact LF-only serialization emitted by the writer.
+        parse_record = (
+            encoded_record[:-1]
+            if encoded_record.endswith(b"\r")
+            else encoded_record
+        )
         try:
-            payload = json.loads(raw_line)
-        except (TypeError, json.JSONDecodeError) as exc:
+            raw_line = parse_record.decode("utf-8", errors="strict")
+            payload = _strict_json_loads(raw_line)
+        except (
+            UnicodeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            RecursionError,
+        ) as exc:
             raise MemoryProvenanceCorrectionJournalIntegrityError(
                 "memory_provenance_correction_journal_integrity_failed"
             ) from exc
@@ -396,6 +570,15 @@ def _journal_snapshot(
             events.append(payload)
             continue
         if schema != MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA:
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        _validate_persisted_event(payload)
+        if (
+            not terminated_with_lf
+            or encoded_record
+            != _canonical_json(payload).encode("utf-8")
+        ):
             raise MemoryProvenanceCorrectionJournalIntegrityError(
                 "memory_provenance_correction_journal_integrity_failed"
             )
@@ -442,12 +625,23 @@ def _journal_snapshot(
     head_sequence: int | None = None
     head_hash = ""
     try:
-        head = json.loads(
-            _chain_head_path(root).read_text(encoding="utf-8")
-        )
+        head_raw = _chain_head_path(root).read_text(encoding="utf-8")
+        head = _strict_json_loads(head_raw)
+        if (
+            not isinstance(head, dict)
+            or head_raw != _canonical_artifact_json(head)
+        ):
+            raise ValueError("noncanonical_json")
     except FileNotFoundError:
         head = None
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+    ) as exc:
         raise MemoryProvenanceCorrectionJournalIntegrityError(
             "memory_provenance_correction_journal_integrity_failed"
         ) from exc
@@ -491,7 +685,7 @@ def _journal_snapshot(
             or not isinstance(head_hash, str)
             or len(head_hash) != 64
             or head.get("contentFree") is not True
-            or not isinstance(head.get("updatedAt"), str)
+            or not _valid_timestamp(head.get("updatedAt"))
             or not secrets.compare_digest(
                 head_hash,
                 (
@@ -685,13 +879,17 @@ def _append_journal_event(
     with _writer_guard(root):
         with _correction_lock:
             snapshot = _ensure_journal_checkpoint(root)
+            persisted_payload = _canonicalize_journal_payload(
+                payload
+            )
             event = {
+                **persisted_payload,
                 "schema": MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
-                **payload,
                 "sequence": int(snapshot["sequence"]) + 1,
                 "previousHash": str(snapshot["lastHash"]),
             }
             event["eventHash"] = _event_hash(event)
+            _validate_persisted_event(event)
             with path.open(
                 "a",
                 encoding="utf-8",
@@ -711,7 +909,11 @@ def _read_journal_events(
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
     with _correction_lock:
-        return list(_journal_snapshot(root)["events"])
+        events = list(_journal_snapshot(root)["events"])
+    return _project_journal_events_to_raw_ids(
+        events,
+        root=root,
+    )
 
 
 def _journal_records(
@@ -762,16 +964,17 @@ def _authenticity_public_configuration(
 
 def _writer_public_state(root: Path | None = None) -> str:
     try:
-        payload = json.loads(
-            _writer_marker_path(root).read_text(encoding="utf-8")
+        payload = _read_valid_writer_marker(
+            _writer_marker_path(root)
         )
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return "unknown"
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema")
-        != MEMORY_PROVENANCE_CORRECTION_WRITER_SCHEMA
-        or payload.get("state") not in {"held", "released"}
+    except (
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
     ):
         return "unknown"
     return str(payload["state"])
@@ -791,6 +994,243 @@ def _as_ids(value: object) -> list[str]:
             if (cleaned := clean_text(str(item)))
         )
     )[:MEMORY_PROVENANCE_CORRECTION_MAX_SOURCES]
+
+
+def _correction_integrity_failure(
+    _cause: BaseException | None = None,
+) -> MemoryProvenanceCorrectionJournalIntegrityError:
+    return MemoryProvenanceCorrectionJournalIntegrityError(
+        "memory_provenance_correction_journal_integrity_failed"
+    )
+
+
+def _canonical_ledger_note_id(value: object) -> str:
+    try:
+        return memory_deletion_ledger_note_id(value)
+    except Exception as exc:
+        raise _correction_integrity_failure(exc) from None
+
+
+def _canonicalize_journal_payload(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    output = dict(payload)
+    if clean_text(str(output.get("eventType") or "")) != "prepared":
+        return output
+    target_note_id = clean_text(
+        str(output.get("targetNoteId") or "")
+    )
+    if not target_note_id:
+        raise _correction_integrity_failure()
+    output["targetNoteId"] = _canonical_ledger_note_id(
+        target_note_id
+    )
+    for field in MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS:
+        raw_ids = _as_ids(output.get(field))
+        canonical_ids = [
+            _canonical_ledger_note_id(raw_id)
+            for raw_id in raw_ids
+        ]
+        if len(canonical_ids) != len(set(canonical_ids)):
+            raise _correction_integrity_failure()
+        output[field] = sorted(canonical_ids)
+    output["contentFree"] = True
+    return output
+
+
+def _valid_change_id(value: object) -> bool:
+    prefix = "provcorr-"
+    return bool(
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and len(value) == len(prefix) + 24
+        and all(
+            character in "0123456789abcdef"
+            for character in value[len(prefix) :]
+        )
+    )
+
+
+def _validate_persisted_event(
+    payload: dict[str, Any],
+) -> None:
+    event_type = payload.get("eventType")
+    expected_fields = {
+        "prepared": _CORRECTION_PREPARED_FIELDS,
+        "committed": _CORRECTION_COMMITTED_FIELDS,
+        "failed": _CORRECTION_FAILED_FIELDS,
+    }.get(event_type)
+    sequence = payload.get("sequence")
+    if (
+        expected_fields is None
+        or set(payload) != expected_fields
+        or payload.get("schema")
+        != MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
+        or isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence <= 0
+        or not _valid_hash(payload.get("previousHash"))
+        or not _valid_hash(payload.get("eventHash"))
+        or not _valid_change_id(payload.get("changeId"))
+    ):
+        raise _correction_integrity_failure()
+
+    if event_type == "committed":
+        if (
+            not _valid_timestamp(payload.get("committedAt"))
+            or type(payload.get("recoveredAfterRestart")) is not bool
+        ):
+            raise _correction_integrity_failure()
+        return
+
+    if event_type == "failed":
+        if (
+            not _valid_timestamp(payload.get("failedAt"))
+            or payload.get("errorCode")
+            not in _CORRECTION_FAILED_ERROR_CODES
+        ):
+            raise _correction_integrity_failure()
+        return
+
+    action = payload.get("action")
+    previous_revision = payload.get("previousRevision")
+    next_revision = payload.get("nextRevision")
+    undo_of_change_id = payload.get("undoOfChangeId")
+    target_note_id = payload.get("targetNoteId")
+    if (
+        action not in {"relink", "unlink", "undo"}
+        or payload.get("actor") != "control-page-user"
+        or not _valid_timestamp(payload.get("preparedAt"))
+        or isinstance(previous_revision, bool)
+        or not isinstance(previous_revision, int)
+        or previous_revision < 0
+        or isinstance(next_revision, bool)
+        or not isinstance(next_revision, int)
+        or next_revision != previous_revision + 1
+        or not isinstance(undo_of_change_id, str)
+        or (
+            bool(undo_of_change_id)
+            and not _valid_change_id(undo_of_change_id)
+        )
+        or (action == "undo") != bool(undo_of_change_id)
+        or payload.get("contentFree") is not True
+        or not memory_deletion_note_id_is_canonical(target_note_id)
+    ):
+        raise _correction_integrity_failure()
+    for field in MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS:
+        values = payload.get(field)
+        if (
+            not isinstance(values, list)
+            or len(values)
+            > MEMORY_PROVENANCE_CORRECTION_MAX_SOURCES
+            or any(
+                not memory_deletion_note_id_is_canonical(value)
+                for value in values
+            )
+            or values != sorted(set(values))
+        ):
+            raise _correction_integrity_failure()
+
+
+def _journal_raw_id_resolution(
+    events: list[dict[str, Any]],
+    *,
+    root: Path | None,
+) -> dict[str, set[str]]:
+    try:
+        nodes, _note_sources = (
+            vault._memory_provenance_audit_nodes(  # noqa: SLF001
+                root=root
+            )
+        )
+    except vault.MemoryDeletionJournalIntegrityError:
+        raise
+    except Exception as exc:
+        raise _correction_integrity_failure(exc) from None
+    raw_ids = {
+        raw_id
+        for node in nodes
+        for raw_id in (
+            node.note_id,
+            *node.derived_from,
+            *node.origin_derived_from,
+        )
+        if clean_text(str(raw_id))
+    }
+    # Version 1 rows remain immutable and raw by contract. They can provide
+    # an exact application-ID mapping for a later chained v2 event without
+    # rewriting or weakening the legacy-prefix anchor.
+    for event in events:
+        if (
+            event.get("schema")
+            != MEMORY_PROVENANCE_CORRECTION_LEGACY_EVENT_SCHEMA
+            or clean_text(str(event.get("eventType") or ""))
+            != "prepared"
+        ):
+            continue
+        target_note_id = clean_text(
+            str(event.get("targetNoteId") or "")
+        )
+        if target_note_id:
+            raw_ids.add(target_note_id)
+        for field in MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS:
+            raw_ids.update(_as_ids(event.get(field)))
+
+    ledger_to_raw_ids: dict[str, set[str]] = {}
+    for raw_id in raw_ids:
+        ledger_to_raw_ids.setdefault(
+            _canonical_ledger_note_id(raw_id),
+            set(),
+        ).add(raw_id)
+    return ledger_to_raw_ids
+
+
+def _project_journal_events_to_raw_ids(
+    events: list[dict[str, Any]],
+    *,
+    root: Path | None,
+) -> list[dict[str, Any]]:
+    if not any(
+        event.get("schema")
+        == MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
+        and clean_text(str(event.get("eventType") or ""))
+        == "prepared"
+        for event in events
+    ):
+        return [dict(event) for event in events]
+    ledger_to_raw_ids = _journal_raw_id_resolution(
+        events,
+        root=root,
+    )
+
+    def resolve(stored_id: object) -> str:
+        ledger_id = clean_text(str(stored_id or ""))
+        matches = ledger_to_raw_ids.get(ledger_id, set())
+        if len(matches) != 1:
+            raise _correction_integrity_failure()
+        return next(iter(matches))
+
+    output: list[dict[str, Any]] = []
+    for event in events:
+        projected = dict(event)
+        if (
+            event.get("schema")
+            == MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
+            and clean_text(str(event.get("eventType") or ""))
+            == "prepared"
+        ):
+            projected["targetNoteId"] = resolve(
+                event.get("targetNoteId")
+            )
+            for field in MEMORY_PROVENANCE_CORRECTION_ID_LIST_FIELDS:
+                projected[field] = _as_ids(
+                    [
+                        resolve(value)
+                        for value in event.get(field) or []
+                    ]
+                )
+        output.append(projected)
+    return output
 
 
 def _non_negative_int(value: object, default: int = 0) -> int:
@@ -872,7 +1312,10 @@ def _reconcile_journal(
                         snapshot = _ensure_journal_checkpoint(root)
         except MemoryProvenanceCorrectionWriterUnavailable:
             pass
-    events = list(snapshot["events"])
+    events = _project_journal_events_to_raw_ids(
+        list(snapshot["events"]),
+        root=root,
+    )
     prepared, terminal = _journal_records(events)
     recovered_any = False
     for change_id, intent in prepared.items():
@@ -918,6 +1361,8 @@ def _reconcile_journal(
                     root=root,
                 )
                 recovered_any = True
+        except MemoryProvenanceCorrectionJournalIntegrityError:
+            raise
         except OSError:
             continue
     return (
@@ -1341,6 +1786,7 @@ def _record_can_undo(
     )
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def memory_provenance_correction_overview(
     *,
     root: Path | None = None,
@@ -1538,6 +1984,7 @@ def memory_provenance_correction_overview(
     }
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def memory_provenance_correction_source_options(
     note_id_or_rel_path: str,
     *,
@@ -1724,6 +2171,7 @@ def _preview_from_binding(
     }
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def preview_memory_provenance_correction(
     note_id_or_rel_path: str,
     source_note_ids: list[str] | tuple[str, ...],
@@ -1749,6 +2197,7 @@ def preview_memory_provenance_correction(
     )
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def preview_memory_provenance_correction_undo(
     note_id_or_rel_path: str,
     change_id: str,
@@ -2094,6 +2543,8 @@ def _apply_preview(
                 path,
                 updated_raw,
             )
+    except vault.MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         current = vault._memory_vault_find_note(  # noqa: SLF001
             binding["targetNoteId"],
@@ -2154,6 +2605,8 @@ def _apply_preview(
         memory_version = vault.sync_memory_vault_index(
             root=root
         )
+    except vault.MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         memory_version = 0
         cleanup_errors.append(
@@ -2161,12 +2614,16 @@ def _apply_preview(
         )
     try:
         vault.refresh_memory_hot_context(root=root)
+    except vault.MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         cleanup_errors.append(
             "memory_provenance_correction_hot_context_cleanup_failed"
         )
     try:
         vault.memory_provenance_backfill_preview(root=root)
+    except vault.MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         cleanup_errors.append(
             "memory_provenance_correction_audit_refresh_failed"
@@ -2251,6 +2708,7 @@ def _apply_with_writer(
         }
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def apply_memory_provenance_correction(
     note_id_or_rel_path: str,
     confirm_token: str,
@@ -2267,6 +2725,7 @@ def apply_memory_provenance_correction(
     )
 
 
+@vault._memory_deletion_linearized  # noqa: SLF001
 def apply_memory_provenance_correction_undo(
     note_id_or_rel_path: str,
     confirm_token: str,

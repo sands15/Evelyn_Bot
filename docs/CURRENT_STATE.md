@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-01 KST
-Source branch: `codex/dependency-config-hardening`, current grounded-memory prompt boundary increment
+Source branch: `codex/dependency-config-hardening`, current memory-deletion integrity increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -270,7 +270,9 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
     title, body, path, source ref/hash와 transcript 없이 구조적 근거 상태만
     집계한다.
   - 거부된 derived write는 note type별 content-free 내구 카운터에만
-    기록한다. 손상된 숫자는 감사 API를 실패시키지 않고 0으로 처리한다.
+    기록한다. 레거시·손상 파일은 감사 lease 아래 닫힌 enum의 canonical
+    집계로 내구성 있게 원자 교체하고, 유효하지 않은 숫자는 0으로 처리한다.
+    교체 실패는 감사 보고서를 남기지 않고 고정 integrity 오류로 닫힌다.
   - exact 신호가 없거나 현재 source와 불일치하는 과거 note는 자동 추론하지
     않는다. 공개·visible·비격리·접지된 source를 사용자가 최대 12개까지 직접
     선택하고 별도 preview/apply로만 연결한다.
@@ -316,18 +318,21 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
     유지한다. ID에는 발화 내용이 들어가지 않으며 allowlist 형식에 맞지 않는
     metadata는 저장하지 않는다.
   - receipt와 turn summary는 실제 prompt에 선택된 raw row의 evidence/turn
-    ID와 attributed/unattributed legacy 항목 수를 공개한다. 새 rolling
+    ID를 domain-separated `opaque-evidence-*`/`opaque-turn-*`로 투영한 값과
+    attributed/unattributed legacy 항목 수를 공개한다. 새 rolling
     summary는 내용 SHA-256에 묶인 sidecar에 파생 evidence ID와 실제 Summary
     LLM 입력 evidence/turn ID를 저장하고, 내용이 따로 바뀌면 provenance만
     fail-closed로 버린다. 새 facts/questions도 같은 실제 입력 ID와 별도 파생
     evidence ID를 JSONL과 mirror에 보존한다. 일반 경로는 summary·선택된 최근
     raw/fact/question·현재 턴만, context-size compact 재시도는 summary와 현재
     턴만 source로 연결한다.
-  - receipt와 turn summary는 새 파생 항목의 evidence ID, 직접 입력 evidence
-    ID와 원본 turn ID를 content-free 필드로 공개한다. 이는 Summary/Main LLM에
-    “제공된 입력”의 계보이며 모델이 실제로 사용했거나 기억 내용이 사실임을
-    뜻하지 않는다. 기존 raw/summary/fact/question은 내용을 보고 근거를 추측해
-    소급 부여하지 않고 계속 `partial|unattributed`로 드러낸다.
+  - receipt와 turn summary는 새 파생 항목, 직접 입력 evidence와 source turn의
+    안정적인 opaque projection만 content-free 필드로 공개한다. 원본 ID는
+    content-bearing/source sidecar 안에만 남는다. 공개 projection은
+    Summary/Main LLM에 “제공된 입력”을 상호 연관하는 계보이며 모델이 실제로
+    사용했거나 기억 내용이 사실임을 뜻하지 않는다. 기존
+    raw/summary/fact/question은 내용을 보고 근거를 추측해 소급 부여하지 않고
+    계속 `partial|unattributed`로 드러낸다.
   - 최종 Main/Fast prompt 경계는 `memory.context-use.v1`을 적용한다. 모든 기억은
     명령이 아닌 데이터로 감싼다. evidence ID/count가 완전한 `attributed` 결합
     문맥만 본문을 모델에 제공한다. 기존 raw/summary/fact/question이나 vault
@@ -729,6 +734,71 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
 - 실제 브라우저의 “현재 근거 연결 관리” 영역에 관리 대상 0, 미리보기 후
   2단계 적용, 최근 변경 1회 undo, origin history와 content-free
   write-ahead journal 경계가 렌더링됐다. console warning/error는 0개였다.
+- 영구 삭제 journal은 duplicate key와 non-canonical v2 row를 거부하는 strict
+  v1/v2 parser, legacy raw-prefix sequence-0 head, v2 sequence/hash chain과 durable
+  local head를 사용한다.
+  - malformed/partial/oversized/symlink artifact, pathological JSON, tail truncation,
+    head mismatch는 `memory_deletion_journal_integrity_failed`로 fail-closed한다.
+  - Windows는 write-through replace, POSIX는 rename 뒤 parent-directory `fsync`를
+    완료해야 durable head로 인정한다.
+  - tombstone 뒤 source Markdown은 content-free stub으로 durable 교체를 시도한
+    다음 unlink하며, 현재 journal/head가 유지되는 동안 index/recall/context에서
+    본문을 노출하지 않는다.
+  - 임의 front-matter ID는 삭제 ledger 경계에서 domain-separated
+    `opaque-<64hex>`로 바꾸고 note/source type은 닫힌 enum으로 정규화한다.
+    application graph의 raw identity는 보존하면서 journal, stub, apply 결과,
+    content-free receipt와 persisted provenance audit에는 자연어 ID를 남기지 않는다.
+    derivation revocation artifact도 ledger ID만 저장하고 live graph와 exact
+    canonical 역매핑한다. 비정규 ID와 충돌·모호성은 추측 없이 fail-closed한다.
+    이미 삭제되어 live graph에 없는 canonical stale target은 reconciliation
+    동안에만 허용한 뒤 artifact에서 제거해 삭제 완료 상태를 영구 장애로
+    오인하지 않는다.
+  - recall/context/Control Page/provenance/index/write와 semantic consolidation,
+    derivation recomposition은 삭제 lease와 선형화된다.
+  - 전체 legacy+vault memory context는 하나의 root-bound deletion position을
+    캡처한다. Main/Voice/Fast HTTP sink는 전송 직전에 이를 다시 검증하고 응답
+    소비까지 lease를 유지하므로, 중간 삭제가 먼저 commit되면 POST 0회로
+    fail-closed한다. 공개 receipt에는 content-free digest projection만 남는다.
+  - `memory.deletion.integrity.v1.rollbackProtected`는 signed head와 외부 anchor가
+    모두 검증된 경우에만 true다. 기본 또는 key-only 상태는 journal+head 과거
+    쌍 replay를 탐지하지 못한다.
+  - 공유 anchor에 다른 journal만 있고 deletion ledger가 전혀 없는 상태는
+    `uninitialized`로 읽을 수 있다. 첫 승인 삭제는 서명된 content-free
+    `memory-deletions.initialized.json` witness를 먼저 기록하며, 그 뒤
+    journal/head/anchor가 사라져도 미초기화로 오인하지 않는다.
+  - 예외와 반환형 양쪽의 integrity 오류는 HTTP 최외곽에서 exact 503 본문으로
+    축약하고 `Cache-Control: no-store`를 적용한다.
+  - cognitive-state, 경량 route planner와 장기 memory writeback은 기억을 읽기
+    전에 root-bound position을 캡처하고 primary/compact 요청의 JSON LLM sink에
+    required boundary로 전달한다. 응답 뒤 cognitive state 또는 memory summary를
+    기록하기 전에도 같은 position을 재검증해, 그 사이 삭제가 commit됐으면
+    파생 상태를 쓰지 않는다.
+  - provenance-correction v2 prepared event는 target/source/origin을 ledger ID로만
+    저장한다. recovery와 undo는 live graph 및 immutable legacy v1 row를 통한
+    exact 1:1 mapping만 허용하고 미매핑·충돌·비정규 v2 ID를 fail-closed한다.
+    새 v2 JSONL row, local head와 signed external anchor는 duplicate key, 추가·누락
+    field와 non-canonical byte serialization을 거부한다. change ID, actor/action,
+    error code, timestamp와 revision도 event kind별 exact schema와 닫힌 domain을
+    통과해야 한다. legacy v1 raw row는 그대로 immutable anchor로 유지한다.
+    writer marker도 exact canonical schema만 상태로 인정하며, 손상 marker는 공개
+    조회에서 `unknown`으로 처리하고 다음 writer lease 아래에서만 정리한다.
+    persisted provenance coverage의 source/note type과 forward rejection type도
+    닫힌 enum으로 정규화·alias 집계한다.
+  - Fast custom memory receipt의 note ID도 ledger ID로 투영하고 이미 canonical인
+    ID는 유지한다. retrieval mode는 닫힌 enum으로 제한해 provider나 손상 cache의
+    자유 형식 값이 `contentFree=true` receipt와 cache summary로 나오지 않는다.
+    explicit-confirmation 성공 receipt도 note ID와 source ref를 각각 canonical
+    ledger ID와 `turn:opaque-turn-<64hex>:user` 형식으로 투영한다. legacy evidence/source/turn
+    ID는 producer, 최종 receipt와 durable turn summary 세 경계에서 각각의
+    `opaque-evidence-*`/`opaque-turn-*` namespace로 방어적으로 투영한다.
+  - persisted provenance audit는 strict `generatedAt`과 전체 raw canonical JSON을
+    검사한다. duplicate key·추가 원문·비정규 serialization은 감사 lease와 관찰
+    lock 아래 durable 교체하며, 실패하면 성공 audit를 반환하지 않는다.
+  - Bot API chat state, Fast non-stream/stream과 공개 Control Page proxy는
+    deletion integrity 오류를 generic chat 실패나 `bot_api_unavailable`로
+    강등하지 않는다. 최외곽 응답은 exact content-free 503과 `no-store`이며,
+    stream은 첫 model delta를 요청해 memory build와 upstream admission이
+    성공한 뒤에만 HTTP 200을 prepare한다.
 
 ## Verification state
 
@@ -1431,6 +1501,26 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
   이미지는 빌드·격리 검증만 했고 실행 중인 서비스를 교체하지 않았다. 실제
   Discord, 마이크, 스피커, Minecraft, 무거운 모델과 사용자 runtime artifact는
   시작하거나 읽거나 수정하지 않았다.
+- memory-deletion integrity 최종 current-source 통합은 기존 Bot API 이미지에
+  저장소를 read-only mount하고 network를 차단한 상태에서 472개(skip 2)를
+  통과했다. strict deletion/correction journal과 authenticity, canonical audit와
+  derivation revocation, content-free ID projection, background JSON LLM,
+  Main/Voice/Fast/Discord sink, exact 503/proxy, API/UI와 durable artifact write를
+  함께 검증했다. 실제 stale journal position을 outbound guard, Bot API
+  state/middleware와 공개 proxy까지 통과시키는 테스트는 HTTP factory 호출 0회와
+  exact `503 + no-store`를 확인한다.
+- 같은 소스의 `compileall`, 이미지 `pip check`, no-op `Bot.run` Main 배선 smoke,
+  fast-control 및 memory-integrity Compose 병합, Control Page 인라인 JavaScript와
+  11개 asset의 `node --check`, `git diff --check`를 통과했다. 최종 검증은 기존
+  이미지로만 수행했지만, 중간 하위 작업에서 로컬
+  `evelyn-fast-control-bot_api:latest` 이미지가 한 번 실수로 빌드됐다(manifest
+  list `sha256:ae9ee365523fe23086f7e6b3f820e2cb5661d97dc20949d9f0d891a404213b3e`).
+  이 이미지를 배포하거나 서비스로 기동하지 않았고, 이후 추가 빌드는 중단했다.
+- 격리된 임시 memory root의 host 전체 discovery는 1,868개를 실행해 assertion
+  실패 0개, skip 17개였다. 번들 환경에 `aiohttp`, `discord`, `requests`, `davey`,
+  `torch`가 없어 42개 모듈은 import 단계에서 실패했으며, 이번 변경과 직접
+  관련된 해당 경로는 위 Docker 통합 검증으로 보완했다. 실제 사용자 memory,
+  Discord, 마이크, 스피커, 모델 서비스와 실행 중 컨테이너는 건드리지 않았다.
 
 ## Operational boundaries
 

@@ -32,6 +32,9 @@ from evelyn_core.control_page_http import (  # noqa: E402
     reject_browser_origin_middleware,
     request_control_page_host_is_allowed,
 )
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+)
 
 
 class ControlPageHttpTests(unittest.TestCase):
@@ -171,6 +174,163 @@ class ControlPageHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(non_json.text)["error"], "json_content_type_required")
         self.assertEqual(accepted.status, 202)
         self.assertEqual(calls, 1)
+
+    def test_control_page_integrity_failure_is_content_free_503(self) -> None:
+        private_detail = (
+            r"C:\private\memory_deletions.jsonl secret-note-body"
+        )
+
+        class Request:
+            method = "GET"
+            path = "/api/control-page/memory/private-note-id"
+            headers = {
+                "Host": "127.0.0.1:8799",
+                "Origin": "http://127.0.0.1:8799",
+            }
+            scheme = "http"
+
+        async def handler(_request):
+            raise MemoryDeletionJournalIntegrityError(private_detail)
+
+        response = asyncio.run(
+            control_page_cors_middleware(Request(), handler)
+        )
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text),
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_detail, response.text)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            CONTROL_PAGE_NO_STORE_HEADERS["Cache-Control"],
+        )
+        self.assertEqual(
+            response.headers["Access-Control-Allow-Origin"],
+            "http://127.0.0.1:8799",
+        )
+
+    def test_internal_api_integrity_failure_is_content_free_503(self) -> None:
+        private_detail = "private transcript and note path"
+        request = type(
+            "Request",
+            (),
+            {
+                "method": "GET",
+                "path": "/api/control-page/memory",
+                "headers": {},
+            },
+        )()
+
+        async def handler(_request):
+            raise MemoryDeletionJournalIntegrityError(private_detail)
+
+        response = asyncio.run(
+            reject_browser_origin_middleware(request, handler)
+        )
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text),
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_detail, response.text)
+
+    def test_result_shaped_integrity_failure_is_collapsed_at_cors_boundary(
+        self,
+    ) -> None:
+        private_detail = "private note body and C:/secret/path"
+
+        class Request:
+            method = "GET"
+            path = "/api/control-page/memory/private-note-id"
+            headers = {
+                "Host": "127.0.0.1:8799",
+                "Origin": "http://127.0.0.1:8799",
+            }
+            scheme = "http"
+
+        async def handler(_request):
+            return control_page_json_response(
+                {
+                    "ok": False,
+                    "error": "memory_deletion_journal_integrity_failed",
+                    "detail": private_detail,
+                    "body": "private transcript",
+                },
+                status=418,
+            )
+
+        response = asyncio.run(
+            control_page_cors_middleware(Request(), handler)
+        )
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text),
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_detail, response.text)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            CONTROL_PAGE_NO_STORE_HEADERS["Cache-Control"],
+        )
+        self.assertEqual(
+            response.headers["Access-Control-Allow-Origin"],
+            "http://127.0.0.1:8799",
+        )
+
+    def test_result_shaped_integrity_failure_is_collapsed_at_internal_boundary(
+        self,
+    ) -> None:
+        private_detail = "private note body and C:/secret/path"
+        request = type(
+            "Request",
+            (),
+            {
+                "method": "GET",
+                "path": "/api/control-page/memory/private-note-id",
+                "headers": {},
+            },
+        )()
+
+        async def handler(_request):
+            return control_page_json_response(
+                {
+                    "ok": False,
+                    "error": "memory_deletion_journal_integrity_failed",
+                    "path": private_detail,
+                },
+                status=200,
+            )
+
+        response = asyncio.run(
+            reject_browser_origin_middleware(request, handler)
+        )
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text),
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_detail, response.text)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            CONTROL_PAGE_NO_STORE_HEADERS["Cache-Control"],
+        )
 
     def test_session_endpoint_returns_no_store_csrf_contract(self) -> None:
         response = asyncio.run(control_page_session_handler(None))

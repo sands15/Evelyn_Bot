@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from .memory_deletion_outbound import memory_deletion_outbound_request
 from .text import clean_text, clean_tts_text
 from .voice_pipeline import AnswerPayload
 
@@ -222,7 +223,12 @@ async def build_first_response_from_runtime(
     }
 
     session = await deps.get_http_session()
-    async with session.post(deps.llm_server_url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+    async with memory_deletion_outbound_request(
+        session.post,
+        deps.llm_server_url,
+        json=payload,
+        timeout=aiohttp.ClientTimeout(total=120),
+    ) as resp:
         if resp.status != 200:
             error_text = await resp.text()
             raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
@@ -308,7 +314,12 @@ async def build_followup_response_from_runtime(
         "stop": list(deps.main_llm_stop_tokens),
     }
     session = await deps.get_http_session()
-    async with session.post(deps.llm_server_url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+    async with memory_deletion_outbound_request(
+        session.post,
+        deps.llm_server_url,
+        json=payload,
+        timeout=aiohttp.ClientTimeout(total=120),
+    ) as resp:
         if resp.status != 200:
             error_text = await resp.text()
             raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")

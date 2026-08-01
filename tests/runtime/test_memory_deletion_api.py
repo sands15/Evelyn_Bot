@@ -18,6 +18,9 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core import control_page_server, memory_vault  # noqa: E402
 from evelyn_core.control_page_http import CONTROL_PAGE_CSRF_HEADER  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+)
 
 
 class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +122,91 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
                     "csrf_token_required",
                 )
 
+    async def test_integrity_exception_is_content_free_503_across_routes(
+        self,
+    ) -> None:
+        private_detail = (
+            r"C:\private\memory_deletions.jsonl private-note-body"
+        )
+        cases = (
+            (
+                "GET",
+                "/api/control-page/memory-graph",
+                "export_memory_graph",
+                None,
+            ),
+            (
+                "GET",
+                "/api/control-page/memory?limit=1",
+                "memory_vault_user_snapshot",
+                None,
+            ),
+            (
+                "GET",
+                "/api/control-page/memory/private-note-id",
+                "memory_vault_user_note",
+                None,
+            ),
+            (
+                "POST",
+                "/api/control-page/memory/private-note-id",
+                "update_memory_vault_user_note",
+                {"action": "edit", "body": "private-note-body"},
+            ),
+            (
+                "POST",
+                (
+                    "/api/control-page/memory/private-note-id/"
+                    "delete/preview"
+                ),
+                "preview_memory_vault_user_note_deletion",
+                {"reason": "privacy_request"},
+            ),
+            (
+                "POST",
+                (
+                    "/api/control-page/memory/private-note-id/"
+                    "delete/apply"
+                ),
+                "delete_memory_vault_user_note",
+                {"confirmToken": "private-token"},
+            ),
+        )
+
+        for method, path, target, body in cases:
+            with self.subTest(method=method, path=path), patch.object(
+                control_page_server,
+                target,
+                side_effect=MemoryDeletionJournalIntegrityError(
+                    private_detail
+                ),
+            ):
+                headers = (
+                    self.headers()
+                    if method == "POST"
+                    else {"Origin": self.origin}
+                )
+                response = await self.client.request(
+                    method,
+                    path,
+                    headers=headers,
+                    json=body,
+                )
+                payload = await response.json()
+
+            self.assertEqual(response.status, 503)
+            self.assertEqual(
+                payload,
+                {
+                    "ok": False,
+                    "error": (
+                        "memory_deletion_journal_integrity_failed"
+                    ),
+                },
+            )
+            self.assertNotIn(private_detail, await response.text())
+            self.assertNotIn("private-note-body", await response.text())
+
     async def test_end_to_end_api_removes_source_and_keeps_content_free_tombstone(
         self,
     ) -> None:
@@ -154,6 +242,16 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(preview_response.status, 200)
         self.assertEqual(applied_response.status, 200)
+        self.assertEqual(
+            preview["deletionIntegrity"]["schema"],
+            "memory.deletion.integrity.v1",
+        )
+        self.assertFalse(
+            preview["deletionIntegrity"]["rollbackProtected"]
+        )
+        self.assertTrue(
+            applied["deletionIntegrity"]["contentFree"]
+        )
         self.assertTrue(applied["deleted"])
         self.assertFalse(path.exists())
         self.assertNotIn(title, tombstone_raw)
@@ -213,6 +311,29 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["error"],
             "memory_delete_cleanup_required",
+        )
+
+    def test_integrity_failure_status_is_service_unavailable(self) -> None:
+        result = {
+            "ok": False,
+            "error": "memory_deletion_journal_integrity_failed",
+        }
+
+        self.assertEqual(
+            control_page_server.memory_note_action_status(result),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_note_delete_status(result),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_provenance_backfill_status(result),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_provenance_correction_status(result),
+            503,
         )
 
     async def test_api_reports_and_applies_derivation_impact(

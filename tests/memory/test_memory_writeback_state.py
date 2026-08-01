@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -14,6 +16,12 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 import evelyn_core.memory as memory  # noqa: E402
 from evelyn_core.memory_writeback_state import apply_long_term_memory_result, run_long_term_memory_update  # noqa: E402
+from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
+from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
+    MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
+    MEMORY_INTEGRITY_BOOTSTRAP_ENV,
+    MEMORY_INTEGRITY_KEY_FILE_ENV,
+)
 from evelyn_core.proactive_questions import load_proactive_questions  # noqa: E402
 
 
@@ -21,13 +29,23 @@ class TemporaryMemoryRoot:
     def __init__(self) -> None:
         self.tmp = TemporaryDirectory()
         self.old_root = memory.MEMORY_ROOT
+        self.auth_environment = patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        )
 
     def __enter__(self) -> Path:
+        self.auth_environment.start()
         memory.MEMORY_ROOT = Path(self.tmp.name)
         return memory.MEMORY_ROOT
 
     def __exit__(self, exc_type, exc, tb) -> None:
         memory.MEMORY_ROOT = self.old_root
+        self.auth_environment.stop()
         self.tmp.cleanup()
 
 
@@ -251,6 +269,15 @@ class MemoryWritebackStateTests(unittest.TestCase):
             ["summary-source", "raw-source", "fact-source", "question-source", "turn-new"],
         )
         self.assertEqual(calls[0][1]["purpose"], "memory_summary")
+        self.assertIsInstance(
+            calls[0][1]["memory_deletion_position"],
+            deletion_journal.MemoryDeletionPosition,
+        )
+        self.assertTrue(calls[0][1]["memory_boundary_required"])
+        self.assertEqual(
+            calls[0][1]["memory_deletion_index_dir"].name,
+            "memory_index",
+        )
         self.assertIn("현재 layered_summary", calls[0][0][1]["content"])
         self.assertTrue(any("[MEMORY LATENCY] guild=123 scope=room-1 ms=250" in line for line in logs))
 
@@ -291,6 +318,11 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertTrue(outcome["ok"])
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][1]["max_tokens"], 220)
+        self.assertEqual(
+            calls[1][1]["memory_deletion_position"],
+            calls[0][1]["memory_deletion_position"],
+        )
+        self.assertTrue(calls[1][1]["memory_boundary_required"])
         self.assertIn("새 대화:", calls[1][0][1]["content"])
         self.assertEqual(summary, "compact 요약")
         self.assertEqual(
@@ -342,6 +374,63 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertEqual(provenance, {})
         self.assertNotIn("source_evidence_ids", facts[0])
         self.assertNotIn("source_turn_ids", facts[0])
+
+    def test_delete_after_summary_response_blocks_stale_memory_apply(self) -> None:
+        with TemporaryMemoryRoot() as memory_root:
+            index_dir = memory_root / "memory_index"
+
+            async def fake_ask(_messages, **_kwargs):
+                deletion_journal.append_memory_deletion_tombstone(
+                    index_dir,
+                    {
+                        "schema": deletion_journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+                        "noteId": "concept-0123456789abcdef",
+                        "noteType": "concept",
+                        "sourceType": "conversation",
+                        "reason": "privacy_request",
+                        "deletedAt": "2026-08-01T00:00:00Z",
+                    },
+                )
+                return {
+                    "summary_update": "PRIVATE stale derived summary",
+                    "durable_facts": [
+                        {"type": "preference", "text": "PRIVATE stale fact"}
+                    ],
+                    "open_questions": [],
+                }
+
+            async def run_in_background_task():
+                return await asyncio.create_task(
+                    run_long_term_memory_update(
+                        123,
+                        "current user turn",
+                        "current answer",
+                        source_turn_id="turn-post-gap",
+                        collect_layers=lambda *_args, **_kwargs: self._layers(),
+                        ask_summary_llm=fake_ask,
+                        is_context_size_error=lambda _exc: False,
+                        should_log_latency=lambda _ms: False,
+                        memory_fact_limit=20,
+                        memory_loop_limit=20,
+                        raw_limit=8,
+                        memory_index_dir=index_dir,
+                    )
+                )
+
+            with self.assertRaises(
+                deletion_journal.MemoryDeletionJournalIntegrityError
+            ) as raised:
+                asyncio.run(run_in_background_task())
+
+            summary = memory.read_text_file(memory.memory_summary_path(123))
+            facts = memory.read_jsonl(memory.memory_facts_path(123))
+
+        self.assertEqual(
+            str(raised.exception),
+            deletion_journal.MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+        )
+        self.assertEqual(summary, "")
+        self.assertEqual(facts, [])
 
 
 if __name__ == "__main__":

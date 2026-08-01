@@ -29,6 +29,10 @@ from .memory_provenance_correction import (
     preview_memory_provenance_correction,
     preview_memory_provenance_correction_undo,
 )
+from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalIntegrityError,
+)
 from .memory_vault import (
     apply_memory_provenance_backfill,
     delete_memory_vault_user_note,
@@ -219,6 +223,30 @@ async def cached_runtime_health(*, force: bool = False) -> dict[str, Any]:
     )
 
 
+def proxy_json_response(
+    *,
+    status: int,
+    text: str,
+    content_type: str,
+) -> web.Response:
+    if status == 503:
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError, RecursionError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("error")
+            == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+        ):
+            raise MemoryDeletionJournalIntegrityError()
+    return web.Response(
+        status=status,
+        text=text,
+        content_type=content_type or "application/json",
+    )
+
+
 async def proxy_json(request: web.Request, method: str, path: str, *, body: Any = None) -> web.Response | None:
     query = request.query_string
     url = f"{BOT_API_BASE}{path}" + (f"?{query}" if query else "")
@@ -228,10 +256,26 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
             if method == "POST":
                 async with session.post(url, json=body) as response:
                     text = await response.text()
-                    return web.Response(status=response.status, text=text, content_type=response.content_type or "application/json")
+                    return proxy_json_response(
+                        status=response.status,
+                        text=text,
+                        content_type=(
+                            response.content_type
+                            or "application/json"
+                        ),
+                    )
             async with session.get(url) as response:
                 text = await response.text()
-                return web.Response(status=response.status, text=text, content_type=response.content_type or "application/json")
+                return proxy_json_response(
+                    status=response.status,
+                    text=text,
+                    content_type=(
+                        response.content_type
+                        or "application/json"
+                    ),
+                )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         print(
             "[CONTROL PAGE] proxy_failed "
@@ -1611,7 +1655,10 @@ def memory_note_action_status(result: dict[str, Any]) -> int:
         "memory_confirmation_write_failed",
     }:
         return 500
-    if error == "memory_edit_cleanup_required":
+    if error in {
+        "memory_edit_cleanup_required",
+        MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    }:
         return 503
     return 400
 
@@ -1624,7 +1671,10 @@ def memory_note_delete_status(result: dict[str, Any]) -> int:
         return 404
     if error == "memory_delete_failed":
         return 500
-    if error == "memory_delete_cleanup_required":
+    if error in {
+        "memory_delete_cleanup_required",
+        MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    }:
         return 503
     if error in {
         "memory_delete_token_expired",
@@ -1648,10 +1698,10 @@ def memory_provenance_backfill_status(
         return 404
     if error == "memory_provenance_backfill_failed":
         return 500
-    if (
-        error
-        == "memory_provenance_backfill_cleanup_required"
-    ):
+    if error in {
+        "memory_provenance_backfill_cleanup_required",
+        MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    }:
         return 503
     if error in {
         "memory_provenance_backfill_ambiguous",
@@ -1686,10 +1736,10 @@ def memory_provenance_correction_status(
         return 404
     if error == "memory_provenance_correction_failed":
         return 500
-    if (
-        error
-        == "memory_provenance_correction_cleanup_required"
-    ):
+    if error in {
+        "memory_provenance_correction_cleanup_required",
+        MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    }:
         return 503
     if (
         error

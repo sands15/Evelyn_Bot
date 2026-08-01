@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .autonomy_router import resolve_route_executor_from_runtime
@@ -26,6 +27,7 @@ from .main_llm_runtime import (
     synthesize_tool_result_with_main_llm_from_runtime,
     tool_synthesis_answer_drifted as tool_synthesis_answer_drifted_payload,
 )
+from .memory_deletion_journal import MemoryDeletionPosition
 from .response_output_policy import (
     extract_answer_from_reasoning_from_runtime,
     extract_json_object_from_runtime,
@@ -149,6 +151,9 @@ class LlmRouteComposition:
         session_key: str | None = None,
         source: str | None = None,
         guild_id: int | None = None,
+        memory_deletion_position: MemoryDeletionPosition | None = None,
+        memory_boundary_required: bool = False,
+        memory_deletion_index_dir: Path | None = None,
     ) -> dict:
         return await ask_json_llm_from_runtime(
             messages,
@@ -161,6 +166,9 @@ class LlmRouteComposition:
             session_key=session_key,
             source=source,
             guild_id=guild_id,
+            memory_deletion_position=memory_deletion_position,
+            memory_boundary_required=memory_boundary_required,
+            memory_deletion_index_dir=memory_deletion_index_dir,
         )
 
     async def ask_router_llm(
@@ -175,6 +183,9 @@ class LlmRouteComposition:
         session_key: str | None = None,
         source: str | None = None,
         guild_id: int | None = None,
+        memory_deletion_position: MemoryDeletionPosition | None = None,
+        memory_boundary_required: bool = False,
+        memory_deletion_index_dir: Path | None = None,
     ) -> dict:
         return await ask_json_llm_from_runtime(
             messages,
@@ -187,6 +198,9 @@ class LlmRouteComposition:
             session_key=session_key,
             source=source,
             guild_id=guild_id,
+            memory_deletion_position=memory_deletion_position,
+            memory_boundary_required=memory_boundary_required,
+            memory_deletion_index_dir=memory_deletion_index_dir,
         )
 
     async def classify_llm_route(
@@ -196,6 +210,7 @@ class LlmRouteComposition:
         guild_id: int | None = None,
         source: str = "text",
         session_key: str | None = None,
+        memory_index_dir: Path | None = None,
     ) -> tuple[str, dict | None]:
         return await classify_llm_route_from_runtime(
             user_text,
@@ -203,6 +218,7 @@ class LlmRouteComposition:
             guild_id=guild_id,
             source=source,
             session_key=session_key,
+            memory_index_dir=memory_index_dir,
         )
 
     def sanitize_model_output(self, text: str) -> str:

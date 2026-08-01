@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
+from .memory_deletion_journal import (
+    normalize_memory_deletion_note_type,
+    normalize_memory_deletion_source_type,
+)
+
 
 DIRECT_SOURCE_TYPES = frozenset({"conversation", "system", "user"})
 PROVENANCE_COVERAGE_SCHEMA = "memory.provenance.coverage.v1"
@@ -29,6 +34,24 @@ def _non_negative_int(value: object) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _closed_note_type(value: object) -> str:
+    try:
+        return normalize_memory_deletion_note_type(
+            _clean(value).lower() or "unknown"
+        )
+    except Exception:
+        return "unknown"
+
+
+def _closed_source_type(value: object) -> str:
+    try:
+        return normalize_memory_deletion_source_type(
+            _clean(value).lower() or "unknown"
+        )
+    except Exception:
+        return "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +359,75 @@ def _coverage_bucket_rows(
     ]
 
 
+def _normalized_coverage_bucket_rows(
+    rows: object,
+    *,
+    normalizer: Callable[[object], str],
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, int]] = {}
+    if not isinstance(rows, (list, tuple)):
+        return []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = normalizer(row.get("key"))
+        values = buckets.setdefault(
+            key,
+            {"total": 0, "grounded": 0, "needs_review": 0},
+        )
+        values["total"] += _non_negative_int(
+            row.get("totalNoteCount")
+        )
+        values["grounded"] += _non_negative_int(
+            row.get("groundedNoteCount")
+        )
+        values["needs_review"] += _non_negative_int(
+            row.get("needsReviewCount")
+        )
+    return _coverage_bucket_rows(buckets)
+
+
+def _normalized_note_type_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, int] = {}
+    for raw_key, raw_count in value.items():
+        key = _closed_note_type(raw_key)
+        output[key] = (
+            output.get(key, 0) + _non_negative_int(raw_count)
+        )
+    return {key: output[key] for key in sorted(output)}
+
+
+def normalize_provenance_coverage_dimensions(
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    """Project persisted coverage dimensions onto closed, content-free enums."""
+
+    output = dict(coverage)
+    output["bySourceType"] = _normalized_coverage_bucket_rows(
+        coverage.get("bySourceType"),
+        normalizer=_closed_source_type,
+    )
+    output["byNoteType"] = _normalized_coverage_bucket_rows(
+        coverage.get("byNoteType"),
+        normalizer=_closed_note_type,
+    )
+    raw_rejections = coverage.get("forwardWriteRejections")
+    rejections = (
+        raw_rejections
+        if isinstance(raw_rejections, dict)
+        else {}
+    )
+    output["forwardWriteRejections"] = {
+        "count": _non_negative_int(rejections.get("count")),
+        "byNoteType": _normalized_note_type_counts(
+            rejections.get("byNoteType")
+        ),
+    }
+    return output
+
+
 def summarize_provenance_coverage(
     audit_nodes: Iterable[ProvenanceAuditNode],
     *,
@@ -402,13 +494,11 @@ def summarize_provenance_coverage(
         dimensions = (
             (
                 source_buckets,
-                _clean(node.source_type).lower()
-                or "unknown",
+                _closed_source_type(node.source_type),
             ),
             (
                 type_buckets,
-                _clean(node.note_type).lower()
-                or "unknown",
+                _closed_note_type(node.note_type),
             ),
             (
                 age_buckets,
@@ -446,7 +536,7 @@ def summarize_provenance_coverage(
     )
     total_count = len(nodes)
     needs_review_count = total_count - grounded_count
-    return {
+    return normalize_provenance_coverage_dimensions({
         "schema": PROVENANCE_COVERAGE_SCHEMA,
         "contentFree": True,
         "totalNoteCount": total_count,
@@ -470,20 +560,15 @@ def summarize_provenance_coverage(
             "count": _non_negative_int(
                 rejection_payload.get("count")
             ),
-            "byNoteType": {
-                _clean(key).lower() or "unknown": (
-                    _non_negative_int(value)
-                )
-                for key, value in sorted(
-                    rejection_by_type.items()
-                )
-            },
+            "byNoteType": _normalized_note_type_counts(
+                rejection_by_type
+            ),
         },
         "checkedAt": checked_at.isoformat().replace(
             "+00:00",
             "Z",
         ),
-    }
+    })
 
 
 __all__ = [
@@ -493,5 +578,6 @@ __all__ = [
     "ProvenanceCandidateSignal",
     "PROVENANCE_COVERAGE_SCHEMA",
     "audit_missing_derivations",
+    "normalize_provenance_coverage_dimensions",
     "summarize_provenance_coverage",
 ]

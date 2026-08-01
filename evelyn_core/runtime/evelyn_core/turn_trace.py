@@ -12,6 +12,11 @@ from .text import clean_text
 from .memory_confirmation_contract import (
     is_explicit_memory_confirmation_receipt,
 )
+from .memory_content_free_ids import memory_content_free_id
+from .memory_deletion_journal import (
+    memory_deletion_ledger_note_id,
+    memory_deletion_note_id_is_canonical,
+)
 
 
 TURN_SUMMARY_EVENTS = frozenset(
@@ -252,14 +257,38 @@ def _int_or_none(value: Any) -> int | None:
 def _memory_note_ids(value: Any) -> list[str] | None:
     if not isinstance(value, (list, tuple)):
         return None
-    note_ids = list(
-        dict.fromkeys(
+    note_ids: list[str] = []
+    for item in value[:12]:
+        cleaned = clean_text(str(item))
+        if not cleaned:
+            continue
+        projected = (
             cleaned
-            for item in value[:12]
-            if (cleaned := clean_text(str(item)))
+            if memory_deletion_note_id_is_canonical(cleaned)
+            else memory_deletion_ledger_note_id(cleaned)
         )
-    )
-    return note_ids or []
+        if projected not in note_ids:
+            note_ids.append(projected)
+    return note_ids
+
+
+def _memory_content_free_ids(
+    value: Any,
+    *,
+    namespace: str,
+    limit: int,
+) -> list[str] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    identifiers: list[str] = []
+    for item in value[:limit]:
+        projected = memory_content_free_id(
+            item,
+            namespace=namespace,
+        )
+        if projected and projected not in identifiers:
+            identifiers.append(projected)
+    return identifiers
 
 
 def _first_ms(*values: Any) -> float | None:
@@ -419,9 +448,21 @@ def build_turn_summary_payload(
         "memory_legacy_attributed_item_count": _int_or_none(memory_receipt.get("legacyAttributedItemCount")),
         "memory_legacy_unattributed_item_count": _int_or_none(memory_receipt.get("legacyUnattributedItemCount")),
         "memory_legacy_confirm_only_item_count": _int_or_none(memory_receipt.get("legacyConfirmOnlyItemCount")),
-        "memory_legacy_evidence_ids": _memory_note_ids(memory_receipt.get("legacyEvidenceIds")),
-        "memory_legacy_source_evidence_ids": _memory_note_ids(memory_receipt.get("legacySourceEvidenceIds")),
-        "memory_legacy_source_turn_ids": _memory_note_ids(memory_receipt.get("legacySourceTurnIds")),
+        "memory_legacy_evidence_ids": _memory_content_free_ids(
+            memory_receipt.get("legacyEvidenceIds"),
+            namespace="evidence",
+            limit=64,
+        ),
+        "memory_legacy_source_evidence_ids": _memory_content_free_ids(
+            memory_receipt.get("legacySourceEvidenceIds"),
+            namespace="evidence",
+            limit=64,
+        ),
+        "memory_legacy_source_turn_ids": _memory_content_free_ids(
+            memory_receipt.get("legacySourceTurnIds"),
+            namespace="turn",
+            limit=32,
+        ),
         "memory_hot_context_state": _clean_optional(memory_receipt.get("hotContextState")),
         "memory_version": _int_or_none(memory_receipt.get("memoryVersion")),
         "memory_receipt_content_free": _bool_or_none(memory_receipt.get("contentFree")),

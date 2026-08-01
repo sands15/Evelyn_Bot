@@ -18,9 +18,11 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.memory_provenance_audit import (  # noqa: E402
     ProvenanceAuditNode,
     audit_missing_derivations,
+    summarize_provenance_coverage,
 )
 from evelyn_core.memory_vault import (  # noqa: E402
     delete_memory_vault_user_note,
@@ -38,6 +40,7 @@ class ProvenanceAuditContractTests(unittest.TestCase):
         self,
         note_id: str,
         *,
+        note_type: str = "concept",
         source_type: str = "derived",
         source_refs: tuple[str, ...] = (),
         derived_from: tuple[str, ...] = (),
@@ -49,7 +52,7 @@ class ProvenanceAuditContractTests(unittest.TestCase):
     ) -> ProvenanceAuditNode:
         return ProvenanceAuditNode(
             note_id=note_id,
-            note_type="concept",
+            note_type=note_type,
             source_type=source_type,
             source_refs=source_refs,
             derived_from=derived_from,
@@ -166,8 +169,151 @@ class ProvenanceAuditContractTests(unittest.TestCase):
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.cycle_rejected_signal_count, 1)
 
+    def test_coverage_dimensions_use_closed_aggregated_enums(
+        self,
+    ) -> None:
+        source_canary = "PRIVATE source transcript canary sentence"
+        type_canary = "PRIVATE note type transcript canary sentence"
+        coverage = summarize_provenance_coverage(
+            [
+                self.node(
+                    "one",
+                    note_type=type_canary,
+                    source_type=source_canary,
+                ),
+                self.node(
+                    "two",
+                    note_type="concepts",
+                    source_type="conversation-turn-log",
+                ),
+                self.node(
+                    "three",
+                    note_type="semantic",
+                    source_type="conversation",
+                ),
+            ],
+            forward_write_rejections={
+                "count": 4,
+                "byNoteType": {
+                    type_canary: 2,
+                    "concepts": 1,
+                    "semantic": 1,
+                },
+            },
+        )
+        encoded = json.dumps(coverage, ensure_ascii=False)
+
+        self.assertNotIn(source_canary, encoded)
+        self.assertNotIn(type_canary, encoded)
+        self.assertEqual(
+            {
+                row["key"]: row["totalNoteCount"]
+                for row in coverage["bySourceType"]
+            },
+            {"conversation": 2, "unknown": 1},
+        )
+        self.assertEqual(
+            {
+                row["key"]: row["totalNoteCount"]
+                for row in coverage["byNoteType"]
+            },
+            {"concept": 2, "unknown": 1},
+        )
+        self.assertEqual(
+            coverage["forwardWriteRejections"]["byNoteType"],
+            {"concept": 2, "unknown": 2},
+        )
+
 
 class ProvenanceAuditIntegrationTests(unittest.TestCase):
+    def test_persisted_coverage_reprojects_free_form_dimensions(
+        self,
+    ) -> None:
+        source_canary = "PRIVATE persisted source transcript sentence"
+        type_canary = "PRIVATE persisted note type transcript sentence"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_vault_module.ensure_memory_vault_layout(root)
+            persisted = (
+                memory_vault_module
+                ._memory_persisted_provenance_audit(  # noqa: SLF001
+                    root=root,
+                    graph_fingerprint="0" * 64,
+                    audit=audit_missing_derivations([]),
+                    coverage={
+                        "schema": "memory.provenance.coverage.v1",
+                        "contentFree": True,
+                        "bySourceType": [
+                            {
+                                "key": source_canary,
+                                "totalNoteCount": 1,
+                                "groundedNoteCount": 0,
+                                "needsReviewCount": 1,
+                            },
+                            {
+                                "key": "runtime",
+                                "totalNoteCount": 2,
+                                "groundedNoteCount": 2,
+                                "needsReviewCount": 0,
+                            },
+                        ],
+                        "byNoteType": [
+                            {
+                                "key": type_canary,
+                                "totalNoteCount": 1,
+                                "groundedNoteCount": 0,
+                                "needsReviewCount": 1,
+                            },
+                            {
+                                "key": "concepts",
+                                "totalNoteCount": 2,
+                                "groundedNoteCount": 2,
+                                "needsReviewCount": 0,
+                            },
+                        ],
+                        "forwardWriteRejections": {
+                            "count": 3,
+                            "byNoteType": {
+                                type_canary: 1,
+                                "concepts": 2,
+                            },
+                        },
+                    },
+                    legacy_context_coverage={},
+                )
+            )
+            report_path = (
+                root
+                / "memory_index"
+                / "memory_provenance_backfill_audit.json"
+            )
+            persisted_raw = report_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertNotIn(source_canary, persisted_raw)
+        self.assertNotIn(type_canary, persisted_raw)
+        self.assertEqual(
+            {
+                row["key"]: row["totalNoteCount"]
+                for row in persisted["coverage"]["bySourceType"]
+            },
+            {"runtime": 2, "unknown": 1},
+        )
+        self.assertEqual(
+            {
+                row["key"]: row["totalNoteCount"]
+                for row in persisted["coverage"]["byNoteType"]
+            },
+            {"concept": 2, "unknown": 1},
+        )
+        self.assertEqual(
+            persisted["coverage"]["forwardWriteRejections"][
+                "byNoteType"
+            ],
+            {"concept": 2, "unknown": 1},
+        )
+
     def test_preview_is_read_only_and_persisted_report_is_content_free(
         self,
     ) -> None:

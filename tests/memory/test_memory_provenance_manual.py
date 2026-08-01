@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = next(
@@ -200,6 +201,261 @@ class MemoryProvenanceCoverageTests(unittest.TestCase):
                 "byNoteType": {"episode": 0},
             },
         )
+
+    def test_audit_migrates_legacy_forward_counter_raw_keys(
+        self,
+    ) -> None:
+        transcript_canary = (
+            "PRIVATE transcript-like legacy note-type canary"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            counter_path = root / "memory_index" / (
+                "memory_provenance_"
+                "forward_write_rejections.json"
+            )
+            counter_path.parent.mkdir(parents=True)
+            counter_path.write_text(
+                json.dumps(
+                    {
+                        "schema": (
+                            "memory.provenance."
+                            "forward-write-rejections.v1"
+                        ),
+                        "contentFree": True,
+                        "count": 5,
+                        "byNoteType": {
+                            transcript_canary: 2,
+                            "episodes": 3,
+                        },
+                        "firstRejectedAt": transcript_canary,
+                        "lastRejectedAt": "2026-07-30T12:34:56Z",
+                        "transcript": transcript_canary,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            preview = memory_provenance_backfill_preview(
+                root=root
+            )
+            migrated_raw = counter_path.read_text(
+                encoding="utf-8"
+            )
+            migrated = json.loads(migrated_raw)
+
+        self.assertEqual(
+            migrated,
+            {
+                "schema": (
+                    "memory.provenance."
+                    "forward-write-rejections.v1"
+                ),
+                "contentFree": True,
+                "count": 5,
+                "byNoteType": {
+                    "episode": 3,
+                    "unknown": 2,
+                },
+                "firstRejectedAt": "",
+                "lastRejectedAt": "2026-07-30T12:34:56Z",
+            },
+        )
+        self.assertEqual(
+            preview["coverage"]["forwardWriteRejections"],
+            {
+                "count": 5,
+                "byNoteType": {
+                    "episode": 3,
+                    "unknown": 2,
+                },
+            },
+        )
+        self.assertNotIn(transcript_canary, migrated_raw)
+        self.assertNotIn('"transcript"', migrated_raw)
+
+    def test_forward_counter_migration_failure_fails_audit_closed(
+        self,
+    ) -> None:
+        transcript_canary = "PRIVATE migration failure canary"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            counter_path = root / "memory_index" / (
+                "memory_provenance_"
+                "forward_write_rejections.json"
+            )
+            counter_path.parent.mkdir(parents=True)
+            counter_path.write_text(
+                json.dumps(
+                    {
+                        "schema": (
+                            "memory.provenance."
+                            "forward-write-rejections.v1"
+                        ),
+                        "contentFree": True,
+                        "count": 1,
+                        "byNoteType": {
+                            transcript_canary: 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            audit_path = root / "memory_index" / (
+                "memory_provenance_backfill_audit.json"
+            )
+            original_atomic_json_write = (
+                memory_vault.atomic_json_write
+            )
+            attempted_targets: list[Path] = []
+
+            def fail_only_counter_migration(
+                path: Path,
+                payload: dict[str, object],
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                target = Path(path)
+                if target == counter_path:
+                    attempted_targets.append(target)
+                    raise OSError("durable migration failed")
+                original_atomic_json_write(
+                    target,
+                    payload,
+                    *args,
+                    **kwargs,
+                )
+
+            with mock.patch.object(
+                memory_vault,
+                "atomic_json_write",
+                side_effect=fail_only_counter_migration,
+            ):
+                with self.assertRaises(
+                    memory_vault.MemoryDeletionJournalIntegrityError
+                ) as raised:
+                    memory_provenance_backfill_preview(
+                        root=root
+                    )
+
+            raw_after_failure = counter_path.read_text(
+                encoding="utf-8"
+            )
+            audit_exists_after_failure = audit_path.exists()
+
+        self.assertEqual(attempted_targets, [counter_path])
+        self.assertEqual(
+            str(raised.exception),
+            "memory_deletion_journal_integrity_failed",
+        )
+        self.assertEqual(
+            raised.exception.args,
+            ("memory_deletion_journal_integrity_failed",),
+        )
+        self.assertIn(transcript_canary, raw_after_failure)
+        self.assertFalse(audit_exists_after_failure)
+
+    def test_audit_rewrites_duplicate_generated_at_raw_canary(
+        self,
+    ) -> None:
+        transcript_canary = (
+            "PRIVATE duplicate generatedAt transcript canary"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_provenance_backfill_preview(root=root)
+            audit_path = root / "memory_index" / (
+                "memory_provenance_backfill_audit.json"
+            )
+            canonical_before = audit_path.read_text(
+                encoding="utf-8"
+            )
+            marker = '"generatedAt": "'
+            marker_offset = canonical_before.index(marker)
+            poisoned = (
+                canonical_before[:marker_offset]
+                + f'"generatedAt": "{transcript_canary}",\n  '
+                + canonical_before[marker_offset:]
+            )
+            audit_path.write_text(poisoned, encoding="utf-8")
+            self.assertEqual(
+                json.loads(poisoned),
+                json.loads(canonical_before),
+            )
+
+            memory_provenance_backfill_preview(root=root)
+            canonical_after = audit_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(canonical_after, canonical_before)
+        self.assertNotIn(transcript_canary, canonical_after)
+        self.assertEqual(canonical_after.count(marker), 1)
+
+    def test_audit_raw_canonicalization_failure_fails_closed(
+        self,
+    ) -> None:
+        transcript_canary = (
+            "PRIVATE audit canonicalization failure canary"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_provenance_backfill_preview(root=root)
+            audit_path = root / "memory_index" / (
+                "memory_provenance_backfill_audit.json"
+            )
+            canonical = audit_path.read_text(encoding="utf-8")
+            marker = '"generatedAt": "'
+            marker_offset = canonical.index(marker)
+            poisoned = (
+                canonical[:marker_offset]
+                + f'"generatedAt": "{transcript_canary}",\n  '
+                + canonical[marker_offset:]
+            )
+            audit_path.write_text(poisoned, encoding="utf-8")
+            original_atomic_json_write = (
+                memory_vault.atomic_json_write
+            )
+            attempted_targets: list[Path] = []
+
+            def fail_only_audit_rewrite(
+                path: Path,
+                payload: dict[str, object],
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                target = Path(path)
+                if target == audit_path:
+                    attempted_targets.append(target)
+                    raise OSError("durable audit rewrite failed")
+                original_atomic_json_write(
+                    target,
+                    payload,
+                    *args,
+                    **kwargs,
+                )
+
+            with mock.patch.object(
+                memory_vault,
+                "atomic_json_write",
+                side_effect=fail_only_audit_rewrite,
+            ):
+                with self.assertRaises(
+                    memory_vault.MemoryDeletionJournalIntegrityError
+                ) as raised:
+                    memory_provenance_backfill_preview(root=root)
+
+            raw_after_failure = audit_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(attempted_targets, [audit_path])
+        self.assertEqual(
+            raised.exception.args,
+            ("memory_deletion_journal_integrity_failed",),
+        )
+        self.assertIn(transcript_canary, raw_after_failure)
 
 
 class MemoryProvenanceManualSelectionTests(

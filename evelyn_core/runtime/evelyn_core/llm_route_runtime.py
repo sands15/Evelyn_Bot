@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import config as runtime_config
 from .context_pipeline import ContextPolicy
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_guard,
+)
 from .route_fallback_policy import normalize_route_name, should_force_voice_context_route
 from .turn_budget import build_turn_execution_budget
 
@@ -39,6 +46,7 @@ async def classify_llm_route_from_runtime(
     guild_id: int | None = None,
     source: str = "text",
     session_key: str | None = None,
+    memory_index_dir: Path | None = None,
 ) -> tuple[str, dict | None]:
     fallback_route = deps.classify_llm_route_fallback(user_text, source=source)
     budget = build_turn_execution_budget(
@@ -76,47 +84,61 @@ async def classify_llm_route_from_runtime(
             "execution_budget": budget.to_dict(),
         }
 
-    summary = deps.load_working_summary(guild_id) if guild_id is not None else ""
-    state = deps.load_cognitive_state(guild_id) if guild_id is not None else deps.normalize_cognitive_state({})
-    recent_raw = deps.load_recent_raw(guild_id)[-3:] if guild_id is not None else []
-    recent_facts = deps.load_recent_facts(guild_id)[-3:] if guild_id is not None else []
+    deletion_index_dir = (
+        Path(memory_index_dir)
+        if memory_index_dir is not None
+        else Path(runtime_config.MEMORY_ROOT) / "memory_index"
+    )
+    build_guard = (
+        memory_deletion_journal_guard(
+            deletion_index_dir,
+            require_stable=True,
+        )
+        if guild_id is not None
+        else contextlib.nullcontext(None)
+    )
+    with build_guard as memory_deletion_position:
+        summary = deps.load_working_summary(guild_id) if guild_id is not None else ""
+        state = deps.load_cognitive_state(guild_id) if guild_id is not None else deps.normalize_cognitive_state({})
+        recent_raw = deps.load_recent_raw(guild_id)[-3:] if guild_id is not None else []
+        recent_facts = deps.load_recent_facts(guild_id)[-3:] if guild_id is not None else []
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Evelyn's lightweight router and context policy planner. "
-                "Return exactly one JSON object and no other text. "
-                "Required shape: "
-                '{"selected":"main_direct|voice_context|sub_wait","confidence":0.0,'
-                '"reason_brief":"short reason","context_policy":{'
-                '"intent":"chat|question|minecraft_task|vision_question|memory_update|control",'
-                '"needs_main_llm":true,"needs_memory":true,"needs_runtime_state":true,'
-                '"needs_minecraft_state":false,"needs_vision":false,"needs_skill_graph":false,'
-                '"needs_long_context":false,"priority":"latency|accuracy|action",'
-                '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"},'
-                '"ask_mode":"none|clarify|soft_followup|preference_probe|topic_continue|idle_checkin",'
-                '"max_question_count":0,"question_reason":"short reason","question_hint":"direction only","question_source":"router"}. '
-                "Use main_direct for ordinary direct replies, voice_context when recent state/memory is important, "
-                "and sub_wait when search/wait/search_then_answer style reasoning is needed. "
-                "Set minecraft/vision/skill flags only when the current turn needs them. "
-                "Question rules: do not add a router call just for questions; if a direct answer/task/fix is requested, "
-                "use ask_mode=none and max_question_count=0. If a light follow-up is useful, allow at most one question. "
-                "question_hint is only a direction, not a final sentence."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"최근 요약:\n{summary or '(없음)'}\n\n"
-                f"현재 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
-                f"최근 raw_transcript:\n{deps.format_memory_rows_for_llm(recent_raw, max_items=3)}\n\n"
-                f"최근 durable_facts:\n{deps.format_memory_rows_for_llm(recent_facts, max_items=3)}\n\n"
-                f"현재 사용자 입력:\n{deps.compact_memory_text(user_text, max_chars=160)}\n\n"
-                f"fallback_route={fallback_route}\nsource={source}"
-            ),
-        },
-    ]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Evelyn's lightweight router and context policy planner. "
+                    "Return exactly one JSON object and no other text. "
+                    "Required shape: "
+                    '{"selected":"main_direct|voice_context|sub_wait","confidence":0.0,'
+                    '"reason_brief":"short reason","context_policy":{'
+                    '"intent":"chat|question|minecraft_task|vision_question|memory_update|control",'
+                    '"needs_main_llm":true,"needs_memory":true,"needs_runtime_state":true,'
+                    '"needs_minecraft_state":false,"needs_vision":false,"needs_skill_graph":false,'
+                    '"needs_long_context":false,"priority":"latency|accuracy|action",'
+                    '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"},'
+                    '"ask_mode":"none|clarify|soft_followup|preference_probe|topic_continue|idle_checkin",'
+                    '"max_question_count":0,"question_reason":"short reason","question_hint":"direction only","question_source":"router"}. '
+                    "Use main_direct for ordinary direct replies, voice_context when recent state/memory is important, "
+                    "and sub_wait when search/wait/search_then_answer style reasoning is needed. "
+                    "Set minecraft/vision/skill flags only when the current turn needs them. "
+                    "Question rules: do not add a router call just for questions; if a direct answer/task/fix is requested, "
+                    "use ask_mode=none and max_question_count=0. If a light follow-up is useful, allow at most one question. "
+                    "question_hint is only a direction, not a final sentence."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"최근 요약:\n{summary or '(없음)'}\n\n"
+                    f"현재 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
+                    f"최근 raw_transcript:\n{deps.format_memory_rows_for_llm(recent_raw, max_items=3)}\n\n"
+                    f"최근 durable_facts:\n{deps.format_memory_rows_for_llm(recent_facts, max_items=3)}\n\n"
+                    f"현재 사용자 입력:\n{deps.compact_memory_text(user_text, max_chars=160)}\n\n"
+                    f"fallback_route={fallback_route}\nsource={source}"
+                ),
+            },
+        ]
 
     try:
         result = await deps.ask_router_llm(
@@ -129,7 +151,14 @@ async def classify_llm_route_from_runtime(
             session_key=session_key,
             source=source,
             guild_id=guild_id,
+            memory_deletion_position=memory_deletion_position,
+            memory_boundary_required=guild_id is not None,
+            memory_deletion_index_dir=(
+                deletion_index_dir if guild_id is not None else None
+            ),
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         deps.log(f"[ROUTER] route 실패 fallback 사용: {exc!r}")
         return fallback_route, {

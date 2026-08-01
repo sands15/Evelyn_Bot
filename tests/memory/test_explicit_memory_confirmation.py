@@ -27,6 +27,9 @@ from evelyn_core.memory_vault import memory_vault_user_note  # noqa: E402
 from evelyn_core.memory_confirmation_contract import (  # noqa: E402
     is_explicit_memory_confirmation_receipt,
 )
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+)
 
 
 class ExplicitMemoryConfirmationTests(unittest.TestCase):
@@ -92,6 +95,11 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertEqual(first["noteId"], second["noteId"])
         self.assertTrue(first["contentFree"])
         self.assertNotIn("산책", str(first))
+        self.assertNotIn("control-request-123", str(first))
+        self.assertRegex(
+            first["sourceRef"],
+            r"^turn:opaque-turn-[0-9a-f]{64}:user$",
+        )
         self.assertTrue(note["ok"])
         self.assertEqual(note["card"]["body"], "나는 산책을 좋아해")
         self.assertTrue(note["card"]["confirmed"])
@@ -129,7 +137,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertNotIn("private path", str(receipt))
         self.assertRegex(
             receipt["sourceRef"],
-            r"^turn:[0-9a-f]{32}:user$",
+            r"^turn:opaque-turn-[0-9a-f]{64}:user$",
         )
 
     def test_same_action_cannot_be_reused_for_different_content(self) -> None:
@@ -172,10 +180,11 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 root=root,
             )
 
-        self.assertEqual(
+        self.assertRegex(
             receipt["sourceRef"],
-            "turn:discord-turn-abc:user",
+            r"^turn:opaque-turn-[0-9a-f]{64}:user$",
         )
+        self.assertNotIn("discord-turn-abc", str(receipt))
         self.assertIn(
             "source_refs: [turn:discord-turn-abc:user]",
             raw,
@@ -213,8 +222,10 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertEqual(duplicate["state"], "duplicate")
         self.assertEqual(
             duplicate["sourceRef"],
-            "turn:discord-turn-original:user",
+            first["sourceRef"],
         )
+        self.assertNotIn("discord-turn-original", str(duplicate))
+        self.assertNotIn("discord-turn-retry", str(duplicate))
 
     def test_unknown_source_is_rejected(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -307,12 +318,35 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertEqual(error, "memory_confirmation_write_unverified")
         self.assertNotIn("private-canary", str(receipt))
 
+    def test_executor_does_not_downgrade_deletion_integrity_failure(
+        self,
+    ) -> None:
+        with patch(
+            "evelyn_core.explicit_memory_confirmation."
+            "store_explicit_memory_confirmation",
+            side_effect=MemoryDeletionJournalIntegrityError(
+                "PRIVATE_MUST_NOT_SURVIVE"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MemoryDeletionJournalIntegrityError,
+                "^memory_deletion_journal_integrity_failed$",
+            ):
+                execute_explicit_memory_confirmation(
+                    "/remember private-canary-must-not-leak",
+                    action_id="integrity-failure-action-123",
+                )
+
     def test_receipt_validator_rejects_extra_or_private_fields(self) -> None:
         valid = {
             "schema": "memory.user-confirmation.v1",
             "state": "stored",
-            "noteId": "concept-safe-id",
-            "sourceRef": "turn:discord-turn-abc:user",
+            "noteId": "concept-0123456789abcdef",
+            "sourceRef": (
+                "turn:opaque-turn-"
+                + ("a" * 64)
+                + ":user"
+            ),
             "confirmedAt": "2026-07-31T00:00:00+00:00",
             "contentFree": True,
         }

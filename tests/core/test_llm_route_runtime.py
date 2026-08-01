@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -13,6 +14,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.llm_route_runtime import (  # noqa: E402
     LlmRouteRuntimeDeps,
     classify_llm_route_from_runtime,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
 )
 
 
@@ -125,13 +130,16 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(meta["execution_budget"]["router_enabled"])
 
     async def test_router_result_includes_question_and_context_policy(self) -> None:
-        route, meta = await classify_llm_route_from_runtime(
-            "이전 내용을 이어서 설명해줘",
-            deps=self.build_deps(),
-            guild_id=11,
-            source="text",
-            session_key="session-2",
-        )
+        with TemporaryDirectory() as tmp:
+            index_dir = Path(tmp) / "memory_index"
+            route, meta = await classify_llm_route_from_runtime(
+                "이전 내용을 이어서 설명해줘",
+                deps=self.build_deps(),
+                guild_id=11,
+                source="text",
+                session_key="session-2",
+                memory_index_dir=index_dir,
+            )
 
         self.assertEqual(route, "sub_hint")
         self.assertEqual(meta["source"], "router")
@@ -148,7 +156,26 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("{'id': 4}", messages[1]["content"])
         self.assertEqual(kwargs["max_tokens"], 321)
         self.assertEqual(kwargs["turn_id"], "turn:session-2")
+        self.assertIsInstance(
+            kwargs["memory_deletion_position"],
+            MemoryDeletionPosition,
+        )
+        self.assertTrue(kwargs["memory_boundary_required"])
+        self.assertEqual(kwargs["memory_deletion_index_dir"], index_dir)
         self.assertEqual(self.question_calls[0][1], "router")
+
+    async def test_memory_deletion_integrity_error_is_not_downgraded_to_route_fallback(self) -> None:
+        self.router_result = MemoryDeletionJournalIntegrityError()
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(MemoryDeletionJournalIntegrityError):
+                await classify_llm_route_from_runtime(
+                    "이전 내용을 이어서 설명해줘",
+                    deps=self.build_deps(),
+                    guild_id=11,
+                    memory_index_dir=Path(tmp) / "memory_index",
+                )
+
+        self.assertEqual(self.logs, [])
 
     async def test_router_exception_returns_error_fallback(self) -> None:
         self.router_result = RuntimeError("router down")

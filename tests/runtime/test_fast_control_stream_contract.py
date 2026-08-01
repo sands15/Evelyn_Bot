@@ -16,6 +16,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
+)
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -303,6 +306,111 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("internal:9820", public_text)
         self.assertNotIn("C:\\\\private", public_text)
 
+    async def test_nonstream_integrity_failure_is_exact_no_store_503(
+        self,
+    ) -> None:
+        async def fail_main_llm(*_args, **_kwargs):
+            raise MemoryDeletionJournalIntegrityError(
+                "PRIVATE_MUST_NOT_SURVIVE"
+            )
+
+        client = TestClient(TestServer(fast_api.create_app()))
+        await client.start_server()
+        try:
+            with patch.object(
+                fast_api,
+                "plan_fast_tool_request_for_turn",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "resolve_pre_llm_reply",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "ask_main_llm",
+                new=fail_main_llm,
+            ), patch.object(
+                fast_api,
+                "should_queue_local_bridge_speech",
+                return_value=False,
+            ):
+                response = await client.post(
+                    "/api/control-page/chat",
+                    json={
+                        "text": "경계 일반 응답 테스트",
+                        "source": "control_page",
+                    },
+                )
+                payload = await response.json()
+        finally:
+            await client.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "error": (
+                    "memory_deletion_journal_integrity_failed"
+                ),
+            },
+        )
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertNotIn("PRIVATE_MUST_NOT_SURVIVE", str(payload))
+
+    async def test_stream_integrity_failure_precedes_http_200_admission(
+        self,
+    ) -> None:
+        async def fail_before_first_delta(*_args, **_kwargs):
+            if False:
+                yield ""
+            raise MemoryDeletionJournalIntegrityError(
+                "PRIVATE_STREAM_MUST_NOT_SURVIVE"
+            )
+
+        client = TestClient(TestServer(fast_api.create_app()))
+        await client.start_server()
+        try:
+            with patch.object(
+                fast_api,
+                "plan_fast_tool_request_for_turn",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "resolve_pre_llm_reply",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "iter_main_llm_deltas",
+                new=fail_before_first_delta,
+            ):
+                response = await client.post(
+                    "/api/control-page/chat-stream",
+                    json={
+                        "text": "경계 스트림 응답 테스트",
+                        "source": "local_bridge",
+                    },
+                )
+                body = await response.text()
+                payload = json.loads(body)
+        finally:
+            await client.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "error": (
+                    "memory_deletion_journal_integrity_failed"
+                ),
+            },
+        )
+        self.assertNotIn('"type": "progress"', body)
+        self.assertNotIn('"type": "error"', body)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertNotIn("PRIVATE_STREAM_MUST_NOT_SURVIVE", body)
+
     async def test_stream_planner_failure_uses_same_terminal_contract(
         self,
     ) -> None:
@@ -429,8 +537,10 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         receipt = {
             "schema": "memory.user-confirmation.v1",
             "state": "stored",
-            "noteId": "concept-stream-test",
-            "sourceRef": "turn:stream-test:user",
+            "noteId": "concept-234567890abcdef1",
+            "sourceRef": (
+                "turn:opaque-turn-" + ("c" * 64) + ":user"
+            ),
             "confirmedAt": "2026-07-31T00:00:00+00:00",
             "contentFree": True,
         }

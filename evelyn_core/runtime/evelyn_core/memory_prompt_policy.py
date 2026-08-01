@@ -1,14 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from .context_pipeline import clean_block_text
+from .memory_deletion_journal import (
+    MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+    memory_deletion_ledger_note_id,
+    memory_deletion_note_id_is_canonical,
+)
+from .memory_content_free_ids import memory_content_free_id
+from .memory_deletion_outbound import (
+    current_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 from .text import clean_text
 
 
 MEMORY_CONTEXT_USE_POLICY = "memory.context-use.v1"
 MEMORY_PROMPT_MAX_CHARS = 1680
+MEMORY_RETRIEVAL_MODES = frozenset(
+    {
+        "fts",
+        "scan",
+        "fts+vector",
+        "scan+vector",
+        "cache",
+        "unknown",
+    }
+)
+_MEMORY_DELETION_NOT_REQUIRED_DIGEST = "0" * 64
+_MEMORY_DELETION_POSITION_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 _MEMORY_CONTEXT_RECEIPT_FIELDS = frozenset(
     {
@@ -43,6 +68,7 @@ _MEMORY_CONTEXT_RECEIPT_FIELDS = frozenset(
         "legacyEvidenceIds",
         "legacySourceEvidenceIds",
         "legacySourceTurnIds",
+        "deletionBoundary",
         "contentFree",
     }
 )
@@ -87,6 +113,106 @@ def _identifier_count(value: object) -> int:
             for item in value
             if isinstance(item, str) and (cleaned := clean_text(item))
         }
+    )
+
+
+def memory_deletion_boundary_not_required() -> dict[str, Any]:
+    """Return the only valid public projection for a non-memory prompt."""
+
+    return {
+        "schema": MEMORY_DELETION_POSITION_SCHEMA,
+        "state": "not_required",
+        "sequence": 0,
+        "positionDigest": _MEMORY_DELETION_NOT_REQUIRED_DIGEST,
+        "contentFree": True,
+    }
+
+
+def memory_deletion_boundary_from_position(
+    position: MemoryDeletionPosition,
+) -> dict[str, Any]:
+    """Project an internal position without exposing its root binding."""
+
+    if (
+        not isinstance(position, MemoryDeletionPosition)
+        or position.schema != MEMORY_DELETION_POSITION_SCHEMA
+        or isinstance(position.sequence, bool)
+        or not isinstance(position.sequence, int)
+        or position.sequence < 0
+        or not isinstance(position.root_digest, str)
+        or not _MEMORY_DELETION_POSITION_DIGEST.fullmatch(
+            position.root_digest
+        )
+        or not isinstance(position.position_digest, str)
+        or not _MEMORY_DELETION_POSITION_DIGEST.fullmatch(
+            position.position_digest
+        )
+    ):
+        raise MemoryDeletionJournalIntegrityError()
+    return {
+        "schema": MEMORY_DELETION_POSITION_SCHEMA,
+        "state": "captured",
+        "sequence": position.sequence,
+        "positionDigest": position.position_digest,
+        "contentFree": True,
+    }
+
+
+def normalize_memory_deletion_boundary(
+    value: object,
+    *,
+    require_captured: bool,
+) -> dict[str, Any]:
+    """Allowlist a public deletion position or fail a memory exposure closed."""
+
+    source = value if isinstance(value, dict) else {}
+    schema = source.get("schema")
+    state = source.get("state")
+    sequence = source.get("sequence")
+    position_digest = source.get("positionDigest")
+    content_free = source.get("contentFree")
+    captured = bool(
+        schema == MEMORY_DELETION_POSITION_SCHEMA
+        and state == "captured"
+        and not isinstance(sequence, bool)
+        and isinstance(sequence, int)
+        and sequence >= 0
+        and isinstance(position_digest, str)
+        and _MEMORY_DELETION_POSITION_DIGEST.fullmatch(position_digest)
+        and content_free is True
+    )
+    if captured:
+        return {
+            "schema": MEMORY_DELETION_POSITION_SCHEMA,
+            "state": "captured",
+            "sequence": sequence,
+            "positionDigest": position_digest,
+            "contentFree": True,
+        }
+    if require_captured:
+        raise MemoryDeletionJournalIntegrityError()
+    return memory_deletion_boundary_not_required()
+
+
+def memory_deletion_boundary_matches_position(
+    boundary: object,
+    position: object,
+) -> bool:
+    """Match the public projection to the internal root-bound position."""
+
+    if not isinstance(position, MemoryDeletionPosition):
+        return False
+    try:
+        projected = normalize_memory_deletion_boundary(
+            boundary,
+            require_captured=True,
+        )
+        expected = memory_deletion_boundary_from_position(position)
+    except MemoryDeletionJournalIntegrityError:
+        return False
+    return bool(
+        projected["sequence"] == expected["sequence"]
+        and projected["positionDigest"] == expected["positionDigest"]
     )
 
 
@@ -159,6 +285,52 @@ def _render_withheld_memory_context() -> str:
 def _finalize_memory_receipt(receipt: dict[str, Any]) -> None:
     receipt["schema"] = "memory.context-receipt.v1"
     receipt["contentFree"] = True
+    receipt["retrievalMode"] = normalize_memory_retrieval_mode(
+        receipt.get("retrievalMode")
+    )
+    raw_note_ids = receipt.get("suppliedNoteIds")
+    canonical_note_ids: set[str] = set()
+    if isinstance(raw_note_ids, (list, tuple)):
+        for item in raw_note_ids[:12]:
+            raw_id = clean_text(str(item))
+            if not raw_id:
+                continue
+            canonical_note_ids.add(
+                raw_id
+                if memory_deletion_note_id_is_canonical(raw_id)
+                else memory_deletion_ledger_note_id(raw_id)
+            )
+    receipt["suppliedNoteIds"] = sorted(canonical_note_ids)
+    receipt["suppliedNoteCount"] = len(canonical_note_ids)
+    for field, namespace, limit in (
+        ("legacyEvidenceIds", "evidence", 64),
+        ("legacySourceEvidenceIds", "evidence", 64),
+        ("legacySourceTurnIds", "turn", 32),
+    ):
+        values = receipt.get(field)
+        projected_ids: set[str] = set()
+        if isinstance(values, (list, tuple)):
+            for item in values[:limit]:
+                projected = memory_content_free_id(
+                    item,
+                    namespace=namespace,
+                )
+                if projected:
+                    projected_ids.add(projected)
+        receipt[field] = sorted(projected_ids)
+    boundary_required = receipt.get("state") == "provided"
+    boundary = normalize_memory_deletion_boundary(
+        receipt.get("deletionBoundary"),
+        require_captured=False,
+    )
+    if boundary_required:
+        position = current_memory_deletion_outbound_position()
+        if not memory_deletion_boundary_matches_position(boundary, position):
+            boundary = memory_deletion_boundary_not_required()
+            reset_memory_deletion_outbound_position()
+    else:
+        reset_memory_deletion_outbound_position()
+    receipt["deletionBoundary"] = boundary
     projected = {
         key: value
         for key, value in receipt.items()
@@ -316,6 +488,7 @@ def reconcile_memory_receipt_for_prompt(
         receipt["confirmOnlyItemCount"] = 1
         _finalize_memory_receipt(receipt)
         return
+    receipt["state"] = "provided"
     receipt["groundingState"] = boundary.grounding_state
     if boundary.grounding_state == "unattributed":
         legacy_item_count = _nonnegative_int(receipt.get("legacyItemCount"))
@@ -358,10 +531,25 @@ def wrap_memory_context_for_prompt(
     ).context
 
 
+def normalize_memory_retrieval_mode(value: object) -> str:
+    normalized = clean_text(str(value or "unknown")).lower()
+    return (
+        normalized
+        if normalized in MEMORY_RETRIEVAL_MODES
+        else "unknown"
+    )
+
+
 __all__ = [
     "MEMORY_CONTEXT_USE_POLICY",
     "MEMORY_PROMPT_MAX_CHARS",
+    "MEMORY_RETRIEVAL_MODES",
     "MemoryPromptBoundary",
+    "memory_deletion_boundary_from_position",
+    "memory_deletion_boundary_matches_position",
+    "memory_deletion_boundary_not_required",
+    "normalize_memory_deletion_boundary",
+    "normalize_memory_retrieval_mode",
     "prepare_memory_context_for_prompt",
     "reconcile_memory_receipt_for_prompt",
     "render_memory_context_rules",

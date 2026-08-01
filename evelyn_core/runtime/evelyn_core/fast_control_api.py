@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextvars import ContextVar
 import json
 import os
@@ -93,7 +94,14 @@ from .minecraft_world_lease_delegation import (
 from .minecraft_world_lease_http_runtime import (
     MinecraftWorldLeaseHttpRuntime,
 )
-from .memory_prompt_policy import MEMORY_CONTEXT_USE_POLICY
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+)
+from .memory_deletion_outbound import memory_deletion_outbound_request
+from .memory_prompt_policy import (
+    MEMORY_CONTEXT_USE_POLICY,
+    memory_deletion_boundary_not_required,
+)
 from .query_intents import answer_current_datetime_query
 from .runtime_health import (
     collect_runtime_health,
@@ -137,6 +145,10 @@ MEMORY_RECALL_PROGRESS_SOURCES = frozenset({"local_bridge", "local_mic", "voice"
 MEMORY_RECALL_PROGRESS_LAST_TEXT: str | None = None
 FAST_MEMORY_CONTEXT_RECEIPT: ContextVar[dict[str, Any] | None] = ContextVar(
     "fast_memory_context_receipt",
+    default=None,
+)
+FAST_MEMORY_DELETION_POSITION: ContextVar[Any | None] = ContextVar(
+    "fast_memory_deletion_position",
     default=None,
 )
 RESEARCH_PROGRESS_TEXTS = (
@@ -356,6 +368,7 @@ def visible_text(value: Any) -> str:
 
 
 def reset_fast_memory_context_receipt() -> dict[str, Any]:
+    FAST_MEMORY_DELETION_POSITION.set(None)
     receipt = {
         "schema": "memory.context-receipt.v1",
         "state": "not_requested",
@@ -371,6 +384,7 @@ def reset_fast_memory_context_receipt() -> dict[str, Any]:
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
+        "deletionBoundary": memory_deletion_boundary_not_required(),
         "contentFree": True,
     }
     FAST_MEMORY_CONTEXT_RECEIPT.set(receipt)
@@ -1911,6 +1925,9 @@ async def build_main_llm_request_payload(
         if isinstance(memory_receipt, dict)
         else reset_fast_memory_context_receipt()
     )
+    FAST_MEMORY_DELETION_POSITION.set(
+        getattr(llm_request, "memory_deletion_position", None)
+    )
     return payload, deterministic_reply
 
 
@@ -1944,8 +1961,17 @@ async def iter_main_llm_deltas(
         return
     timeout = ClientTimeout(total=120)
     prefix_filter = ModelStreamPrefixFilter()
+    deletion_position = FAST_MEMORY_DELETION_POSITION.get()
     async with ClientSession(timeout=timeout) as session:
-        async with session.post(LLM_SERVER_URL, json=payload) as resp:
+        async with memory_deletion_outbound_request(
+            session.post,
+            LLM_SERVER_URL,
+            json=payload,
+            expected_position=deletion_position,
+            memory_boundary_required=(
+                deletion_position is not None
+            ),
+        ) as resp:
             if resp.status != 200:
                 detail = await resp.text()
                 raise RuntimeError(f"main_llm_error {resp.status}: {detail[:300]}")
@@ -2553,6 +2579,8 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
                 active_task_id=task_record.task_id if task_record is not None else None,
             )
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         error_code = "fast_control_chat_failed"
         print(
@@ -2643,7 +2671,6 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             "X-Accel-Buffering": "no",
         },
     )
-    await response.prepare(request)
 
     started_at = time.perf_counter()
     first_sentence_ms: float | None = None
@@ -2659,6 +2686,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     speech_filter = SafeIncrementalSpeechFilter()
     memory_write_receipt: dict[str, Any] | None = None
     memory_command_error = ""
+    llm_stream: AsyncIterator[str] | None = None
+
+    async def ensure_response_prepared() -> None:
+        if not response.prepared:
+            await response.prepare(request)
 
     async def emit_delta(fragment: str) -> None:
         nonlocal first_delta_ms
@@ -2667,6 +2699,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if first_delta_ms is None:
             first_delta_ms = elapsed_ms
+        await ensure_response_prepared()
         await write_stream_event(
             response,
             {
@@ -2685,6 +2718,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if first_progress_ms is None:
             first_progress_ms = elapsed_ms
+        await ensure_response_prepared()
         await write_stream_event(
             response,
             {
@@ -2707,6 +2741,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if first_sentence_ms is None:
             first_sentence_ms = elapsed_ms
         emitted_chunks.append(chunk)
+        await ensure_response_prepared()
         await write_stream_event(
             response,
             {
@@ -2716,6 +2751,25 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "elapsedMs": round(elapsed_ms, 1),
             },
         )
+
+    async def consume_llm_delta(delta: str) -> None:
+        nonlocal clean_seen_len, sentence_buffer
+        raw_parts.append(delta)
+        cleaned = visible_text("".join(raw_parts))
+        new_text = cleaned[clean_seen_len:]
+        clean_seen_len = len(cleaned)
+        if not new_text:
+            return
+        for safe_fragment in speech_filter.push(new_text):
+            await emit_delta(safe_fragment)
+        sentence_buffer += new_text
+        chunks, sentence_buffer = pop_speakable_chunks(
+            sentence_buffer
+        )
+        for chunk in chunks:
+            if has_unbacked_progress_claim(chunk):
+                continue
+            await emit_sentence(chunk)
 
     try:
         (
@@ -2754,31 +2808,29 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     )
                     await emit_sentence(reply)
                 else:
-                    if should_emit_memory_recall_progress(text, source=source):
-                        await emit_progress(
-                            next_memory_recall_progress_text(),
-                            stage="memory_recall",
-                        )
                     llm_stream = (
                         iter_main_llm_deltas(text, source=source)
                         if tool_plan is None
                         else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
                     )
+                    try:
+                        first_delta = await anext(llm_stream)
+                        has_first_delta = True
+                    except StopAsyncIteration:
+                        first_delta = ""
+                        has_first_delta = False
+                    if should_emit_memory_recall_progress(
+                        text,
+                        source=source,
+                    ):
+                        await emit_progress(
+                            next_memory_recall_progress_text(),
+                            stage="memory_recall",
+                        )
+                    if has_first_delta:
+                        await consume_llm_delta(first_delta)
                     async for delta in llm_stream:
-                        raw_parts.append(delta)
-                        cleaned = visible_text("".join(raw_parts))
-                        new_text = cleaned[clean_seen_len:]
-                        clean_seen_len = len(cleaned)
-                        if not new_text:
-                            continue
-                        for safe_fragment in speech_filter.push(new_text):
-                            await emit_delta(safe_fragment)
-                        sentence_buffer += new_text
-                        chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
-                        for chunk in chunks:
-                            if has_unbacked_progress_claim(chunk):
-                                continue
-                            await emit_sentence(chunk)
+                        await consume_llm_delta(delta)
                     for safe_fragment in speech_filter.finish():
                         await emit_delta(safe_fragment)
                     tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
@@ -2809,6 +2861,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             memory_write_receipt=memory_write_receipt,
         )
         continuity = commit_fast_control_turn(text, reply)
+        await ensure_response_prepared()
         await write_stream_event(
             response,
             {
@@ -2830,6 +2883,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         )
         if task_record is not None and task_runner is not None and task_record.status == "running":
             launch_background_action(task_record, task_runner)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         error_code = "fast_control_stream_failed"
         failure_reply = public_failure_message(error_code)
@@ -2874,6 +2929,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 failure_reply,
             )
         )
+        await ensure_response_prepared()
         await write_stream_event(
             response,
             {
@@ -2885,6 +2941,17 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "continuity": continuity,
             },
         )
+    finally:
+        if llm_stream is not None:
+            close_stream = getattr(
+                llm_stream,
+                "aclose",
+                None,
+            )
+            if callable(close_stream):
+                with contextlib.suppress(Exception):
+                    await close_stream()
+    await ensure_response_prepared()
     await response.write_eof()
     return response
 

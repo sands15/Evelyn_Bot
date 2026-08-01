@@ -6,8 +6,10 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = next(
@@ -20,9 +22,13 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.assistant_contracts import MemoryRecallRequest  # noqa: E402
+from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.memory_derivation_revocation import (  # noqa: E402
     DerivationNode,
     resolve_derivation_states,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
 )
 from evelyn_core.memory_vault import (  # noqa: E402
     delete_memory_vault_user_note,
@@ -35,6 +41,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     recall_memory_vault,
     refresh_memory_hot_context,
     run_memory_derivation_recomposition_once,
+    sync_memory_vault_index,
     update_memory_vault_user_note,
     write_memory_vault_note,
 )
@@ -525,6 +532,106 @@ class MemoryDerivationRevocationIntegrationTests(
         self.assertNotIn("apricot", recall.context_text)
         self.assertEqual(state_payload["entries"], {})
 
+    def test_recomposition_llm_boundary_blocks_concurrent_delete(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            source_b = fixture["source_b"]
+            source_b_path = fixture["source_b_path"]
+            source_b_bytes = source_b_path.read_bytes()
+            preview = preview_memory_vault_user_note_deletion(
+                source_b.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(preview.get("ok"), preview)
+
+            entered = threading.Event()
+            release = threading.Event()
+            prompts: list[str] = []
+            outcome: dict[str, object] = {}
+
+            def paused_llm(
+                messages: list[dict[str, str]],
+            ) -> dict[str, object]:
+                prompts.append(
+                    json.dumps(messages, ensure_ascii=False)
+                )
+                entered.set()
+                release.wait(timeout=5)
+                return {
+                    "note": {
+                        "title": "Linearized recomposition",
+                        "body": "Only the current live source is retained.",
+                        "tags": ["recomposed"],
+                        "links": [],
+                        "confidence": "high",
+                    }
+                }
+
+            def recompose_worker() -> None:
+                outcome["result"] = (
+                    run_memory_derivation_recomposition_once(
+                        root=root,
+                        sub_llm_health={"available": True},
+                        llm_client=paused_llm,
+                        max_notes=4,
+                    )
+                )
+
+            worker = threading.Thread(target=recompose_worker)
+            try:
+                worker.start()
+                self.assertTrue(entered.wait(timeout=5))
+                with self.assertRaises(
+                    MemoryDeletionJournalIntegrityError
+                ):
+                    delete_memory_vault_user_note(
+                        source_b.note_id,
+                        preview["confirmToken"],
+                        reason="privacy_request",
+                        root=root,
+                    )
+            finally:
+                release.set()
+                worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(prompts)
+            self.assertIn(
+                "live blueberry evidence from source B",
+                "\n".join(prompts),
+            )
+
+            next_preview = preview_memory_vault_user_note_deletion(
+                source_b.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            deleted = delete_memory_vault_user_note(
+                source_b.note_id,
+                next_preview["confirmToken"],
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(deleted.get("ok"), deleted)
+            source_b_path.parent.mkdir(parents=True, exist_ok=True)
+            source_b_path.write_bytes(source_b_bytes)
+            calls_after_delete: list[object] = []
+            after = run_memory_derivation_recomposition_once(
+                root=root,
+                sub_llm_health={"available": True},
+                llm_client=lambda messages: (
+                    calls_after_delete.append(messages) or {}
+                ),
+                max_notes=4,
+            )
+
+        self.assertEqual(calls_after_delete, [])
+        self.assertIn(after["status"], {"clear", "pending"})
+
     def test_unavailable_sub_llm_keeps_quarantine(
         self,
     ) -> None:
@@ -821,6 +928,346 @@ class MemoryDerivationRevocationIntegrationTests(
                 fixture["downstream"].note_id,
             },
         )
+
+    def test_content_free_revocation_raw_is_canonicalized(
+        self,
+    ) -> None:
+        private_canary = (
+            "PRIVATE duplicate revocation transcript canary"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            state_path = root / "memory_index" / (
+                "memory_derivation_revocations.json"
+            )
+            canonical_before = state_path.read_text(
+                encoding="utf-8"
+            )
+            marker = '"updatedAt": "'
+            marker_offset = canonical_before.index(marker)
+            poisoned = (
+                canonical_before[:2]
+                + f'  "privateField": "{private_canary}",\n'
+                + canonical_before[2:marker_offset]
+                + f'"updatedAt": "{private_canary}",\n  '
+                + canonical_before[marker_offset:]
+            )
+            state_path.write_text(poisoned, encoding="utf-8")
+
+            snapshot = memory_vault_user_snapshot(root=root)
+            canonical_after = state_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertTrue(snapshot["ok"])
+        self.assertEqual(canonical_after, canonical_before)
+        self.assertNotIn(private_canary, canonical_after)
+        self.assertNotIn('"privateField"', canonical_after)
+        self.assertEqual(canonical_after.count(marker), 1)
+
+    def test_revocation_canonical_rewrite_failure_is_stable(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE revocation rewrite failure"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            state_path = root / "memory_index" / (
+                "memory_derivation_revocations.json"
+            )
+            canonical = state_path.read_text(encoding="utf-8")
+            poisoned = canonical.replace(
+                "{\n",
+                "{\n"
+                f'  "privateField": "{private_canary}",\n',
+                1,
+            )
+            state_path.write_text(poisoned, encoding="utf-8")
+            original_atomic_json_write = (
+                memory_vault_module.atomic_json_write
+            )
+            attempted_targets: list[Path] = []
+
+            def fail_only_revocation_rewrite(
+                path: Path,
+                payload: dict[str, object],
+                *args: object,
+                **kwargs: object,
+            ) -> None:
+                target = Path(path)
+                if target == state_path:
+                    attempted_targets.append(target)
+                    raise OSError("durable revocation rewrite failed")
+                original_atomic_json_write(
+                    target,
+                    payload,
+                    *args,
+                    **kwargs,
+                )
+
+            with mock.patch.object(
+                memory_vault_module,
+                "atomic_json_write",
+                side_effect=fail_only_revocation_rewrite,
+            ):
+                with self.assertRaises(
+                    MemoryDeletionJournalIntegrityError
+                ) as raised:
+                    memory_vault_module._read_memory_derivation_revocations(
+                        root
+                    )
+            raw_after_failure = state_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(attempted_targets, [state_path])
+        self.assertEqual(
+            raised.exception.args,
+            ("memory_deletion_journal_integrity_failed",),
+        )
+        self.assertIn(private_canary, raw_after_failure)
+
+    def test_deleted_quarantine_target_is_dropped_on_sync(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            multi = fixture["multi"]
+            downstream = fixture["downstream"]
+            memory_vault_module._append_memory_deletion_tombstone(
+                {
+                    "schema": "memory.deletion.tombstone.v1",
+                    "noteId": multi.note_id,
+                    "noteType": multi.note_type,
+                    "sourceType": "derived",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-01T00:00:00Z",
+                },
+                root=root,
+            )
+
+            version = sync_memory_vault_index(root=root)
+            state_path = root / "memory_index" / (
+                "memory_derivation_revocations.json"
+            )
+            state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            multi_deleted = memory_note_was_deleted(
+                multi.note_id,
+                root=root,
+            )
+            downstream_deleted = memory_note_was_deleted(
+                downstream.note_id,
+                root=root,
+            )
+
+        self.assertGreaterEqual(version, 1)
+        self.assertNotIn(multi.note_id, state["entries"])
+        self.assertTrue(multi_deleted)
+        self.assertTrue(downstream_deleted)
+
+    def test_restart_recovery_maps_opaque_ledger_id_back_to_raw_graph_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private_id = "PRIVATE deleted source transcript canary"
+            source_path = (
+                memory_vault_module.memory_vault_root(root)
+                / "concepts"
+                / "private-source.md"
+            )
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        f"id: {private_id}",
+                        "type: concepts",
+                        "title: Private Source",
+                        "status: active",
+                        "source: conversation-turn-log",
+                        "---",
+                        "# Private Source",
+                        "private source body",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            source = parse_memory_note(source_path)
+            derived_path = write_memory_vault_note(
+                note_type="episode",
+                title="Opaque Source Derived Note",
+                body="derived body",
+                source="sub-llm-semantic-consolidation",
+                derived_from=[source.note_id],
+                evidence_hashes=[source.source_hash],
+                root=root,
+            )
+            derived = parse_memory_note(derived_path)
+            live_path = write_memory_vault_note(
+                note_type="concept",
+                title="Opaque Recovery Live Source",
+                body="live source body",
+                source="control-page-user",
+                root=root,
+            )
+            live = parse_memory_note(live_path)
+            multi_path = write_memory_vault_note(
+                note_type="concept",
+                title="Opaque Recovery Multi Source",
+                body="multi source body",
+                source="sub-llm-semantic-consolidation",
+                derived_from=[source.note_id, live.note_id],
+                evidence_hashes=[
+                    source.source_hash,
+                    live.source_hash,
+                ],
+                root=root,
+            )
+            multi = parse_memory_note(multi_path)
+            downstream_path = write_memory_vault_note(
+                note_type="project",
+                title="Opaque Recovery Downstream",
+                body="downstream body",
+                source="sub-llm-semantic-consolidation",
+                derived_from=[multi.note_id],
+                evidence_hashes=[multi.source_hash],
+                root=root,
+            )
+            downstream = parse_memory_note(downstream_path)
+
+            # Model the restart window: the root journal commit is durable,
+            # while source cleanup and cascade reconciliation have not run.
+            root_tombstone = (
+                memory_vault_module._append_memory_deletion_tombstone(
+                    {
+                        "schema": "memory.deletion.tombstone.v1",
+                        "noteId": source.note_id,
+                        "noteType": source.note_type,
+                        "sourceType": "conversation-turn-log",
+                        "reason": "privacy_request",
+                        "deletedAt": "2026-08-01T00:00:00Z",
+                    },
+                    root=root,
+                )
+            )
+            sync_memory_vault_index(root=root)
+            journal_raw = (
+                root
+                / "memory_index"
+                / "memory_deletions.jsonl"
+            ).read_text(encoding="utf-8")
+            revocation_path = (
+                root
+                / "memory_index"
+                / "memory_derivation_revocations.json"
+            )
+            internal_entries = (
+                memory_vault_module._read_memory_derivation_revocations(
+                    root
+                )
+            )
+            revocation_path.write_text(
+                json.dumps(
+                    {
+                        "schema": (
+                            "memory.derivation.revocations.v1"
+                        ),
+                        "updatedAt": "2026-08-01T00:00:01Z",
+                        "entries": internal_entries,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            legacy_revocation_raw = revocation_path.read_text(
+                encoding="utf-8"
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = os.pathsep.join(
+                item
+                for item in (
+                    str(RUNTIME_ROOT),
+                    environment.get("PYTHONPATH", ""),
+                )
+                if item
+            )
+            recovered = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    RECOVERY_WORKER,
+                    str(root),
+                    multi.note_id,
+                    downstream.note_id,
+                ],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            recovered_payload = (
+                json.loads(recovered.stdout)
+                if recovered.returncode == 0
+                else {}
+            )
+            revocation_raw = revocation_path.read_text(
+                encoding="utf-8"
+            )
+            revocation_payload = json.loads(revocation_raw)
+            source_exists = source_path.exists()
+            derived_exists = derived_path.exists()
+            multi_exists = multi_path.exists()
+            downstream_exists = downstream_path.exists()
+            source_was_deleted = memory_note_was_deleted(
+                private_id,
+                root=root,
+            )
+            derived_was_deleted = memory_note_was_deleted(
+                derived.note_id,
+                root=root,
+            )
+
+        self.assertEqual(source.note_id, private_id)
+        self.assertTrue(
+            root_tombstone["noteId"].startswith("opaque-")
+        )
+        self.assertEqual(root_tombstone["noteType"], "concept")
+        self.assertEqual(
+            root_tombstone["sourceType"],
+            "conversation",
+        )
+        self.assertFalse(source_exists)
+        self.assertFalse(derived_exists)
+        self.assertTrue(multi_exists)
+        self.assertTrue(downstream_exists)
+        self.assertTrue(source_was_deleted)
+        self.assertTrue(derived_was_deleted)
+        self.assertNotIn(private_id, journal_raw)
+        self.assertIn(private_id, legacy_revocation_raw)
+        self.assertNotIn(private_id, revocation_raw)
+        self.assertTrue(revocation_payload["contentFree"])
+        self.assertEqual(
+            recovered.returncode,
+            0,
+            recovered.stderr + recovered.stdout,
+        )
+        self.assertTrue(recovered_payload["multiQuarantined"])
+        self.assertTrue(
+            recovered_payload["downstreamQuarantined"]
+        )
+        self.assertFalse(recovered_payload["multiInGraph"])
+        self.assertFalse(recovered_payload["downstreamInGraph"])
 
 
 if __name__ == "__main__":

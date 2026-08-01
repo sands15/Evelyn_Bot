@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +18,12 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.json_llm_request_runtime import (  # noqa: E402
     JsonLlmRequestRuntimeDeps,
     ask_json_llm_from_runtime,
+)
+from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
+from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
+    MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
+    MEMORY_INTEGRITY_BOOTSTRAP_ENV,
+    MEMORY_INTEGRITY_KEY_FILE_ENV,
 )
 
 
@@ -123,6 +132,50 @@ class JsonLlmRequestRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.ask(self.build_deps(role="router", label="router LLM"))
 
         self.assertEqual(self.traces, [])
+
+    async def test_stale_required_memory_boundary_fails_before_post_factory(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            index_dir = Path(tmp) / "memory_index"
+            position = deletion_journal.memory_deletion_journal_position(index_dir)
+            deletion_journal.append_memory_deletion_tombstone(
+                index_dir,
+                {
+                    "schema": deletion_journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+                    "noteId": "concept-0123456789abcdef",
+                    "noteType": "concept",
+                    "sourceType": "conversation",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-01T00:00:00Z",
+                },
+            )
+
+            with self.assertRaises(
+                deletion_journal.MemoryDeletionJournalIntegrityError
+            ) as raised:
+                await ask_json_llm_from_runtime(
+                    [{"role": "system", "content": "PRIVATE deleted memory canary"}],
+                    deps=self.build_deps(),
+                    max_tokens=123,
+                    timeout_seconds=4.5,
+                    purpose="memory_summary",
+                    hot_path=False,
+                    memory_deletion_position=position,
+                    memory_boundary_required=True,
+                    memory_deletion_index_dir=index_dir,
+                )
+
+        self.assertEqual(
+            str(raised.exception),
+            deletion_journal.MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+        )
+        self.assertEqual(self.session.posts, [])
 
     def test_main_summary_and_router_wrappers_delegate_to_common_runtime(self) -> None:
         source = (

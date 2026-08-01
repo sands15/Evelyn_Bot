@@ -180,9 +180,9 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         receipt = {
             "schema": "memory.user-confirmation.v1",
             "state": "stored",
-            "noteId": "concept-discord-text",
+            "noteId": "concept-0123456789abcdef",
             "sourceRef": (
-                "turn:turn:guild:1:text:2:user:3:user"
+                "turn:opaque-turn-" + ("a" * 64) + ":user"
             ),
             "confirmedAt": "2026-07-31T00:00:00+00:00",
             "contentFree": True,

@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from . import config as runtime_config
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_guard,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,7 @@ async def update_cognitive_state_from_runtime(
     session_memory_key: str | None = None,
     source: str = "text",
     turn_scope: Any = None,
+    memory_index_dir: Path | None = None,
 ) -> dict:
     started_at = time.monotonic()
     task = deps.attach_current_task(turn_scope)
@@ -57,52 +65,70 @@ async def update_cognitive_state_from_runtime(
         async with lock:
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
-            layers = deps.collect_memory_layers(
-                guild_id,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
+            deletion_index_dir = (
+                Path(memory_index_dir)
+                if memory_index_dir is not None
+                else Path(runtime_config.MEMORY_ROOT) / "memory_index"
             )
-            current_summary = deps.layered_summary_text(layers)
-            current_state = deps.normalize_cognitive_state(
-                deps.read_layered_cognitive_state(
+            with memory_deletion_journal_guard(
+                deletion_index_dir,
+                require_stable=True,
+            ) as memory_deletion_position:
+                layers = deps.collect_memory_layers(
                     guild_id,
                     room_key=room_key,
                     person_key=person_key,
                     session_memory_key=session_memory_key,
-                ) or {}
-            )
-            speculative = deps.get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
-            fast_policy = (speculative or {}).get("policy") or deps.fast_path_policy(
-                user_text,
-                source,
-                deps.session_state_snapshot(session_key),
-            )
-            if fast_policy is not None:
-                state = deps.build_fast_cognitive_state(
-                    user_text,
-                    action=str(fast_policy.get("action", "answer")),
-                    current_state=current_state,
-                    reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
                 )
-                deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
-                return state
-            recent = deps.recent_memory_groups(
-                layers,
-                raw_limit=deps.memory_cognitive_raw_limit,
-                facts_limit=4,
-                questions_limit=4,
-            )
+                current_summary = deps.layered_summary_text(layers)
+                current_state = deps.normalize_cognitive_state(
+                    deps.read_layered_cognitive_state(
+                        guild_id,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                    ) or {}
+                )
+                speculative = deps.get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
+                fast_policy = (speculative or {}).get("policy") or deps.fast_path_policy(
+                    user_text,
+                    source,
+                    deps.session_state_snapshot(session_key),
+                )
+                if fast_policy is not None:
+                    with memory_deletion_journal_guard(
+                        deletion_index_dir,
+                        expected_position=memory_deletion_position,
+                        require_stable=True,
+                    ):
+                        state = deps.build_fast_cognitive_state(
+                            user_text,
+                            action=str(fast_policy.get("action", "answer")),
+                            current_state=current_state,
+                            reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
+                        )
+                        deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
+                    return state
+                recent = deps.recent_memory_groups(
+                    layers,
+                    raw_limit=deps.memory_cognitive_raw_limit,
+                    facts_limit=4,
+                    questions_limit=4,
+                )
 
-            messages = deps.build_cognitive_state_messages(
-                current_state=current_state,
-                current_summary=current_summary,
-                recent_raw=recent["raw"],
-                recent_facts=recent["facts"],
-                recent_questions=recent["questions"],
-                user_text=user_text,
-                raw_limit=deps.memory_cognitive_raw_limit,
-            )
+                messages = deps.build_cognitive_state_messages(
+                    current_state=current_state,
+                    current_summary=current_summary,
+                    recent_raw=recent["raw"],
+                    recent_facts=recent["facts"],
+                    recent_questions=recent["questions"],
+                    user_text=user_text,
+                    raw_limit=deps.memory_cognitive_raw_limit,
+                )
+                compact_messages = deps.build_compact_cognitive_state_messages(
+                    current_summary=current_summary,
+                    user_text=user_text,
+                )
 
             try:
                 if turn_scope is not None:
@@ -117,13 +143,14 @@ async def update_cognitive_state_from_runtime(
                     session_key=session_key,
                     source=source,
                     guild_id=guild_id,
+                    memory_deletion_position=memory_deletion_position,
+                    memory_boundary_required=True,
+                    memory_deletion_index_dir=deletion_index_dir,
                 )
+            except MemoryDeletionJournalIntegrityError:
+                raise
             except Exception as e:
                 if deps.is_context_size_error(e):
-                    compact_messages = deps.build_compact_cognitive_state_messages(
-                        current_summary=current_summary,
-                        user_text=user_text,
-                    )
                     try:
                         if turn_scope is not None:
                             turn_scope.raise_if_cancelled()
@@ -137,7 +164,12 @@ async def update_cognitive_state_from_runtime(
                             session_key=session_key,
                             source=source,
                             guild_id=guild_id,
+                            memory_deletion_position=memory_deletion_position,
+                            memory_boundary_required=True,
+                            memory_deletion_index_dir=deletion_index_dir,
                         )
+                    except MemoryDeletionJournalIntegrityError:
+                        raise
                     except Exception as e2:
                         e = e2
                         deps.log(f"[COGNITIVE] compact retry 실패: {e2}")
@@ -148,21 +180,31 @@ async def update_cognitive_state_from_runtime(
                     elapsed_ms = (time.monotonic() - started_at) * 1000.0
                     if deps.should_log_voice_timing(elapsed_ms):
                         deps.log(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
-                    fallback = deps.build_cognitive_fallback_state(
-                        current_state=current_state,
-                        user_text=user_text,
-                    )
-                    deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
+                    with memory_deletion_journal_guard(
+                        deletion_index_dir,
+                        expected_position=memory_deletion_position,
+                        require_stable=True,
+                    ):
+                        fallback = deps.build_cognitive_fallback_state(
+                            current_state=current_state,
+                            user_text=user_text,
+                        )
+                        deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
                     return fallback
 
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
-            state = deps.finalize_cognitive_state(
-                result,
-                current_state=current_state,
-                user_text=user_text,
-            )
-            deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
+            with memory_deletion_journal_guard(
+                deletion_index_dir,
+                expected_position=memory_deletion_position,
+                require_stable=True,
+            ):
+                state = deps.finalize_cognitive_state(
+                    result,
+                    current_state=current_state,
+                    user_text=user_text,
+                )
+                deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             if deps.should_log_voice_timing(elapsed_ms):
                 deps.log(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")

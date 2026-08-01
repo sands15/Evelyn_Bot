@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -14,7 +15,10 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.assistant_contracts import MemoryRecallRequest  # noqa: E402
+from evelyn_core.assistant_contracts import (  # noqa: E402
+    MemoryRecallRequest,
+    MemoryRecallResult,
+)
 from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
     MEMORY_DELETE_TOMBSTONE_SCHEMA,
@@ -23,12 +27,14 @@ from evelyn_core.memory_vault import (  # noqa: E402
     activate_memory_vault_for_guild,
     append_turn_rows_to_memory_vault,
     bootstrap_memory_vault_source,
+    build_memory_recall_receipt,
     build_memory_vault_context,
     consolidate_daily_memory_once,
     delete_memory_vault_user_note,
     export_memory_graph,
     mark_memory_note_superseded,
     memory_note_was_deleted,
+    memory_provenance_backfill_preview,
     memory_vault_user_note,
     memory_vault_user_snapshot,
     memory_vault_root,
@@ -48,6 +54,25 @@ from evelyn_core.memory_vault import (  # noqa: E402
 
 
 class MemoryVaultTests(unittest.TestCase):
+    def test_recall_receipt_normalizes_private_retrieval_mode(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE retrieval-mode receipt canary"
+        receipt = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-retrieval-mode",
+                ok=True,
+                context_text="grounded memory",
+                metadata={
+                    "retrieval_mode": private_canary,
+                    "provenance": [],
+                },
+            )
+        )
+
+        self.assertEqual(receipt["retrievalMode"], "unknown")
+        self.assertNotIn(private_canary, str(receipt))
+
     def test_parse_front_matter_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "concept.md"
@@ -118,6 +143,69 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("Stone Tools", first.context_text)
         self.assertFalse(first.metadata["cache_hit"])
         self.assertTrue(second.metadata["cache_hit"])
+
+    def test_cache_hit_cannot_export_private_retrieval_mode(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE cached retrieval-mode canary"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concepts = memory_vault_root(root) / "concepts"
+            concepts.mkdir(parents=True)
+            (concepts / "cache-mode.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "id: cache-mode",
+                        "type: concept",
+                        "title: Cache Mode",
+                        "---",
+                        "",
+                        "Grounded cache retrieval fixture.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            request = MemoryRecallRequest(
+                turn_id="turn-cache-mode",
+                session_key="session",
+                guild_id=None,
+                user_text="cache retrieval fixture",
+                topic_id=None,
+                source="test",
+                max_items=3,
+            )
+            first = recall_memory_vault(request, root=root)
+            self.assertTrue(first.ok)
+            db_path = memory_vault_module.memory_index_db_path(root)
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT cache_key, payload FROM retrieval_cache"
+                ).fetchone()
+                assert row is not None
+                cached_payload = json.loads(str(row[1]))
+                cached_payload["retrieval_mode"] = private_canary
+                conn.execute(
+                    "UPDATE retrieval_cache SET payload = ? "
+                    "WHERE cache_key = ?",
+                    (
+                        json.dumps(cached_payload),
+                        str(row[0]),
+                    ),
+                )
+                conn.commit()
+
+            cached = recall_memory_vault(request, root=root)
+            receipt = build_memory_recall_receipt(cached)
+
+        self.assertTrue(cached.ok)
+        self.assertTrue(cached.metadata["cache_hit"])
+        self.assertEqual(
+            cached.metadata["retrieval_mode"],
+            "unknown",
+        )
+        self.assertEqual(receipt["retrievalMode"], "unknown")
+        self.assertNotIn(private_canary, str(receipt))
 
     def test_append_turn_rows_creates_daily_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -341,6 +429,16 @@ class MemoryVaultTests(unittest.TestCase):
             detail = memory_vault_user_note(note_id, root=root)
 
         self.assertTrue(detail["ok"])
+        self.assertEqual(
+            snapshot["deletionIntegrity"]["schema"],
+            "memory.deletion.integrity.v1",
+        )
+        self.assertFalse(
+            snapshot["deletionIntegrity"]["rollbackProtected"]
+        )
+        self.assertTrue(
+            snapshot["deletionIntegrity"]["contentFree"]
+        )
         self.assertGreater(len(detail["card"]["body"]), len(detail["card"]["preview"]))
         self.assertIn("Line 79: keep this editable detail.", detail["card"]["body"])
 
@@ -1173,6 +1271,94 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIsInstance(recreated_error, MemoryNoteDeletedError)
         self.assertEqual(reused["error"], "memory_delete_token_reused")
 
+    def test_delete_opaque_canonicalizes_natural_language_front_matter_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private_id = "PRIVATE transcript canary full sentence"
+            path = memory_vault_root(root) / "concepts" / "opaque-id.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            original_text = "\n".join(
+                [
+                    "---",
+                    f"id: {private_id}",
+                    "type: concepts",
+                    "title: Opaque deletion ID",
+                    "status: active",
+                    "source: control-page-user",
+                    "---",
+                    "# Opaque deletion ID",
+                    "private body",
+                ]
+            )
+            path.write_text(original_text, encoding="utf-8")
+            note = parse_memory_note(path)
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            with patch.object(
+                Path,
+                "unlink",
+                side_effect=PermissionError("locked"),
+            ):
+                result = delete_memory_vault_user_note(
+                    preview["note"]["path"],
+                    preview["confirmToken"],
+                    reason="privacy_request",
+                    root=root,
+                )
+                redaction_stub = path.read_text(encoding="utf-8")
+            journal_raw = (
+                root / "memory_index" / "memory_deletions.jsonl"
+            ).read_text(encoding="utf-8")
+            head_raw = (
+                root
+                / "memory_index"
+                / "memory_deletions_chain_head.json"
+            ).read_text(encoding="utf-8")
+            canonical_id = result["tombstone"]["noteId"]
+
+            # A same-identity resurrection must be removed by reconciliation,
+            # even though the application parser intentionally preserves the
+            # original front-matter ID.
+            path.write_text(original_text, encoding="utf-8")
+            resurrected_note = parse_memory_note(path)
+            sync_memory_vault_index(root=root)
+            resurrected_exists = path.exists()
+            private_id_was_deleted = memory_note_was_deleted(
+                private_id,
+                root=root,
+            )
+
+        self.assertEqual(note.note_id, private_id)
+        self.assertEqual(note.note_type, "concepts")
+        self.assertTrue(preview["ok"], preview)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(
+            result["error"],
+            "memory_delete_cleanup_required",
+        )
+        self.assertTrue(canonical_id.startswith("opaque-"), canonical_id)
+        self.assertEqual(result["noteId"], canonical_id)
+        self.assertEqual(
+            result["tombstone"]["noteType"],
+            "concept",
+        )
+        self.assertEqual(resurrected_note.note_id, private_id)
+        self.assertFalse(resurrected_exists)
+        self.assertTrue(private_id_was_deleted)
+        self.assertNotIn(private_id, journal_raw)
+        self.assertNotIn(private_id, head_raw)
+        self.assertNotIn(private_id, redaction_stub)
+        self.assertNotIn(
+            private_id,
+            json.dumps(result, ensure_ascii=False),
+        )
+        self.assertIn(canonical_id, redaction_stub)
+
     def test_delete_tombstone_hides_memory_before_cleanup_finishes(
         self,
     ) -> None:
@@ -1216,6 +1402,9 @@ class MemoryVaultTests(unittest.TestCase):
                     now=lambda: 501.0,
                 )
                 source_still_exists = path.exists()
+                redacted_source = path.read_text(
+                    encoding="utf-8"
+                )
                 stale_hot_context = read_memory_hot_context(
                     root=root
                 )
@@ -1252,6 +1441,9 @@ class MemoryVaultTests(unittest.TestCase):
         )
         self.assertTrue(result["tombstoned"])
         self.assertTrue(source_still_exists)
+        self.assertNotIn(title, redacted_source)
+        self.assertNotIn(body, redacted_source)
+        self.assertIn(note.note_id, redacted_source)
         self.assertEqual(stale_hot_context, "")
         self.assertFalse(
             any(
@@ -1601,6 +1793,95 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(receipt["suppliedNoteCount"], len(receipt["suppliedNoteIds"]))
         self.assertTrue(receipt["contentFree"])
         self.assertNotIn("Memory Source Contract", str(receipt))
+
+    def test_content_free_receipt_and_audit_project_natural_note_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private_id = "PRIVATE receipt transcript canary sentence"
+            source_label = "PRIVATE natural source label"
+            source_path = (
+                memory_vault_root(root)
+                / "core"
+                / "private-receipt-source.md"
+            )
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        f"id: {private_id}",
+                        "type: core",
+                        "title: Receipt Projection Source",
+                        "status: active",
+                        f"source: {source_label}",
+                        "---",
+                        "# Receipt Projection Source",
+                        "receipt projection marker body",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            source = parse_memory_note(source_path)
+            source_ref = (
+                source_path.relative_to(memory_vault_root(root))
+                .with_suffix("")
+                .as_posix()
+            )
+            source_digest = hashlib.sha1(
+                source.body.encode("utf-8")
+            ).hexdigest()[:12]
+            write_memory_vault_note(
+                note_type="episode",
+                title="Receipt Projection Target",
+                body="target body",
+                source="legacy-sub-llm-semantic-consolidation",
+                source_refs=[source_ref],
+                evidence_hashes=[source_digest],
+                root=root,
+            )
+            refresh_memory_hot_context(root=root)
+            receipt: dict[str, object] = {}
+            context = build_memory_vault_context(
+                123,
+                "receipt projection marker",
+                source="test",
+                max_items=5,
+                root=root,
+                receipt=receipt,
+            )
+            memory_provenance_backfill_preview(root=root)
+            audit_raw = (
+                root
+                / "memory_index"
+                / "memory_provenance_backfill_audit.json"
+            ).read_text(encoding="utf-8")
+            audit_payload = json.loads(audit_raw)
+            receipt_raw = json.dumps(receipt, ensure_ascii=False)
+
+        self.assertEqual(source.note_id, private_id)
+        self.assertIn("receipt projection marker body", context)
+        self.assertTrue(receipt["contentFree"])
+        self.assertTrue(audit_payload["contentFree"])
+        self.assertNotIn(private_id, receipt_raw)
+        self.assertNotIn(source_label, receipt_raw)
+        self.assertNotIn(private_id, audit_raw)
+        self.assertTrue(
+            any(
+                str(note_id).startswith("opaque-")
+                for note_id in receipt["suppliedNoteIds"]
+            )
+        )
+        self.assertTrue(
+            any(
+                str(entry["candidateSourceIds"][0]).startswith(
+                    "opaque-"
+                )
+                for entry in audit_payload["entries"]
+                if entry.get("candidateSourceIds")
+            )
+        )
 
     def test_context_builder_rejects_hot_context_from_an_older_memory_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

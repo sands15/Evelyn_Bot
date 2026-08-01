@@ -15,9 +15,13 @@ from .cross_surface_continuity import (
 )
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
+    memory_deletion_boundary_not_required,
     prepare_memory_context_for_prompt,
     reconcile_memory_receipt_for_prompt,
     validated_memory_grounding_state,
+)
+from .memory_deletion_outbound import (
+    reset_memory_deletion_outbound_position,
 )
 from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
 
@@ -110,6 +114,7 @@ async def prepare_llm_messages_from_runtime(
     metrics: dict | None = None,
     turn_scope: Any = None,
 ) -> tuple[list[dict], dict | None, str, ContextPolicy]:
+    reset_memory_deletion_outbound_position()
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
     runtime_mode = deps.compute_runtime_mode(metrics)
@@ -278,6 +283,7 @@ async def prepare_llm_messages_from_runtime(
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
+        "deletionBoundary": memory_deletion_boundary_not_required(),
         "contentFree": True,
     }
     if guild_id is not None and context_policy.needs_memory:

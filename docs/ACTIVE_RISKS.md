@@ -593,6 +593,66 @@ key/anchor 경로까지 장악하는 관리자를 위협 모델에 포함할 때
 append-only audit sink를 추가하고, coverage bucket과 forward rejection 추세가
 실제 품질 신호인지 함께 측정한다.
 
+## P1 — 삭제 journal 외부 rollback 보호와 read-lease 가용성
+
+삭제 journal의 malformed/partial row 무시 문제는 닫혔다. strict v1/v2 parser,
+legacy raw-prefix pin, sequence/hash chain, durable head, OS single-writer lease와
+정확한 1-event crash recovery가 적용됐다. Windows write-through replace와 POSIX
+parent-directory fsync 뒤에만 durable commit으로 인정하고, source Markdown은
+tombstone commit 뒤 content-free stub으로 먼저 durable redaction한 다음 unlink한다.
+recall/context/Control Page/provenance/Sub-LLM 경계도 삭제와 선형화됐다. 전체
+legacy+vault context에서 캡처한 root-bound position은 Main non-stream, Voice
+stream/legacy response와 Fast Control의 실제 HTTP sink에서 request 시작 전에
+재검증하며 응답 소비까지 lease를 유지한다. 따라서 build 뒤 삭제가 먼저
+commit되면 HTTP POST 자체를 시작하지 않는다.
+
+남은 첫 번째 위험은 외부 anchor가 기본 필수가 아니라는 점이다. key와 외부
+anchor가 설정되면 signed head와 `memory-deletions.json`이 journal+head의 과거
+쌍 replay를 탐지하지만, 외부 anchor까지 검증되지 않으면—기본 미설정 상태와
+key-only 상태를 포함해—local chain은 손상·단독 truncation만 탐지한다. journal과
+head를 함께 같은 과거 상태로 되돌리는 관리자 공격은 로컬 두 파일만으로 판정할
+수 없다. Control Page snapshot과 삭제 preview는
+`memory.deletion.integrity.v1.rollbackProtected=false`와 경고를 표시하므로 이를
+보호된 영구 삭제로 오인하지 않는다. 실제 사용자 memory root에는 비파괴 원칙상
+key/anchor bootstrap이나 삭제를 실행하지 않았다.
+
+빈 deletion ledger는 재시작이나 read만으로 signed head/anchor를 생성하지 않는다.
+첫 승인 삭제가 signed `memory-deletions.initialized.json` witness를 anchor보다 먼저
+내구 기록하고 ledger를 초기화한다. 기존 unsigned 이력 채택만 one-shot bootstrap을
+명시적으로 조율해야 한다. witness가 남아 있는데 journal/head/anchor가 사라지면
+완전 미초기화로 오인하지 않고 integrity failure다.
+
+두 번째 위험은 현재 exposure guard가 shared reader가 아니라 nonblocking
+exclusive writer lease를 재사용한다는 점이다. privacy 선형성은 강하지만 동시에
+두 recall/snapshot이 겹치거나 semantic Sub-LLM·Main LLM 응답이 길어지면 정상 요청도
+`memory_deletion_journal_integrity_failed` 503으로 분류될 수 있다. 64 MiB journal
+상한에 도달했을 때 검증 가능한 compaction/rotation도 아직 없다.
+
+generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
+구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
+typed deletion position을 캡처해 primary/compact retry와 실제 HTTP sink까지
+명시적으로 전달하고, 파생 상태 write 전에도 같은 position을 재검증한다.
+search/tool 전용 sink는 vault memory context를 입력으로 받지 않는다. 앞으로
+다른 호출자가 저장 기억을 새로 주입할 때 required boundary를 빠뜨리지 않도록
+정적 architecture test를 전체 LLM sink로 넓히는 작업은 P1이다.
+
+세 번째 위험은 일반 대화 continuity가 기억 삭제 계약과 별도로 보존된다는
+점이다. Fast의 process-local assistant message에는 현재 `memoryReceipt`가 붙지만
+planner용 projection은 이를 제거하고, restart/cross-surface continuity의 평문에는
+note-level receipt가 이어지지 않는다. 따라서 과거 assistant 답변이 삭제된 기억을
+바탕으로 생성됐더라도 이를 개별 note tombstone과 정확히 연결해 Router/Main
+history에서 제거할 수 없다. 현재 계약상 사용자 대화 자체를 기억 note 삭제로
+지우지는 않으므로 P0 범위 밖이지만, 다음 단계에서는 receipt를 durable/cross-
+surface message까지 전파하고 tombstoned supplied-note와 연결된 assistant history를
+prompt 전에 필터링한 뒤 같은 deletion admission을 적용해야 한다.
+
+다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
+one-shot bootstrap과 pair replay를 먼저 검증한다. 그 다음 Windows shared
+byte-range/POSIX `LOCK_SH`와 in-process reader count를 도입해 여러 exposure는
+공존시키고 삭제 writer만 배타화하며, 정상 경합은 별도
+`memory_deletion_journal_busy` retry 계약으로 분리한다. chain과 외부 anchor를
+잃지 않는 checkpointed rotation도 그 계약과 함께 설계한다.
+
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 
 Windows Host Vision Bridge에 읽기 전용 Windows UI Automation Control View를

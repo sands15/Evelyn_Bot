@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -17,6 +20,23 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import control_page_server  # noqa: E402
+from evelyn_core.control_page_http import (  # noqa: E402
+    CONTROL_PAGE_CSRF_HEADER,
+    CONTROL_PAGE_CSRF_TOKEN,
+    control_page_json_response,
+    control_page_cors_middleware,
+    reject_browser_origin_middleware,
+)
+from evelyn_core.control_page_state import (  # noqa: E402
+    handle_control_page_chat_request,
+)
+from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
+from evelyn_core import memory_deletion_outbound as deletion_outbound  # noqa: E402
+from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
+    MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
+    MEMORY_INTEGRITY_BOOTSTRAP_ENV,
+    MEMORY_INTEGRITY_KEY_FILE_ENV,
+)
 
 
 def unused_tcp_port() -> int:
@@ -169,6 +189,139 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["events"][0]["type"], "completed")
         self.assertEqual(payload["tasks"][0]["status"], "completed")
+
+    async def test_chat_proxy_preserves_actual_bot_api_integrity_failure_as_503(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE_STALE_MEMORY_MUST_NOT_SURVIVE"
+        request_factory_calls: list[str] = []
+        chat_log: list[tuple[object, ...]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            index_dir = Path(temp_dir) / "memory_index"
+            deletion_journal.append_memory_deletion_tombstone(
+                index_dir,
+                {
+                    "schema": deletion_journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+                    "noteId": "concept-0123456789abcdef",
+                    "noteType": "concept",
+                    "sourceType": "conversation",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-01T00:00:00Z",
+                },
+            )
+            stale_position = deletion_journal.memory_deletion_journal_position(
+                index_dir
+            )
+            deletion_journal.append_memory_deletion_tombstone(
+                index_dir,
+                {
+                    "schema": deletion_journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+                    "noteId": "concept-fedcba9876543210",
+                    "noteType": "concept",
+                    "sourceType": "conversation",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-01T00:00:01Z",
+                },
+            )
+
+            def request_factory(*_args, **_kwargs):
+                request_factory_calls.append("called")
+                raise AssertionError("stale memory reached the HTTP factory")
+
+            async def handle_input(_guild, _text: str) -> str:
+                async with deletion_outbound.memory_deletion_outbound_request(
+                    request_factory,
+                    "http://llm.invalid/v1/chat/completions",
+                    expected_position=stale_position,
+                    memory_boundary_required=True,
+                    memory_index_dir=index_dir,
+                    json={"messages": [{"content": private_canary}]},
+                ):
+                    raise AssertionError("stale memory request was admitted")
+
+            async def bot_chat(request: web.Request) -> web.Response:
+                result, status = await handle_control_page_chat_request(
+                    await request.json(),
+                    discord_enabled=False,
+                    select_guild=lambda _guild_id: None,
+                    effective_guild_id=lambda _guild: 0,
+                    append_chat_log=lambda *args: chat_log.append(args),
+                    handle_input=handle_input,
+                    ensure_minecraft_snapshot=AsyncMock(),
+                    refresh_runtime_services=AsyncMock(),
+                    build_state=AsyncMock(return_value={"ok": True}),
+                )
+                return control_page_json_response(result, status=status)
+
+            backend = web.Application(
+                middlewares=[reject_browser_origin_middleware]
+            )
+            backend.router.add_post("/api/control-page/chat", bot_chat)
+            backend_runner = web.AppRunner(backend)
+            await backend_runner.setup()
+            backend_site = web.TCPSite(backend_runner, "127.0.0.1", 0)
+            await backend_site.start()
+            sockets = (
+                backend_site._server.sockets  # noqa: SLF001
+                if backend_site._server
+                else []
+            )
+            backend_port = int(sockets[0].getsockname()[1])
+
+            public_app = web.Application(
+                middlewares=[control_page_cors_middleware]
+            )
+            public_app.router.add_post(
+                "/api/control-page/chat",
+                control_page_server.chat_handler,
+            )
+            client = TestClient(TestServer(public_app))
+            await client.start_server()
+            try:
+                with patch.object(
+                    control_page_server,
+                    "BOT_API_BASE",
+                    f"http://127.0.0.1:{backend_port}",
+                ):
+                    response = await client.post(
+                        "/api/control-page/chat",
+                        headers={
+                            CONTROL_PAGE_CSRF_HEADER:
+                            CONTROL_PAGE_CSRF_TOKEN,
+                        },
+                        json={
+                            "text": "프록시 경계 테스트",
+                            "source": "control_page",
+                        },
+                    )
+                    payload = await response.json()
+            finally:
+                await client.close()
+                await backend_runner.cleanup()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertNotIn(private_canary, str(payload))
+        self.assertEqual(request_factory_calls, [])
+        self.assertEqual(
+            [entry[1] for entry in chat_log],
+            ["user"],
+        )
 
 
 if __name__ == "__main__":

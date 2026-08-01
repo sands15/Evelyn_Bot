@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -16,6 +17,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
+from evelyn_core import explicit_memory_confirmation as explicit_memory  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -367,8 +369,10 @@ class FastControlApiToolTests(unittest.TestCase):
         receipt = {
             "schema": "memory.user-confirmation.v1",
             "state": "stored",
-            "noteId": "concept-test",
-            "sourceRef": "turn:control-request-123:user",
+            "noteId": "concept-34567890abcdef12",
+            "sourceRef": (
+                "turn:opaque-turn-" + ("d" * 64) + ":user"
+            ),
             "confirmedAt": "2026-07-31T00:00:00+00:00",
             "contentFree": True,
         }
@@ -403,6 +407,89 @@ class FastControlApiToolTests(unittest.TestCase):
         execute.assert_called_once_with(
             "/remember 나는 산책을 좋아해",
             action_id="control-request-123",
+        )
+        planner.assert_not_awaited()
+
+    def test_fast_confirmation_projects_request_id_from_receipt(
+        self,
+    ) -> None:
+        private_request_id = "private-natural-language-secret"
+
+        class _Request:
+            async def json(self):
+                return {
+                    "text": "/remember 공개 영수증 경계",
+                    "source": "control_page",
+                    "requestId": private_request_id,
+                }
+
+        async def fake_collect_runtime_health(
+            *,
+            manifest,
+            probe_runner,
+        ):
+            return {
+                "ok": True,
+                "overallState": "up",
+                "legacyServices": {},
+                "services": [],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            real_store = (
+                explicit_memory.store_explicit_memory_confirmation
+            )
+
+            def store_in_temp(
+                fact: str,
+                **kwargs: object,
+            ):
+                return real_store(
+                    fact,
+                    root=root,
+                    **kwargs,
+                )
+
+            with patch.object(
+                explicit_memory,
+                "store_explicit_memory_confirmation",
+                side_effect=store_in_temp,
+            ), patch.object(
+                fast_api,
+                "plan_fast_tool_request_for_turn",
+                new=AsyncMock(),
+            ) as planner, patch.object(
+                fast_api,
+                "collect_runtime_health",
+                new=AsyncMock(
+                    side_effect=fake_collect_runtime_health
+                ),
+            ):
+                response = asyncio.run(
+                    fast_api.chat_handler(_Request())
+                )
+
+        payload = fast_api.json.loads(response.text or "{}")
+        receipt = payload["memoryWriteReceipt"]
+        serialized_receipt = fast_api.json.dumps(
+            receipt,
+            ensure_ascii=False,
+        )
+        self.assertTrue(payload["ok"])
+        self.assertNotIn(private_request_id, serialized_receipt)
+        self.assertRegex(
+            receipt["sourceRef"],
+            r"^turn:opaque-turn-[0-9a-f]{64}:user$",
+        )
+        self.assertNotIn(
+            private_request_id,
+            fast_api.json.dumps(
+                fast_api.CHAT_MESSAGES[-1].get(
+                    "memoryWriteReceipt"
+                ),
+                ensure_ascii=False,
+            ),
         )
         planner.assert_not_awaited()
 

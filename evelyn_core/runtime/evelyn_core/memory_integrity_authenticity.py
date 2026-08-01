@@ -54,6 +54,35 @@ def _canonical_json(payload: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_artifact_json(payload: Mapping[str, Any]) -> str:
+    """Return the exact serialization emitted by ``atomic_json_write``."""
+
+    return json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _strict_json_object(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate_json_key")
+        payload[key] = value
+    return payload
+
+
+def _strict_json_loads(encoded: str) -> Any:
+    return json.loads(
+        encoded,
+        object_pairs_hook=_strict_json_object,
+    )
+
+
 def _enabled(value: Any) -> bool:
     return str(value or "").strip().lower() in {
         "1",
@@ -67,7 +96,9 @@ def _valid_hash(value: Any) -> str:
     if not isinstance(value, str) or len(value) != 64:
         return ""
     lowered = value.lower()
-    if not all(character in "0123456789abcdef" for character in lowered):
+    if value != lowered or not all(
+        character in "0123456789abcdef" for character in lowered
+    ):
         return ""
     return lowered
 
@@ -251,7 +282,15 @@ class MemoryIntegrityAuthenticity:
                 raise MemoryIntegrityAuthenticityError(
                     "memory_provenance_correction_anchor_record_rejected"
                 )
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            raw = path.read_text(encoding="utf-8")
+            payload = _strict_json_loads(raw)
+            if (
+                not isinstance(payload, dict)
+                or raw != _canonical_artifact_json(payload)
+            ):
+                raise MemoryIntegrityAuthenticityError(
+                    "memory_provenance_correction_anchor_record_rejected"
+                )
             expected = {
                 "schema",
                 "sequence",
@@ -264,8 +303,7 @@ class MemoryIntegrityAuthenticity:
                 "authTag",
             }
             if (
-                not isinstance(payload, dict)
-                or set(payload) != expected
+                set(payload) != expected
                 or payload.get("schema") != MEMORY_INTEGRITY_ANCHOR_SCHEMA
                 or payload.get("contentFree") is not True
                 or payload.get("authAlgorithm") != MEMORY_INTEGRITY_ALGORITHM
@@ -303,7 +341,14 @@ class MemoryIntegrityAuthenticity:
             }
         except MemoryIntegrityAuthenticityError:
             raise
-        except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        except (
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            RecursionError,
+        ):
             raise MemoryIntegrityAuthenticityError(
                 "memory_provenance_correction_anchor_record_rejected"
             ) from None

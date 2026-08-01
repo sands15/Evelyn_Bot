@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -69,12 +70,16 @@ class MemoryIntegrityAuthenticityTests(unittest.TestCase):
 
     @staticmethod
     def append(root: Path, change_id: str) -> None:
+        persisted_change_id = (
+            "provcorr-"
+            + hashlib.sha256(change_id.encode("utf-8")).hexdigest()[:24]
+        )
         correction._append_journal_event(
             {
                 "eventType": "failed",
-                "changeId": change_id,
+                "changeId": persisted_change_id,
                 "failedAt": "2026-08-01T00:00:00Z",
-                "errorCode": "test_failure",
+                "errorCode": "memory_provenance_correction_failed",
             },
             root=root,
         )
@@ -221,6 +226,141 @@ class MemoryIntegrityAuthenticityTests(unittest.TestCase):
         self.assertEqual(strict["headAuthenticity"], "verified")
         self.assertEqual(strict["externalAnchorState"], "verified")
 
+    def test_signed_v2_event_rejects_duplicate_private_actor_without_rehash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            memory_root = base / "memory"
+            with self.configured(base, bootstrap=True) as (_key, anchor):
+                correction._append_journal_event(
+                    {
+                        "eventType": "prepared",
+                        "changeId": "provcorr-000000000000000000000009",
+                        "action": "unlink",
+                        "targetNoteId": "concept-0123456789abcdef",
+                        "previousSourceIds": [],
+                        "previousOriginSourceIds": [],
+                        "newSourceIds": [],
+                        "newOriginSourceIds": [],
+                        "previousRevision": 0,
+                        "nextRevision": 1,
+                        "undoOfChangeId": "",
+                        "actor": "control-page-user",
+                        "preparedAt": "2026-08-01T00:00:00Z",
+                        "contentFree": True,
+                    },
+                    root=memory_root,
+                )
+                journal_path = correction._journal_path(memory_root)
+                original_raw = journal_path.read_text(encoding="utf-8")
+                original_event = json.loads(original_raw)
+                original_hash = original_event["eventHash"]
+                head_path = correction._chain_head_path(memory_root)
+                head_raw = head_path.read_bytes()
+                anchor_path = anchor / "memory-provenance-corrections.json"
+                anchor_raw = anchor_path.read_bytes()
+                mutated_raw = original_raw.replace(
+                    '"actor":"control-page-user"',
+                    (
+                        '"actor":"PRIVATE TRANSCRIPT CANARY",'
+                        '"actor":"control-page-user"'
+                    ),
+                    1,
+                )
+                self.assertNotEqual(mutated_raw, original_raw)
+                # A permissive parser keeps the valid last value, so the old
+                # dict-only hash check could not see this raw-byte mutation.
+                permissive = json.loads(mutated_raw)
+                self.assertEqual(permissive["actor"], "control-page-user")
+                self.assertEqual(
+                    correction._event_hash(permissive),
+                    original_hash,
+                )
+                journal_path.write_text(mutated_raw, encoding="utf-8")
+
+            with self.configured(base, bootstrap=False):
+                with self.assertRaises(
+                    correction
+                    .MemoryProvenanceCorrectionJournalIntegrityError
+                ) as raised:
+                    correction._journal_snapshot(memory_root)
+
+            self.assertEqual(head_path.read_bytes(), head_raw)
+            self.assertEqual(anchor_path.read_bytes(), anchor_raw)
+            self.assertNotIn(b"PRIVATE", head_raw + anchor_raw)
+
+        self.assertEqual(
+            str(raised.exception),
+            "memory_provenance_correction_journal_integrity_failed",
+        )
+
+    def test_signed_head_and_anchor_require_strict_canonical_json(
+        self,
+    ) -> None:
+        for target in ("head", "anchor"):
+            for mutation in ("duplicate-auth-tag", "whitespace"):
+                with self.subTest(target=target, mutation=mutation):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        base = Path(tmp)
+                        memory_root = base / "memory"
+                        with self.configured(
+                            base,
+                            bootstrap=True,
+                        ) as (_key, anchor):
+                            self.append(memory_root, "signed-metadata")
+                            target_path = (
+                                correction._chain_head_path(memory_root)
+                                if target == "head"
+                                else anchor
+                                / "memory-provenance-corrections.json"
+                            )
+                            original = target_path.read_text(
+                                encoding="utf-8"
+                            )
+                            payload = json.loads(original)
+                            if mutation == "duplicate-auth-tag":
+                                valid_tag = str(payload["authTag"])
+                                mutated = original.replace(
+                                    f'"authTag": "{valid_tag}"',
+                                    (
+                                        '"authTag": "PRIVATE CANARY",\n'
+                                        f'  "authTag": "{valid_tag}"'
+                                    ),
+                                    1,
+                                )
+                                self.assertEqual(
+                                    json.loads(mutated)["authTag"],
+                                    valid_tag,
+                                )
+                            else:
+                                mutated = " " + original
+                                self.assertEqual(json.loads(mutated), payload)
+                            target_path.write_text(
+                                mutated,
+                                encoding="utf-8",
+                            )
+
+                        with self.configured(base, bootstrap=False):
+                            with self.assertRaises(
+                                correction
+                                .MemoryProvenanceCorrectionJournalIntegrityError
+                            ) as raised:
+                                correction._journal_snapshot(memory_root)
+
+                    self.assertEqual(
+                        str(raised.exception),
+                        (
+                            "memory_provenance_correction_"
+                            "journal_integrity_failed"
+                        )
+                        if target == "head"
+                        else (
+                            "memory_provenance_correction_"
+                            "anchor_record_rejected"
+                        ),
+                    )
+
     def test_existing_unsigned_head_requires_explicit_bootstrap(
         self,
     ) -> None:
@@ -280,7 +420,12 @@ class MemoryIntegrityAuthenticityTests(unittest.TestCase):
                 payload = json.loads(anchor_path.read_text(encoding="utf-8"))
                 payload["sequence"] = 0
                 anchor_path.write_text(
-                    json.dumps(payload),
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    ),
                     encoding="utf-8",
                 )
             with self.configured(base, bootstrap=False):

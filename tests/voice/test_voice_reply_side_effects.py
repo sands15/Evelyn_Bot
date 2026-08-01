@@ -461,8 +461,12 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                 "memory_write_receipt": {
                     "schema": "memory.user-confirmation.v1",
                     "state": "stored",
-                    "noteId": "concept-discord-voice",
-                    "sourceRef": "turn:turn-voice-1:user",
+                    "noteId": "concept-0123456789abcdef",
+                    "sourceRef": (
+                        "turn:opaque-turn-"
+                        + ("a" * 64)
+                        + ":user"
+                    ),
                     "confirmedAt": "2026-07-31T00:00:00+00:00",
                     "contentFree": True,
                 },

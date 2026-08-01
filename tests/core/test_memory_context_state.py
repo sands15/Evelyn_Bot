@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import unittest
 from pathlib import Path
@@ -15,9 +16,37 @@ from evelyn_core.memory_context_state import (  # noqa: E402
     format_memory_row_lines,
     merge_recent_memory_rows,
 )
+from evelyn_core.memory_content_free_ids import (  # noqa: E402
+    memory_content_free_id,
+)
+from evelyn_core.memory_deletion_journal import MemoryDeletionPosition  # noqa: E402
+from evelyn_core.memory_deletion_outbound import (  # noqa: E402
+    current_memory_deletion_outbound_position,
+    reset_memory_deletion_outbound_position,
+)
 
 
 class MemoryContextStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.deletion_position = MemoryDeletionPosition(
+            schema="memory.deletion.position.v1",
+            root_digest="a" * 64,
+            sequence=7,
+            position_digest="b" * 64,
+        )
+
+        @contextlib.contextmanager
+        def fake_guard(*_args, **_kwargs):
+            yield self.deletion_position
+
+        self.deletion_guard = patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_guard",
+            side_effect=fake_guard,
+        )
+        self.deletion_guard.start()
+        self.addCleanup(self.deletion_guard.stop)
+        self.addCleanup(reset_memory_deletion_outbound_position)
+
     def test_merge_recent_memory_rows_sorts_and_limits(self) -> None:
         rows = merge_recent_memory_rows(
             [{"text": "old", "saved_at": 1}, {"text": "new", "saved_at": 3}],
@@ -151,6 +180,21 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertEqual(receipt["suppliedNoteIds"], ["note-1", "note-2"])
         self.assertEqual(receipt["legacyItemCount"], 1)
         self.assertTrue(receipt["contentFree"])
+        self.assertEqual(
+            receipt["deletionBoundary"],
+            {
+                "schema": "memory.deletion.position.v1",
+                "state": "captured",
+                "sequence": 7,
+                "positionDigest": "b" * 64,
+                "contentFree": True,
+            },
+        )
+        self.assertIs(
+            current_memory_deletion_outbound_position(),
+            self.deletion_position,
+        )
+        self.assertNotIn("a" * 64, str(receipt))
         self.assertNotIn("private", str(receipt).lower())
 
     def test_new_raw_turn_rows_are_attributed_to_stable_evidence(self) -> None:
@@ -205,9 +249,25 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(receipt["legacyAttributedItemCount"], 1)
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
-        self.assertEqual(receipt["legacyEvidenceIds"], ["turn:abc123:user"])
+        self.assertEqual(
+            receipt["legacyEvidenceIds"],
+            [
+                memory_content_free_id(
+                    "turn:abc123:user",
+                    namespace="evidence",
+                )
+            ],
+        )
         self.assertEqual(receipt["legacySourceEvidenceIds"], [])
-        self.assertEqual(receipt["legacySourceTurnIds"], ["abc123"])
+        self.assertEqual(
+            receipt["legacySourceTurnIds"],
+            [
+                memory_content_free_id(
+                    "abc123",
+                    namespace="turn",
+                )
+            ],
+        )
         self.assertNotIn("PRIVATE_RAW_TEXT", str(receipt))
 
     def test_derived_legacy_items_report_content_free_input_lineage(self) -> None:
@@ -273,18 +333,43 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
         self.assertEqual(
             receipt["legacyEvidenceIds"],
-            ["memory:fact:new", "memory:question:new", "memory:summary:new"],
+            sorted(
+                memory_content_free_id(
+                    value,
+                    namespace="evidence",
+                )
+                for value in (
+                    "memory:fact:new",
+                    "memory:question:new",
+                    "memory:summary:new",
+                )
+            ),
         )
         self.assertEqual(
             receipt["legacySourceEvidenceIds"],
-            [
-                "memory:summary:new",
-                "turn:source-a:user",
-                "turn:source-b:assistant",
-                "turn:source-b:user",
-            ],
+            sorted(
+                memory_content_free_id(
+                    value,
+                    namespace="evidence",
+                )
+                for value in (
+                    "memory:summary:new",
+                    "turn:source-a:user",
+                    "turn:source-b:assistant",
+                    "turn:source-b:user",
+                )
+            ),
         )
-        self.assertEqual(receipt["legacySourceTurnIds"], ["source-a", "source-b"])
+        self.assertEqual(
+            receipt["legacySourceTurnIds"],
+            sorted(
+                memory_content_free_id(
+                    value,
+                    namespace="turn",
+                )
+                for value in ("source-a", "source-b")
+            ),
+        )
         self.assertNotIn("PRIVATE_", str(receipt))
 
     def test_invalid_derived_provenance_remains_unattributed(self) -> None:
@@ -340,6 +425,55 @@ class MemoryContextStateTests(unittest.TestCase):
             ),
             "",
         )
+
+    def test_context_guard_covers_legacy_and_vault_reads(self) -> None:
+        active = False
+
+        @contextlib.contextmanager
+        def observing_guard(*_args, **_kwargs):
+            nonlocal active
+            active = True
+            try:
+                yield self.deletion_position
+            finally:
+                active = False
+
+        def collect(*_args, **_kwargs):
+            self.assertTrue(active)
+            return {}
+
+        def vault(*_args, receipt=None, **_kwargs):
+            self.assertTrue(active)
+            receipt.update({"state": "empty"})
+            return ""
+
+        receipt: dict[str, object] = {}
+        with patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_guard",
+            side_effect=observing_guard,
+        ):
+            with patch(
+                "evelyn_core.memory_context_state.collect_memory_layers",
+                side_effect=collect,
+            ):
+                with patch(
+                    "evelyn_core.memory_context_state.build_memory_vault_context",
+                    side_effect=vault,
+                ):
+                    context = build_memory_context(
+                        123,
+                        "no memory",
+                        cognitive_state={},
+                        receipt=receipt,
+                    )
+
+        self.assertFalse(active)
+        self.assertEqual(context, "")
+        self.assertEqual(
+            receipt["deletionBoundary"]["state"],
+            "not_required",
+        )
+        self.assertIsNone(current_memory_deletion_outbound_position())
 
 
 if __name__ == "__main__":

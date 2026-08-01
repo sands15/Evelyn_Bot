@@ -10,6 +10,11 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
+from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalIntegrityError,
+)
+
 
 CONTROL_PAGE_NO_STORE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -171,6 +176,53 @@ def control_page_security_error(error: str, *, status: int = 403) -> web.Respons
     return control_page_json_response({"ok": False, "error": error}, status=status)
 
 
+def memory_deletion_journal_integrity_response() -> web.Response:
+    return add_control_page_no_store_headers(
+        control_page_json_response(
+            {
+                "ok": False,
+                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            },
+            status=503,
+        )
+    )
+
+
+def normalize_memory_deletion_journal_integrity_response(
+    response: web.StreamResponse,
+) -> web.StreamResponse:
+    """Collapse result-shaped integrity failures at the HTTP boundary.
+
+    Some memory helpers intentionally return public error dictionaries rather
+    than raising. Treat the stable deletion-integrity code as a privileged
+    sentinel and discard every sibling field before any response can leave
+    either Control Page application.
+    """
+
+    if (
+        not isinstance(response, web.Response)
+        or response.content_type != "application/json"
+    ):
+        return response
+    body = response.body
+    if not isinstance(body, (bytes, bytearray, memoryview)):
+        return response
+    encoded = bytes(body)
+    if MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR.encode("ascii") not in encoded:
+        return response
+    try:
+        payload = json.loads(encoded.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError, TypeError, RecursionError):
+        return response
+    if (
+        isinstance(payload, dict)
+        and payload.get("error")
+        == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+    ):
+        return memory_deletion_journal_integrity_response()
+    return response
+
+
 async def control_page_session_handler(_: web.Request) -> web.StreamResponse:
     response = control_page_json_response(
         {
@@ -203,7 +255,13 @@ async def control_page_cors_middleware(
     if request.method == "OPTIONS" and api_request:
         response: web.StreamResponse = web.Response(status=204)
     else:
-        response = await handler(request)
+        try:
+            response = await handler(request)
+        except MemoryDeletionJournalIntegrityError:
+            response = memory_deletion_journal_integrity_response()
+    response = normalize_memory_deletion_journal_integrity_response(
+        response
+    )
     return add_control_page_cors_headers(response, path=request.path, origin=origin)
 
 
@@ -218,7 +276,11 @@ async def reject_browser_origin_middleware(
         content_type = str(request.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
         if content_type != "application/json":
             return control_page_security_error("json_content_type_required", status=415)
-    return await handler(request)
+    try:
+        response = await handler(request)
+    except MemoryDeletionJournalIntegrityError:
+        response = memory_deletion_journal_integrity_response()
+    return normalize_memory_deletion_journal_integrity_response(response)
 
 
 __all__ = [
@@ -235,6 +297,8 @@ __all__ = [
     "control_page_session_handler",
     "control_page_file_response",
     "control_page_json_response",
+    "memory_deletion_journal_integrity_response",
+    "normalize_memory_deletion_journal_integrity_response",
     "resolve_control_page_asset_path",
     "reject_browser_origin_middleware",
 ]

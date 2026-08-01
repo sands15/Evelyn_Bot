@@ -66,6 +66,75 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
             "target_path": target_path,
         }
 
+    def create_natural_id_fixture(
+        self,
+        root: Path,
+    ) -> dict[str, object]:
+        vault_root = root / "memory_vault"
+        source_a_id = "PRIVATE correction source alpha sentence"
+        source_b_id = "PRIVATE correction source beta sentence"
+        target_id = "PRIVATE correction target transcript sentence"
+
+        def write_note(
+            relative_path: str,
+            *,
+            note_id: str,
+            note_type: str,
+            source: str,
+            derived_from: list[str] | None = None,
+        ) -> Path:
+            path = vault_root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        f"id: {note_id}",
+                        f"type: {note_type}",
+                        f"title: {note_id}",
+                        "status: active",
+                        f"source: {source}",
+                        (
+                            "derived_from: ["
+                            + ", ".join(derived_from or [])
+                            + "]"
+                        ),
+                        "revision: 0",
+                        "---",
+                        f"# {note_id}",
+                        "private correction body canary",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            return path
+
+        source_a_path = write_note(
+            "daily/natural-source-a.md",
+            note_id=source_a_id,
+            note_type="daily",
+            source="conversation-turn-log",
+        )
+        source_b_path = write_note(
+            "daily/natural-source-b.md",
+            note_id=source_b_id,
+            note_type="daily",
+            source="conversation-turn-log",
+        )
+        target_path = write_note(
+            "episodes/natural-target.md",
+            note_id=target_id,
+            note_type="episode",
+            source="sub-llm-semantic-consolidation",
+            derived_from=[source_a_id],
+        )
+        return {
+            "source_a": parse_memory_note(source_a_path),
+            "source_b": parse_memory_note(source_b_path),
+            "target": parse_memory_note(target_path),
+            "target_path": target_path,
+        }
+
     def test_relink_then_explicit_undo_preserves_body(
         self,
     ) -> None:
@@ -375,6 +444,532 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, persisted)
 
+    def test_v2_journal_rejects_noncanonical_and_wrong_event_shapes(
+        self,
+    ) -> None:
+        for mutation in (
+            "whitespace",
+            "crlf",
+            "missing-lf",
+            "extra-field",
+            "missing-field",
+            "private-change-id",
+            "private-error-code",
+        ):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    correction._append_journal_event(
+                        {
+                            "eventType": "failed",
+                            "changeId": "provcorr-000000000000000000000001",
+                            "failedAt": "2026-08-01T00:00:00Z",
+                            "errorCode": (
+                                "memory_provenance_correction_failed"
+                            ),
+                        },
+                        root=root,
+                    )
+                    journal_path = correction._journal_path(root)
+                    raw = journal_path.read_text(encoding="utf-8")
+                    if mutation == "whitespace":
+                        journal_path.write_text(
+                            " " + raw,
+                            encoding="utf-8",
+                        )
+                    elif mutation == "crlf":
+                        journal_path.write_bytes(
+                            raw.encode("utf-8").replace(b"\n", b"\r\n")
+                        )
+                    elif mutation == "missing-lf":
+                        journal_path.write_text(
+                            raw.rstrip("\n"),
+                            encoding="utf-8",
+                        )
+                    else:
+                        event = json.loads(raw)
+                        if mutation == "extra-field":
+                            event["privateActor"] = (
+                                "PRIVATE TRANSCRIPT CANARY"
+                            )
+                        elif mutation == "missing-field":
+                            event.pop("errorCode")
+                        elif mutation == "private-change-id":
+                            event["changeId"] = (
+                                "PRIVATE TRANSCRIPT CANARY"
+                            )
+                        else:
+                            event["errorCode"] = (
+                                "private_transcript_canary"
+                            )
+                        event["eventHash"] = correction._event_hash(event)
+                        journal_path.write_text(
+                            correction._canonical_json(event) + "\n",
+                            encoding="utf-8",
+                        )
+                        head_path = correction._chain_head_path(root)
+                        head = json.loads(
+                            head_path.read_text(encoding="utf-8")
+                        )
+                        head["eventHash"] = event["eventHash"]
+                        head_path.write_text(
+                            correction._canonical_artifact_json(head),
+                            encoding="utf-8",
+                        )
+
+                    with self.assertRaises(
+                        correction
+                        .MemoryProvenanceCorrectionJournalIntegrityError
+                    ) as raised:
+                        correction._journal_snapshot(root)
+
+                self.assertEqual(
+                    str(raised.exception),
+                    (
+                        "memory_provenance_correction_"
+                        "journal_integrity_failed"
+                    ),
+                )
+
+    def test_v2_writer_rejects_extra_fields_before_persisting(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(
+                correction.MemoryProvenanceCorrectionJournalIntegrityError
+            ) as raised:
+                correction._append_journal_event(
+                    {
+                        "eventType": "failed",
+                        "changeId": "provcorr-000000000000000000000002",
+                        "failedAt": "2026-08-01T00:00:00Z",
+                        "errorCode": (
+                            "memory_provenance_correction_failed"
+                        ),
+                        "privateActor": "PRIVATE TRANSCRIPT CANARY",
+                    },
+                    root=root,
+                )
+            journal_exists = correction._journal_path(root).exists()
+
+        self.assertEqual(
+            str(raised.exception),
+            "memory_provenance_correction_journal_integrity_failed",
+        )
+        self.assertFalse(journal_exists)
+
+    def test_unsigned_head_rejects_private_updated_at_without_rehash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            correction._append_journal_event(
+                {
+                    "eventType": "failed",
+                    "changeId": "provcorr-00000000000000000000000a",
+                    "failedAt": "2026-08-01T00:00:00Z",
+                    "errorCode": "memory_provenance_correction_failed",
+                },
+                root=root,
+            )
+            head_path = correction._chain_head_path(root)
+            head = json.loads(head_path.read_text(encoding="utf-8"))
+            original_event_hash = head["eventHash"]
+            head["updatedAt"] = "PRIVATE TRANSCRIPT CANARY"
+            head_path.write_text(
+                correction._canonical_artifact_json(head),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(
+                correction.MemoryProvenanceCorrectionJournalIntegrityError
+            ) as raised:
+                correction._journal_snapshot(root)
+
+        self.assertEqual(head["eventHash"], original_event_hash)
+        self.assertEqual(
+            str(raised.exception),
+            "memory_provenance_correction_journal_integrity_failed",
+        )
+
+    def test_writer_marker_reader_rejects_and_lease_scrubs_private_json(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            correction._write_writer_marker(
+                root=root,
+                state="released",
+                acquired_at="2026-08-01T00:00:00Z",
+                recovered_stale_owner=False,
+            )
+            marker_path = correction._writer_marker_path(root)
+            raw = marker_path.read_text(encoding="utf-8")
+            mutated = raw.replace(
+                '"state": "released"',
+                (
+                    '"secret": "PRIVATE TRANSCRIPT CANARY",\n'
+                    '  "state": "held",\n'
+                    '  "state": "released"'
+                ),
+                1,
+            )
+            self.assertEqual(json.loads(mutated)["state"], "released")
+            marker_path.write_text(mutated, encoding="utf-8")
+
+            self.assertEqual(
+                correction._writer_public_state(root),
+                "unknown",
+            )
+            self.assertEqual(
+                marker_path.read_text(encoding="utf-8"),
+                mutated,
+            )
+            with correction._writer_guard(root):
+                held = marker_path.read_text(encoding="utf-8")
+                self.assertEqual(
+                    correction._writer_public_state(root),
+                    "held",
+                )
+                self.assertNotIn("PRIVATE", held)
+            released = marker_path.read_text(encoding="utf-8")
+            released_payload = correction._read_valid_writer_marker(
+                marker_path
+            )
+
+        self.assertEqual(released_payload["state"], "released")
+        self.assertNotIn("PRIVATE", released)
+
+    def test_noncanonical_legacy_v1_prefix_remains_immutable_compatible(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal_path = correction._journal_path(root)
+            journal_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy = {
+                "schema": (
+                    correction
+                    .MEMORY_PROVENANCE_CORRECTION_LEGACY_EVENT_SCHEMA
+                ),
+                "eventType": "failed",
+                "changeId": "provcorr-legacy-noncanonical",
+                "legacyCompatibility": True,
+            }
+            legacy_line = json.dumps(
+                legacy,
+                ensure_ascii=False,
+                sort_keys=False,
+            )
+            self.assertNotEqual(
+                legacy_line,
+                correction._canonical_json(legacy),
+            )
+            journal_path.write_text(
+                legacy_line + "\n",
+                encoding="utf-8",
+            )
+            correction._append_journal_event(
+                {
+                    "eventType": "failed",
+                    "changeId": "provcorr-000000000000000000000003",
+                    "failedAt": "2026-08-01T00:00:00Z",
+                    "errorCode": "memory_provenance_correction_failed",
+                },
+                root=root,
+            )
+            snapshot = correction._journal_snapshot(root)
+
+        self.assertEqual(len(snapshot["events"]), 2)
+        self.assertTrue(snapshot["events"][0]["legacyCompatibility"])
+        self.assertEqual(
+            snapshot["events"][1]["previousHash"],
+            correction._legacy_anchor([legacy_line]),
+        )
+
+    def test_v2_journal_canonicalizes_natural_ids_and_undo_round_trips(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_natural_id_fixture(root)
+            source_a = fixture["source_a"]
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            target_path = fixture["target_path"]
+            preview = correction.preview_memory_provenance_correction(
+                target.note_id,
+                [source_b.note_id],
+                root=root,
+            )
+            applied = correction.apply_memory_provenance_correction(
+                target.note_id,
+                preview["confirmToken"],
+                root=root,
+            )
+            journal_path = correction._journal_path(root)
+            persisted_raw = journal_path.read_text(encoding="utf-8")
+            persisted_rows = [
+                json.loads(line)
+                for line in persisted_raw.splitlines()
+            ]
+            prepared = persisted_rows[0]
+            semantic_prepared = correction._read_journal_events(
+                root
+            )[0]
+            undo_preview = (
+                correction.preview_memory_provenance_correction_undo(
+                    target.note_id,
+                    applied["changeId"],
+                    root=root,
+                )
+            )
+            undone = (
+                correction.apply_memory_provenance_correction_undo(
+                    target.note_id,
+                    undo_preview["confirmToken"],
+                    root=root,
+                )
+            )
+            restored = parse_memory_note(target_path)
+            final_journal_raw = journal_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertTrue(applied["applied"], applied)
+        self.assertEqual(
+            prepared["targetNoteId"],
+            correction.memory_deletion_ledger_note_id(
+                target.note_id
+            ),
+        )
+        for field in (
+            "previousSourceIds",
+            "previousOriginSourceIds",
+            "newSourceIds",
+            "newOriginSourceIds",
+        ):
+            self.assertTrue(
+                all(
+                    correction.memory_deletion_note_id_is_canonical(
+                        note_id
+                    )
+                    for note_id in prepared[field]
+                )
+            )
+        self.assertEqual(
+            semantic_prepared["targetNoteId"],
+            target.note_id,
+        )
+        self.assertEqual(
+            semantic_prepared["previousSourceIds"],
+            [source_a.note_id],
+        )
+        self.assertEqual(
+            semantic_prepared["newSourceIds"],
+            [source_b.note_id],
+        )
+        self.assertTrue(undone["applied"], undone)
+        self.assertEqual(
+            restored.metadata["derived_from"],
+            f"[{source_a.note_id}]",
+        )
+        for raw_id in (
+            source_a.note_id,
+            source_b.note_id,
+            target.note_id,
+        ):
+            self.assertNotIn(raw_id, persisted_raw)
+            self.assertNotIn(raw_id, final_journal_raw)
+
+    def test_v2_journal_rejects_unmapped_canonical_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            correction._append_journal_event(
+                {
+                    "eventType": "prepared",
+                    "changeId": "provcorr-000000000000000000000004",
+                    "action": "relink",
+                    "targetNoteId": "PRIVATE absent target sentence",
+                    "previousSourceIds": [],
+                    "previousOriginSourceIds": [],
+                    "newSourceIds": [
+                        "PRIVATE absent source sentence"
+                    ],
+                    "newOriginSourceIds": [],
+                    "previousRevision": 0,
+                    "nextRevision": 1,
+                    "undoOfChangeId": "",
+                    "actor": "control-page-user",
+                    "preparedAt": "2026-08-01T00:00:00Z",
+                    "contentFree": True,
+                },
+                root=root,
+            )
+            persisted_raw = correction._journal_path(root).read_text(
+                encoding="utf-8"
+            )
+
+            with self.assertRaises(
+                correction
+                .MemoryProvenanceCorrectionJournalIntegrityError
+            ):
+                correction._read_journal_events(root)
+
+        self.assertNotIn("PRIVATE absent", persisted_raw)
+
+    def test_v2_journal_rejects_ambiguous_canonical_mapping(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_natural_id_fixture(root)
+            source_a = fixture["source_a"]
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            correction._append_journal_event(
+                {
+                    "eventType": "prepared",
+                    "changeId": "provcorr-000000000000000000000005",
+                    "action": "relink",
+                    "targetNoteId": target.note_id,
+                    "previousSourceIds": [source_a.note_id],
+                    "previousOriginSourceIds": [],
+                    "newSourceIds": [source_b.note_id],
+                    "newOriginSourceIds": [source_a.note_id],
+                    "previousRevision": 0,
+                    "nextRevision": 1,
+                    "undoOfChangeId": "",
+                    "actor": "control-page-user",
+                    "preparedAt": "2026-08-01T00:00:00Z",
+                    "contentFree": True,
+                },
+                root=root,
+            )
+            stored_target_id = (
+                correction.memory_deletion_ledger_note_id(
+                    target.note_id
+                )
+            )
+            real_canonicalize = (
+                correction.memory_deletion_ledger_note_id
+            )
+
+            def collide(value: object) -> str:
+                if value == source_a.note_id:
+                    return stored_target_id
+                return real_canonicalize(value)
+
+            with patch.object(
+                correction,
+                "memory_deletion_ledger_note_id",
+                side_effect=collide,
+            ):
+                with self.assertRaises(
+                    correction
+                    .MemoryProvenanceCorrectionJournalIntegrityError
+                ):
+                    correction._read_journal_events(root)
+
+    def test_natural_id_prepared_event_recovers_after_new_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_natural_id_fixture(root)
+            source_a = fixture["source_a"]
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            target_path = fixture["target_path"]
+            preview = correction.preview_memory_provenance_correction(
+                target.note_id,
+                [source_b.note_id],
+                root=root,
+            )
+            original_append = correction._append_journal_event
+
+            def fail_commit(
+                payload: dict[str, object],
+                *,
+                root: Path | None = None,
+            ) -> None:
+                if payload.get("eventType") == "committed":
+                    raise OSError("simulated commit crash")
+                original_append(payload, root=root)
+
+            with patch.object(
+                correction,
+                "_append_journal_event",
+                side_effect=fail_commit,
+            ):
+                applied = (
+                    correction.apply_memory_provenance_correction(
+                        target.note_id,
+                        preview["confirmToken"],
+                        root=root,
+                    )
+                )
+
+            script = (
+                "import json,sys;"
+                f"sys.path.insert(0,{str(RUNTIME_ROOT)!r});"
+                "from pathlib import Path;"
+                "from evelyn_core.memory_provenance_correction "
+                "import memory_provenance_correction_overview;"
+                "payload=memory_provenance_correction_overview("
+                f"root=Path({str(root)!r}));"
+                "print(json.dumps(payload))"
+            )
+            recovered = json.loads(
+                subprocess.check_output(
+                    [sys.executable, "-c", script],
+                    text=True,
+                    cwd=str(REPO_ROOT),
+                )
+            )
+            undo_preview = (
+                correction.preview_memory_provenance_correction_undo(
+                    target.note_id,
+                    applied["changeId"],
+                    root=root,
+                )
+            )
+            undone = (
+                correction.apply_memory_provenance_correction_undo(
+                    target.note_id,
+                    undo_preview["confirmToken"],
+                    root=root,
+                )
+            )
+            restored = parse_memory_note(target_path)
+            journal_raw = correction._journal_path(root).read_text(
+                encoding="utf-8"
+            )
+
+        self.assertTrue(applied["applied"], applied)
+        self.assertFalse(applied["ok"], applied)
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertTrue(
+            recovered["relationships"][0]["latestChange"][
+                "canUndo"
+            ]
+        )
+        self.assertTrue(undone["applied"], undone)
+        self.assertEqual(
+            restored.metadata["derived_from"],
+            f"[{source_a.note_id}]",
+        )
+        self.assertIn('"recoveredAfterRestart":true', journal_raw)
+        for raw_id in (
+            source_a.note_id,
+            source_b.note_id,
+            target.note_id,
+        ):
+            self.assertNotIn(raw_id, journal_raw)
+
     def test_tampered_journal_blocks_apply_without_note_write(
         self,
     ) -> None:
@@ -523,9 +1118,9 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
             correction._append_journal_event(
                 {
                     "eventType": "failed",
-                    "changeId": "provcorr-v2-anchor",
+                    "changeId": "provcorr-000000000000000000000006",
                     "failedAt": "2026-07-31T00:00:00Z",
-                    "errorCode": "test_failure",
+                    "errorCode": "memory_provenance_correction_failed",
                 },
                 root=root,
             )
@@ -591,9 +1186,9 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
                 "\ntry:\n"
                 " c._append_journal_event("
                 "{'eventType':'failed',"
-                "'changeId':'provcorr-child',"
+                "'changeId':'provcorr-000000000000000000000007',"
                 "'failedAt':'2026-07-31T00:00:00Z',"
-                "'errorCode':'test_failure'},"
+                "'errorCode':'memory_provenance_correction_failed'},"
                 f"root=Path({str(root)!r}))\n"
                 " print(json.dumps({'ok':True}))\n"
                 "except Exception as exc:\n"
@@ -614,9 +1209,9 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
             correction._append_journal_event(
                 {
                     "eventType": "failed",
-                    "changeId": "provcorr-parent",
+                    "changeId": "provcorr-000000000000000000000008",
                     "failedAt": "2026-07-31T00:00:00Z",
-                    "errorCode": "test_failure",
+                    "errorCode": "memory_provenance_correction_failed",
                 },
                 root=root,
             )
@@ -638,7 +1233,7 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["changeId"] for row in rows],
-            ["provcorr-parent"],
+            ["provcorr-000000000000000000000008"],
         )
         self.assertEqual(marker["state"], "released")
 

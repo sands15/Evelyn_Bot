@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable, MutableMapping
 
 import aiohttp
 
+from .memory_deletion_outbound import memory_deletion_outbound_request
 from .skills import SkillContext, SkillResult
 from .text import ModelStreamPrefixFilter, clean_text, is_user_echo_answer
 from .turn_budget import build_turn_execution_budget
@@ -795,7 +796,12 @@ async def execute_main_llm_streaming_turn(
             source_mode=source,
             prompt_chars=len(final_user_text),
         )
-        async with session.post(deps.llm_server_url, json=payload, timeout=timeout) as resp:
+        async with memory_deletion_outbound_request(
+            session.post,
+            deps.llm_server_url,
+            json=payload,
+            timeout=timeout,
+        ) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")

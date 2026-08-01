@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -25,6 +26,19 @@ from .memory_derivation_revocation import (
     changed_quarantine_ids,
     resolve_derivation_states,
 )
+from .memory_deletion_journal import (
+    MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+    MemoryDeletionJournalIntegrityError,
+    append_memory_deletion_tombstone,
+    memory_deletion_ledger_note_id,
+    memory_deletion_journal_guard,
+    memory_deletion_journal_state,
+    memory_deletion_journal_status,
+    normalize_memory_deletion_note_type,
+    normalize_memory_deletion_source_type,
+    memory_deletion_note_id_is_canonical,
+    read_memory_deletion_tombstones,
+)
 from .memory_legacy_coverage import summarize_legacy_memory_context_coverage
 from .memory_confirmation_contract import (
     MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
@@ -36,8 +50,10 @@ from .memory_provenance_audit import (
     ProvenanceAuditNode,
     ProvenanceAuditResult,
     audit_missing_derivations,
+    normalize_provenance_coverage_dimensions,
     summarize_provenance_coverage,
 )
+from .memory_prompt_policy import normalize_memory_retrieval_mode
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
@@ -73,7 +89,7 @@ MEMORY_GRAPH_INTERNAL_NOTE_TYPES = frozenset(MEMORY_INTERNAL_NOTE_TYPES)
 MEMORY_PROVENANCE_SCHEMA = "memory.provenance.v1"
 MEMORY_DELETE_PREVIEW_SCHEMA = "memory.deletion.preview.v1"
 MEMORY_DELETE_RESULT_SCHEMA = "memory.deletion.result.v1"
-MEMORY_DELETE_TOMBSTONE_SCHEMA = "memory.deletion.tombstone.v1"
+MEMORY_DELETE_TOMBSTONE_SCHEMA = MEMORY_DELETE_TOMBSTONE_V1_SCHEMA
 MEMORY_DERIVATION_IMPACT_SCHEMA = "memory.derivation.impact.v1"
 MEMORY_DERIVATION_REVOCATIONS_SCHEMA = "memory.derivation.revocations.v1"
 MEMORY_DERIVATION_RECOMPOSITION_SCHEMA = "memory.derivation.recomposition.v1"
@@ -128,6 +144,78 @@ _memory_provenance_backfill_tokens: dict[
 
 class MemoryNoteDeletedError(RuntimeError):
     pass
+
+
+def _memory_deletion_linearized(
+    operation: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Serialize memory exposure/mutation against deletion commits."""
+
+    @functools.wraps(operation)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        root = kwargs.get("root")
+        index_dir = memory_index_dir(root)
+        with memory_deletion_journal_guard(index_dir):
+            result = operation(*args, **kwargs)
+            # Detect an out-of-band writer that ignored the lease before any
+            # content escapes this boundary.
+            read_memory_deletion_tombstones(index_dir)
+            return result
+
+    return wrapped
+
+
+def _memory_deletion_journal_mutation_linearized(
+    operation: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Serialize an operation that intentionally advances the journal."""
+
+    @functools.wraps(operation)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        root = kwargs.get("root")
+        index_dir = memory_index_dir(root)
+        with memory_deletion_journal_guard(
+            index_dir,
+            require_stable=False,
+        ):
+            result = operation(*args, **kwargs)
+            read_memory_deletion_tombstones(index_dir)
+            return result
+
+    return wrapped
+
+
+def _memory_deletion_linearized_recall(
+    operation: Callable[..., MemoryRecallResult],
+) -> Callable[..., MemoryRecallResult]:
+    """Recall variant that preserves its content-free result contract."""
+
+    @functools.wraps(operation)
+    def wrapped(
+        request: MemoryRecallRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> MemoryRecallResult:
+        started = time.monotonic()
+        try:
+            root = kwargs.get("root")
+            index_dir = memory_index_dir(root)
+            with memory_deletion_journal_guard(index_dir):
+                result = operation(request, *args, **kwargs)
+                read_memory_deletion_tombstones(index_dir)
+                return result
+        except MemoryDeletionJournalIntegrityError:
+            return MemoryRecallResult(
+                turn_id=request.turn_id,
+                ok=False,
+                context_text="",
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                error_text=(
+                    "memory_deletion_journal_integrity_failed"
+                ),
+            )
+
+    return wrapped
 
 BOOTSTRAP_NOTES: tuple[dict[str, Any], ...] = (
     {
@@ -605,6 +693,7 @@ def _dot_sparse_vectors(left: dict[str, float], right: dict[str, float]) -> floa
     return total
 
 
+@_memory_deletion_journal_mutation_linearized
 def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = None) -> int:
     vault = ensure_memory_vault_layout(root)
     _reconcile_memory_deletion_tombstones(root=root)
@@ -639,7 +728,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
             except Exception:
                 continue
             if (
-                note.note_id in deleted_note_ids
+                _memory_note_is_deleted(note, deleted_note_ids)
                 or note.note_id in quarantined_note_ids
                 or _user_confirmed_memory_integrity_state(
                     note,
@@ -1219,6 +1308,7 @@ def _load_note_vector_map(conn: sqlite3.Connection, note_ids: set[str]) -> dict[
     return vectors
 
 
+@_memory_deletion_linearized
 def export_memory_graph(
     *,
     root: Path | None = None,
@@ -1862,11 +1952,13 @@ def _daily_intro_block(
     )
 
 
+@_memory_deletion_linearized
 def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max_items: int = 12) -> Path | None:
     base_root = root or MEMORY_ROOT
     guild_dir = base_root / f"guild_{guild_id}"
     if not guild_dir.exists():
         return None
+    _read_memory_deletion_tombstones(root)
 
     vault = ensure_memory_vault_layout(root)
     target = vault / "core" / f"legacy-guild-{guild_id}.md"
@@ -2107,6 +2199,7 @@ def _write_legacy_node_note(
     return target
 
 
+@_memory_deletion_linearized
 def refresh_legacy_memory_node_notes(
     guild_id: int,
     *,
@@ -2119,6 +2212,7 @@ def refresh_legacy_memory_node_notes(
     guild_dir = base_root / f"guild_{guild_id}"
     if not guild_dir.exists():
         return []
+    _read_memory_deletion_tombstones(root)
 
     vault = ensure_memory_vault_layout(root)
     created_or_existing: list[Path] = []
@@ -2161,6 +2255,7 @@ def refresh_legacy_memory_node_notes(
     return created_or_existing
 
 
+@_memory_deletion_linearized
 def append_turn_rows_to_memory_vault(
     guild_id: int,
     rows: list[dict[str, Any]],
@@ -2186,6 +2281,7 @@ def append_turn_rows_to_memory_vault(
     if not normalized or not meaningful_user_seen:
         return None
 
+    _read_memory_deletion_tombstones(root)
     vault = ensure_memory_vault_layout(root)
     day_key = time.strftime("%Y-%m-%d")
     path = vault / "daily" / f"{day_key}.md"
@@ -2276,6 +2372,7 @@ def _is_meaningful_daily_user_text(text: str) -> bool:
     return len(stripped) >= 3
 
 
+@_memory_deletion_linearized
 def consolidate_daily_memory_once(
     guild_id: int | None = None,
     *,
@@ -2283,6 +2380,7 @@ def consolidate_daily_memory_once(
     day_key: str | None = None,
     min_chars: int = CONSOLIDATION_MIN_DAILY_CHARS,
 ) -> Path | None:
+    _read_memory_deletion_tombstones(root)
     vault = ensure_memory_vault_layout(root)
     day = day_key or time.strftime("%Y-%m-%d")
     source_path = vault / "daily" / f"{day}.md"
@@ -2290,6 +2388,8 @@ def consolidate_daily_memory_once(
         return None
     source_text = source_path.read_text(encoding="utf-8", errors="ignore")
     source_note = parse_memory_note(source_path, source_text)
+    if memory_note_was_deleted(source_note.note_id, root=root):
+        return None
     body_raw = source_text
     if source_text.startswith("---") and "\n---" in source_text:
         parts = source_text.split("---", 2)
@@ -2393,6 +2493,7 @@ def request_sub_llm_json(
     return _json_object_from_text(text)
 
 
+@_memory_deletion_linearized
 def run_semantic_memory_consolidation_once(
     guild_id: int,
     *,
@@ -2458,7 +2559,36 @@ def run_semantic_memory_consolidation_once(
     ]
 
     try:
-        result = llm_client(messages) if llm_client is not None else request_sub_llm_json(messages)
+        with memory_deletion_journal_guard(
+            memory_index_dir(root)
+        ):
+            current_source = _memory_vault_find_note(
+                source_note.note_id,
+                root=root,
+            )
+            if (
+                current_source is None
+                or not secrets.compare_digest(
+                    current_source[1].source_hash,
+                    source_note.source_hash,
+                )
+            ):
+                return {
+                    "status": "skipped_source_deleted_or_changed",
+                    "created_notes": [],
+                    "latency_ms": round(
+                        (time.monotonic() - started) * 1000.0,
+                        1,
+                    ),
+                }
+            result = (
+                llm_client(messages)
+                if llm_client is not None
+                else request_sub_llm_json(messages)
+            )
+            _read_memory_deletion_tombstones(root)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         return {
             "status": "failed_sub_llm_request",
@@ -2491,20 +2621,35 @@ def run_semantic_memory_consolidation_once(
             importance = 0.55
         confidence = clean_text(str(item.get("confidence") or "medium")) or "medium"
         try:
-            path = write_memory_vault_note(
-                note_type=note_type,
-                title=title,
-                body=body,
-                tags=tags or ["semantic-consolidation"],
-                links=links,
-                source="sub-llm-semantic-consolidation",
-                source_refs=[f"daily/{day}"],
-                derived_from=[source_note.note_id],
-                evidence_hashes=[digest],
-                importance=importance,
-                confidence=confidence,
-                root=root,
-            )
+            with memory_deletion_journal_guard(
+                memory_index_dir(root)
+            ):
+                current_source = _memory_vault_find_note(
+                    source_note.note_id,
+                    root=root,
+                )
+                if (
+                    current_source is None
+                    or not secrets.compare_digest(
+                        current_source[1].source_hash,
+                        source_note.source_hash,
+                    )
+                ):
+                    break
+                path = write_memory_vault_note(
+                    note_type=note_type,
+                    title=title,
+                    body=body,
+                    tags=tags or ["semantic-consolidation"],
+                    links=links,
+                    source="sub-llm-semantic-consolidation",
+                    source_refs=[f"daily/{day}"],
+                    derived_from=[source_note.note_id],
+                    evidence_hashes=[digest],
+                    importance=importance,
+                    confidence=confidence,
+                    root=root,
+                )
         except MemoryNoteDeletedError:
             continue
         created.append(str(path))
@@ -2608,6 +2753,7 @@ def _write_recomposed_memory_note(
     return parse_memory_note(path, content)
 
 
+@_memory_deletion_linearized
 def run_memory_derivation_recomposition_once(
     *,
     root: Path | None = None,
@@ -2686,7 +2832,10 @@ def run_memory_derivation_recomposition_once(
                 source_id
                 for source_id in dependencies
                 if (
-                    source_id not in deleted_ids
+                    not _memory_note_id_is_deleted(
+                        source_id,
+                        deleted_ids,
+                    )
                     and source_id not in quarantined_ids
                     and source_id in note_sources
                 )
@@ -2760,11 +2909,41 @@ def run_memory_derivation_recomposition_once(
             },
         ]
         try:
-            result = (
-                llm_client(messages)
-                if llm_client is not None
-                else request_sub_llm_json(messages)
-            )
+            with memory_deletion_journal_guard(
+                memory_index_dir(root)
+            ):
+                sources_current = all(
+                    (
+                        current_source := _memory_vault_find_note(
+                            source_id,
+                            root=root,
+                        )
+                    )
+                    is not None
+                    and secrets.compare_digest(
+                        current_source[1].source_hash,
+                        source_versions[source_id],
+                    )
+                    for source_id in live_source_ids
+                )
+                if not sources_current:
+                    errors.append(
+                        {
+                            "noteId": note_id,
+                            "error": (
+                                "memory_recomposition_source_deleted"
+                            ),
+                        }
+                    )
+                    continue
+                result = (
+                    llm_client(messages)
+                    if llm_client is not None
+                    else request_sub_llm_json(messages)
+                )
+                _read_memory_deletion_tombstones(root)
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception as exc:
             errors.append(
                 {
@@ -2801,7 +2980,12 @@ def run_memory_derivation_recomposition_once(
         tags = list(_as_list(item.get("tags")))
         links = list(_as_list(item.get("links")))
 
-        with _memory_edit_lock:
+        with (
+            memory_deletion_journal_guard(
+                memory_index_dir(root)
+            ),
+            _memory_edit_lock,
+        ):
             current = _memory_vault_find_note(
                 note_id,
                 root=root,
@@ -2871,6 +3055,7 @@ def run_memory_derivation_recomposition_once(
                         or []
                     ),
                 )
+                _read_memory_deletion_tombstones(root)
             except (OSError, ValueError) as exc:
                 errors.append(
                     {
@@ -2945,6 +3130,7 @@ def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None
     }
 
 
+@_memory_deletion_linearized_recall
 def recall_memory_vault(
     request: MemoryRecallRequest,
     *,
@@ -2953,6 +3139,7 @@ def recall_memory_vault(
 ) -> MemoryRecallResult:
     started = time.monotonic()
     try:
+        _read_memory_deletion_tombstones(root)
         if request.guild_id is not None:
             refresh_legacy_memory_mirror(request.guild_id, root=root)
             refresh_legacy_memory_node_notes(request.guild_id, root=root)
@@ -2981,7 +3168,9 @@ def recall_memory_vault(
                     metadata={
                         "cache_hit": True,
                         "memory_version": version,
-                        "retrieval_mode": cached.get("retrieval_mode") or "cache",
+                        "retrieval_mode": normalize_memory_retrieval_mode(
+                            cached.get("retrieval_mode") or "cache"
+                        ),
                         "provenance": list(cached.get("provenance") or []),
                     },
                 )
@@ -3007,6 +3196,9 @@ def recall_memory_vault(
                 if not allow_internal_memory:
                     rows = [row for row in rows if not _is_internal_memory_note(row)]
                 retrieval_mode = f"{retrieval_mode}+vector"
+            retrieval_mode = normalize_memory_retrieval_mode(
+                retrieval_mode
+            )
             scored: list[tuple[int, int, sqlite3.Row]] = []
             for recency, row in enumerate(rows):
                 score = _note_score(row, query_tokens, focus_tokens, active_project)
@@ -3072,6 +3264,14 @@ def recall_memory_vault(
                 "provenance": provenance,
             },
         )
+    except MemoryDeletionJournalIntegrityError:
+        return MemoryRecallResult(
+            turn_id=request.turn_id,
+            ok=False,
+            context_text="",
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            error_text="memory_deletion_journal_integrity_failed",
+        )
     except Exception as exc:
         return MemoryRecallResult(
             turn_id=request.turn_id,
@@ -3091,7 +3291,9 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
     provenance = list(metadata.get("provenance") or []) if result.ok else []
     note_ids = sorted(
         {
-            clean_text(str(item.get("noteId") or ""))
+            memory_deletion_ledger_note_id(
+                clean_text(str(item.get("noteId") or ""))
+            )
             for item in provenance
             if isinstance(item, dict)
             and clean_text(str(item.get("noteId") or ""))
@@ -3101,7 +3303,10 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
     for item in provenance:
         if not isinstance(item, dict):
             continue
-        source_type = clean_text(str(item.get("sourceType") or "unknown"))
+        source_type = normalize_memory_deletion_source_type(
+            clean_text(str(item.get("sourceType") or "unknown"))
+            or "unknown"
+        )
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
     state = "provided" if result.ok and result.context_text else ("empty" if result.ok else "unavailable")
     return {
@@ -3117,7 +3322,9 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
             else "unavailable"
         ),
         "memoryVersion": version,
-        "retrievalMode": clean_text(str(metadata.get("retrieval_mode") or "unknown"))[:40],
+        "retrievalMode": normalize_memory_retrieval_mode(
+            metadata.get("retrieval_mode")
+        ),
         "cacheHit": bool(metadata.get("cache_hit")) if result.ok else False,
         "noteIds": note_ids,
         "noteCount": len(note_ids),
@@ -3127,6 +3334,7 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
     }
 
 
+@_memory_deletion_linearized
 def build_memory_vault_context(
     guild_id: int,
     user_text: str,
@@ -3180,13 +3388,20 @@ def build_memory_vault_context(
         hot_context_state = "empty"
 
     recall_note_ids = list(recall_receipt["noteIds"])
+    receipt_hot_note_ids = [
+        memory_deletion_ledger_note_id(note_id)
+        for note_id in hot_note_ids
+    ]
 
     parts = []
     if hot_context:
         parts.append("[Pinned Memory Vault]\n" + hot_context)
     if result.ok and result.context_text:
         parts.append(result.context_text)
-    supplied_note_ids = sorted(set(recall_note_ids) | set(hot_note_ids if hot_context else []))
+    supplied_note_ids = sorted(
+        set(recall_note_ids)
+        | set(receipt_hot_note_ids if hot_context else [])
+    )
     if receipt is not None:
         receipt.clear()
         receipt.update(
@@ -3202,7 +3417,11 @@ def build_memory_vault_context(
                 "recallProvenanceCount": recall_receipt["provenanceCount"],
                 "sourceTypeCounts": recall_receipt["sourceTypeCounts"],
                 "hotContextState": hot_context_state,
-                "hotContextNoteIds": sorted(set(hot_note_ids)) if hot_context else [],
+                "hotContextNoteIds": (
+                    sorted(set(receipt_hot_note_ids))
+                    if hot_context
+                    else []
+                ),
                 "suppliedNoteIds": supplied_note_ids,
                 "suppliedNoteCount": len(supplied_note_ids),
                 "contentFree": True,
@@ -3211,12 +3430,15 @@ def build_memory_vault_context(
     if not parts:
         return ""
     cache_label = "hit" if result.metadata.get("cache_hit") else "miss"
-    mode = clean_text(str(result.metadata.get("retrieval_mode") or "unknown"))
+    mode = normalize_memory_retrieval_mode(
+        result.metadata.get("retrieval_mode")
+    )
     if result.ok and result.context_text:
         parts.append(f"[Memory Cache]\n- retrieval_cache: {cache_label}\n- retrieval_mode: {mode}\n- memory_version: {version}")
     return "\n\n".join(parts)
 
 
+@_memory_deletion_linearized
 def write_memory_vault_note(
     *,
     note_type: str,
@@ -3236,6 +3458,7 @@ def write_memory_vault_note(
     confidence: str = "medium",
     root: Path | None = None,
 ) -> Path:
+    _read_memory_deletion_tombstones(root)
     vault = ensure_memory_vault_layout(root)
     normalized_type = clean_text(note_type).lower() or "concept"
     folder_by_type = {
@@ -3253,9 +3476,7 @@ def write_memory_vault_note(
     slug = _slug(storage_key or title, default=normalized_type)
     path = vault / folder / f"{slug}.md"
     note_id = f"{normalized_type}-{_stable_id(folder + '/' + slug)}"
-    normalized_derivations = list(
-        dict.fromkeys(_as_list(derived_from))
-    )[:12]
+    normalized_derivations = list(dict.fromkeys(_as_list(derived_from)))[:12]
     if (
         _memory_source_type(source, normalized_type)
         == "derived"
@@ -3511,7 +3732,7 @@ def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = Non
             note = parse_memory_note(path, raw)
         except Exception:
             continue
-        if note.note_id in deleted_note_ids:
+        if _memory_note_is_deleted(note, deleted_note_ids):
             continue
         rel_path = path.relative_to(vault).as_posix()
         if target in {note.note_id, rel_path, path.stem}:
@@ -3653,6 +3874,7 @@ def _write_memory_vault_note_body(
     return parse_memory_note(path, content)
 
 
+@_memory_deletion_linearized
 def memory_vault_user_snapshot(
     *,
     root: Path | None = None,
@@ -3682,7 +3904,7 @@ def memory_vault_user_snapshot(
             note = parse_memory_note(path, raw)
         except Exception:
             continue
-        if note.note_id in deleted_note_ids:
+        if _memory_note_is_deleted(note, deleted_note_ids):
             continue
         rel_path = path.relative_to(vault).as_posix()
         if not include_internal and _is_internal_memory_note_type(note.note_type):
@@ -3737,6 +3959,9 @@ def memory_vault_user_snapshot(
             root=root,
             entries=revocations,
         ),
+        "deletionIntegrity": memory_deletion_journal_status(
+            memory_index_dir(root)
+        ),
         "cards": cards,
         "includeInternal": bool(include_internal),
         "hiddenTypes": sorted(MEMORY_INTERNAL_NOTE_TYPES) if not include_internal else [],
@@ -3744,6 +3969,7 @@ def memory_vault_user_snapshot(
     }
 
 
+@_memory_deletion_linearized
 def memory_vault_user_note(
     note_id_or_rel_path: str,
     *,
@@ -3816,6 +4042,7 @@ def memory_vault_user_note(
     }
 
 
+@_memory_deletion_linearized
 def update_memory_vault_user_note(
     note_id_or_rel_path: str,
     action: str,
@@ -4036,12 +4263,16 @@ def update_memory_vault_user_note(
     if normalized_action == "edit":
         try:
             sync_memory_vault_index(root=root)
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception:
             cleanup_errors.append(
                 "memory_edit_index_cleanup_failed"
             )
         try:
             refresh_memory_hot_context(root=root)
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception:
             cleanup_errors.append(
                 "memory_edit_hot_context_cleanup_failed"
@@ -4113,26 +4344,10 @@ def _memory_deletion_reason(value: str) -> str:
 def _read_memory_deletion_tombstones(
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    path = _memory_deletion_tombstones_path(root)
     with _memory_delete_lock:
-        if not path.exists():
-            return []
-        lines = path.read_text(
-            encoding="utf-8",
-            errors="ignore",
-        ).splitlines()
-    output: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            payload = json.loads(line)
-        except Exception:
-            continue
-        if (
-            isinstance(payload, dict)
-            and payload.get("schema") == MEMORY_DELETE_TOMBSTONE_SCHEMA
-        ):
-            output.append(payload)
-    return output
+        return read_memory_deletion_tombstones(
+            memory_index_dir(root)
+        )
 
 
 def _memory_deleted_note_ids(
@@ -4149,16 +4364,43 @@ def _memory_deleted_note_ids(
     }
 
 
+def _memory_note_id_is_deleted(
+    note_id: object,
+    deleted_ledger_ids: set[str],
+) -> bool:
+    """Compare an application note ID with ledger-boundary IDs."""
+
+    raw_note_id = clean_text(str(note_id or ""))
+    if not raw_note_id:
+        return False
+    return (
+        memory_deletion_ledger_note_id(raw_note_id)
+        in deleted_ledger_ids
+    )
+
+
+def _memory_note_is_deleted(
+    note: MemoryVaultNote,
+    deleted_ledger_ids: set[str],
+) -> bool:
+    # Redaction stubs already carry a ledger ID. Normal notes, including a
+    # user-authored ID that happens to use the reserved ``opaque-`` spelling,
+    # must always pass through the application-ID mapping.
+    if (
+        clean_text(str(note.metadata.get("source") or ""))
+        == "deletion-redaction"
+    ):
+        return note.note_id in deleted_ledger_ids
+    return _memory_note_id_is_deleted(
+        note.note_id,
+        deleted_ledger_ids,
+    )
+
+
 def _memory_deletion_journal_state(
     root: Path | None = None,
-) -> tuple[int, int]:
-    try:
-        journal_stat = _memory_deletion_tombstones_path(root).stat()
-    except FileNotFoundError:
-        return (0, 0)
-    except OSError:
-        return (-1, -1)
-    return (journal_stat.st_mtime_ns, journal_stat.st_size)
+) -> tuple[int, ...]:
+    return memory_deletion_journal_state(memory_index_dir(root))
 
 
 def _memory_derivation_revocations_path(
@@ -4182,82 +4424,125 @@ def _memory_provenance_forward_rejections_path(
     )
 
 
-def _read_memory_provenance_forward_rejections(
-    root: Path | None = None,
-) -> dict[str, Any]:
-    path = _memory_provenance_forward_rejections_path(root)
-    if not path.exists():
-        return {
-            "schema": (
-                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
-            ),
-            "contentFree": True,
-            "count": 0,
-            "byNoteType": {},
-            "firstRejectedAt": "",
-            "lastRejectedAt": "",
-        }
+def _empty_memory_provenance_forward_rejections() -> dict[str, Any]:
+    return {
+        "schema": MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA,
+        "contentFree": True,
+        "count": 0,
+        "byNoteType": {},
+        "firstRejectedAt": "",
+        "lastRejectedAt": "",
+    }
+
+
+def _canonical_memory_provenance_rejection_timestamp(
+    value: object,
+) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+        value,
+    ):
+        return ""
     try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError):
-        return {
-            "schema": (
-                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
-            ),
-            "contentFree": True,
-            "count": 0,
-            "byNoteType": {},
-            "firstRejectedAt": "",
-            "lastRejectedAt": "",
-        }
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    return value
+
+
+def _canonicalize_memory_provenance_forward_rejections(
+    payload: object,
+) -> dict[str, Any]:
     if (
         not isinstance(payload, dict)
         or payload.get("schema")
         != MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
     ):
-        return {
-            "schema": (
-                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
-            ),
-            "contentFree": True,
-            "count": 0,
-            "byNoteType": {},
-            "firstRejectedAt": "",
-            "lastRejectedAt": "",
-        }
-    by_note_type = (
-        payload.get("byNoteType")
-        if isinstance(payload.get("byNoteType"), dict)
-        else {}
-    )
+        return _empty_memory_provenance_forward_rejections()
 
     def non_negative_int(value: object) -> int:
         try:
             return max(0, int(value or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
+    raw_by_note_type = payload.get("byNoteType")
+    by_note_type = (
+        raw_by_note_type
+        if isinstance(raw_by_note_type, dict)
+        else {}
+    )
+    normalized_by_note_type: dict[str, int] = {}
+    for key, value in by_note_type.items():
+        try:
+            normalized_key = normalize_memory_deletion_note_type(
+                clean_text(str(key)) or "unknown"
+            )
+        except MemoryDeletionJournalIntegrityError:
+            normalized_key = "unknown"
+        normalized_by_note_type[normalized_key] = (
+            normalized_by_note_type.get(normalized_key, 0)
+            + non_negative_int(value)
+        )
+
     return {
-        "schema": (
-            MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
-        ),
+        "schema": MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA,
         "contentFree": True,
         "count": non_negative_int(payload.get("count")),
-        "byNoteType": {
-            clean_text(str(key)).lower() or "unknown": (
-                non_negative_int(value)
+        "byNoteType": dict(sorted(normalized_by_note_type.items())),
+        "firstRejectedAt": (
+            _canonical_memory_provenance_rejection_timestamp(
+                payload.get("firstRejectedAt")
             )
-            for key, value in by_note_type.items()
-        },
-        "firstRejectedAt": clean_text(
-            str(payload.get("firstRejectedAt") or "")
         ),
-        "lastRejectedAt": clean_text(
-            str(payload.get("lastRejectedAt") or "")
+        "lastRejectedAt": (
+            _canonical_memory_provenance_rejection_timestamp(
+                payload.get("lastRejectedAt")
+            )
         ),
     }
+
+
+def _read_memory_provenance_forward_rejections(
+    root: Path | None = None,
+) -> dict[str, Any]:
+    path = _memory_provenance_forward_rejections_path(root)
+    # Audit callers already hold the cross-process deletion-journal lease.
+    # This lock additionally linearizes migration with counter increments in
+    # this process. A failed durable rewrite is deliberately propagated, so
+    # an audit cannot claim contentFree while legacy raw keys remain on disk.
+    with _memory_provenance_observability_lock:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _empty_memory_provenance_forward_rejections()
+        try:
+            payload: object = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+        normalized = (
+            _canonicalize_memory_provenance_forward_rejections(
+                payload
+            )
+        )
+        canonical_raw = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        if raw != canonical_raw:
+            try:
+                atomic_json_write(
+                    path,
+                    normalized,
+                    durable=True,
+                )
+            except MemoryDeletionJournalIntegrityError:
+                raise
+            except OSError:
+                raise MemoryDeletionJournalIntegrityError() from None
+        return normalized
 
 
 def _record_memory_provenance_forward_rejection(
@@ -4265,8 +4550,8 @@ def _record_memory_provenance_forward_rejection(
     *,
     root: Path | None = None,
 ) -> None:
-    normalized_type = (
-        clean_text(note_type).lower() or "unknown"
+    normalized_type = normalize_memory_deletion_note_type(
+        clean_text(note_type) or "unknown"
     )
     rejected_at = _utc_now_iso()
     with _memory_provenance_observability_lock:
@@ -4412,18 +4697,139 @@ def _memory_derivation_revocation_file_state(
     return (state.st_mtime_ns, state.st_size)
 
 
+def _canonical_memory_derivation_revocations_payload(
+    payload: object,
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema")
+        != MEMORY_DERIVATION_REVOCATIONS_SCHEMA
+        or payload.get("contentFree") is not True
+        or not isinstance(payload.get("entries"), dict)
+    ):
+        return None
+
+    updated_at = _parse_memory_utc_timestamp(
+        payload.get("updatedAt")
+    )
+    canonical_entries: dict[str, dict[str, Any]] = {}
+    for note_id, entry in payload["entries"].items():
+        if (
+            not memory_deletion_note_id_is_canonical(note_id)
+            or not isinstance(entry, dict)
+            or entry.get("state") != "quarantined"
+            or entry.get("noteId") != note_id
+            or _parse_memory_utc_timestamp(
+                entry.get("quarantinedAt")
+            )
+            is None
+        ):
+            return None
+        projected: dict[str, Any] = {
+            "noteId": note_id,
+            "state": "quarantined",
+        }
+        for key in (
+            "directSourceIds",
+            "revokedSourceIds",
+            "blockedSourceIds",
+            "remainingSourceIds",
+        ):
+            values = entry.get(key)
+            if (
+                not isinstance(values, list)
+                or any(
+                    not memory_deletion_note_id_is_canonical(item)
+                    for item in values
+                )
+            ):
+                return None
+            projected[key] = sorted(set(values))
+        quarantined_at = _parse_memory_utc_timestamp(
+            entry.get("quarantinedAt")
+        )
+        assert quarantined_at is not None
+        projected["quarantinedAt"] = (
+            quarantined_at.isoformat().replace(
+                "+00:00",
+                "Z",
+            )
+        )
+        canonical_entries[note_id] = projected
+
+    return {
+        "schema": MEMORY_DERIVATION_REVOCATIONS_SCHEMA,
+        "contentFree": True,
+        "updatedAt": (
+            updated_at.isoformat().replace("+00:00", "Z")
+            if updated_at is not None
+            else _utc_now_iso()
+        ),
+        "entries": {
+            note_id: canonical_entries[note_id]
+            for note_id in sorted(canonical_entries)
+        },
+    }
+
+
+def _durably_write_memory_derivation_revocation_payload(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    try:
+        atomic_json_write(path, payload, durable=True)
+    except MemoryDeletionJournalIntegrityError:
+        raise
+    except OSError:
+        raise MemoryDeletionJournalIntegrityError() from None
+
+
 def _read_memory_derivation_revocations(
     root: Path | None = None,
+    *,
+    nodes: dict[str, DerivationNode] | None = None,
+) -> dict[str, dict[str, Any]]:
+    with memory_deletion_journal_guard(memory_index_dir(root)):
+        with _memory_provenance_observability_lock:
+            return _read_memory_derivation_revocations_locked(
+                root,
+                nodes=nodes,
+            )
+
+
+def _read_memory_derivation_revocations_locked(
+    root: Path | None = None,
+    *,
+    nodes: dict[str, DerivationNode] | None = None,
 ) -> dict[str, dict[str, Any]]:
     path = _memory_derivation_revocations_path(root)
     if not path.exists():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(
             "memory_derivation_revocations_corrupt"
         ) from exc
+    canonical_payload = (
+        _canonical_memory_derivation_revocations_payload(
+            payload
+        )
+    )
+    if canonical_payload is not None:
+        canonical_raw = json.dumps(
+            canonical_payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        if raw != canonical_raw:
+            _durably_write_memory_derivation_revocation_payload(
+                path,
+                canonical_payload,
+            )
+        payload = canonical_payload
     if (
         not isinstance(payload, dict)
         or payload.get("schema")
@@ -4433,16 +4839,140 @@ def _read_memory_derivation_revocations(
         raise RuntimeError(
             "memory_derivation_revocations_corrupt"
         )
+    content_free = payload.get("contentFree") is True
+    if nodes is None:
+        nodes, _note_sources = _memory_derivation_nodes(root=root)
+    raw_ids = set(nodes)
+    for node in nodes.values():
+        raw_ids.update(node.derived_from)
+    ledger_to_raw_ids: dict[str, set[str]] = {}
+    for raw_id in raw_ids:
+        ledger_to_raw_ids.setdefault(
+            memory_deletion_ledger_note_id(raw_id),
+            set(),
+        ).add(raw_id)
+
+    def resolve_id(
+        value: object,
+        *,
+        allow_unmapped_canonical: bool = False,
+    ) -> str:
+        stored_id = clean_text(str(value or ""))
+        if not stored_id:
+            raise RuntimeError(
+                "memory_derivation_revocations_corrupt"
+            )
+        if not content_free and stored_id in raw_ids:
+            return stored_id
+        matches = ledger_to_raw_ids.get(stored_id, set())
+        if (
+            not matches
+            and content_free
+            and allow_unmapped_canonical
+            and memory_deletion_note_id_is_canonical(stored_id)
+        ):
+            # A resolved/recomposed note can intentionally stop declaring the
+            # revoked source. Keep its already content-free ledger ID until
+            # reconciliation removes the stale quarantine entry.
+            return stored_id
+        if len(matches) != 1:
+            raise RuntimeError(
+                "memory_derivation_revocations_corrupt"
+            )
+        return next(iter(matches))
+
     output: dict[str, dict[str, Any]] = {}
     for note_id, entry in payload["entries"].items():
-        cleaned_id = clean_text(str(note_id))
         if (
-            cleaned_id
-            and isinstance(entry, dict)
-            and entry.get("state") == "quarantined"
+            not isinstance(entry, dict)
+            or set(entry)
+            != {
+                "noteId",
+                "state",
+                "directSourceIds",
+                "revokedSourceIds",
+                "blockedSourceIds",
+                "remainingSourceIds",
+                "quarantinedAt",
+            }
+            or entry.get("state") != "quarantined"
+            or _parse_memory_utc_timestamp(
+                entry.get("quarantinedAt")
+            )
+            is None
         ):
-            output[cleaned_id] = dict(entry)
+            raise RuntimeError(
+                "memory_derivation_revocations_corrupt"
+            )
+        raw_note_id = resolve_id(
+            note_id,
+            allow_unmapped_canonical=True,
+        )
+        if (
+            resolve_id(
+                entry.get("noteId"),
+                allow_unmapped_canonical=True,
+            )
+            != raw_note_id
+        ):
+            raise RuntimeError(
+                "memory_derivation_revocations_corrupt"
+            )
+        projected = dict(entry)
+        projected["noteId"] = raw_note_id
+        for key in (
+            "directSourceIds",
+            "revokedSourceIds",
+            "blockedSourceIds",
+            "remainingSourceIds",
+        ):
+            values = entry.get(key)
+            if not isinstance(values, list):
+                raise RuntimeError(
+                    "memory_derivation_revocations_corrupt"
+                )
+            projected[key] = list(
+                dict.fromkeys(
+                    resolve_id(
+                        item,
+                        allow_unmapped_canonical=True,
+                    )
+                    for item in values
+                )
+            )
+        if raw_note_id in output:
+            raise RuntimeError(
+                "memory_derivation_revocations_corrupt"
+            )
+        output[raw_note_id] = projected
     return output
+
+
+def _memory_derivation_revocations_are_content_free(
+    root: Path | None = None,
+) -> bool:
+    path = _memory_derivation_revocations_path(root)
+    if not path.exists():
+        return True
+    with _memory_provenance_observability_lock:
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return False
+        canonical = (
+            _canonical_memory_derivation_revocations_payload(
+                payload
+            )
+        )
+        if canonical is None:
+            return False
+        return raw == json.dumps(
+            canonical,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def _write_memory_derivation_revocations(
@@ -4453,18 +4983,54 @@ def _write_memory_derivation_revocations(
     path = _memory_derivation_revocations_path(root)
     if not entries and not path.exists():
         return
-    atomic_json_write(
-        path,
-        {
-            "schema": MEMORY_DERIVATION_REVOCATIONS_SCHEMA,
-            "updatedAt": _utc_now_iso(),
-            "entries": {
-                note_id: entries[note_id]
-                for note_id in sorted(entries)
+    projected_entries: dict[str, dict[str, Any]] = {}
+    for note_id in sorted(entries):
+        entry = entries[note_id]
+        ledger_note_id = memory_deletion_ledger_note_id(note_id)
+        if ledger_note_id in projected_entries:
+            raise RuntimeError(
+                "memory_derivation_revocations_id_collision"
+            )
+        quarantined_at = _parse_memory_utc_timestamp(
+            entry.get("quarantinedAt")
+        )
+        projected_entries[ledger_note_id] = {
+            "noteId": ledger_note_id,
+            "state": "quarantined",
+            **{
+                key: sorted(
+                    {
+                        memory_deletion_ledger_note_id(item)
+                        for item in _as_list(entry.get(key))
+                    }
+                )
+                for key in (
+                    "directSourceIds",
+                    "revokedSourceIds",
+                    "blockedSourceIds",
+                    "remainingSourceIds",
+                )
             },
-        },
-        durable=True,
-    )
+            "quarantinedAt": (
+                quarantined_at.isoformat().replace(
+                    "+00:00",
+                    "Z",
+                )
+                if quarantined_at is not None
+                else _utc_now_iso()
+            ),
+        }
+    payload = {
+            "schema": MEMORY_DERIVATION_REVOCATIONS_SCHEMA,
+            "contentFree": True,
+            "updatedAt": _utc_now_iso(),
+            "entries": projected_entries,
+        }
+    with _memory_provenance_observability_lock:
+        _durably_write_memory_derivation_revocation_payload(
+            path,
+            payload,
+        )
 
 
 def _memory_derivation_nodes(
@@ -4485,7 +5051,7 @@ def _memory_derivation_nodes(
             note = parse_memory_note(path)
         except Exception:
             continue
-        if note.note_id in deleted_note_ids:
+        if _memory_note_is_deleted(note, deleted_note_ids):
             continue
         dependencies = tuple(
             _as_list(note.metadata.get("derived_from"))
@@ -4707,16 +5273,26 @@ def _memory_persisted_provenance_audit(
     legacy_context_coverage: dict[str, Any],
 ) -> dict[str, Any]:
     path = _memory_provenance_audit_path(root)
+    content_free_coverage = (
+        normalize_provenance_coverage_dimensions(coverage)
+    )
     entries = [
         {
-            "targetNoteId": candidate.target_note_id,
+            "targetNoteId": memory_deletion_ledger_note_id(
+                candidate.target_note_id
+            ),
             "state": candidate.state,
-            "candidateSourceIds": list(
-                candidate.candidate_source_ids
+            "candidateSourceIds": sorted(
+                {
+                    memory_deletion_ledger_note_id(note_id)
+                    for note_id in candidate.candidate_source_ids
+                }
             ),
             "signals": [
                 {
-                    "sourceNoteId": signal.source_note_id,
+                    "sourceNoteId": memory_deletion_ledger_note_id(
+                        signal.source_note_id
+                    ),
                     "reasonCodes": list(
                         signal.reason_codes
                     ),
@@ -4731,6 +5307,7 @@ def _memory_persisted_provenance_audit(
         "schema": MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA,
         "readOnly": True,
         "autoApply": False,
+        "contentFree": True,
         "contentSimilarityUsed": False,
         "graphFingerprint": graph_fingerprint,
         "summary": _memory_provenance_audit_summary(
@@ -4738,7 +5315,7 @@ def _memory_persisted_provenance_audit(
         ),
         "coverage": {
             key: value
-            for key, value in coverage.items()
+            for key, value in content_free_coverage.items()
             if key != "checkedAt"
         },
         "legacyContextCoverage": {
@@ -4748,11 +5325,29 @@ def _memory_persisted_provenance_audit(
         },
         "entries": entries,
     }
-    generated_at = ""
-    try:
-        existing = json.loads(
-            path.read_text(encoding="utf-8")
-        )
+    # The persisted report claims contentFree, so parsed-object equality is
+    # insufficient: duplicate JSON keys or non-canonical raw bytes could retain
+    # private text that json.loads no longer exposes. Preserve only a strict
+    # timestamp and rewrite every non-canonical representation while the audit
+    # caller holds the deletion lease.
+    with _memory_provenance_observability_lock:
+        raw: str | None = None
+        existing: object = None
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except UnicodeError:
+            raw = ""
+        except OSError:
+            raise MemoryDeletionJournalIntegrityError() from None
+        if raw is not None:
+            try:
+                existing = json.loads(raw)
+            except json.JSONDecodeError:
+                existing = None
+
+        generated_at = ""
         if (
             isinstance(existing, dict)
             and {
@@ -4762,18 +5357,29 @@ def _memory_persisted_provenance_audit(
             }
             == stable_payload
         ):
-            generated_at = clean_text(
-                str(existing.get("generatedAt") or "")
+            generated_at = (
+                _canonical_memory_provenance_rejection_timestamp(
+                    existing.get("generatedAt")
+                )
             )
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        pass
-    payload = {
-        **stable_payload,
-        "generatedAt": generated_at or _utc_now_iso(),
-    }
-    if not generated_at:
-        atomic_json_write(path, payload, durable=True)
-    return payload
+        payload = {
+            **stable_payload,
+            "generatedAt": generated_at or _utc_now_iso(),
+        }
+        canonical_raw = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        if raw != canonical_raw:
+            try:
+                atomic_json_write(path, payload, durable=True)
+            except MemoryDeletionJournalIntegrityError:
+                raise
+            except OSError:
+                raise MemoryDeletionJournalIntegrityError() from None
+        return payload
 
 
 def _memory_public_audit_note(
@@ -4818,6 +5424,7 @@ def _memory_public_audit_note(
     }
 
 
+@_memory_deletion_linearized
 def memory_provenance_backfill_preview(
     *,
     root: Path | None = None,
@@ -5000,6 +5607,7 @@ def memory_provenance_backfill_preview(
     }
 
 
+@_memory_deletion_linearized
 def memory_provenance_manual_source_options(
     note_id_or_rel_path: str,
     *,
@@ -5180,12 +5788,28 @@ def _resolve_current_memory_derivations(
     dict[str, dict[str, Any]],
 ]:
     nodes, note_sources = _memory_derivation_nodes(root=root)
-    entries = _read_memory_derivation_revocations(root)
+    entries = _read_memory_derivation_revocations(
+        root,
+        nodes=nodes,
+    )
     seeds = _active_memory_quarantine_seeds(
         entries,
         note_sources,
     )
-    deleted_note_ids = _memory_deleted_note_ids(root)
+    deleted_ledger_ids = _memory_deleted_note_ids(root)
+    raw_graph_ids = set(nodes)
+    for node in nodes.values():
+        raw_graph_ids.update(node.derived_from)
+    deleted_note_ids = {
+        raw_note_id
+        for raw_note_id in raw_graph_ids
+        if _memory_note_id_is_deleted(
+            raw_note_id,
+            deleted_ledger_ids,
+        )
+    }
+    # Callers use application graph IDs for a deletion being previewed or
+    # committed. Keep those IDs raw so graph joins remain stable.
     deleted_note_ids.update(additional_deleted_ids or set())
     resolution = resolve_derivation_states(
         nodes,
@@ -5328,6 +5952,62 @@ def _memory_derivation_deletion_impact(
     return impact, fingerprint
 
 
+def _memory_deletion_public_derivation_impact(
+    impact: dict[str, Any],
+) -> dict[str, Any]:
+    """Return an apply-result projection with ledger-boundary IDs."""
+
+    def canonical_ids(values: object) -> list[str]:
+        return [
+            memory_deletion_ledger_note_id(item)
+            for item in _as_list(values)
+        ]
+
+    def canonical_item(item: object) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        projected = dict(item)
+        raw_id = clean_text(str(projected.get("id") or ""))
+        if raw_id:
+            projected["id"] = memory_deletion_ledger_note_id(
+                raw_id
+            )
+            if clean_text(str(projected.get("title") or "")) == raw_id:
+                projected["title"] = "unknown"
+        if "type" in projected:
+            projected["type"] = normalize_memory_deletion_note_type(
+                projected.get("type")
+            )
+        for key in (
+            "directSourceIds",
+            "revokedSourceIds",
+            "blockedSourceIds",
+        ):
+            if key in projected:
+                projected[key] = canonical_ids(projected.get(key))
+        if "remainingSources" in projected:
+            projected["remainingSources"] = [
+                canonical_item(source)
+                for source in projected.get("remainingSources") or []
+                if isinstance(source, dict)
+            ]
+        return projected
+
+    output = dict(impact)
+    trigger_id = clean_text(str(output.get("triggerNoteId") or ""))
+    if trigger_id:
+        output["triggerNoteId"] = memory_deletion_ledger_note_id(
+            trigger_id
+        )
+    for key in ("cascadeDelete", "quarantine"):
+        output[key] = [
+            canonical_item(item)
+            for item in output.get(key) or []
+            if isinstance(item, dict)
+        ]
+    return output
+
+
 def _reconcile_memory_derivation_revocations(
     *,
     root: Path | None = None,
@@ -5337,7 +6017,12 @@ def _reconcile_memory_derivation_revocations(
     )
     deleted_before = _memory_deleted_note_ids(root)
     cascade_ids = sorted(
-        set(resolution.deleted_note_ids) - deleted_before
+        note_id
+        for note_id in resolution.deleted_note_ids
+        if not _memory_note_id_is_deleted(
+            note_id,
+            deleted_before,
+        )
     )
     now_iso = _utc_now_iso()
     for note_id in cascade_ids:
@@ -5392,7 +6077,12 @@ def _reconcile_memory_derivation_revocations(
             )
             or now_iso,
         }
-    if entries != prior_entries:
+    if (
+        entries != prior_entries
+        or not _memory_derivation_revocations_are_content_free(
+            root
+        )
+    ):
         _write_memory_derivation_revocations(
             entries,
             root=root,
@@ -5429,13 +6119,47 @@ def _remove_memory_hot_context_files(
             pass
 
 
+def _redact_memory_note_before_unlink(
+    path: Path,
+    note: MemoryVaultNote,
+) -> bool:
+    """Durably replace memory content with a content-free deletion stub.
+
+    The journal remains the logical deletion authority. This second layer
+    prevents a delayed or rolled-back directory unlink from restoring the
+    note body after the tombstone commit.
+    """
+
+    stub = (
+        _format_front_matter(
+            {
+                "id": memory_deletion_ledger_note_id(
+                    note.note_id
+                ),
+                "type": normalize_memory_deletion_note_type(
+                    note.note_type
+                ),
+                "status": "deleted",
+                "source": "deletion-redaction",
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        + "\n"
+    )
+    try:
+        atomic_text_write(path, stub, durable=True)
+    except OSError:
+        return False
+    return True
+
+
 def _invalidate_stale_memory_hot_context(
     *,
     root: Path | None = None,
 ) -> None:
     index_dir = memory_index_dir(root)
     hot_path = index_dir / "hot_context.json"
-    cache_state: tuple[int, int, int, int] | None = None
+    cache_state: tuple[int, ...] | None = None
     if hot_path.exists():
         try:
             payload = json.loads(
@@ -5445,19 +6169,30 @@ def _invalidate_stale_memory_hot_context(
                 )
             )
             if isinstance(payload, dict):
+                raw_deletion_state = payload.get(
+                    "deletion_journal_state"
+                )
+                if isinstance(raw_deletion_state, list):
+                    deletion_state = tuple(
+                        int(item) for item in raw_deletion_state
+                    )
+                else:
+                    deletion_state = (
+                        int(
+                            payload.get(
+                                "deletion_journal_mtime_ns"
+                            )
+                            or 0
+                        ),
+                        int(
+                            payload.get(
+                                "deletion_journal_size"
+                            )
+                            or 0
+                        ),
+                    )
                 cache_state = (
-                    int(
-                        payload.get(
-                            "deletion_journal_mtime_ns"
-                        )
-                        or 0
-                    ),
-                    int(
-                        payload.get(
-                            "deletion_journal_size"
-                        )
-                        or 0
-                    ),
+                    *deletion_state,
                     int(
                         payload.get(
                             "derivation_revocations_mtime_ns"
@@ -5500,8 +6235,13 @@ def _reconcile_memory_deletion_tombstones(
             note = parse_memory_note(path)
         except Exception:
             continue
-        if note.note_id not in deleted_note_ids:
+        if not _memory_note_is_deleted(note, deleted_note_ids):
             continue
+        if (
+            clean_text(str(note.metadata.get("source") or ""))
+            != "deletion-redaction"
+        ):
+            _redact_memory_note_before_unlink(path, note)
         try:
             path.unlink()
             source_file_count += 1
@@ -5513,7 +6253,10 @@ def _reconcile_memory_deletion_tombstones(
     next_state = {
         note_id: payload
         for note_id, payload in state.items()
-        if note_id not in deleted_note_ids
+        if not _memory_note_id_is_deleted(
+            note_id,
+            deleted_note_ids,
+        )
     }
     if next_state != state:
         try:
@@ -5531,15 +6274,33 @@ def _append_memory_deletion_tombstone(
     payload: dict[str, Any],
     *,
     root: Path | None = None,
-) -> None:
-    path = _memory_deletion_tombstones_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
-        )
-        handle.flush()
-        os.fsync(handle.fileno())
+) -> dict[str, Any]:
+    committed = append_memory_deletion_tombstone(
+        memory_index_dir(root),
+        payload,
+    )
+    public_tombstone = {
+        "schema": MEMORY_DELETE_TOMBSTONE_SCHEMA,
+        "noteId": clean_text(str(committed.get("noteId") or "")),
+        "noteType": clean_text(
+            str(committed.get("noteType") or "")
+        ),
+        "sourceType": clean_text(
+            str(committed.get("sourceType") or "")
+        ),
+        "reason": clean_text(str(committed.get("reason") or "")),
+        "deletedAt": clean_text(
+            str(committed.get("deletedAt") or "")
+        ),
+    }
+    revoked_by = committed.get("revokedByNoteIds")
+    if isinstance(revoked_by, list) and revoked_by:
+        public_tombstone["revokedByNoteIds"] = [
+            clean_text(str(item))
+            for item in revoked_by
+            if clean_text(str(item))
+        ][:12]
+    return public_tombstone
 
 
 def _memory_note_deletion_protection(
@@ -5936,6 +6697,7 @@ def _prune_memory_provenance_backfill_tokens(
         )
 
 
+@_memory_deletion_linearized
 def preview_memory_provenance_backfill_application(
     note_id_or_rel_path: str,
     source_note_ids: list[str] | tuple[str, ...],
@@ -6150,6 +6912,7 @@ def _replace_memory_front_matter(
     return formatted + "\n" + suffix
 
 
+@_memory_deletion_linearized
 def apply_memory_provenance_backfill(
     note_id_or_rel_path: str,
     confirm_token: str,
@@ -6352,6 +7115,8 @@ def apply_memory_provenance_backfill(
                 path,
                 updated_raw,
             )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         return {
             "ok": False,
@@ -6367,6 +7132,8 @@ def apply_memory_provenance_backfill(
     cleanup_errors: list[str] = []
     try:
         version = sync_memory_vault_index(root=root)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         version = 0
         cleanup_errors.append(
@@ -6374,12 +7141,16 @@ def apply_memory_provenance_backfill(
         )
     try:
         refresh_memory_hot_context(root=root)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         cleanup_errors.append(
             "memory_provenance_backfill_hot_context_cleanup_failed"
         )
     try:
         memory_provenance_backfill_preview(root=root)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         cleanup_errors.append(
             "memory_provenance_backfill_audit_refresh_failed"
@@ -6437,6 +7208,7 @@ def _prune_memory_delete_tokens(now: float) -> None:
         _memory_delete_tokens.pop(token, None)
 
 
+@_memory_deletion_linearized
 def preview_memory_vault_user_note_deletion(
     note_id_or_rel_path: str,
     *,
@@ -6507,12 +7279,16 @@ def preview_memory_vault_user_note_deletion(
             "contentFreeTombstoneRetained": True,
         },
         "derivationImpact": derivation_impact,
+        "deletionIntegrity": memory_deletion_journal_status(
+            memory_index_dir(root)
+        ),
         "reason": normalized_reason,
         "confirmToken": token,
         "expiresAt": expires_at,
     }
 
 
+@_memory_deletion_journal_mutation_linearized
 def delete_memory_vault_user_note(
     note_id_or_rel_path: str,
     confirm_token: str,
@@ -6643,9 +7419,13 @@ def delete_memory_vault_user_note(
                     ),
                 }
             derivation_impact = locked_impact
-            _append_memory_deletion_tombstone(
+            tombstone = _append_memory_deletion_tombstone(
                 tombstone,
                 root=root,
+            )
+            _redact_memory_note_before_unlink(
+                resolved_path,
+                current_note,
             )
             try:
                 resolved_path.unlink()
@@ -6654,6 +7434,11 @@ def delete_memory_vault_user_note(
                 source_file_deleted = True
             except OSError:
                 pass
+    except MemoryDeletionJournalIntegrityError:
+        return {
+            "ok": False,
+            "error": "memory_deletion_journal_integrity_failed",
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -6661,6 +7446,11 @@ def delete_memory_vault_user_note(
             "detail": type(exc).__name__,
         }
 
+    public_derivation_impact = (
+        _memory_deletion_public_derivation_impact(
+            derivation_impact
+        )
+    )
     cleanup_errors: list[str] = []
     try:
         _write_user_note_state(state, root)
@@ -6668,6 +7458,11 @@ def delete_memory_vault_user_note(
         cleanup_errors.append("memory_delete_user_state_cleanup_failed")
     try:
         version = sync_memory_vault_index(root=root)
+    except MemoryDeletionJournalIntegrityError:
+        return {
+            "ok": False,
+            "error": "memory_deletion_journal_integrity_failed",
+        }
     except Exception:
         version = 0
         cleanup_errors.append("memory_delete_index_cleanup_failed")
@@ -6684,6 +7479,11 @@ def delete_memory_vault_user_note(
         cleanup_errors.append("memory_delete_source_cleanup_failed")
     try:
         refresh_memory_hot_context(root=root)
+    except MemoryDeletionJournalIntegrityError:
+        return {
+            "ok": False,
+            "error": "memory_deletion_journal_integrity_failed",
+        }
     except Exception:
         cleanup_errors.append("memory_delete_hot_context_cleanup_failed")
     if cleanup_errors:
@@ -6691,21 +7491,24 @@ def delete_memory_vault_user_note(
             "ok": False,
             "schema": MEMORY_DELETE_RESULT_SCHEMA,
             "action": "delete",
-            "noteId": note.note_id,
+            "noteId": tombstone["noteId"],
             "deleted": False,
             "tombstoned": True,
             "sourceFileDeleted": source_file_deleted,
             "error": "memory_delete_cleanup_required",
             "cleanupErrors": list(dict.fromkeys(cleanup_errors)),
             "tombstone": tombstone,
-            "derivationImpact": derivation_impact,
+            "derivationImpact": public_derivation_impact,
+            "deletionIntegrity": memory_deletion_journal_status(
+                memory_index_dir(root)
+            ),
         }
 
     return {
         "ok": True,
         "schema": MEMORY_DELETE_RESULT_SCHEMA,
         "action": "delete",
-        "noteId": note.note_id,
+        "noteId": tombstone["noteId"],
         "deleted": True,
         "deletedAt": deleted_at,
         "reason": normalized_reason,
@@ -6713,7 +7516,10 @@ def delete_memory_vault_user_note(
         "sourceFileDeleted": True,
         "tombstoned": True,
         "tombstone": tombstone,
-        "derivationImpact": derivation_impact,
+        "derivationImpact": public_derivation_impact,
+        "deletionIntegrity": memory_deletion_journal_status(
+            memory_index_dir(root)
+        ),
     }
 
 
@@ -6722,10 +7528,9 @@ def memory_note_was_deleted(
     *,
     root: Path | None = None,
 ) -> bool:
-    target = clean_text(note_id)
-    return any(
-        clean_text(str(item.get("noteId") or "")) == target
-        for item in _read_memory_deletion_tombstones(root)
+    return _memory_note_id_is_deleted(
+        note_id,
+        _memory_deleted_note_ids(root),
     )
 
 
@@ -6747,6 +7552,7 @@ def _memory_vault_note_path(*, note_type: str, title: str, root: Path | None = N
     return vault / folder / f"{_slug(title, default=normalized_type)}.md"
 
 
+@_memory_deletion_linearized
 def bootstrap_memory_vault_source(*, root: Path | None = None, overwrite: bool = False) -> list[Path]:
     """Create the minimum Markdown source notes needed for an active vault."""
     created_or_existing: list[Path] = []
@@ -6777,6 +7583,7 @@ def bootstrap_memory_vault_source(*, root: Path | None = None, overwrite: bool =
     return created_or_existing
 
 
+@_memory_deletion_linearized
 def refresh_memory_hot_context(
     *,
     root: Path | None = None,
@@ -6815,7 +7622,10 @@ def refresh_memory_hot_context(
         rows = [
             row
             for row in rows
-            if clean_text(str(row["note_id"])) not in deleted_note_ids
+            if not _memory_note_id_is_deleted(
+                row["note_id"],
+                deleted_note_ids,
+            )
         ]
 
         block_lines: list[str] = []
@@ -6857,6 +7667,9 @@ def refresh_memory_hot_context(
             "note_ids": note_ids,
             "deletion_journal_mtime_ns": deletion_journal_state[0],
             "deletion_journal_size": deletion_journal_state[1],
+            "deletion_journal_state": list(
+                deletion_journal_state
+            ),
             "derivation_revocations_mtime_ns": (
                 derivation_revocation_state[0]
             ),
@@ -6897,6 +7710,11 @@ def _validated_memory_hot_context_payload(
     root: Path | None = None,
     expected_memory_version: int | None = None,
 ) -> tuple[dict[str, Any], str]:
+    # A cache whose file metadata still matches is not sufficient proof that
+    # deletion history is intact. Validate the ledger before reading any
+    # cached memory content so a malformed, truncated, or replayed journal
+    # cannot revive an older prompt block.
+    _read_memory_deletion_tombstones(root)
     path = memory_index_dir(root) / "hot_context.json"
     if not path.exists():
         return {}, "missing"
@@ -6908,12 +7726,26 @@ def _validated_memory_hot_context_payload(
         return {}, "malformed"
     try:
         cached_memory_version = int(payload.get("memory_version") or 0)
-        cached_deletion_journal_mtime_ns = int(
-            payload.get("deletion_journal_mtime_ns") or 0
+        raw_deletion_state = payload.get(
+            "deletion_journal_state"
         )
-        cached_deletion_journal_size = int(
-            payload.get("deletion_journal_size") or 0
-        )
+        if isinstance(raw_deletion_state, list):
+            cached_deletion_journal_state = tuple(
+                int(item) for item in raw_deletion_state
+            )
+        else:
+            cached_deletion_journal_state = (
+                int(
+                    payload.get(
+                        "deletion_journal_mtime_ns"
+                    )
+                    or 0
+                ),
+                int(
+                    payload.get("deletion_journal_size")
+                    or 0
+                ),
+            )
         cached_derivation_revocations_mtime_ns = int(
             payload.get(
                 "derivation_revocations_mtime_ns"
@@ -6928,10 +7760,9 @@ def _validated_memory_hot_context_payload(
         return {}, "malformed"
     if expected_memory_version is not None and cached_memory_version != int(expected_memory_version):
         return {}, "stale_memory_version"
-    if (
-        cached_deletion_journal_mtime_ns,
-        cached_deletion_journal_size,
-    ) != _memory_deletion_journal_state(root):
+    if cached_deletion_journal_state != (
+        _memory_deletion_journal_state(root)
+    ):
         return {}, "stale_deletion_state"
     if (
         cached_derivation_revocations_mtime_ns,
@@ -6941,6 +7772,7 @@ def _validated_memory_hot_context_payload(
     return payload, "verified"
 
 
+@_memory_deletion_linearized
 def read_memory_hot_context(
     *,
     root: Path | None = None,
@@ -7043,6 +7875,7 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
     }
 
 
+@_memory_deletion_linearized
 def mark_memory_note_superseded(note_id_or_rel_path: str, *, root: Path | None = None) -> bool:
     vault = ensure_memory_vault_layout(root)
     deleted_note_ids = _memory_deleted_note_ids(root)
@@ -7054,7 +7887,7 @@ def mark_memory_note_superseded(note_id_or_rel_path: str, *, root: Path | None =
                 note = parse_memory_note(path, raw)
             except Exception:
                 continue
-            if note.note_id in deleted_note_ids:
+            if _memory_note_is_deleted(note, deleted_note_ids):
                 continue
             rel_path = path.relative_to(vault).as_posix()
             if target_key not in {note.note_id, rel_path, path.stem}:
@@ -7104,6 +7937,7 @@ __all__ = [
     "MEMORY_PROVENANCE_SCHEMA",
     "MEMORY_QUARANTINE_STATUS_SCHEMA",
     "MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA",
+    "MemoryDeletionJournalIntegrityError",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",
     "activate_memory_vault_for_guild",

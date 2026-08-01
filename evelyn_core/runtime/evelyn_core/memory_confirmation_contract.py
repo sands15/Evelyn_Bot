@@ -6,6 +6,13 @@ import re
 from datetime import datetime
 from typing import Any
 
+from .memory_content_free_ids import (
+    memory_content_free_source_ref_is_canonical,
+)
+from .memory_deletion_journal import (
+    memory_deletion_note_id_is_canonical,
+)
+
 
 MEMORY_USER_CONFIRMATION_SCHEMA = "memory.user-confirmation.v1"
 MEMORY_USER_CONFIRMATION_NOTE_SCHEMA = (
@@ -17,7 +24,6 @@ MEMORY_USER_CONFIRMATION_SOURCES = frozenset(
 MEMORY_USER_CONFIRMATION_TAG = "user-confirmed"
 MEMORY_USER_EDIT_SOURCE = "user-edit"
 MEMORY_USER_EDIT_SOURCE_REF = "control-page-memory-editor"
-_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 _SOURCE_REF_RE = re.compile(
     r"^turn:[A-Za-z0-9._:-]{8,120}:user$"
 )
@@ -69,14 +75,12 @@ def is_explicit_memory_confirmation_receipt(
     if state in {"stored", "duplicate"}:
         return (
             keys == _SUCCESS_KEYS
-            and _SAFE_ID_RE.fullmatch(
-                str(value.get("noteId") or "")
+            and memory_deletion_note_id_is_canonical(
+                value.get("noteId")
             )
-            is not None
-            and _SOURCE_REF_RE.fullmatch(
-                str(value.get("sourceRef") or "")
+            and memory_content_free_source_ref_is_canonical(
+                value.get("sourceRef")
             )
-            is not None
             and _valid_iso_datetime(value.get("confirmedAt"))
         )
     if state in {"rejected", "failed"}:

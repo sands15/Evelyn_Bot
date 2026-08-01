@@ -75,8 +75,17 @@ transcript가 들어가지 않는다. `checkedAt`은 응답에만 존재하고, 
 `memory.provenance.forward-write-rejections.v1` 카운터를 증가시킨다. 이
 파일은 총 거부 수, note type별 수, 최초·최근 거부 시각만 보존한다. 요청의
 title, body, source, source ref, hash 또는 경로는 저장하지 않는다. 파일이
-없거나 손상됐거나 숫자가 유효하지 않으면 감사 조회는 실패하지 않고 해당
-값을 0으로 취급한다.
+없으면 빈 집계로 취급한다. 레거시·손상 형식이나 닫힌 enum 밖의 키는 감사
+lease와 프로세스 내 관찰 lock 아래에서 content-free canonical 집계로 내구성
+있게 원자 교체하며, 알 수 없는 note type은 `unknown`, 유효하지 않은 숫자는
+0으로 정규화한다. 이 교체가 실패하면 감사 결과를 쓰거나 성공으로 반환하지
+않고 `memory_deletion_journal_integrity_failed`로 fail-closed한다.
+
+기존 `memory_provenance_backfill_audit.json`도 parsed object가 같다는 사실만으로
+재사용하지 않는다. `generatedAt`은 엄격한 UTC timestamp일 때만 보존하고 전체
+raw JSON이 canonical serialization과 byte-for-byte 같지 않으면 감사 lease와
+관찰 lock 아래 내구성 있게 원자 교체한다. 중복 key나 숨은 원문을 제거하는
+교체가 실패하면 같은 고정 integrity 오류로 fail-closed한다.
 
 ## Content-free legacy context coverage
 
@@ -261,6 +270,13 @@ v1 raw line 전체를 domain-separated SHA-256으로 묶은 값이
 `previousHash`가 된다. 따라서 v1 prefix의 수정·삭제도 이후 검증에서
 감지한다.
 
+v2 row는 UTF-8 canonical JSON 한 줄과 정확한 LF terminator만 허용한다.
+duplicate key, CRLF, 공백·key 순서가 다른 동치 JSON, terminator 누락,
+추가·누락 field를 거부한다. prepared/committed/failed는 각각 exact field set과
+타입을 가지며 change ID, actor/action, error code, revision, UTC timestamp와
+ledger ID는 닫힌 domain을 통과해야 한다. 이미 존재하는 duplicate-free legacy
+v1 row는 raw byte를 다시 쓰지 않고 immutable prefix anchor로만 사용한다.
+
 마지막 sequence/hash는 별도
 `memory_provenance_correction_chain_head.json`에 durable atomic replace로
 기록한다. 이 head가 journal보다 앞서거나 기존 prefix와 다르면 손상으로
@@ -269,12 +285,20 @@ v1 raw line 전체를 domain-separated SHA-256으로 묶은 값이
 writer lease 아래 head를 복구한다. journal과 head가 모두 비어 있는 최초
 상태는 정상이다.
 
+local head와 signed external anchor도 strict duplicate-key parser, exact schema와
+canonical artifact JSON byte 검사를 통과해야 한다. 기존 event hash나 HMAC을
+그대로 둔 채 숨은 중복 field를 추가한 artifact는 유효한 head/anchor로 인정하지
+않는다.
+
 correction 전체는 Windows byte-range lock 또는 POSIX `flock`과 프로세스 내부
 owner table을 함께 사용한다. 임의 명령이나 경로를 받는 lease API는 없으며,
 diagnostic marker에는 schema, held/released, process nonce, PID, 시각,
 stale-owner 회수 여부와 `contentFree=true`만 기록한다. 다른 thread/process가
 이미 소유 중이면 대기하거나 겹쳐 쓰지 않고 즉시
 `memory_provenance_correction_writer_unavailable`로 거부한다.
+marker도 duplicate key 없는 exact canonical schema와 닫힌 상태·timestamp를
+요구한다. 손상 marker는 공개 조회에서 소유권 근거로 사용하지 않고 `unknown`을
+반환하며, 파일 mutation은 다음 writer lease를 획득한 뒤에만 정리한다.
 
 선택적으로 correction head에 기억 전용 HMAC-SHA256 authenticity를 적용한다.
 `EVELYN_MEMORY_INTEGRITY_KEY_FILE`은 repository와 `bot_memory` 밖의 절대 경로,
@@ -410,19 +434,121 @@ preview 뒤 파생 note나 근거 관계가 바뀌면 HTTP 409,
 
 apply가 최종 내용을 검증한 뒤에는 다음 순서를 지킨다.
 
-1. `memory.deletion.tombstone.v1` 한 줄을 journal에 append한다.
-2. flush와 `fsync`가 끝난 뒤 source Markdown을 제거한다.
-3. user state, SQLite/FTS/vector rows, recall cache, hot context를 정리한다.
-4. `derivedFrom`을 따라 파생 기억을 연쇄 철회 또는 격리한다.
+1. 공개 삭제 요청의 strict `memory.deletion.tombstone.v1` payload를 검증한다.
+2. 이를 `contentFree=true`, 단조 `sequence`, `previousHash`, `eventHash`를
+   가진 `memory.deletion.tombstone.v2` event로 변환해 journal에 append하고
+   file data를 동기화한다.
+3. 현재 chain position과 legacy raw-prefix hash를 durable head에 원자 교체한다.
+   Windows는 `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`, POSIX는 temp file
+   `fsync` 뒤 rename과 parent-directory `fsync`가 모두 성공해야 commit으로
+   인정한다.
+4. 선택적 memory-integrity key가 있으면 deletion 전용 HMAC domain/scope로
+   head를 서명한다. 외부 anchor가 있으면 head를 기록한 뒤 별도
+   `memory-deletions.json` position을 순서대로 전진시킨다. 어느 단계든
+   실패하면 삭제 성공을 반환하지 않으며, 둘을 하나의 filesystem atomic
+   operation으로 간주하지 않는다.
+5. journal commit 뒤 source Markdown을 먼저 content-free deletion stub으로
+   durable replace하고 unlink한다. unlink가 지연되거나 되돌아가도 note body는
+   다시 나타나지 않는다.
+6. user state, SQLite/FTS/vector rows, recall cache, hot context를 정리한다.
+7. `derivedFrom`을 따라 파생 기억을 연쇄 철회 또는 격리한다. 연쇄 철회 source도
+   같은 redaction-before-unlink 경계를 사용한다.
 
 tombstone은 삭제 권한의 내구성 있는 경계다. title, body, source path,
-content hash를 저장하지 않고 note ID, note/source type, 정규화된 reason,
-삭제 시각만 저장한다.
+content hash를 저장하지 않고 canonical ledger note ID, 닫힌 note/source type,
+정규화된 reason, 삭제 시각만 저장한다. Evelyn 고유 machine ID 형식만 그대로
+허용하며, front matter의 임의 ID는 domain-separated SHA-256
+`opaque-<64hex>`로 투영한다. 임의 type/source label도 각각 `unknown` 또는
+정해진 alias enum으로 정규화한다. 따라서 사용자 작성 ID가 문장이나 transcript
+형태여도 새 v2 journal, redaction stub, API apply 결과, content-free receipt와
+provenance audit에는 원문이 기록되지 않는다. application 내부 graph join은 기존
+raw ID를 유지하고 삭제 여부를 비교할 때만 같은 ledger projection을 적용한다.
+Fast의 사용자 지정 memory provider가 주는 receipt도 note ID를 같은 ledger ID로
+투영하되 이미 canonical인 ledger ID는 이중 hash하지 않는다. `retrievalMode`는
+`fts`, `scan`, `fts+vector`, `scan+vector`, `cache`, `unknown`의 닫힌 enum만
+허용하며 provider·retrieval cache의 자유 형식 값은 `unknown`으로 바꾼다.
+legacy evidence/source/turn ID도 producer, 최종 receipt와 durable turn summary에서
+각각 domain-separated `opaque-evidence-*`/`opaque-turn-*`로 투영한다. explicit
+confirmation 성공 receipt의 note ID는 canonical ledger ID, source ref는
+`turn:opaque-turn-<64hex>:user` 형식만 허용한다. 원본 source ref는 provenance를
+담는 content-bearing note 안에만 남고 `contentFree=true` receipt에는 나오지 않는다.
+`memory_derivation_revocations.json`도 target/direct/revoked/blocked/remaining ID를
+ledger ID로만 저장한다. 읽을 때 현재 live graph의 raw ID 후보를 같은 방식으로
+투영해 정확히 하나만 일치할 때 역매핑한다. 비정규 ID나 충돌·모호성은 추측하지
+않고 `memory_derivation_revocations_corrupt`로 fail-closed한다. 이미 삭제되어 live
+graph에 없는 canonical stale target은 reconciliation 동안에만 허용한 뒤 artifact에서
+제거한다. 정상 legacy raw artifact와 duplicate/additional key 또는 비정규 byte
+serialization은 writer lease와 observability lock 아래 canonical content-free 형식으로
+내구성 있게 다시 쓰며, 이 교체가 실패하면 고정 integrity 오류로 fail-closed한다.
+
+기존 v1 journal은 원본 byte prefix 전체의 SHA-256 domain hash로 고정한다.
+첫 read가 non-empty legacy-only journal을 만나면 writer lease 아래 sequence 0
+head를 먼저 durable write한 뒤에만 내용을 반환한다. 이후 valid한 legacy tail을
+지우거나 바꾸는 것도 integrity failure다. v2 chain은 빈 줄, partial JSON,
+duplicate key, non-canonical serialization, pathological integer/depth,
+per-record·전체 크기 초과, unknown/extra/missing field, sequence gap,
+hash mismatch, v1-after-v2와 symlink artifact를 모두 fail-closed한다.
+
+journal `fsync`와 head 교체 사이의 정확한 1-event lag만 crash recovery로
+허용한다. 둘 이상의 lag, head-ahead, journal/head 불일치, journal 없이 head만
+남은 상태는 복구하지 않는다. directory metadata sync가 실패했으면 파일이
+보이더라도 durable commit으로 보고하지 않는다.
 
 tombstone 기록 뒤 프로세스가 중단되어 source 파일이 남더라도 그 note는
 논리적으로 삭제된 상태다. indexing, direct note lookup, user snapshot,
 recall, supersede 경로는 tombstoned note를 노출하지 않는다. 다음 index sync는
 남은 source와 user state를 재조정하고 파생 인덱스를 제거한다.
+
+현재 journal/head가 유지되는 동안 redaction stub과 tombstone 검증은 지연된
+unlink 또는 남은 source 파일의 본문 노출을 막는다. journal, head와 source를
+함께 과거 상태로 복원하는 공격은 검증된 외부 anchor 없이는 탐지하지 못한다.
+
+snapshot과 삭제 preview/apply는 content-free
+`memory.deletion.integrity.v1`을 함께 반환한다. `rollbackProtected=true`는
+keyed head와 외부 anchor가 모두 검증된 경우에만 참이다. 외부 anchor가
+검증되지 않은 기본·key-only 상태는 local corruption과 단독 truncation은
+탐지하지만 유효한 journal+head 과거 쌍 replay는 탐지하지 못한다.
+
+### Exposure linearization
+
+recall, 전체 vault context 조립, graph/snapshot/detail, hot context, provenance
+preview/apply, index/cache rebuild와 memory write는 deletion writer lease 안에서
+journal을 검증하고 결과가 경계를 벗어나기 직전에 다시 검증한다. 정상 삭제는
+노출 전 또는 노출 후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로
+그 본문을 반환할 수 없다.
+
+semantic consolidation과 derivation recomposition은 source의 현재 tombstone과
+content hash를 writer lease 안에서 다시 검사한 뒤 그 lease를 Sub-LLM 호출이
+끝날 때까지 유지한다. 결과 write 전에도 source/target을 다시 검사한다. 따라서
+삭제 성공 뒤 source 본문을 Sub-LLM에 새로 전송하거나 중단된 결과를 쓰지 않는다.
+
+전체 legacy+vault memory context build는 하나의 검증된
+`memory.deletion.position.v1`에서 수행한다. 공개 memory receipt에는 sequence와
+position digest만 있는 `deletionBoundary`를 남기고, root-bound
+`MemoryDeletionPosition` 객체는 현재 async context/Fast typed request 안에서만
+운반한다. Main non-stream, Voice stream/legacy response, Fast Control stream의
+실제 HTTP sink는 request factory를 호출하기 전에 그 position을 다시 검증하고
+응답 소비가 끝날 때까지 deletion lease를 유지한다. build 뒤 삭제가 먼저
+commit됐거나 position이 다른 root·sequence라면 고정 integrity 오류로 중단하며
+HTTP POST는 시작하지 않는다. 기억 본문이 empty/withheld/not-requested이면 내부
+position을 지우고 공개 boundary를 `not_required`로 만든다.
+
+cognitive-state, 경량 route planner와 장기 memory writeback처럼 legacy/layered
+기억을 읽는 background JSON LLM도 동일하다. 메시지를 만드는 guard에서 position을
+캡처해 primary와 compact retry 모두에 명시적으로 전달하고, 공통 JSON sink는
+`memory_boundary_required=true`일 때 POST factory 호출 전에 재검증한다. 응답으로
+생성한 cognitive state, summary와 durable facts는 같은 position을 다시 획득한
+guard 안에서만 기록한다. 이 사이 삭제가 먼저 commit되면 모델 결과를 저장하지
+않고 고정 integrity 오류로 중단한다. 기억을 입력받지 않는 JSON LLM 호출은
+boundary 없이 기존 계약을 유지한다.
+
+provenance-correction journal의 새 v2 prepared event도 target/source/origin
+application ID를 그대로 저장하지 않고 deletion-ledger ID만 기록한다. recovery와
+undo는 현재 live graph와 immutable legacy v1 prefix에서 만든 exact 1:1 mapping으로
+raw graph identity를 복원한다. 미매핑, 충돌 또는 canonical 형식이 아닌 v2 ID는
+추측하지 않고 correction journal integrity failure로 차단한다. persisted
+provenance coverage의 `bySourceType`, `byNoteType`과 forward rejection note type은
+각각 닫힌 source/note type enum으로 정규화하고 alias bucket을 합산한다.
 
 ## Derived-memory partial revocation
 
@@ -471,11 +597,12 @@ title, body와 transcript는 집계에 포함하지 않는다.
 
 ## Cache and daily-note continuity
 
-hot context에는 deletion journal의 수정 시각과 크기를 함께 저장한다. 캐시와
-현재 journal의 상태가 다르면 cached prompt는 빈 값으로 처리되어 삭제된 기억이
-다시 주입되지 않는다. derivation revocation 파일의 수정 시각과 크기도 같은
-방식으로 묶는다. 다음 index sync는 stale hot-context와 prompt-block 파일도
-제거한다. 새 hot-context와 prompt block은 원자 파일 교체로 갱신한다.
+hot context에는 deletion journal과 chain head 각각의 수정 시각·크기를 함께
+저장한다. cache metadata가 현재 4-value journal/head state와 다르거나 ledger
+자체가 strict validation을 통과하지 못하면 cached prompt는 빈 값으로 처리되어
+삭제된 기억이 다시 주입되지 않는다. derivation revocation 파일의 수정 시각과
+크기도 같은 방식으로 묶는다. 다음 index sync는 stale hot-context와 prompt-block
+파일도 제거한다. 새 hot-context와 prompt block은 원자 파일 교체로 갱신한다.
 
 현재 날짜의 daily note를 삭제한 뒤 새 대화가 생기면 같은 파일 경로를 다시
 사용할 수 있지만 note ID는
@@ -488,8 +615,11 @@ hot context에는 deletion journal의 수정 시각과 크기를 함께 저장�
 - tombstone은 내구성 있게 기록됐지만 파생 정리가 남음:
   HTTP 503, `ok=false`, `error=memory_delete_cleanup_required`,
   `tombstoned=true`, `cleanupErrors=[...]`
-- tombstone 자체를 내구성 있게 기록하지 못함:
-  HTTP 500, `error=memory_delete_failed`
+- deletion-ledger 무결성/내구 commit 실패로 분류되기 전의 예기치 않은 사전
+  실패: HTTP 500, `error=memory_delete_failed`
+- deletion ledger가 손상됐거나 writer/exposure lease를 획득하지 못함:
+  HTTP 503, exact
+  `{ "ok": false, "error": "memory_deletion_journal_integrity_failed" }`
 - preview 뒤 파생 영향 그래프 변경:
   HTTP 409, `memory_derivation_impact_changed_since_preview`, 삭제 없음
 
@@ -497,10 +627,25 @@ hot context에는 deletion journal의 수정 시각과 크기를 함께 저장�
 fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과 인덱스가
 정리됐는지 확인한다.
 
+integrity 503에는 parser 원문, 예외 메시지, source/title/body, transcript,
+host path를 넣지 않고 `Cache-Control: no-store`를 적용한다. recall의 같은 실패도
+빈 context/facts/sources와 고정 error code만 반환한다. Bot API chat state
+handler도 이 오류를 generic `control_page_chat_failed`로 바꾸지 않고 최외곽
+middleware까지 다시 던지며, 공개 Control Page proxy는 같은 exact 503과
+`no-store`를 보존한다.
+
 ## Storage
 
 - journal:
   `bot_memory/memory_index/memory_deletions.jsonl`
+- deletion chain head:
+  `bot_memory/memory_index/memory_deletions_chain_head.json`
+- deletion writer OS lock:
+  `bot_memory/memory_index/.memory_deletions_writer.lock`
+- optional external deletion anchor (configured root):
+  `memory-deletions.json`
+- signed external deletion-initialization witness (configured root):
+  `memory-deletions.initialized.json`
 - user state:
   `bot_memory/memory_index/user_note_state.json`
 - derived index:
@@ -540,6 +685,28 @@ prompt block과 user state가 의도적으로 남아 있다.
   retrieval cache, user state, hot-context와 prompt block을 제거한다.
 - recall 결과에 삭제 title/body가 없고 동일 note ID 재생성이 차단된다.
 - tombstone에는 title, body, path, content hash가 없다.
+
+`tests.memory.test_memory_deletion_journal_integrity`와
+`tests.memory.test_memory_deletion_integrity_restart`는 추가로 다음을 검증한다.
+
+- strict v1/v2 shape, legacy raw-prefix pin, v2 sequence/hash chain
+- malformed/partial/oversized/symlink artifact, duplicate JSON key,
+  non-canonical v2 row와 pathological JSON의 고정 integrity 실패
+- journal이 없고 head가 남은 상태 거부, 검증된 외부 anchor 사용 시
+  journal+head pair replay와 journal/head/anchor 전체 삭제 거부
+- 공유 anchor에 correction journal만 있는 진짜 미초기화 deletion ledger 허용,
+  첫 승인 삭제의 signed initialization witness 생성과 기존 anchor marker migration
+- exact 1-event crash recovery와 그 이상의 lag 거부
+- signed head와 외부 anchor의 과거 journal+head replay 탐지
+- writer allowlist가 아니라 OS single-writer lease를 무시한 경쟁 append 거부
+- fresh-process torn/missing/lag 상태와 same-ID resurrection 차단
+- cached recall, 전체 vault context, semantic Sub-LLM, derivation recomposition
+  경계의 concurrent delete 선형화
+- 전체 legacy+vault context position capture, content-free receipt projection,
+  build와 Main/Voice/Fast HTTP admission 사이 삭제 시 POST 0회 fail-closed
+- unlink 실패 시 source Markdown의 title/body가 content-free stub으로 먼저
+  redaction되는 계약
+- public API의 exact content-free 503와 integrity status projection
 
 `tests.memory.test_memory_edit_restart`는 사용자 편집 뒤 새 Python
 프로세스에서 note detail과 recall을 다시 열어 수정 본문,
