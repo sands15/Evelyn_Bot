@@ -314,6 +314,251 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(payload["leaseStatus"]["statusReady"])
 
+    async def test_minecraft_owner_lock_failure_returns_503(self) -> None:
+        class Owner:
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": True,
+                    "statusReady": True,
+                    "ownerClaimOwned": False,
+                    "ownerLockHeld": False,
+                    "lease": None,
+                    "lastErrorCode": (
+                        "minecraft_world_lease_owner_lock_unavailable"
+                    ),
+                }
+
+            @staticmethod
+            async def connect(_guild_id, **_kwargs):
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_lock_unavailable"
+                )
+
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            Owner(),
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                payload = await response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "minecraft_world_lease_owner_lock_unavailable",
+        )
+        self.assertFalse(payload["leaseStatus"]["ownerLockHeld"])
+
+    async def test_minecraft_owner_infrastructure_failures_return_503(
+        self,
+    ) -> None:
+        class Owner:
+            def __init__(self, error: str) -> None:
+                self.error = error
+
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            def status(self):
+                return {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": True,
+                    "statusReady": True,
+                    "ownerClaimOwned": True,
+                    "ownerLockHeld": True,
+                    "lease": None,
+                    "lastErrorCode": self.error,
+                }
+
+            async def connect(self, _guild_id, **_kwargs):
+                raise RuntimeError(self.error)
+
+        for error in (
+            "minecraft_world_action_lock_busy",
+            "minecraft_world_action_lock_unavailable",
+            "minecraft_world_lease_owner_claim_failed",
+            "minecraft_world_lease_owner_claim_write_failed",
+        ):
+            with self.subTest(error=error), patch.object(
+                fast_api,
+                "MINECRAFT_WORLD_LEASE_OWNER",
+                Owner(error),
+            ):
+                client = TestClient(
+                    TestServer(
+                        fast_api.create_app(
+                            enable_minecraft_world_lease_owner=False
+                        )
+                    )
+                )
+                await client.start_server()
+                try:
+                    response = await client.post(
+                        "/internal/minecraft-world-lease/connect",
+                        headers={
+                            fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                            "owner-secret"
+                        },
+                        json={
+                            "guildId": 7,
+                            "issuerRef": "discord_user:1",
+                            "source": "discord_command",
+                        },
+                    )
+                    payload = await response.json()
+                finally:
+                    await client.close()
+
+                self.assertEqual(response.status, 503)
+                self.assertEqual(payload["error"], error)
+                self.assertEqual(
+                    payload["leaseStatus"]["lastErrorCode"],
+                    error,
+                )
+
+    async def test_minecraft_owner_startup_failure_always_shuts_down(
+        self,
+    ) -> None:
+        class Owner:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def initialize(self) -> None:
+                self.calls.append("initialize")
+
+            async def ensure_started(self) -> None:
+                self.calls.append("ensure_started")
+                raise RuntimeError("startup failed")
+
+            async def shutdown(self, *, reason: str) -> None:
+                self.calls.append(f"shutdown:{reason}")
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            context = fast_api.minecraft_world_lease_owner_context(None)
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                await anext(context)
+
+        self.assertEqual(
+            owner.calls,
+            ["initialize", "ensure_started", "shutdown:shutdown"],
+        )
+
+    async def test_minecraft_owner_initialize_failure_always_shuts_down(
+        self,
+    ) -> None:
+        class Owner:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def initialize(self) -> None:
+                self.calls.append("initialize")
+                raise RuntimeError("initialize failed")
+
+            async def ensure_started(self) -> None:
+                self.calls.append("ensure_started")
+
+            async def shutdown(self, *, reason: str) -> None:
+                self.calls.append(f"shutdown:{reason}")
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            context = fast_api.minecraft_world_lease_owner_context(None)
+            with self.assertRaisesRegex(RuntimeError, "initialize failed"):
+                await anext(context)
+
+        self.assertEqual(
+            owner.calls,
+            ["initialize", "shutdown:shutdown"],
+        )
+
+    async def test_cancelled_minecraft_owner_startup_shields_shutdown(
+        self,
+    ) -> None:
+        ensure_started = asyncio.Event()
+        shutdown_started = asyncio.Event()
+        allow_shutdown = asyncio.Event()
+        shutdown_completed = asyncio.Event()
+
+        class Owner:
+            @staticmethod
+            def initialize() -> None:
+                return None
+
+            @staticmethod
+            async def ensure_started() -> None:
+                ensure_started.set()
+                await asyncio.Event().wait()
+
+            @staticmethod
+            async def shutdown(*, reason: str) -> None:
+                if reason != "shutdown":
+                    raise AssertionError(reason)
+                shutdown_started.set()
+                await allow_shutdown.wait()
+                shutdown_completed.set()
+
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            Owner(),
+        ):
+            context = fast_api.minecraft_world_lease_owner_context(None)
+            startup_task = asyncio.create_task(anext(context))
+            await asyncio.wait_for(ensure_started.wait(), timeout=1.0)
+            startup_task.cancel()
+            await asyncio.wait_for(shutdown_started.wait(), timeout=1.0)
+            self.assertFalse(startup_task.done())
+            startup_task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(startup_task.done())
+            allow_shutdown.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(startup_task, timeout=1.0)
+
+        self.assertTrue(shutdown_completed.is_set())
+
     async def test_local_voice_stream_missing_token_has_no_turn_side_effects(
         self,
     ) -> None:

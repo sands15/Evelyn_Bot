@@ -132,6 +132,24 @@ status/proof를 소비하는 모든 경계는 `auditReady`와 `statusReady`가 �
 `minecraft_world_lease_audit_unavailable` 또는
 `minecraft_world_lease_status_write_failed`로 거부한다.
 
+Bot API 단일 owner의 권한 근거는 stable `owner_claim.lock`에 process lifetime
+동안 유지하는 exclusive OS lock 하나뿐이다. `owner_claim.json`의 heartbeat,
+timestamp와 PID는 진단 정보이므로 오래됐다는 이유로 살아 있는 owner를 교체하지
+않는다. claim의 process nonce는 status/proof epoch가 현재 owner publication과
+일치하는지 fail-closed로 fencing하지만 새 owner를 선출하는 근거는 아니다. 정상
+shutdown은 revoke와 shielded runtime cleanup 뒤 kernel lock을 반납하고,
+crash·process exit에서는 OS가 lock을 해제한다. 새 owner는 lock 획득 뒤 새
+process nonce와 capability token을 발급하고 이전 lease를 복구하지 않는다.
+15초 heartbeat freshness는 Mindcraft/Voyager가 stale status를 거부하고 runner를
+정지하는 service-side 경계이며 owner takeover 유예가 아니다.
+
+별도의 stable `world_action.lock`은 proof admission과 실제 effect 사이를 owner
+handoff와 직렬화한다. Mindcraft/Voyager `/start`·`/goal`은 검증 직전부터 effect
+commit까지 이 lock을 유지하고, successor owner는 predecessor token 폐기와 새
+claim/status/secret epoch 게시 동안 같은 lock을 유지한다. 따라서 검증 직후 이전
+owner가 죽더라도 이미 검증된 proof가 새 epoch의 effect로 넘어갈 수 없다. lock
+busy·unavailable은 임의 재시도나 timestamp fallback 없이 503으로 거부한다.
+
 owner 초기화의 `process_started`, lease 발급, runner 시작 확인, goal 실행 전
 시도와 실행 후 확인 event는 각 JSONL 행을 flush하고 `fsync`한 뒤에만 성공으로
 인정한다. 필요한 event를 내구 기록할 수 없으면 다음 계약을 적용한다.
@@ -178,13 +196,21 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 - retry budget 소진의 미검증·cursor 유지
 - 미검증 결과와 미검증 skip이 plan cursor를 진행하지 않음
 - Minecraft 접속·종료·목표 변경의 긍정/부정 outcome
+- lifetime owner lock의 live-owner 경쟁 거부, crash release, nonce/token 회전과
+  refresh/status/release adversarial interleaving
 - 변경성 Discord 명령의 owner/admin 권한 검사
 - 감사 journal retention 기본값
 
 실제 Discord 메시지 전송, 장시간 grant 만료, Minecraft 연결·종료·목표 변경을
 한 세션에서 수행하는 live E2E는 별도 운영 증거가 필요하다. 이 검증이 끝나기
-전에는 자율행동 P0를 운영 완료로 판정하지 않는다. 현재 world-action lease의
-2026-08-01 durable-audit source 계약은 bundled Python에서 Minecraft 115개
+전에는 자율행동 P0를 운영 완료로 판정하지 않는다. 직전 world-action lease의
+2026-08-01 durable-audit snapshot은 bundled Python에서 Minecraft 115개
 (skip 7), runtime 513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를
 통과했다. 다만 실제 Minecraft E2E 증거는 아니므로 운영 완료 근거로 사용하지
-않는다.
+않는다. 현재 lifetime lock도 Docker Desktop bind mount를 공유하는 실제 두
+컨테이너 사이의 exclusion과 SIGKILL crash release는 별도 live 증거가 필요하다.
+현재 increment의 source 회귀는 Minecraft 156개(skip 8), runtime 518개(skip 4)를
+통과했다. 전체 discover 2,476개의 잔여 3건은
+기존 opaque note ID 기대값,
+Windows SQLite 임시파일 handle, Voyager `requests` 미설치이며 이 lock 변경의
+실패는 아니다.

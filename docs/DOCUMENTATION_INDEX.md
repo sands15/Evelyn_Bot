@@ -82,11 +82,12 @@ implemented behavior.
 - `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
   - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,
     Minecraft 직접 제어의 fail-closed 성공 판정, exact `auditReady`/
-    `statusReady`, 내구성 감사 journal·status와 audit loss 중
-    safety-executable stop 계약.
+    `statusReady`, process-lifetime owner OS lock, 내구성 감사 journal·status와
+    audit loss 중 safety-executable stop 계약.
 
 - `docs/MINECRAFT_WORLD_ACTION_LEASE.md`
-  - Minecraft runner의 Bot API 단일 lease owner, 서비스 proof, heartbeat,
+  - Minecraft runner의 Bot API 단일 lease owner, stable `owner_claim.lock`의
+    process-lifetime kernel authority, 서비스 proof·15초 status guard,
     인증된 Discord 위임, 경쟁 owner 차단, 재시작 비복구와 flush/`fsync`
     audit/status-gated capability, 401 privacy와 remote stale-cache 제거 계약을
     정의한다.

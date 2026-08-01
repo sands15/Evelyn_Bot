@@ -46,6 +46,10 @@ Vision 그룹은 `vision` ingress와 `vision_runtime` 두 이미지를 함께 �
 launcher는 자신이 만든 매핑임을 다시 확인한 뒤 해제하며 기존 `subst` 매핑은
 재사용하거나 삭제하지 않는다.
 
+이미지 교체 전 launcher는 기존 Bot API 컨테이너가 실제로 정지했는지 확인한다.
+crash 뒤 `owner_claim.json`이 남아 있어도 이는 경고만 표시하는 진단 파일이며,
+새 Bot API가 stable process-lifetime OS lock을 획득해야만 owner가 된다.
+
 기본 런타임:
 
 ```powershell

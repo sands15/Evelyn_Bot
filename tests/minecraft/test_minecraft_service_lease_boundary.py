@@ -56,6 +56,19 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
             "load_guarded_world_lease",
             runtime_source,
         )
+        for guarded_source in (
+            start_source,
+            goal_source,
+            runtime_source,
+        ):
+            self.assertIn(
+                "owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH",
+                guarded_source,
+            )
+        self.assertIn(
+            'WORLD_LEASE_OWNER_CLAIM_PATH = (',
+            full_source,
+        )
         self.assertIn(
             "app.cleanup_ctx.append(_world_lease_guard_context)",
             full_source,
@@ -67,6 +80,7 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
         start_source = function_source(path, "start")
         goal_source = function_source(path, "set_goal")
         poller_source = function_source(path, "_status_poller")
+        full_source = path.read_text(encoding="utf-8")
 
         self.assertLess(
             start_source.index("validate_world_lease_request"),
@@ -78,6 +92,19 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
         )
         self.assertIn("load_guarded_world_lease", poller_source)
         self.assertIn("STATE.stop_runner()", poller_source)
+        for guarded_source in (
+            start_source,
+            goal_source,
+            poller_source,
+        ):
+            self.assertIn(
+                "owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH",
+                guarded_source,
+            )
+        self.assertIn(
+            'WORLD_LEASE_OWNER_CLAIM_PATH = (',
+            full_source,
+        )
 
     def test_local_bridge_has_no_direct_world_mutation(self) -> None:
         path = CORE_ROOT / "local_io_bridge.py"

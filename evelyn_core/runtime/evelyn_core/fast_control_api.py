@@ -2476,17 +2476,34 @@ async def cached_fast_runtime_health(
     )
 
 
+async def _shielded_minecraft_world_lease_owner_shutdown(
+    owner: Any,
+) -> None:
+    shutdown_task = asyncio.create_task(
+        owner.shutdown(reason="shutdown")
+    )
+    cancellation_requested = False
+    while not shutdown_task.done():
+        try:
+            await asyncio.shield(shutdown_task)
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            continue
+    shutdown_task.result()
+    if cancellation_requested:
+        raise asyncio.CancelledError()
+
+
 async def minecraft_world_lease_owner_context(
     _: web.Application,
 ):
-    MINECRAFT_WORLD_LEASE_OWNER.initialize()
-    await MINECRAFT_WORLD_LEASE_OWNER.ensure_started()
+    owner = MINECRAFT_WORLD_LEASE_OWNER
     try:
+        owner.initialize()
+        await owner.ensure_started()
         yield
     finally:
-        await MINECRAFT_WORLD_LEASE_OWNER.shutdown(
-            reason="shutdown"
-        )
+        await _shielded_minecraft_world_lease_owner_shutdown(owner)
 
 
 async def health_handler(_: web.Request) -> web.StreamResponse:
@@ -2584,7 +2601,12 @@ async def minecraft_world_lease_mutation_handler(
                 503
                 if error in {
                     "minecraft_service_unavailable",
+                    "minecraft_world_action_lock_busy",
+                    "minecraft_world_action_lock_unavailable",
                     "minecraft_world_lease_audit_unavailable",
+                    "minecraft_world_lease_owner_claim_failed",
+                    "minecraft_world_lease_owner_claim_write_failed",
+                    "minecraft_world_lease_owner_lock_unavailable",
                     "minecraft_world_lease_status_write_failed",
                 }
                 else 409

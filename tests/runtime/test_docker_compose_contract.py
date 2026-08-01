@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -150,14 +151,17 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertNotIn("restart: always", source)
         self.assertEqual(source.count('restart: "no"'), 14)
 
-    def test_bot_api_has_time_to_release_single_owner_claim(self) -> None:
+    def test_bot_api_stop_budget_exceeds_artifact_fence_grace(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
         bot_api = source.split("  bot_api:\n", 1)[1].split(
             "\n  control_page:",
             1,
         )[0]
 
-        self.assertIn("stop_grace_period: 30s", bot_api)
+        match = re.search(r"stop_grace_period: (\d+)s", bot_api)
+        self.assertIsNotNone(match)
+        self.assertGreater(int(match.group(1)), 31 + 10)
+        self.assertEqual(int(match.group(1)), 60)
 
     def test_mindcraft_persists_microsoft_account_profile_cache(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")

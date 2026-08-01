@@ -56,9 +56,13 @@ Minecraft 상태 변화까지 한 세션에서 수행하는 live E2E는 아직 �
 
 Minecraft world-action lease, process-rotated capability token, 5초 owner
 heartbeat, 15초 service-side stale guard, restart 비복구, `/start`·`/goal`
-proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단일 owner,
-공유 claim을 통한 경쟁 owner 차단, Discord 인증 위임, split Fast Control의
-승인 경로도 구현했다. Local I/O Bridge와 legacy auto-start 우회는 차단했다.
+proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단일 owner는
+stable `owner_claim.lock`의 process-lifetime OS lock을 유일한 소유권 근거로
+사용한다. `owner_claim.json` heartbeat와 그 timestamp는 진단 정보이며 살아 있는
+owner를 교체하는 근거가 아니다. Discord 인증 위임과 split Fast Control 승인
+경로도 구현했고 Local I/O Bridge와 legacy auto-start 우회는 차단했다.
+`world_action.lock`은 Mindcraft/Voyager의 proof 검증부터 start/goal effect까지와
+successor의 token 폐기·epoch publication을 직렬화해 검증-효과 TOCTOU를 막는다.
 
 2026-08-01 worktree의 추가 source 계약은 world lease event 행을 append 뒤
 flush+`fsync`하며 POSIX의 새 daily file은 parent directory entry까지 sync한다.
@@ -75,15 +79,32 @@ status artifact commit 실패도 같은 capability를 제거하고, 실행 중�
 cancellation에서 stale active cache를 지운다. 이 경계는 raw goal,
 transcript, Minecraft chat과 token을 저장하지 않는다.
 
-최종 source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
+직전 durable-audit source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
 513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제 Minecraft
 connect/goal/stop live E2E는 계속 미검증이다.
 
-계획된 Bot API 교체의 claim handoff도 실제 컨테이너에서 검증했다. shutdown
-취소를 포함한 모든 cleanup 경로가 `finally`에서 claim을 반납하고 30초 stop
-grace를 사용한다. 실제 SIGTERM은 4.2초 안에 claim을 제거했으며 다음
-`--force-recreate`는 첫 시도에 healthy가 됐다. 전원 차단·SIGKILL처럼 cleanup이
-불가능한 종료는 의도적으로 15초 stale guard 뒤에만 새 owner가 인수한다.
+현재 lifetime-lock increment는 같은 bundled Python에서 Minecraft 156개(skip 8)와
+runtime 518개(skip 4)를 통과했다. 전체 discover 2,476개에서는 이 변경과 무관한
+기존 opaque note ID 기대값 1건, Windows SQLite 임시파일 handle 1건, Voyager
+`requests` 미설치 import 1건만 남았고 skip은 18개였다. Python `compileall`, 모든
+Control Page asset JavaScript의 `node --check`, `git diff --check`도 통과했다. 혼합
+bundled/.venv `pip check`의 기존 platform-tag 6건과 실제 main/Minecraft/Docker
+smoke는 이 증거에 포함하지 않는다.
+
+artifact secret·claim을 모두 바꿀 수 없는 극단 실패에서는 shutdown이
+`world_action.lock`과 lifetime owner lock을 31초 stale fence까지 유지한다. Bot API
+Compose와 launcher의 종료 예산은 60초다. 종료 예산을 이보다 줄이거나 lock 파일을
+수동 교체하면 오래된 proof가 stale되기 전에 kernel lock이 풀릴 수 있으므로 계약
+테스트가 이를 고정한다.
+
+이 lifetime-lock 변경 전 timestamp claim 구현에서는 계획된 Bot API 교체의
+claim handoff도 실제 컨테이너에서 검증했다. shutdown 취소를 포함한 cleanup과
+30초 stop grace 아래 실제 SIGTERM은 4.2초 안에 claim을 제거했고 다음
+`--force-recreate`는 첫 시도에 healthy가 됐다. 이 관측은 역사적 배포 증거로
+보존하지만 현재 owner 인수 규칙은 아니다. 현재 계약에서 정상 shutdown은 안전
+정리 뒤 kernel lock을 반납하고, crash·SIGKILL은 OS가 lock을 해제한다. 15초는
+Mindcraft/Voyager가 stale public status를 거부하고 runner를 정지하는 heartbeat
+경계일 뿐 owner takeover 대기 시간이 아니다.
 
 Minecraft가 지연 시작인 동안 owner claim과 공개 상태 heartbeat는 5초로
 유지하되, 외부 서비스 `/status` 탐지는 30초로 분리했다. lease 만료와
@@ -108,20 +129,24 @@ main signature를 조회하는 테스트 2개만 환경 오류였다.
 `verified=true`와 exact `evidenceCode`, 실제 world effect를 한 흐름에서
 대조한다.
 
-## P1 — Minecraft owner claim takeover 원자성
+## P1 — Minecraft lifetime lock의 Docker bind-mount live 검증 대기
 
-현재 owner claim은 fresh owner의 순차 경쟁과 15초 stale takeover를
-fail-closed하지만, claim 확인과 atomic replacement를 하나의 OS-held lock으로
-묶지는 않는다. 극단적인 interleaving에서 stale owner가 기존 nonce를 확인한 뒤
-멈춘 사이 replacement owner가 claim을 인수하고, stale owner가 뒤늦게 refresh
-replace를 수행하면 새 claim/status를 다시 덮을 수 있다. 현재 순차 takeover
-회귀는 이 TOCTOU를 재현하지 않는다.
+소스 계약은 stable `owner_claim.lock`에 건 process-lifetime OS lock을 단일 owner의
+유일한 authority로 사용한다. 살아 있는 owner가 lock을 가진 동안 timestamp가
+오래돼도 replacement owner는 인수할 수 없고, 정상 shutdown이나 crash로 kernel
+lock이 해제된 뒤에만 새 owner가 nonce와 token을 회전하며 lease를 복구하지 않고
+시작한다. 이 경계는 이전 `read → unlink → create`와 늦은 refresh/status replace
+사이의 TOCTOU를 제거한다.
 
-다음 조치: owner process lifetime 동안 유지되는 OS file lock 또는 generation
-CAS를 claim/status commit 경계에 도입하고, 두 owner의 read/unlink/create/replace를
-의도적으로 교차시키는 deterministic multi-process 회귀를 추가한다. 이 작업 전에는
-15초 stale guard를 adversarial scheduling까지 포함한 완전한 mutual exclusion
-증거로 해석하지 않는다.
+남은 위험은 Windows 호스트의 Docker Desktop bind mount와 실제 split container
+사이에서도 두 stable lock의 byte-range lock/POSIX `flock` exclusion과 crash
+release가 소스 테스트와 동일하게 전달되는지 live로 확인하지 않았다는 점이다. 15초 status
+heartbeat guard는 service-side 정지 경계이며 lock coherence의 대체 증거가 아니다.
+
+다음 조치: 같은 bind mount를 공유하는 두 Bot API 프로세스·컨테이너를 의도적으로
+겹쳐 실행해 live owner가 있는 동안 두 번째 기동이 즉시 fail-closed하는지,
+SIGKILL 뒤 kernel lock이 자동 해제되어 새 owner가 lease 비복구·nonce/token 회전
+상태로 인수하는지, 이전 proof가 거부되는지를 대조한다.
 
 ## P1 — Conversation Continuity live Discord·원격 CI 검증 대기
 

@@ -279,25 +279,41 @@ function Invoke-DockerCommand {
     }
 }
 
+function Test-DockerContainerRunning {
+    param([string]$ContainerName)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $state = & docker inspect --format '{{.State.Running}}' $ContainerName 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return (
+        $exitCode -eq 0 -and
+        ([string]$state).Trim().ToLowerInvariant() -eq 'true'
+    )
+}
+
 function Stop-BotApiForImageRefresh {
     Write-Host '[Evelyn] Stopping the current Bot API cleanly before replacing its image.'
     Invoke-DockerCommand -Arguments @(
         'stop',
-        '--timeout', '15',
+        '--timeout', '60',
         'evelyn-bot-api'
     ) -IgnoreFailure
 
-    $deadline = (Get-Date).AddSeconds(20)
-    while ((Get-Date) -lt $deadline) {
-        if (-not (Test-Path -LiteralPath $minecraftOwnerClaim -PathType Leaf)) {
-            return
-        }
-        Start-Sleep -Milliseconds 250
+    if (Test-DockerContainerRunning -ContainerName 'evelyn-bot-api') {
+        throw 'Bot API is still running after docker stop. Refusing to replace a live owner.'
     }
-    throw (
-        "Bot API stopped but did not release its Minecraft owner claim. " +
-        "Refusing to recreate it while ownership is ambiguous: $minecraftOwnerClaim"
-    )
+    if (Test-Path -LiteralPath $minecraftOwnerClaim -PathType Leaf) {
+        Write-Warning (
+            'A stale Minecraft owner claim remains after Bot API stop. ' +
+            'The claim JSON is diagnostic only; the replacement Bot API must acquire ' +
+            'the process-lifetime OS lock before it can become owner.'
+        )
+    }
 }
 
 function Start-DockerCore {

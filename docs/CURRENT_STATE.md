@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-01 KST
-Source branch: `codex/dependency-config-hardening`, current Minecraft world-lease durable-audit/status fail-closed increment
+Source branch: `codex/dependency-config-hardening`, current Minecraft world-lease process-lifetime owner-lock increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -26,10 +26,22 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
     `explicit_postcondition` 결과 검증을 모두 요구한다.
   - 누락·손상·상위 상태와 모순된 Mindcraft 계약은 fail-closed하며,
     Control Page와 Runtime Health는 같은 validator를 사용한다.
-  - Bot API의 Minecraft 단일-owner claim은 정상 종료와 취소된 cleanup 모두
-    `finally`에서 반납한다. Bot API 컨테이너에는 외부 runtime 정리를 끝낼 수
-    있는 30초 stop grace를 적용한다. 강제 종료의 15초 stale takeover와
-    경쟁 owner fail-closed 규칙은 유지한다.
+  - Bot API의 Minecraft 단일-owner authority는 stable `owner_claim.lock`에
+    process lifetime 동안 유지하는 exclusive OS lock이다. `owner_claim.json`과
+    timestamp는 진단 heartbeat이며 살아 있는 owner의 takeover 근거가 아니다.
+    claim nonce는 status/proof epoch mismatch를 거부하는 fencing 값일 뿐 owner
+    선출 근거가 아니다. 정상 shutdown은 shielded runtime cleanup 뒤 kernel lock을
+    반납하고 crash나 process exit에서는 OS가 lock을 해제한다. 새 owner는
+    nonce/token을 회전하고 lease를 복구하지 않는다. 15초는 stale service/status를
+    거부하는 runner guard다.
+    별도 `world_action.lock`은 Mindcraft/Voyager의 proof 검증부터 start/goal
+    effect commit까지와 successor epoch publication을 직렬화한다. busy 또는
+    unavailable이면 503으로 fail-closed하며 timestamp fallback은 없다.
+    Bot API 컨테이너에는 31초 artifact fence와 외부 runtime 정리를 모두 끝낼
+    60초 stop grace를 적용한다.
+  - 로컬 image-refresh launcher는 기존 Bot API 컨테이너의 정지를 확인하되,
+    crash 뒤 남을 수 있는 `owner_claim.json`은 경고만 표시한다. successor의
+    process-lifetime OS lock 획득이 재기동 시 유일한 fail-closed owner 판정이다.
 - 현재 worktree의 Minecraft world-action lease source 계약은 감사 내구성을
   실행 권한에 포함한다.
   - status/proof consumer는 `auditReady`와 `statusReady`가 모두 정확한
@@ -52,9 +64,15 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
     cancellation에서 기존 active cache를 즉시 inactive error로 지운다.
   - status와 audit journal에는 raw goal, transcript, Minecraft chat, token과
     임의 arguments를 저장하지 않는다.
-  - 최종 source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
+  - 직전 durable-audit source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
     513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제
     Minecraft connect/goal/stop E2E는 아직 확인된 사실로 기록하지 않는다.
+  - 현재 lifetime-lock increment는 bundled Python의 Minecraft 156개(skip 8),
+    runtime 518개(skip 4)를 통과했다. 전체 discover 2,476개에서는 기존 opaque
+    note ID 기대값, Windows SQLite 임시파일 handle, Voyager `requests` 미설치의
+    무관한 3건만 남았고 skip은 18개였다. `compileall`, 모든 Control Page asset
+    JavaScript 구문 검사와 `git diff --check`도 통과했다. 혼합 환경 `pip check`의
+    기존 platform-tag 6건과 실제 main/Minecraft/Docker smoke는 미검증이다.
 - 음성 P0 검증 FSM과 로컬 재생 연속성 경계를 강화했다.
   - 현재 surface와 barge-in에 연결된 interrupt 단계만 이벤트를 받을 수 있다.
     지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.
@@ -442,6 +460,11 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
     상태 불일치와 stale version은 fail-closed로 제외한다.
 
 ## Deployment state
+
+아래 timestamp claim의 15초 대기·회수 기록은 lifetime lock 도입 전 배포에서
+실제로 관측한 역사적 사실이다. 현재 소스의 owner 인수 규칙으로 재해석하지 않는다.
+현재 contract의 Docker bind-mount cross-container lock coherence와 crash release는
+아직 live 배포 증거가 없다.
 
 - `bd0786d` 소스로 Mindcraft 이미지만 다시 빌드했다.
   - Mindcraft:

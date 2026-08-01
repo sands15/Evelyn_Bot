@@ -12,6 +12,11 @@ from typing import Any
 
 from aiohttp import web
 
+from .minecraft_owner_lock import (
+    MinecraftOwnerLock,
+    MinecraftOwnerLockBusy,
+    MinecraftOwnerLockUnavailable,
+)
 from .paths import get_runtime_artifacts_root
 from .minecraft_world_lease_contract import (
     load_guarded_world_lease,
@@ -44,6 +49,16 @@ WORLD_LEASE_STATUS_PATH = (
     RUNTIME_ARTIFACTS_ROOT
     / "minecraft_world_lease"
     / "status.json"
+)
+WORLD_LEASE_OWNER_CLAIM_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "minecraft_world_lease"
+    / "owner_claim.json"
+)
+WORLD_ACTION_LOCK_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "minecraft_world_lease"
+    / "world_action.lock"
 )
 WORLD_LEASE_SECRET_PATH = (
     RUNTIME_ARTIFACTS_ROOT
@@ -348,6 +363,7 @@ class MindcraftRuntime:
         lease_status, error = load_guarded_world_lease(
             WORLD_LEASE_STATUS_PATH,
             WORLD_LEASE_SECRET_PATH,
+            owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH,
         )
         authorized = bool(lease_status)
         self._last_world_lease_error_code = error
@@ -524,20 +540,52 @@ async def observe(_: web.Request) -> web.Response:
     return web.json_response(STATE.build_status().get("observation") or {})
 
 
+def _acquire_world_action_lock() -> MinecraftOwnerLock:
+    action_lock = MinecraftOwnerLock(WORLD_ACTION_LOCK_PATH)
+    try:
+        action_lock.acquire()
+    except MinecraftOwnerLockBusy:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps(
+                {"error": "minecraft_world_action_lock_busy"}
+            ),
+            content_type="application/json",
+        ) from None
+    except (MinecraftOwnerLockUnavailable, OSError):
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps(
+                {
+                    "error": (
+                        "minecraft_world_action_lock_unavailable"
+                    )
+                }
+            ),
+            content_type="application/json",
+        ) from None
+    return action_lock
+
+
 async def start(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
-    valid, error = validate_world_lease_request(
-        payload,
-        status_path=WORLD_LEASE_STATUS_PATH,
-        secret_path=WORLD_LEASE_SECRET_PATH,
-    )
-    if not valid:
-        raise web.HTTPForbidden(
-            text=json.dumps({"error": error}),
-            content_type="application/json",
+    action_lock = _acquire_world_action_lock()
+    try:
+        valid, error = validate_world_lease_request(
+            payload,
+            status_path=WORLD_LEASE_STATUS_PATH,
+            secret_path=WORLD_LEASE_SECRET_PATH,
+            owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH,
         )
-    STATE.start(_clean_goal((payload or {}).get("goal") or STATE.get_goal()))
-    return web.json_response(STATE.build_status())
+        if not valid:
+            raise web.HTTPForbidden(
+                text=json.dumps({"error": error}),
+                content_type="application/json",
+            )
+        STATE.start(
+            _clean_goal((payload or {}).get("goal") or STATE.get_goal())
+        )
+        return web.json_response(STATE.build_status())
+    finally:
+        action_lock.release()
 
 
 async def stop(_: web.Request) -> web.Response:
@@ -547,21 +595,29 @@ async def stop(_: web.Request) -> web.Response:
 
 async def set_goal(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
-    valid, error = validate_world_lease_request(
-        payload,
-        status_path=WORLD_LEASE_STATUS_PATH,
-        secret_path=WORLD_LEASE_SECRET_PATH,
-    )
-    if not valid:
-        raise web.HTTPForbidden(
-            text=json.dumps({"error": error}),
-            content_type="application/json",
+    action_lock = _acquire_world_action_lock()
+    try:
+        valid, error = validate_world_lease_request(
+            payload,
+            status_path=WORLD_LEASE_STATUS_PATH,
+            secret_path=WORLD_LEASE_SECRET_PATH,
+            owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH,
         )
-    goal = str((payload or {}).get("goal") or "").strip()
-    if not goal:
-        raise web.HTTPBadRequest(text=json.dumps({"error": "goal text is empty"}), content_type="application/json")
-    STATE.restart_for_goal(goal)
-    return web.json_response(STATE.build_status())
+        if not valid:
+            raise web.HTTPForbidden(
+                text=json.dumps({"error": error}),
+                content_type="application/json",
+            )
+        goal = str((payload or {}).get("goal") or "").strip()
+        if not goal:
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "goal text is empty"}),
+                content_type="application/json",
+            )
+        STATE.restart_for_goal(goal)
+        return web.json_response(STATE.build_status())
+    finally:
+        action_lock.release()
 
 
 async def _cleanup(_: web.Application) -> None:

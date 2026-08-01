@@ -20,18 +20,50 @@ from .minecraft_mode_composition import (
     minecraft_stop_confirmed,
 )
 from .minecraft_world_lease_contract import (
+    DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC,
     MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+    MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
     MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
     build_world_lease_proof,
 )
+from .minecraft_owner_lock import (
+    MinecraftOwnerLock,
+    MinecraftOwnerLockBusy,
+    MinecraftOwnerLockUnavailable,
+)
 from .runtime_artifact_io import atomic_json_write
 
 
 MINECRAFT_WORLD_LEASE_EVENT_SCHEMA = "minecraft_world_lease.event.v1"
-MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA = (
-    "minecraft_world_lease.owner_claim.v1"
+MINECRAFT_WORLD_LEASE_OWNER_CONFLICT = (
+    "minecraft_world_lease_owner_conflict"
+)
+MINECRAFT_WORLD_LEASE_OWNER_LOCK_UNAVAILABLE = (
+    "minecraft_world_lease_owner_lock_unavailable"
+)
+MINECRAFT_WORLD_LEASE_OWNER_CLAIM_WRITE_FAILED = (
+    "minecraft_world_lease_owner_claim_write_failed"
+)
+MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED = (
+    "minecraft_world_lease_owner_claim_failed"
+)
+MINECRAFT_WORLD_ACTION_LOCK_BUSY = (
+    "minecraft_world_action_lock_busy"
+)
+MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE = (
+    "minecraft_world_action_lock_unavailable"
+)
+_OWNER_AUTHORITY_ERROR_CODES = frozenset(
+    {
+        MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
+        MINECRAFT_WORLD_LEASE_OWNER_LOCK_UNAVAILABLE,
+        MINECRAFT_WORLD_LEASE_OWNER_CLAIM_WRITE_FAILED,
+        MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED,
+        MINECRAFT_WORLD_ACTION_LOCK_BUSY,
+        MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE,
+    }
 )
 DEFAULT_WORLD_LEASE_TTL_SEC = 60 * 60.0
 MAX_WORLD_LEASE_TTL_SEC = 4 * 60 * 60.0
@@ -39,6 +71,10 @@ MIN_WORLD_LEASE_TTL_SEC = 60.0
 DEFAULT_WATCHDOG_INTERVAL_SEC = 5.0
 DEFAULT_STANDBY_PROBE_INTERVAL_SEC = 30.0
 MIN_OWNER_CLAIM_STALE_SEC = 15.0
+WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC = (
+    DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC * 2.0 + 1.0
+)
+WORLD_ACTION_LOCK_RETRY_SEC = 0.05
 STOP_RETRY_WINDOW_SEC = 10 * 60.0
 STOP_RETRY_LIMIT = 3
 
@@ -181,6 +217,8 @@ class MinecraftWorldLeaseOwner:
         events_dir: Path,
         secret_path: Path | None = None,
         owner_claim_path: Path | None = None,
+        owner_lock_path: Path | None = None,
+        world_action_lock_path: Path | None = None,
         get_runtime_status: Callable[
             [],
             Awaitable[dict[str, Any]],
@@ -219,6 +257,21 @@ class MinecraftWorldLeaseOwner:
             or self.status_path.parent
             / "owner_claim.json"
         )
+        self.owner_lock_path = Path(
+            owner_lock_path
+            or self.owner_claim_path.parent
+            / "owner_claim.lock"
+        )
+        self._owner_lock = MinecraftOwnerLock(self.owner_lock_path)
+        self.world_action_lock_path = Path(
+            world_action_lock_path
+            or self.owner_claim_path.parent
+            / "world_action.lock"
+        )
+        self._world_action_lock = MinecraftOwnerLock(
+            self.world_action_lock_path
+        )
+        self._world_action_lock_quarantined = False
         self.get_runtime_status = get_runtime_status
         self.enable_mode = enable_mode
         self.disable_mode = disable_mode
@@ -266,6 +319,7 @@ class MinecraftWorldLeaseOwner:
         self._audit_ready = False
         self._status_ready = False
         self._owner_claim_owned = False
+        self._owner_epoch_published = False
         self._lease: MinecraftWorldLease | None = None
         self._state = "not_initialized"
         self._last_event_at: float | None = None
@@ -361,13 +415,44 @@ class MinecraftWorldLeaseOwner:
         except OSError:
             return False
 
-    def _withhold_delegation_capability(self) -> None:
-        self._lease = None
+    def _mark_owner_conflict(self) -> None:
+        """Drop only local authority; never mutate a successor's artifacts."""
+
+        self._owner_claim_owned = False
         self._secret_ready = False
+        self._lease = None
+        self._state = "owner_conflict"
+        self._last_error_code = MINECRAFT_WORLD_LEASE_OWNER_CONFLICT
+
+    def _mark_owner_lock_unavailable(self) -> None:
+        self._owner_claim_owned = False
+        self._secret_ready = False
+        self._lease = None
+        self._state = "manual_intervention_required"
+        self._last_error_code = (
+            MINECRAFT_WORLD_LEASE_OWNER_LOCK_UNAVAILABLE
+        )
+
+    def _invalidate_secret_artifact(
+        self,
+        *,
+        require_owner_claim: bool = True,
+    ) -> bool:
+        """Invalidate the shared token while this process is still owner."""
+
+        if not self._owner_lock.acquired:
+            return False
+        # The lifetime OS lock, not the mutable diagnostic claim, is the
+        # authority to revoke.  Re-reading owner_claim.json here used to turn
+        # a transient read error into local owner loss before either external
+        # fence could be changed, leaving an otherwise valid old proof behind.
+        if require_owner_claim and not self._owner_claim_owned:
+            return False
         try:
             self.secret_path.unlink()
+            return True
         except FileNotFoundError:
-            pass
+            return True
         except OSError:
             try:
                 atomic_json_write(
@@ -378,13 +463,89 @@ class MinecraftWorldLeaseOwner:
                         "authorizationToken": secrets.token_urlsafe(32),
                         "issuedAt": self.now(),
                     },
+                    durable=True,
                 )
+                return True
             except OSError:
-                pass
+                return False
+
+    def _invalidate_owner_claim_artifact(self) -> bool:
+        """Fence old status when the secret artifact cannot be revoked."""
+
+        if not self._owner_lock.acquired:
+            return False
+        invalidated = False
+        try:
+            self.owner_claim_path.unlink()
+            invalidated = True
+        except FileNotFoundError:
+            invalidated = True
+        except OSError:
+            try:
+                atomic_json_write(
+                    self.owner_claim_path,
+                    {
+                        "schema": (
+                            "minecraft_world_lease.owner_claim.invalid.v1"
+                        ),
+                        "processNonce": secrets.token_hex(8),
+                        "updatedAt": self.now(),
+                        "pid": os.getpid(),
+                    },
+                    durable=True,
+                )
+                invalidated = True
+            except OSError:
+                # _read_owner_claim() deliberately conflates missing,
+                # malformed, and unreadable input for consumers.  It cannot
+                # prove a destructive fence after both mutations failed.
+                invalidated = False
+        if invalidated:
+            self._owner_claim_owned = False
+            self._secret_ready = False
+            self._lease = None
+        return invalidated
+
+    def _quarantine_world_action_barrier(self) -> bool:
+        """Keep new service effects out when artifacts cannot be fenced."""
+
+        if self._world_action_lock.acquired:
+            self._world_action_lock_quarantined = True
+            return True
+        try:
+            self._world_action_lock.acquire_blocking()
+        except (MinecraftOwnerLockBusy, MinecraftOwnerLockUnavailable, OSError):
+            return False
+        self._world_action_lock_quarantined = True
+        return True
+
+    def _withhold_delegation_capability(self) -> bool:
+        self._lease = None
+        self._secret_ready = False
+        claim_state, _ = self._read_owner_claim_snapshot()
+        if (
+            self._owner_epoch_published
+            and claim_state in {"missing", "invalid", "mismatch"}
+        ):
+            # The published status nonce can no longer match the claim seen
+            # by consumers.  Preserve a different explicit owner artifact;
+            # it is already an externally observable denial fence.
+            self._owner_claim_owned = False
+            if claim_state == "mismatch":
+                self._mark_owner_conflict()
+            return True
+        if self._invalidate_secret_artifact():
+            return True
+        if self._invalidate_owner_claim_artifact():
+            return True
+        self._quarantine_world_action_barrier()
+        return False
 
     def _mark_status_write_failed(self) -> None:
         self._status_ready = False
         self._withhold_delegation_capability()
+        if self._last_error_code in _OWNER_AUTHORITY_ERROR_CODES:
+            return
         self._state = "manual_intervention_required"
         self._last_error_code = (
             MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED
@@ -393,6 +554,8 @@ class MinecraftWorldLeaseOwner:
     def _mark_audit_unavailable(self) -> None:
         self._audit_ready = False
         self._withhold_delegation_capability()
+        if self._last_error_code in _OWNER_AUTHORITY_ERROR_CODES:
+            return
         self._state = "manual_intervention_required"
         self._last_error_code = (
             MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
@@ -404,6 +567,8 @@ class MinecraftWorldLeaseOwner:
         event: str,
         **kwargs: Any,
     ) -> bool:
+        if not self._owner_claim_matches():
+            return False
         if not self._status_ready:
             self._mark_status_write_failed()
             return False
@@ -454,10 +619,14 @@ class MinecraftWorldLeaseOwner:
                 self._state == "manual_intervention_required"
             ),
             "ownerClaimOwned": self._owner_claim_owned,
+            "ownerLockHeld": self._owner_lock.acquired,
             "policy": {
                 "restoredAfterRestart": False,
                 "singleWorldOwner": True,
                 "ownerClaimStaleSec": self.owner_claim_stale_sec,
+                "ownerAuthority": "process_lifetime_os_lock",
+                "effectHandoffLock": True,
+                "staleClaimTakeover": False,
                 "defaultTtlSec": self.default_ttl_sec,
                 "maxTtlSec": self.max_ttl_sec,
                 "watchdogIntervalSec": self.watchdog_interval_sec,
@@ -487,9 +656,14 @@ class MinecraftWorldLeaseOwner:
         except OSError:
             self._mark_status_write_failed()
             return False
+        if not self._owner_claim_matches():
+            self._status_ready = False
+            return False
         return True
 
     def _boundary_error_code(self) -> str:
+        if self._last_error_code in _OWNER_AUTHORITY_ERROR_CODES:
+            return self._last_error_code
         if not self._status_ready:
             return MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED
         if not self._audit_ready:
@@ -499,6 +673,8 @@ class MinecraftWorldLeaseOwner:
         return ""
 
     def _boundary_stop_reason(self) -> str:
+        if self._last_error_code in _OWNER_AUTHORITY_ERROR_CODES:
+            return "unauthorized_runtime"
         if not self._status_ready:
             return "status_write_failed"
         if not self._audit_ready:
@@ -515,132 +691,156 @@ class MinecraftWorldLeaseOwner:
             "pid": os.getpid(),
         }
 
-    def _read_owner_claim(self) -> dict[str, Any]:
+    def _read_owner_claim_snapshot(self) -> tuple[str, dict[str, Any]]:
         try:
             payload = json.loads(
                 self.owner_claim_path.read_text(encoding="utf-8")
             )
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        except FileNotFoundError:
+            return "missing", {}
+        except json.JSONDecodeError:
+            return "invalid", {}
+        except OSError:
+            return "unreadable", {}
+        if not isinstance(payload, dict):
+            return "invalid", {}
+        process_nonce = payload.get("processNonce")
+        if (
+            payload.get("schema")
+            != MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA
+            or not isinstance(process_nonce, str)
+            or not process_nonce
+            or process_nonce != process_nonce.strip()
+        ):
+            return "invalid", payload
+        if process_nonce == self.process_nonce:
+            return "match", payload
+        return "mismatch", payload
+
+    def _read_owner_claim(self) -> dict[str, Any]:
+        state, payload = self._read_owner_claim_snapshot()
+        return payload if state in {"match", "mismatch"} else {}
 
     def _owner_claim_matches(self) -> bool:
         if not self._owner_claim_owned:
             return False
-        payload = self._read_owner_claim()
-        matches = bool(
-            payload.get("schema")
-            == MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA
-            and payload.get("processNonce") == self.process_nonce
-        )
+        if not self._owner_lock.acquired:
+            self._mark_owner_lock_unavailable()
+            return False
+        state, _ = self._read_owner_claim_snapshot()
+        matches = state == "match"
         if not matches:
-            self._owner_claim_owned = False
-            self._secret_ready = False
-            self._lease = None
-            self._state = "owner_conflict"
-            self._last_error_code = (
-                "minecraft_world_lease_owner_conflict"
-            )
+            self._mark_owner_conflict()
         return matches
 
-    def _claim_observed_at(self, payload: dict[str, Any]) -> float:
-        updated_at = _finite_float(payload.get("updatedAt"), -1.0)
-        if updated_at >= 0.0:
-            return updated_at
-        try:
-            return float(self.owner_claim_path.stat().st_mtime)
-        except OSError:
-            return self.now()
-
-    def _create_owner_claim(self) -> bool:
-        self.owner_claim_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
+    def _acquire_owner_claim(self) -> bool:
+        if not self._owner_lock.acquired:
+            raise MinecraftOwnerLockUnavailable(
+                MINECRAFT_WORLD_LEASE_OWNER_LOCK_UNAVAILABLE
+            )
+        atomic_json_write(
+            self.owner_claim_path,
+            self._owner_claim_payload(),
+            durable=True,
         )
-        created = False
-        try:
-            with self.owner_claim_path.open(
-                "x",
-                encoding="utf-8",
-            ) as stream:
-                created = True
-                json.dump(
-                    self._owner_claim_payload(),
-                    stream,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-        except FileExistsError:
-            return False
-        except OSError:
-            if created:
-                try:
-                    self.owner_claim_path.unlink()
-                except OSError:
-                    pass
-            raise
+        self._owner_epoch_published = True
         self._owner_claim_owned = True
+        if not self._owner_claim_matches():
+            raise OSError("owner claim commit was not readable")
         return True
 
-    def _acquire_owner_claim(self) -> bool:
-        if self._create_owner_claim():
-            return True
-        payload = self._read_owner_claim()
-        age = max(
-            0.0,
-            self.now() - self._claim_observed_at(payload),
-        )
-        if age <= self.owner_claim_stale_sec:
-            return False
-        try:
-            self.owner_claim_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return False
-        return self._create_owner_claim()
-
     def _refresh_owner_claim(self) -> bool:
-        if not self._owner_claim_matches():
+        claim_state, _ = self._read_owner_claim_snapshot()
+        if claim_state != "match":
+            if claim_state == "unreadable":
+                self._withhold_delegation_capability()
+                if self._last_error_code not in _OWNER_AUTHORITY_ERROR_CODES:
+                    self._state = "manual_intervention_required"
+                    self._last_error_code = (
+                        MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED
+                    )
+            else:
+                self._mark_owner_conflict()
             return False
         try:
             atomic_json_write(
                 self.owner_claim_path,
                 self._owner_claim_payload(),
+                durable=True,
             )
         except OSError:
-            self._owner_claim_owned = False
-            self._secret_ready = False
-            self._lease = None
-            self._state = "owner_conflict"
+            self._withhold_delegation_capability()
+            self._state = "manual_intervention_required"
             self._last_error_code = (
-                "minecraft_world_lease_owner_claim_failed"
+                MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED
             )
             return False
-        return True
+        return self._owner_claim_matches()
 
-    def _release_owner_claim(self) -> None:
-        if not self._owner_claim_matches():
-            return
-        try:
-            self.owner_claim_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
+    def _release_owner_claim(self) -> bool:
+        """Fence published authority before releasing the lifetime lock.
+
+        A diagnostic-claim read is not authority and may itself be the failed
+        I/O boundary.  While the lifetime lock is held it is safe to revoke
+        either shared artifact directly.  If neither fence can be committed,
+        retain the owner lock and quarantine the action lock until shutdown's
+        heartbeat grace has elapsed.
+        """
+
+        if not self._owner_lock.acquired:
+            self._owner_claim_owned = False
+            self._owner_epoch_published = False
             self._secret_ready = False
-            return
+            self._lease = None
+            return True
+
+        claim_state, _ = self._read_owner_claim_snapshot()
+        if (
+            self._owner_epoch_published
+            and claim_state in {"missing", "invalid", "mismatch"}
+        ):
+            fenced = True
+            if claim_state == "mismatch":
+                self._mark_owner_conflict()
+        else:
+            fenced = self._invalidate_secret_artifact(
+                require_owner_claim=False,
+            )
+            if fenced:
+                try:
+                    self.owner_claim_path.unlink()
+                except (FileNotFoundError, OSError):
+                    # The secret fence is already externally sufficient.
+                    pass
+            else:
+                fenced = self._invalidate_owner_claim_artifact()
+
         self._owner_claim_owned = False
         self._secret_ready = False
+        self._lease = None
+        if not fenced:
+            self._quarantine_world_action_barrier()
+            return False
+        self._owner_lock.release()
+        self._owner_epoch_published = False
+        return True
+
+    def _force_release_owner_lock_after_fence_grace(self) -> None:
+        self._owner_claim_owned = False
+        self._owner_epoch_published = False
+        self._secret_ready = False
+        self._lease = None
+        self._owner_lock.release()
 
     def _require_owner_claim(self) -> None:
         if not self._owner_claim_matches():
             raise RuntimeError(
-                "minecraft_world_lease_owner_conflict"
+                self._boundary_error_code()
+                or MINECRAFT_WORLD_LEASE_OWNER_CONFLICT
             )
 
     def _write_secret(self) -> None:
+        self._require_owner_claim()
         atomic_json_write(
             self.secret_path,
             {
@@ -650,12 +850,15 @@ class MinecraftWorldLeaseOwner:
                 "issuedAt": self.now(),
             },
         )
+        self._require_owner_claim()
         self._secret_ready = True
 
     def _lease_proof(
         self,
         lease: MinecraftWorldLease,
     ) -> dict[str, Any]:
+        if not self._owner_claim_matches():
+            return {}
         status = self._status_payload()
         if (
             self._lease is None
@@ -675,57 +878,128 @@ class MinecraftWorldLeaseOwner:
             ),
         )
 
+    def _initialize_owner_epoch(self) -> dict[str, Any]:
+        """Publish one new epoch while the effect-handoff lock is held."""
+
+        # The kernel owner lock is already authoritative. Invalidate any
+        # predecessor token before publishing the successor epoch so even a
+        # not-yet-upgraded consumer cannot admit an old proof.
+        predecessor_secret_invalidated = (
+            self._invalidate_secret_artifact(
+                require_owner_claim=False,
+            )
+        )
+        try:
+            claim_acquired = self._acquire_owner_claim()
+        except (MinecraftOwnerLockUnavailable, OSError):
+            if predecessor_secret_invalidated:
+                self._owner_lock.release()
+            else:
+                # Both external epoch fences may still describe the dead
+                # predecessor.  Retain both kernel barriers until shutdown
+                # has carried the old heartbeat through its stale window.
+                self._quarantine_world_action_barrier()
+            self._state = "manual_intervention_required"
+            self._last_error_code = (
+                MINECRAFT_WORLD_LEASE_OWNER_CLAIM_WRITE_FAILED
+            )
+            return self._status_payload()
+        if not claim_acquired:
+            if predecessor_secret_invalidated:
+                self._owner_lock.release()
+            else:
+                self._quarantine_world_action_barrier()
+            self._state = "owner_conflict"
+            self._last_error_code = (
+                MINECRAFT_WORLD_LEASE_OWNER_CONFLICT
+            )
+            return self._status_payload()
+        # Claim publication is the epoch switch for current consumers. A
+        # predecessor-token failure remains manual/fail-closed even though
+        # the new nonce independently fences old status.
+        if not predecessor_secret_invalidated:
+            self._state = "manual_intervention_required"
+            self._last_error_code = (
+                "minecraft_world_lease_secret_unavailable"
+            )
+            self._status_ready = True
+            self._write_status()
+            return self._status_payload()
+        # This optimistic value is committed into the first status artifact.
+        # A failed commit makes it sticky-false in _write_status(); secret
+        # readiness is an independent boundary.
+        self._status_ready = True
+        if not self._append_event(
+            "process_started",
+            reason="process_restart",
+        ):
+            self._mark_audit_unavailable()
+            return self._status_payload()
+        self._audit_ready = True
+        try:
+            self._write_secret()
+        except OSError:
+            self._withhold_delegation_capability()
+            self._state = "manual_intervention_required"
+            self._last_error_code = (
+                "minecraft_world_lease_secret_unavailable"
+            )
+        self._write_status()
+        return self._status_payload()
+
     def initialize(self) -> dict[str, Any]:
         with self._data_lock:
-            if self._owner_claim_owned:
-                self._release_owner_claim()
+            # Initialization is deliberately idempotent while this process
+            # holds the lifetime lock. Rotating authority synchronously could
+            # orphan an already-running external action.
+            if self._owner_lock.acquired:
+                if self._owner_claim_owned:
+                    self._owner_claim_matches()
+                return self._status_payload()
             self.process_nonce = secrets.token_hex(8)
             self.authorization_token = secrets.token_urlsafe(32)
             self._secret_ready = False
             self._audit_ready = False
             self._status_ready = False
             self._owner_claim_owned = False
+            self._owner_epoch_published = False
             self._lease = None
             self._state = "authorization_required"
             self._last_stop_outcome = ""
             self._last_error_code = ""
             self._stop_attempts.clear()
             self._next_standby_probe_at = 0.0
+            self._world_action_lock_quarantined = False
             try:
-                claim_acquired = self._acquire_owner_claim()
-            except OSError:
-                self._state = "manual_intervention_required"
-                self._last_error_code = (
-                    "minecraft_world_lease_owner_claim_write_failed"
-                )
-                return self._status_payload()
-            if not claim_acquired:
+                self._owner_lock.acquire()
+            except MinecraftOwnerLockBusy:
                 self._state = "owner_conflict"
                 self._last_error_code = (
-                    "minecraft_world_lease_owner_conflict"
+                    MINECRAFT_WORLD_LEASE_OWNER_CONFLICT
                 )
                 return self._status_payload()
-            # This optimistic value is committed into the first status
-            # artifact below.  A failed commit makes it sticky-false in
-            # _write_status(); secret readiness is an independent boundary.
-            self._status_ready = True
-            if not self._append_event(
-                "process_started",
-                reason="process_restart",
-            ):
-                self._mark_audit_unavailable()
+            except (MinecraftOwnerLockUnavailable, OSError):
+                self._mark_owner_lock_unavailable()
                 return self._status_payload()
-            self._audit_ready = True
             try:
-                self._write_secret()
-            except OSError:
-                self._withhold_delegation_capability()
+                self._world_action_lock.acquire()
+            except MinecraftOwnerLockBusy:
+                self._owner_lock.release()
+                self._state = "manual_intervention_required"
+                self._last_error_code = MINECRAFT_WORLD_ACTION_LOCK_BUSY
+                return self._status_payload()
+            except (MinecraftOwnerLockUnavailable, OSError):
+                self._owner_lock.release()
                 self._state = "manual_intervention_required"
                 self._last_error_code = (
-                    "minecraft_world_lease_secret_unavailable"
+                    MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
                 )
-            self._write_status()
-            return self._status_payload()
+                return self._status_payload()
+            try:
+                return self._initialize_owner_epoch()
+            finally:
+                if not self._world_action_lock_quarantined:
+                    self._world_action_lock.release()
 
     def status(self) -> dict[str, Any]:
         with self._data_lock:
@@ -735,6 +1009,8 @@ class MinecraftWorldLeaseOwner:
 
     def delegation_token(self) -> str:
         with self._data_lock:
+            if not self._owner_claim_matches():
+                return ""
             return (
                 self.authorization_token
                 if (
@@ -1056,7 +1332,11 @@ class MinecraftWorldLeaseOwner:
         async with self._start_lock:
             with self._data_lock:
                 self._require_owner_claim()
-                self._refresh_owner_claim()
+                if not self._refresh_owner_claim():
+                    raise RuntimeError(
+                        self._boundary_error_code()
+                        or MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED
+                    )
             task = self._watchdog_task
             if task is not None and not task.done():
                 return self.status()
@@ -1076,12 +1356,17 @@ class MinecraftWorldLeaseOwner:
             try:
                 await self.sleep(self.watchdog_interval_sec)
                 force_safety_stop = False
+                owner_refresh_failed = False
                 with self._data_lock:
                     if not self._refresh_owner_claim():
-                        return
-                    lease = self._lease
+                        owner_refresh_failed = True
+                    if owner_refresh_failed:
+                        lease = None
+                    else:
+                        lease = self._lease
                     if (
-                        lease is not None
+                        not owner_refresh_failed
+                        and lease is not None
                         and lease.expires_at > self.now()
                         and self._audit_ready
                     ):
@@ -1090,14 +1375,22 @@ class MinecraftWorldLeaseOwner:
                             continue
                         force_safety_stop = True
                     if (
-                        lease is None
+                        not owner_refresh_failed
+                        and lease is None
                         and not self._standby_probe_due()
                     ):
                         if self._write_status():
                             continue
                         force_safety_stop = True
-                    if lease is None:
+                    if not owner_refresh_failed and lease is None:
                         self._defer_standby_probe()
+                if owner_refresh_failed:
+                    await self._shielded_stop_runtime(
+                        guild_id=0,
+                        reason="unauthorized_runtime",
+                        force=True,
+                    )
+                    return
                 await self.reconcile_once(
                     reason=(
                         "status_write_failed"
@@ -1626,13 +1919,127 @@ class MinecraftWorldLeaseOwner:
                 result["error"] = boundary_error
             return result
 
+    async def _await_shutdown_step(
+        self,
+        awaitable: Awaitable[Any],
+    ) -> tuple[Any, bool]:
+        """Finish one shutdown step even if its caller is cancelled."""
+
+        step_task = asyncio.create_task(awaitable)
+        cancellation_requested = False
+        while not step_task.done():
+            try:
+                await asyncio.shield(step_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                continue
+        return step_task.result(), cancellation_requested
+
+    async def _acquire_world_action_lock_for_shutdown(self) -> bool:
+        """Poll the nonblocking primitive without orphan worker threads."""
+
+        cancellation_requested = False
+        while True:
+            try:
+                self._world_action_lock.acquire()
+                return cancellation_requested
+            except MinecraftOwnerLockBusy:
+                try:
+                    await asyncio.sleep(WORLD_ACTION_LOCK_RETRY_SEC)
+                except asyncio.CancelledError:
+                    cancellation_requested = True
+                    continue
+
+    async def _shutdown_serialized_cleanup(
+        self,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        with self._data_lock:
+            if not self._owner_lock.acquired:
+                return {
+                    "stopped": False,
+                    "action": "owner_conflict",
+                }
+
+        action_lock_acquired = False
+        action_lock_unavailable = False
+        stale_grace_elapsed = False
+        cancellation_requested = False
+        result: dict[str, Any]
+        try:
+            # A service may already have validated a proof while holding this
+            # lock.  Wait for that effect to commit before stopping the world,
+            # and keep the lock through artifact fencing and owner release.
+            try:
+                cancellation_requested = (
+                    await self._acquire_world_action_lock_for_shutdown()
+                )
+                action_lock_acquired = True
+            except (MinecraftOwnerLockUnavailable, OSError):
+                action_lock_unavailable = True
+                with self._data_lock:
+                    self._state = "manual_intervention_required"
+                    self._last_error_code = (
+                        MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
+                    )
+                    self._withhold_delegation_capability()
+                # No new proof can be admitted through a shared unavailable
+                # boundary.  Carry any request admitted before the fault past
+                # the same stale window, then perform the final safety stop.
+                _, cancelled = await self._await_shutdown_step(
+                    self.sleep(WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC)
+                )
+                cancellation_requested = (
+                    cancellation_requested or cancelled
+                )
+                stale_grace_elapsed = True
+
+            result_value, cancelled = await self._await_shutdown_step(
+                self._shutdown_runtime_cleanup(reason=reason)
+            )
+            result = dict(result_value)
+            cancellation_requested = cancellation_requested or cancelled
+            if action_lock_unavailable:
+                result["error"] = MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
+        finally:
+            with self._data_lock:
+                authority_fenced = self._release_owner_claim()
+            release_ready = authority_fenced
+            if not authority_fenced:
+                # Neither shared artifact could be changed.  The admission
+                # lock remains held while every previously published status
+                # crosses the contract's maximum clock-skew + stale window.
+                if not stale_grace_elapsed:
+                    _, cancelled = await self._await_shutdown_step(
+                        self.sleep(
+                            WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC
+                        )
+                    )
+                    cancellation_requested = (
+                        cancellation_requested or cancelled
+                    )
+                with self._data_lock:
+                    self._force_release_owner_lock_after_fence_grace()
+                release_ready = True
+            if release_ready and (
+                action_lock_acquired
+                or self._world_action_lock.acquired
+            ):
+                self._world_action_lock.release()
+            if release_ready:
+                self._world_action_lock_quarantined = False
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+        return result
+
     async def _shielded_shutdown_runtime_cleanup(
         self,
         *,
         reason: str,
     ) -> dict[str, Any]:
         cleanup_task = asyncio.create_task(
-            self._shutdown_runtime_cleanup(reason=reason)
+            self._shutdown_serialized_cleanup(reason=reason)
         )
         cancellation_requested = False
         while not cleanup_task.done():
@@ -1648,44 +2055,42 @@ class MinecraftWorldLeaseOwner:
 
     async def shutdown(self, *, reason: str = "shutdown") -> dict[str, Any]:
         cancellation_requested = False
-        try:
-            task = self._watchdog_task
-            self._watchdog_task = None
-            if task is not None and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    current_task = asyncio.current_task()
-                    cancellation_requested = bool(
-                        current_task is not None
-                        and current_task.cancelling()
-                    )
-            with self._data_lock:
-                if not self._owner_claim_matches():
-                    if cancellation_requested:
-                        raise asyncio.CancelledError()
-                    return {
-                        "stopped": False,
-                        "action": "owner_conflict",
-                    }
-            result = await self._shielded_shutdown_runtime_cleanup(
-                reason=reason
-            )
-            if cancellation_requested:
-                raise asyncio.CancelledError()
-            return result
-        finally:
-            with self._data_lock:
-                self._release_owner_claim()
+        task = self._watchdog_task
+        self._watchdog_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                cancellation_requested = bool(
+                    current_task is not None
+                    and current_task.cancelling()
+                )
+            except Exception as exc:
+                self.log(
+                    "[MINECRAFT WORLD LEASE] watchdog shutdown failed",
+                    "type=",
+                    type(exc).__name__,
+                )
+        result = await self._shielded_shutdown_runtime_cleanup(reason=reason)
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+        return result
 
 
 __all__ = [
     "DEFAULT_WATCHDOG_INTERVAL_SEC",
     "DEFAULT_WORLD_LEASE_TTL_SEC",
     "MAX_WORLD_LEASE_TTL_SEC",
+    "MINECRAFT_WORLD_ACTION_LOCK_BUSY",
+    "MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE",
     "MINECRAFT_WORLD_LEASE_EVENT_SCHEMA",
+    "MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED",
     "MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA",
+    "MINECRAFT_WORLD_LEASE_OWNER_CLAIM_WRITE_FAILED",
+    "MINECRAFT_WORLD_LEASE_OWNER_CONFLICT",
+    "MINECRAFT_WORLD_LEASE_OWNER_LOCK_UNAVAILABLE",
     "MINECRAFT_WORLD_LEASE_STATUS_SCHEMA",
     "MinecraftWorldLease",
     "MinecraftWorldLeaseOwner",

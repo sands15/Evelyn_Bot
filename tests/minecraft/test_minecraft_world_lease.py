@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +28,12 @@ from evelyn_core.minecraft_world_lease import (  # noqa: E402
 from evelyn_core.minecraft_world_lease_contract import (  # noqa: E402
     MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
     MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+    validate_world_lease_request,
+)
+from evelyn_core.minecraft_owner_lock import (  # noqa: E402
+    MinecraftOwnerLock,
+    MinecraftOwnerLockBusy,
+    MinecraftOwnerLockUnavailable,
 )
 
 
@@ -145,6 +152,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             log=lambda *_args: None,
         )
         self.owner.initialize()
+        self.addCleanup(self.owner._owner_lock.release)
         self.owner._watchdog_task = RunningTask()
 
     def read_events(self) -> list[dict]:
@@ -166,10 +174,10 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         target = owner or self.owner
         original = lease_module.atomic_json_write
 
-        def write(path: Path, payload: dict) -> None:
+        def write(path: Path, payload: dict, **kwargs) -> None:
             if Path(path) == target.status_path:
                 raise OSError("status artifact unavailable")
-            original(path, payload)
+            original(path, payload, **kwargs)
 
         return patch.object(
             lease_module,
@@ -291,6 +299,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(owner._owner_lock.release)
 
         status = owner.initialize()
 
@@ -306,12 +315,24 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialization_secret_failure_keeps_status_ready(
         self,
     ) -> None:
+        owner = MinecraftWorldLeaseOwner(
+            status_path=self.root / "secret-failure" / "status.json",
+            events_dir=self.root / "secret-failure" / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(owner._owner_lock.release)
         with patch.object(
-            self.owner,
+            owner,
             "_write_secret",
             side_effect=OSError("secret unavailable"),
         ):
-            status = self.owner.initialize()
+            status = owner.initialize()
 
         self.assertTrue(status["auditReady"])
         self.assertTrue(status["statusReady"])
@@ -319,14 +340,20 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             status["lastErrorCode"],
             "minecraft_world_lease_secret_unavailable",
         )
-        self.assertEqual(self.owner.delegation_token(), "")
-        self.assertFalse(self.owner.secret_path.exists())
+        self.assertEqual(owner.delegation_token(), "")
+        self.assertFalse(owner.secret_path.exists())
 
         with self.assertRaisesRegex(
             RuntimeError,
             "minecraft_world_lease_secret_unavailable",
         ):
-            await self.connect()
+            await owner.connect(
+                7,
+                issuer_ref="discord_user:123",
+                source="discord_command",
+                goal="diamond",
+                ttl_sec=60.0,
+            )
         self.assertFalse(any(call[0] == "enable" for call in self.runtime.calls))
 
     def test_initialization_status_failure_withholds_capability(self) -> None:
@@ -341,6 +368,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(owner._owner_lock.release)
 
         with self.fail_status_writes(owner):
             status = owner.initialize()
@@ -438,7 +466,15 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_process_restart_does_not_restore_lease(self) -> None:
         await self.connect()
         previous_token = self.owner.authorization_token
-        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
+        previous_nonce = self.owner.process_nonce
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        # Model an abrupt process death: the kernel releases the OS lock,
+        # while claim/status/secret artifacts remain exactly as they were.
+        self.owner._owner_lock.release()
         replacement = MinecraftWorldLeaseOwner(
             status_path=self.root / "status.json",
             events_dir=self.root / "events",
@@ -450,6 +486,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(replacement._owner_lock.release)
 
         status = replacement.initialize()
 
@@ -458,6 +495,106 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(
             replacement.authorization_token,
             previous_token,
+        )
+        self.assertNotEqual(status["processNonce"], previous_nonce)
+        self.assertFalse(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=replacement.status_path,
+            secret_path=replacement.secret_path,
+            owner_claim_path=replacement.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertFalse(valid)
+        self.assertIn(
+            error,
+            {
+                "minecraft_world_authorization_required",
+                "minecraft_world_lease_owner_conflict",
+                "minecraft_world_lease_secret_mismatch",
+            },
+        )
+
+    async def test_crash_takeover_invalidates_old_token_before_claim_swap(
+        self,
+    ) -> None:
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        self.owner._owner_lock.release()
+        replacement = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(replacement._owner_lock.release)
+        claim_swap_entered = threading.Event()
+        allow_claim_swap = threading.Event()
+        replacement_status: list[dict] = []
+        original_acquire_claim = replacement._acquire_owner_claim
+
+        def blocking_acquire_claim() -> bool:
+            claim_swap_entered.set()
+            if not allow_claim_swap.wait(timeout=2.0):
+                raise OSError("test claim-swap gate timed out")
+            return original_acquire_claim()
+
+        worker = threading.Thread(
+            target=lambda: replacement_status.append(
+                replacement.initialize()
+            ),
+            daemon=True,
+        )
+        with patch.object(
+            replacement,
+            "_acquire_owner_claim",
+            side_effect=blocking_acquire_claim,
+        ):
+            worker.start()
+            self.assertTrue(claim_swap_entered.wait(timeout=2.0))
+            try:
+                action_contender = MinecraftOwnerLock(
+                    replacement.world_action_lock_path
+                )
+                try:
+                    with self.assertRaises(MinecraftOwnerLockBusy):
+                        action_contender.acquire()
+                finally:
+                    action_contender.release()
+                valid, error = validate_world_lease_request(
+                    {"worldLease": old_proof},
+                    status_path=self.owner.status_path,
+                    secret_path=self.owner.secret_path,
+                    owner_claim_path=self.owner.owner_claim_path,
+                    now=self.clock,
+                )
+            finally:
+                allow_claim_swap.set()
+                worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(valid)
+        self.assertIn(
+            error,
+            {
+                "minecraft_world_lease_secret_missing",
+                "minecraft_world_lease_secret_mismatch",
+            },
+        )
+        self.assertEqual(len(replacement_status), 1)
+        self.assertEqual(
+            replacement_status[0]["state"],
+            "authorization_required",
         )
 
     async def test_competing_owner_cannot_replace_live_claim(
@@ -477,6 +614,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(competitor._owner_lock.release)
 
         status = competitor.initialize()
 
@@ -499,10 +637,17 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
                 source="discord_command",
             )
 
-    async def test_stale_claim_takeover_invalidates_old_owner(
+    async def test_stale_live_claim_cannot_take_over_lifetime_lock(
         self,
     ) -> None:
         await self.connect()
+        original_claim = self.owner.owner_claim_path.read_bytes()
+        original_status = self.owner.status_path.read_bytes()
+        original_secret = self.owner.secret_path.read_bytes()
+        original_events = {
+            path.name: path.read_bytes()
+            for path in self.owner.events_dir.glob("*.jsonl")
+        }
         self.clock.value += self.owner.owner_claim_stale_sec + 1.0
         replacement = MinecraftWorldLeaseOwner(
             status_path=self.root / "status.json",
@@ -515,18 +660,290 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(replacement._owner_lock.release)
 
         replacement_status = replacement.initialize()
         old_status = self.owner.status()
 
+        self.assertFalse(replacement_status["ownerClaimOwned"])
+        self.assertEqual(
+            replacement_status["state"],
+            "owner_conflict",
+        )
+        self.assertTrue(old_status["ownerClaimOwned"])
+        self.assertTrue(old_status["active"])
+        self.assertNotEqual(self.owner.delegation_token(), "")
+        self.assertEqual(
+            self.owner.owner_claim_path.read_bytes(),
+            original_claim,
+        )
+        self.assertEqual(self.owner.status_path.read_bytes(), original_status)
+        self.assertEqual(self.owner.secret_path.read_bytes(), original_secret)
+        self.assertEqual(
+            {
+                path.name: path.read_bytes()
+                for path in self.owner.events_dir.glob("*.jsonl")
+            },
+            original_events,
+        )
+
+    def test_refresh_interleaving_cannot_admit_second_owner(self) -> None:
+        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
+        refresh_entered = threading.Event()
+        allow_refresh = threading.Event()
+        refresh_result: list[bool] = []
+        original_write = lease_module.atomic_json_write
+
+        def blocking_write(path: Path, payload: dict, **kwargs) -> None:
+            if (
+                Path(path) == self.owner.owner_claim_path
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                refresh_entered.set()
+                if not allow_refresh.wait(timeout=2.0):
+                    raise OSError("test refresh gate timed out")
+            original_write(path, payload, **kwargs)
+
+        competitor = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(competitor._owner_lock.release)
+        worker = threading.Thread(
+            target=lambda: refresh_result.append(
+                self.owner._refresh_owner_claim()
+            ),
+            daemon=True,
+        )
+
+        with patch.object(
+            lease_module,
+            "atomic_json_write",
+            side_effect=blocking_write,
+        ):
+            worker.start()
+            self.assertTrue(refresh_entered.wait(timeout=2.0))
+            try:
+                competitor_status = competitor.initialize()
+            finally:
+                allow_refresh.set()
+                worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(refresh_result, [True])
+        self.assertEqual(competitor_status["state"], "owner_conflict")
+        self.assertFalse(competitor_status["ownerClaimOwned"])
+        self.assertTrue(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(
+            json.loads(
+                self.owner.owner_claim_path.read_text(encoding="utf-8")
+            )["processNonce"],
+            self.owner.process_nonce,
+        )
+        self.assertEqual(competitor.delegation_token(), "")
+
+    async def test_status_interleaving_cannot_overwrite_successor(self) -> None:
+        await self.connect()
+        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
+        status_write_entered = threading.Event()
+        allow_status_write = threading.Event()
+        status_result: list[bool] = []
+        original_write = lease_module.atomic_json_write
+
+        def blocking_write(path: Path, payload: dict, **kwargs) -> None:
+            if (
+                Path(path) == self.owner.status_path
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                status_write_entered.set()
+                if not allow_status_write.wait(timeout=2.0):
+                    raise OSError("test status gate timed out")
+            original_write(path, payload, **kwargs)
+
+        competitor = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(competitor._owner_lock.release)
+        worker = threading.Thread(
+            target=lambda: status_result.append(self.owner._write_status()),
+            daemon=True,
+        )
+
+        with patch.object(
+            lease_module,
+            "atomic_json_write",
+            side_effect=blocking_write,
+        ):
+            worker.start()
+            self.assertTrue(status_write_entered.wait(timeout=2.0))
+            try:
+                competitor_status = competitor.initialize()
+            finally:
+                allow_status_write.set()
+                worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(status_result, [True])
+        self.assertEqual(competitor_status["state"], "owner_conflict")
+        claim = json.loads(
+            self.owner.owner_claim_path.read_text(encoding="utf-8")
+        )
+        status = json.loads(self.owner.status_path.read_text(encoding="utf-8"))
+        secret = json.loads(self.owner.secret_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {claim["processNonce"], status["processNonce"], secret["processNonce"]},
+            {self.owner.process_nonce},
+        )
+        self.assertTrue(status["active"])
+
+    def test_release_interleaving_cannot_delete_successor_claim(self) -> None:
+        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
+        release_entered = threading.Event()
+        allow_release = threading.Event()
+        original_unlink = Path.unlink
+
+        def blocking_unlink(path: Path, *args, **kwargs) -> None:
+            if (
+                Path(path) == self.owner.owner_claim_path
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                release_entered.set()
+                if not allow_release.wait(timeout=2.0):
+                    raise OSError("test release gate timed out")
+            original_unlink(path, *args, **kwargs)
+
+        competitor = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(competitor._owner_lock.release)
+        worker = threading.Thread(
+            target=self.owner._release_owner_claim,
+            daemon=True,
+        )
+
+        with patch.object(Path, "unlink", new=blocking_unlink):
+            worker.start()
+            self.assertTrue(release_entered.wait(timeout=2.0))
+            try:
+                blocked_status = competitor.initialize()
+            finally:
+                allow_release.set()
+                worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(blocked_status["state"], "owner_conflict")
+        self.assertFalse(self.owner._owner_lock.acquired)
+
+        replacement_status = competitor.initialize()
+
+        self.assertTrue(replacement_status["ownerClaimOwned"])
+        self.assertTrue(competitor.owner_claim_path.exists())
+        self.assertEqual(
+            json.loads(
+                competitor.owner_claim_path.read_text(encoding="utf-8")
+            )["processNonce"],
+            competitor.process_nonce,
+        )
+
+    def test_owner_lock_unavailable_fails_closed_without_artifacts(
+        self,
+    ) -> None:
+        root = self.root / "lock-unavailable"
+        owner = MinecraftWorldLeaseOwner(
+            status_path=root / "status.json",
+            events_dir=root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(owner._owner_lock.release)
+
+        with patch.object(
+            owner._owner_lock,
+            "acquire",
+            side_effect=MinecraftOwnerLockUnavailable(
+                "minecraft_owner_lock_unavailable"
+            ),
+        ):
+            status = owner.initialize()
+
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "minecraft_world_lease_owner_lock_unavailable",
+        )
+        self.assertFalse(status["ownerLockHeld"])
+        self.assertEqual(owner.delegation_token(), "")
+        self.assertFalse(owner.owner_claim_path.exists())
+        self.assertFalse(owner.status_path.exists())
+        self.assertFalse(owner.secret_path.exists())
+
+    def test_inflight_world_action_defers_successor_epoch(self) -> None:
+        root = self.root / "action-lock-busy"
+        owner = MinecraftWorldLeaseOwner(
+            status_path=root / "status.json",
+            events_dir=root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(owner._owner_lock.release)
+        self.addCleanup(owner._world_action_lock.release)
+        inflight_action = MinecraftOwnerLock(owner.world_action_lock_path)
+        self.addCleanup(inflight_action.release)
+        inflight_action.acquire()
+
+        blocked_status = owner.initialize()
+
+        self.assertEqual(
+            blocked_status["lastErrorCode"],
+            "minecraft_world_action_lock_busy",
+        )
+        self.assertFalse(blocked_status["ownerLockHeld"])
+        self.assertFalse(owner.owner_claim_path.exists())
+        self.assertFalse(owner.secret_path.exists())
+        self.assertFalse(owner.status_path.exists())
+
+        inflight_action.release()
+        replacement_status = owner.initialize()
+
+        self.assertTrue(replacement_status["ownerLockHeld"])
         self.assertTrue(replacement_status["ownerClaimOwned"])
         self.assertEqual(
             replacement_status["state"],
             "authorization_required",
         )
-        self.assertEqual(old_status["state"], "owner_conflict")
-        self.assertFalse(old_status["active"])
-        self.assertEqual(self.owner.delegation_token(), "")
 
     async def test_clean_shutdown_releases_claim_and_token(
         self,
@@ -539,6 +956,152 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.owner.owner_claim_path.exists())
         self.assertFalse(self.owner.status()["ownerClaimOwned"])
         self.assertEqual(self.owner.delegation_token(), "")
+        self.assertTrue(self.owner.owner_lock_path.exists())
+        self.assertFalse(self.owner._owner_lock.acquired)
+
+        replacement = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(replacement._owner_lock.release)
+        replacement_status = replacement.initialize()
+        self.assertTrue(replacement_status["ownerClaimOwned"])
+        self.assertTrue(replacement_status["ownerLockHeld"])
+        self.assertEqual(
+            replacement_status["state"],
+            "authorization_required",
+        )
+
+    async def test_shutdown_waits_for_admitted_world_effect_boundary(
+        self,
+    ) -> None:
+        self.owner._watchdog_task = None
+        entered = threading.Event()
+        allow_effect_commit = threading.Event()
+
+        class PausedWorldActionLock:
+            acquired = False
+
+            def acquire(inner_self) -> None:
+                entered.set()
+                if not allow_effect_commit.is_set():
+                    raise MinecraftOwnerLockBusy(
+                        "minecraft_owner_lock_busy"
+                    )
+                inner_self.acquired = True
+
+            def release(inner_self) -> None:
+                inner_self.acquired = False
+
+        action_lock = PausedWorldActionLock()
+        self.owner._world_action_lock = action_lock
+        self.runtime.calls.clear()
+
+        task = asyncio.create_task(self.owner.shutdown())
+        acquired_wait = await asyncio.to_thread(entered.wait, 1.0)
+
+        self.assertTrue(acquired_wait)
+        self.assertFalse(task.done())
+        self.assertTrue(self.owner._owner_lock.acquired)
+        self.assertTrue(self.owner.owner_claim_path.exists())
+        self.assertEqual(self.runtime.calls, [])
+
+        allow_effect_commit.set()
+        result = await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertTrue(result["stopped"])
+        self.assertFalse(self.owner._owner_lock.acquired)
+        self.assertFalse(action_lock.acquired)
+        self.assertFalse(self.owner.owner_claim_path.exists())
+
+    async def test_cancelled_action_lock_wait_has_no_late_lock_leak(
+        self,
+    ) -> None:
+        self.owner._watchdog_task = None
+        holder = MinecraftOwnerLock(self.owner.world_action_lock_path)
+        holder.acquire()
+        self.addCleanup(holder.release)
+
+        task = asyncio.create_task(
+            self.owner._shutdown_serialized_cleanup(reason="shutdown")
+        )
+        await asyncio.sleep(lease_module.WORLD_ACTION_LOCK_RETRY_SEC * 2)
+        task.cancel()
+        await asyncio.sleep(lease_module.WORLD_ACTION_LOCK_RETRY_SEC * 2)
+
+        self.assertFalse(task.done())
+        self.assertTrue(self.owner._owner_lock.acquired)
+        holder.release()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertFalse(self.owner._owner_lock.acquired)
+        self.assertFalse(self.owner._world_action_lock.acquired)
+        probe = MinecraftOwnerLock(self.owner.world_action_lock_path)
+        probe.acquire()
+        probe.release()
+
+    async def test_unavailable_action_lock_fences_waits_then_stops_runtime(
+        self,
+    ) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            {"running": True, "connected": True},
+            {"running": False, "connected": False},
+        ]
+        grace_observed: list[float] = []
+
+        class UnavailableWorldActionLock:
+            acquired = False
+
+            @staticmethod
+            def acquire() -> None:
+                raise MinecraftOwnerLockUnavailable(
+                    "minecraft_owner_lock_unavailable"
+                )
+
+            @staticmethod
+            def acquire_blocking() -> None:
+                raise MinecraftOwnerLockUnavailable(
+                    "minecraft_owner_lock_unavailable"
+                )
+
+            @staticmethod
+            def release() -> None:
+                return None
+
+        async def cross_stale_window(delay: float) -> None:
+            self.assertTrue(self.owner._owner_lock.acquired)
+            self.assertFalse(self.owner.secret_path.exists())
+            self.assertEqual(self.runtime.calls, [])
+            grace_observed.append(delay)
+            self.clock.value += delay
+
+        self.owner._world_action_lock = UnavailableWorldActionLock()
+        self.owner.sleep = cross_stale_window
+
+        result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(
+            result["error"],
+            "minecraft_world_action_lock_unavailable",
+        )
+        self.assertEqual(
+            grace_observed,
+            [lease_module.WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC],
+        )
+        self.assertIn(("disable", 0), self.runtime.calls)
+        self.assertFalse(self.owner._owner_lock.acquired)
 
     async def test_shutdown_still_stops_when_audit_fails(self) -> None:
         await self.connect()
@@ -674,12 +1237,17 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
     def test_unwritable_claim_fails_closed_without_secret(
         self,
     ) -> None:
-        blocking_parent = self.root / "not-a-directory"
+        isolated_root = self.root / "unwritable-claim"
+        isolated_root.mkdir()
+        blocking_parent = isolated_root / "not-a-directory"
         blocking_parent.write_text("blocked", encoding="utf-8")
         owner = MinecraftWorldLeaseOwner(
-            status_path=self.root / "other-status.json",
-            events_dir=self.root / "other-events",
+            status_path=isolated_root / "status.json",
+            events_dir=isolated_root / "events",
+            secret_path=isolated_root / "secret.json",
             owner_claim_path=blocking_parent / "claim.json",
+            owner_lock_path=isolated_root / "owner.lock",
+            world_action_lock_path=isolated_root / "world-action.lock",
             get_runtime_status=self.runtime.status,
             enable_mode=self.runtime.enable,
             disable_mode=self.runtime.disable,
@@ -688,6 +1256,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             monotonic=self.clock,
             log=lambda *_args: None,
         )
+        self.addCleanup(owner._owner_lock.release)
 
         status = owner.initialize()
 
@@ -739,6 +1308,360 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["stopped"])
         self.assertIn(("disable", 7), self.runtime.calls)
         self.assertFalse(self.owner.status()["active"])
+
+    async def test_status_and_secret_failure_invalidates_claim_fallback(
+        self,
+    ) -> None:
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        original_write = lease_module.atomic_json_write
+        original_unlink = Path.unlink
+
+        def fail_boundary_write(path: Path, payload: dict, **kwargs) -> None:
+            if Path(path) in {self.owner.status_path, self.owner.secret_path}:
+                raise OSError("boundary artifact unavailable")
+            original_write(path, payload, **kwargs)
+
+        def fail_secret_unlink(path: Path, *args, **kwargs) -> None:
+            if Path(path) == self.owner.secret_path:
+                raise OSError("secret unlink unavailable")
+            original_unlink(path, *args, **kwargs)
+
+        with (
+            patch.object(
+                lease_module,
+                "atomic_json_write",
+                side_effect=fail_boundary_write,
+            ),
+            patch.object(Path, "unlink", new=fail_secret_unlink),
+        ):
+            result = await self.owner.reconcile_once()
+
+        self.assertEqual(
+            result["error"],
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        )
+        self.assertFalse(self.owner.owner_claim_path.exists())
+        self.assertEqual(self.owner.delegation_token(), "")
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=self.owner.status_path,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertFalse(valid)
+        self.assertEqual(error, "minecraft_world_lease_owner_conflict")
+
+    async def test_total_artifact_fence_failure_holds_action_lock_until_stale(
+        self,
+    ) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        original_write = lease_module.atomic_json_write
+        original_unlink = Path.unlink
+        grace_observations: list[float] = []
+
+        def fail_boundary_write(path: Path, payload: dict, **kwargs) -> None:
+            if Path(path) in {
+                self.owner.status_path,
+                self.owner.secret_path,
+                self.owner.owner_claim_path,
+            }:
+                raise OSError("all authority artifacts unavailable")
+            original_write(path, payload, **kwargs)
+
+        def fail_boundary_unlink(path: Path, *args, **kwargs) -> None:
+            if Path(path) in {
+                self.owner.secret_path,
+                self.owner.owner_claim_path,
+            }:
+                raise OSError("authority artifact unlink unavailable")
+            original_unlink(path, *args, **kwargs)
+
+        async def cross_stale_window(delay: float) -> None:
+            self.assertTrue(self.owner._owner_lock.acquired)
+            self.assertTrue(self.owner._world_action_lock.acquired)
+            contender = MinecraftOwnerLock(
+                self.owner.world_action_lock_path,
+            )
+            with self.assertRaises(MinecraftOwnerLockBusy):
+                contender.acquire()
+            grace_observations.append(delay)
+            self.clock.value += delay
+
+        self.owner.sleep = cross_stale_window
+        with (
+            patch.object(
+                lease_module,
+                "atomic_json_write",
+                side_effect=fail_boundary_write,
+            ),
+            patch.object(Path, "unlink", new=fail_boundary_unlink),
+        ):
+            result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(
+            grace_observations,
+            [lease_module.WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC],
+        )
+        self.assertFalse(self.owner._owner_lock.acquired)
+        self.assertFalse(self.owner._world_action_lock.acquired)
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=self.owner.status_path,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertFalse(valid)
+        self.assertEqual(error, "minecraft_world_lease_heartbeat_stale")
+
+    async def test_cancelled_fence_grace_finishes_before_lock_release(
+        self,
+    ) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        original_write = lease_module.atomic_json_write
+        original_unlink = Path.unlink
+        grace_started = asyncio.Event()
+        allow_grace = asyncio.Event()
+
+        def fail_boundary_write(path: Path, payload: dict, **kwargs) -> None:
+            if Path(path) in {
+                self.owner.status_path,
+                self.owner.secret_path,
+                self.owner.owner_claim_path,
+            }:
+                raise OSError("all authority artifacts unavailable")
+            original_write(path, payload, **kwargs)
+
+        def fail_boundary_unlink(path: Path, *args, **kwargs) -> None:
+            if Path(path) in {
+                self.owner.secret_path,
+                self.owner.owner_claim_path,
+            }:
+                raise OSError("authority artifact unlink unavailable")
+            original_unlink(path, *args, **kwargs)
+
+        async def blocking_grace(delay: float) -> None:
+            grace_started.set()
+            await allow_grace.wait()
+            self.clock.value += delay
+
+        self.owner.sleep = blocking_grace
+        with (
+            patch.object(
+                lease_module,
+                "atomic_json_write",
+                side_effect=fail_boundary_write,
+            ),
+            patch.object(Path, "unlink", new=fail_boundary_unlink),
+        ):
+            task = asyncio.create_task(
+                self.owner._shutdown_serialized_cleanup(
+                    reason="shutdown"
+                )
+            )
+            await asyncio.wait_for(grace_started.wait(), timeout=1.0)
+            task.cancel()
+            task.cancel()
+            await asyncio.sleep(0)
+
+            self.assertFalse(task.done())
+            self.assertTrue(self.owner._owner_lock.acquired)
+            self.assertTrue(self.owner._world_action_lock.acquired)
+            allow_grace.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertFalse(self.owner._owner_lock.acquired)
+        self.assertFalse(self.owner._world_action_lock.acquired)
+
+    async def test_startup_double_fence_failure_quarantines_action_lock(
+        self,
+    ) -> None:
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        self.owner._owner_lock.release()
+        successor = MinecraftWorldLeaseOwner(
+            status_path=self.owner.status_path,
+            events_dir=self.owner.events_dir,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            owner_lock_path=self.owner.owner_lock_path,
+            world_action_lock_path=self.owner.world_action_lock_path,
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+        self.addCleanup(successor._owner_lock.release)
+        self.addCleanup(successor._world_action_lock.release)
+        original_write = lease_module.atomic_json_write
+        original_unlink = Path.unlink
+
+        def fail_epoch_write(path: Path, payload: dict, **kwargs) -> None:
+            if Path(path) in {
+                successor.secret_path,
+                successor.owner_claim_path,
+            }:
+                raise OSError("successor epoch unavailable")
+            original_write(path, payload, **kwargs)
+
+        def fail_epoch_unlink(path: Path, *args, **kwargs) -> None:
+            if Path(path) in {
+                successor.secret_path,
+                successor.owner_claim_path,
+            }:
+                raise OSError("predecessor epoch unlink unavailable")
+            original_unlink(path, *args, **kwargs)
+
+        with (
+            patch.object(
+                lease_module,
+                "atomic_json_write",
+                side_effect=fail_epoch_write,
+            ),
+            patch.object(Path, "unlink", new=fail_epoch_unlink),
+        ):
+            status = successor.initialize()
+
+        self.assertEqual(
+            status["lastErrorCode"],
+            "minecraft_world_lease_owner_claim_write_failed",
+        )
+        self.assertTrue(successor._owner_lock.acquired)
+        self.assertTrue(successor._world_action_lock.acquired)
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=successor.status_path,
+            secret_path=successor.secret_path,
+            owner_claim_path=successor.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertTrue(valid, error)
+        contender = MinecraftOwnerLock(successor.world_action_lock_path)
+        with self.assertRaises(MinecraftOwnerLockBusy):
+            contender.acquire()
+
+        successor._watchdog_task = None
+        result = await successor.shutdown()
+        self.assertTrue(result["stopped"])
+        self.assertFalse(successor._owner_lock.acquired)
+        self.assertFalse(successor._world_action_lock.acquired)
+
+    async def test_transient_claim_read_failure_revokes_secret_fence(
+        self,
+    ) -> None:
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        original_read_text = Path.read_text
+
+        def fail_claim_read(path: Path, *args, **kwargs) -> str:
+            if Path(path) == self.owner.owner_claim_path:
+                raise OSError("transient claim read failure")
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", new=fail_claim_read):
+            self.assertFalse(self.owner._refresh_owner_claim())
+
+        self.assertFalse(self.owner.secret_path.exists())
+        self.assertFalse(self.owner._world_action_lock.acquired)
+        self.assertEqual(
+            self.owner.status()["lastErrorCode"],
+            "minecraft_world_lease_owner_claim_failed",
+        )
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=self.owner.status_path,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertFalse(valid)
+        self.assertEqual(error, "minecraft_world_lease_secret_missing")
+
+    async def test_noncanonical_claim_nonce_is_same_fence_for_owner_and_consumer(
+        self,
+    ) -> None:
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+        original_secret = self.owner.secret_path.read_bytes()
+        claim = json.loads(
+            self.owner.owner_claim_path.read_text(encoding="utf-8")
+        )
+        claim["processNonce"] = f" {self.owner.process_nonce} "
+        self.owner.owner_claim_path.write_text(
+            json.dumps(claim),
+            encoding="utf-8",
+        )
+
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=self.owner.status_path,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            now=self.clock,
+        )
+        self.assertFalse(valid)
+        self.assertEqual(error, "minecraft_world_lease_owner_conflict")
+
+        self.owner._mark_status_write_failed()
+
+        self.assertEqual(self.owner.secret_path.read_bytes(), original_secret)
+        self.assertEqual(
+            self.owner.status()["lastErrorCode"],
+            "minecraft_world_lease_status_write_failed",
+        )
+
+    def test_claim_conflict_is_not_overwritten_by_status_failure(self) -> None:
+        original_secret = self.owner.secret_path.read_bytes()
+        replacement_claim = {
+            "schema": "minecraft_world_lease.owner_claim.v1",
+            "processNonce": "replacement-owner",
+            "updatedAt": self.clock(),
+            "pid": 999,
+        }
+        self.owner.owner_claim_path.write_text(
+            json.dumps(replacement_claim),
+            encoding="utf-8",
+        )
+
+        self.owner._mark_status_write_failed()
+
+        status = self.owner.status()
+        self.assertEqual(status["state"], "owner_conflict")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "minecraft_world_lease_owner_conflict",
+        )
+        self.assertEqual(self.owner.secret_path.read_bytes(), original_secret)
 
     async def test_watchdog_refreshes_claim_while_throttling_standby_probe(
         self,

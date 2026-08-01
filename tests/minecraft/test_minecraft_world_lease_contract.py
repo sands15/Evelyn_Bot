@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -18,6 +19,8 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.minecraft_world_lease_contract import (  # noqa: E402
     MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+    MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+    MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
     MINECRAFT_WORLD_LEASE_PROOF_SCHEMA,
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
     MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
@@ -36,6 +39,9 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
         self.path = Path(self.temp_dir.name) / "status.json"
         self.secret_path = (
             Path(self.temp_dir.name) / "secret.json"
+        )
+        self.owner_claim_path = (
+            Path(self.temp_dir.name) / "owner_claim.json"
         )
         self.now = 1000.0
         self.status = {
@@ -68,6 +74,25 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.write_owner_claim()
+
+    def write_owner_claim(
+        self,
+        *,
+        process_nonce: str = "process-1",
+        schema: str = MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+    ) -> None:
+        self.owner_claim_path.write_text(
+            json.dumps(
+                {
+                    "schema": schema,
+                    "processNonce": process_nonce,
+                    "updatedAt": self.now,
+                    "pid": 123,
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def proof(self) -> dict:
         return build_world_lease_proof(
@@ -88,6 +113,148 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
         self.assertEqual(
             self.proof()["schema"],
             MINECRAFT_WORLD_LEASE_PROOF_SCHEMA,
+        )
+
+        status, error = load_guarded_world_lease(
+            self.path,
+            self.secret_path,
+            owner_claim_path=self.owner_claim_path,
+            now=self.now + 5,
+        )
+        self.assertEqual(status, self.status)
+        self.assertEqual(error, "")
+
+    def test_owner_claim_is_required_and_must_match_status_epoch(
+        self,
+    ) -> None:
+        cases = (
+            ("missing", None, None),
+            ("corrupt", "{", None),
+            (
+                "wrong_schema",
+                None,
+                {
+                    "schema": "wrong",
+                    "processNonce": "process-1",
+                },
+            ),
+            (
+                "wrong_nonce",
+                None,
+                {
+                    "schema": MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+                    "processNonce": "replacement-process",
+                },
+            ),
+            (
+                "non_string_nonce",
+                None,
+                {
+                    "schema": MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+                    "processNonce": 123,
+                },
+            ),
+            (
+                "noncanonical_nonce_whitespace",
+                None,
+                {
+                    "schema": MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+                    "processNonce": " process-1 ",
+                },
+            ),
+        )
+        for name, raw, payload in cases:
+            with self.subTest(name=name):
+                if name == "missing":
+                    self.owner_claim_path.unlink(missing_ok=True)
+                elif raw is not None:
+                    self.owner_claim_path.write_text(
+                        raw,
+                        encoding="utf-8",
+                    )
+                else:
+                    self.owner_claim_path.write_text(
+                        json.dumps(payload),
+                        encoding="utf-8",
+                    )
+
+                status, error = load_valid_world_lease(
+                    self.path,
+                    owner_claim_path=self.owner_claim_path,
+                    now=self.now,
+                )
+                self.assertEqual(status, {})
+                self.assertEqual(
+                    error,
+                    MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
+                )
+                self.write_owner_claim()
+
+    def test_valid_load_rechecks_claim_at_final_snapshot_fence(
+        self,
+    ) -> None:
+        with patch(
+            "evelyn_core.minecraft_world_lease_contract."
+            "_read_owner_claim_nonce",
+            side_effect=("process-1", "replacement-process"),
+        ):
+            status, error = load_valid_world_lease(
+                self.path,
+                owner_claim_path=self.owner_claim_path,
+                now=self.now,
+            )
+
+        self.assertEqual(status, {})
+        self.assertEqual(
+            error,
+            MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
+        )
+
+    def test_guarded_load_rechecks_claim_after_secret_read(self) -> None:
+        with patch(
+            "evelyn_core.minecraft_world_lease_contract."
+            "_read_owner_claim_nonce",
+            side_effect=(
+                "process-1",
+                "process-1",
+                "replacement-process",
+            ),
+        ):
+            status, error = load_guarded_world_lease(
+                self.path,
+                self.secret_path,
+                owner_claim_path=self.owner_claim_path,
+                now=self.now,
+            )
+
+        self.assertEqual(status, {})
+        self.assertEqual(
+            error,
+            MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
+        )
+
+    def test_request_rechecks_claim_after_secret_and_proof(self) -> None:
+        with patch(
+            "evelyn_core.minecraft_world_lease_contract."
+            "_read_owner_claim_nonce",
+            side_effect=(
+                "process-1",
+                "process-1",
+                "replacement-process",
+            ),
+        ):
+            valid, error = validate_world_lease_request(
+                {"worldLease": self.proof()},
+                status_path=self.path,
+                secret_path=self.secret_path,
+                owner_claim_path=self.owner_claim_path,
+                now=lambda: self.now,
+            )
+
+        self.assertFalse(valid)
+        self.assertEqual(
+            error,
+            MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
         )
 
     def test_missing_or_mismatched_proof_fails(self) -> None:

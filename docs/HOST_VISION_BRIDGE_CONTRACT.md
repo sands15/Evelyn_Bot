@@ -174,8 +174,11 @@ images, verifies that the mapping still belongs to this project, and removes
 it. Existing drive mappings are never reused or removed.
 
 Before replacing a newly built Bot API image, the launcher stops the current
-container with a 15-second grace period and waits for its Minecraft owner claim
-to disappear. It refuses to recreate the Bot API while ownership is ambiguous.
+container with a 15-second grace period and verifies that it is no longer
+running. A remaining `owner_claim.json` produces a warning only because that
+file is diagnostic state and may survive a crash. The replacement Bot API must
+acquire the stable process-lifetime OS lock before it can become owner, so lock
+acquisition—not claim-file disappearance—is the fail-closed authority.
 
 ## Verified Live Behavior
 

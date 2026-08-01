@@ -214,8 +214,21 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("& $dockerImageBuilder -ProjectRoot $projectRoot", launcher)
         self.assertIn("'bot_api',\n            'control_page',\n            'vision'", launcher)
         self.assertIn("Stop-BotApiForImageRefresh", launcher)
-        self.assertIn("'--timeout', '15'", launcher)
+        self.assertIn("'--timeout', '60'", launcher)
         self.assertIn("$minecraftOwnerClaim", launcher)
+        refresh = launcher[
+            launcher.index("function Stop-BotApiForImageRefresh") :
+            launcher.index("function Start-DockerCore")
+        ]
+        self.assertIn("Test-DockerContainerRunning", refresh)
+        self.assertIn("Write-Warning", refresh)
+        self.assertIn("claim JSON is diagnostic only", refresh)
+        self.assertNotIn("$deadline", refresh)
+        self.assertNotIn("did not release its Minecraft owner claim", refresh)
+        self.assertNotIn(
+            "Refusing to recreate it while ownership is ambiguous",
+            refresh,
+        )
         self.assertNotIn("@('compose') + $composeBaseArgs + @('build'", launcher)
 
         self.assertIn("[ValidateSet('bot_api', 'control_page', 'vision')]", builder)
