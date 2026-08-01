@@ -49,7 +49,7 @@ class ControlPageToolRegistryTests(unittest.TestCase):
         self.assertIn('history_answer = f"도구 실행: {cleaned_tool}\\n결과: {clean_text(reply_text)}"', self.session_memory_state)
         self.assertIn("self.append_history(", self.session_memory_state)
         self.assertIn("self.mark_active(", self.session_memory_state)
-        self.assertIn("deps.remember_control_page_tool_turn(guild, text, reply, cheap_decision)", self.control_page_tool_runtime)
+        self.assertIn("memory_receipt_ref=not_used_memory_receipt_ref()", self.control_page_tool_runtime)
 
     def test_router_policy_blocks_before_router_reply_is_used(self) -> None:
         policy_index = self.control_page_tool_runtime.index("router_policy_error = deps.control_page_tool_policy_error(tool_decision, guild_available=guild is not None)")
@@ -57,7 +57,7 @@ class ControlPageToolRegistryTests(unittest.TestCase):
         self.assertLess(policy_index, reply_index)
         self.assertIn("if router_policy_error:", self.control_page_tool_runtime)
         self.assertIn("return router_policy_error", self.control_page_tool_runtime)
-        self.assertIn("deps.remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)", self.control_page_tool_runtime)
+        self.assertIn("memory_receipt_ref=router_receipt_ref", self.control_page_tool_runtime)
 
     def test_router_reply_only_masks_execution_for_memory_panel(self) -> None:
         self.assertIn("def control_page_tool_reply_from_execution(decision: dict[str, Any], execute_reply: str) -> str:", self.control_page_tools)

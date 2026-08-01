@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -10,17 +13,51 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core import fast_tool_planner  # noqa: E402
 from evelyn_core.fast_tool_planner import (  # noqa: E402
     FAST_TOOL_CAPABILITY_BY_NAME,
+    FastToolPlan,
     answer_fast_tool_capability_question,
+    bind_fast_tool_plan_memory_exposure,
+    default_router_provider,
     enforce_registered_tool_capability_truth,
     normalize_stt_tool_text,
     plan_fast_tool_request,
     render_fast_tool_registry_context,
 )
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+)
+from evelyn_core.memory_exposure import MemoryExposurePosition  # noqa: E402
 
 
 class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _sample_plan() -> FastToolPlan:
+        return FastToolPlan(
+            intent="web_lookup",
+            tool_name="web_search",
+            mode="inline",
+            query="current release",
+            confidence=0.9,
+            source="test",
+            reason="synthetic plan",
+        )
+
+    @staticmethod
+    def _synthetic_exposure_position() -> MemoryExposurePosition:
+        return MemoryExposurePosition(
+            deletion_position=MemoryDeletionPosition(
+                schema=MEMORY_DELETION_POSITION_SCHEMA,
+                root_digest="a" * 64,
+                sequence=0,
+                position_digest="b" * 64,
+            ),
+            memory_version=0,
+        )
+
     def test_registry_contains_real_inline_command_and_background_tools(self) -> None:
         expected = {
             "web_search",
@@ -151,6 +188,163 @@ class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(plan)
+
+    def test_memory_exposure_binding_is_internal_only(self) -> None:
+        position = self._synthetic_exposure_position()
+        plan = self._sample_plan()
+        bound = bind_fast_tool_plan_memory_exposure(plan, position)
+
+        self.assertIs(bound.memory_exposure_position, position)
+        self.assertEqual(bound, plan)
+        self.assertNotIn("memory_exposure_position", repr(bound))
+        public = bound.to_dict()
+        self.assertNotIn("memory_exposure_position", public)
+        serialized = json.dumps(public, sort_keys=True)
+        for forbidden in ("memoryVersion", "noteIds", "position", "path"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_memory_exposure_binding_rejects_invalid_position(self) -> None:
+        with self.assertRaises(MemoryDeletionJournalIntegrityError):
+            bind_fast_tool_plan_memory_exposure(
+                self._sample_plan(),
+                object(),  # type: ignore[arg-type]
+            )
+
+    async def test_default_router_uses_snapshotted_memory_exposure(self) -> None:
+        position = self._synthetic_exposure_position()
+        captured = {}
+
+        class Response:
+            status = 200
+
+            async def json(self, *, content_type=None):
+                del content_type
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "intent": "web_lookup",
+                                        "tool": "web_search",
+                                        "query": "current release",
+                                        "confidence": 0.9,
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        class Session:
+            def __init__(self, *, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                return False
+
+            def post(self, *_args, **_kwargs):
+                raise AssertionError(
+                    "request factory must be entered by the exposure wrapper"
+                )
+
+        @asynccontextmanager
+        async def guarded_request(
+            request_factory,
+            *args,
+            expected_position,
+            memory_boundary_required,
+            **kwargs,
+        ):
+            captured.update(
+                {
+                    "request_factory": request_factory,
+                    "args": args,
+                    "expected_position": expected_position,
+                    "memory_boundary_required": memory_boundary_required,
+                    "kwargs": kwargs,
+                }
+            )
+            yield Response()
+
+        with patch.object(
+            fast_tool_planner,
+            "current_memory_exposure_position",
+            return_value=position,
+        ) as current_position, patch.object(
+            fast_tool_planner,
+            "memory_exposure_request",
+            new=guarded_request,
+        ), patch.object(
+            fast_tool_planner,
+            "ClientSession",
+            Session,
+        ):
+            result = await default_router_provider(
+                "그거 해줘",
+                [
+                    {
+                        "role": "assistant",
+                        "content": "synthetic prior answer",
+                        "memoryVersion": 44,
+                        "noteIds": ["private-note"],
+                    }
+                ],
+            )
+
+        current_position.assert_called_once_with()
+        self.assertIs(captured["expected_position"], position)
+        self.assertTrue(captured["memory_boundary_required"])
+        self.assertEqual(captured["args"], (fast_tool_planner.ROUTER_LLM_URL,))
+        payload = captured["kwargs"]["json"]
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("memoryVersion", serialized)
+        self.assertNotIn("noteIds", serialized)
+        self.assertEqual(result["tool"], "web_search")
+
+    async def test_router_does_not_downgrade_exposure_integrity_failure(self) -> None:
+        class Session:
+            def __init__(self, *, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                return False
+
+            def post(self, *_args, **_kwargs):
+                raise AssertionError("stale boundary must block the request")
+
+        @asynccontextmanager
+        async def reject_stale_boundary(*_args, **_kwargs):
+            raise MemoryDeletionJournalIntegrityError()
+            yield  # pragma: no cover
+
+        position = self._synthetic_exposure_position()
+        with patch.object(
+            fast_tool_planner,
+            "current_memory_exposure_position",
+            return_value=position,
+        ), patch.object(
+            fast_tool_planner,
+            "memory_exposure_request",
+            new=reject_stale_boundary,
+        ), patch.object(
+            fast_tool_planner,
+            "ClientSession",
+            Session,
+        ):
+            with self.assertRaises(MemoryDeletionJournalIntegrityError):
+                await default_router_provider(
+                    "그거 해줘",
+                    [{"role": "user", "content": "synthetic topic"}],
+                )
 
     def test_false_web_permission_claim_is_replaced_with_runtime_truth(self) -> None:
         reply = enforce_registered_tool_capability_truth(

@@ -34,6 +34,13 @@ from evelyn_core.context_pipeline import (  # noqa: E402
 )
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    memory_receipt_ref_from_receipt,
+    unattributed_memory_receipt_ref,
+)
+
+
+NOTE_A = "concept-0123456789abcdef"
 
 
 class FakeClock:
@@ -184,6 +191,9 @@ class SessionContinuityTests(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": "응, 재시작 뒤에도 이어갈게.",
+                    "memoryReceiptRef": (
+                        unattributed_memory_receipt_ref()
+                    ),
                 },
             ],
         )
@@ -210,6 +220,83 @@ class SessionContinuityTests(unittest.TestCase):
             "current",
         )
         self.assertTrue(restored["rollbackProtected"])
+
+    def test_bound_receipt_round_trips_and_status_hides_note_ids(
+        self,
+    ) -> None:
+        store = SessionStateStore.create_empty()
+        store.append_history(
+            "guild:1:text:2:user:3",
+            "기억 질문",
+            "기억 답변",
+            system_prompt="system",
+            max_history_items=12,
+            memory_receipt={
+                "schema": "memory.context-receipt.v1",
+                "state": "provided",
+                "groundingState": "attributed",
+                "memoryVersion": 9,
+                "suppliedNoteIds": [NOTE_A],
+                "suppliedNoteCount": 1,
+                "contentFree": True,
+            },
+        )
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        manager = self.manager(store, clock)
+
+        manager.flush()
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=200.0),
+        ).restore()
+
+        self.assertEqual(restored["state"], "restored")
+        assistant = restored_store.histories[
+            "guild:1:text:2:user:3"
+        ][-1]
+        self.assertEqual(
+            assistant["memoryReceiptRef"]["suppliedNoteIds"],
+            [NOTE_A],
+        )
+        self.assertNotIn(
+            NOTE_A,
+            json.dumps(manager.status(), ensure_ascii=False),
+        )
+
+    def test_invalid_assistant_receipt_row_is_not_persisted(self) -> None:
+        store = SessionStateStore.create_empty()
+        store.histories["guild:1:text:2:user:3"] = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "안전한 사용자 턴"},
+            {
+                "role": "assistant",
+                "content": "삭제되어야 할 assistant row",
+                "memoryReceiptRef": {
+                    **memory_receipt_ref_from_receipt(None),
+                    "privateText": "invalid extra field",
+                },
+            },
+        ]
+        manager = self.manager(
+            store,
+            FakeClock(wall=1000.0, monotonic=100.0),
+        )
+
+        manager.flush()
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            payload["sessions"][0]["history"],
+            [
+                {
+                    "role": "user",
+                    "content": "안전한 사용자 턴",
+                }
+            ],
+        )
 
     def test_unanswered_voice_user_turn_survives_fresh_restart(
         self,

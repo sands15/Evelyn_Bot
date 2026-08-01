@@ -18,6 +18,15 @@ from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
     is_explicit_memory_confirmation_command,
 )
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_metrics,
+    not_used_memory_receipt_ref,
+)
+from .memory_exposure import (
+    MemoryExposurePosition,
+    current_memory_exposure_position,
+)
+from .voice_reply_side_effects import bind_voice_reply_memory_boundary
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 from .voice_barge_in import remember_voice_utterance_for_merge
 
@@ -798,23 +807,45 @@ def finalize_delivered_voice_reply(
     delivery_succeeded: bool = True,
     failure_code: str = "",
 ) -> None:
-    finalize_voice_reply_side_effects(
-        guild_id=guild_id,
-        member=member,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        voice_reply=voice_reply,
-        plain_answer=plain_answer,
-        metrics=metrics,
-        turn_scope=turn_scope,
-        accepted_turn_id=accepted_turn_id,
-        segment_id=segment_id,
-        delivery_succeeded=delivery_succeeded,
-        failure_code=failure_code,
-    )
+    memory_exposure_position: MemoryExposurePosition | None = None
+    memory_receipt: dict[str, Any] | None = None
+    if delivery_succeeded:
+        reply_source = str(
+            metrics.get("meta", {}).get("reply_source") or ""
+        )
+        if reply_source in {
+            "canned_wake_reply",
+            "explicit_memory_confirmation",
+        }:
+            # These replies are fully determined by the current command and
+            # must not inherit an exposure from an earlier async context.
+            memory_receipt = not_used_memory_receipt_ref()
+        else:
+            memory_exposure_position = (
+                current_memory_exposure_position()
+            )
+            memory_receipt = memory_receipt_ref_from_metrics(metrics)
+    with bind_voice_reply_memory_boundary(
+        memory_exposure_position=memory_exposure_position,
+        memory_receipt=memory_receipt,
+    ):
+        finalize_voice_reply_side_effects(
+            guild_id=guild_id,
+            member=member,
+            session_key=session_key,
+            room_session_key=room_session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            voice_reply=voice_reply,
+            plain_answer=plain_answer,
+            metrics=metrics,
+            turn_scope=turn_scope,
+            accepted_turn_id=accepted_turn_id,
+            segment_id=segment_id,
+            delivery_succeeded=delivery_succeeded,
+            failure_code=failure_code,
+        )
     log_voice_stage(
         metrics,
         (

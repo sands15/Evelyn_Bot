@@ -13,6 +13,14 @@ from urllib.parse import quote
 
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
 
+from .config import MEMORY_ROOT
+from .control_page_memory_http import (
+    CONTROL_PAGE_MEMORY_BOUNDARY_HEADER,
+    CONTROL_PAGE_MEMORY_STATE_HEADER,
+    ControlPageMemoryGuardedJsonResponse,
+    control_page_memory_guarded_json_response,
+    parse_control_page_memory_handoff_headers,
+)
 from .control_page_http import control_page_cors_middleware, control_page_session_handler
 from .control_page_contracts import (
     build_control_page_panel_state_payload,
@@ -33,6 +41,7 @@ from .memory_deletion_journal import (
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
 )
+from .memory_exposure import MemoryExposurePosition
 from .memory_vault import (
     apply_memory_provenance_backfill,
     delete_memory_vault_user_note,
@@ -91,6 +100,14 @@ LOCAL_STATUS_COMMANDS = {"/status"}
 LOCAL_MEMORY_COMMANDS = {"/memory", "/obsidian"}
 LOCAL_RESTART_COMMANDS = {"/restart", "restart"}
 LOCAL_SHUTDOWN_COMMANDS = {"/shutdown", "/quit", "/exit"}
+MEMORY_HANDOFF_PROXY_PATHS = frozenset(
+    {
+        "/api/control-page/action-events",
+        "/api/control-page/chat",
+        "/api/control-page/shutdown",
+        "/api/control-page/state",
+    }
+)
 
 MODEL_PORTS = {
     "main": int(os.getenv("MAIN_LLM_PORT", "9820")),
@@ -228,6 +245,8 @@ def proxy_json_response(
     status: int,
     text: str,
     content_type: str,
+    expected_position: MemoryExposurePosition | None = None,
+    memory_handoff_present: bool = False,
 ) -> web.Response:
     if status == 503:
         try:
@@ -240,11 +259,43 @@ def proxy_json_response(
             == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
         ):
             raise MemoryDeletionJournalIntegrityError()
-    return web.Response(
+    if memory_handoff_present:
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError, RecursionError):
+            raise MemoryDeletionJournalIntegrityError() from None
+        if not isinstance(payload, dict):
+            raise MemoryDeletionJournalIntegrityError()
+        return control_page_memory_guarded_json_response(
+            payload,
+            expected_position=expected_position,
+            memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
+            status=status,
+            emit_handoff_headers=False,
+        )
+    response = web.Response(
         status=status,
         text=text,
         content_type=content_type or "application/json",
     )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def proxy_memory_handoff(
+    *,
+    path: str,
+    headers: Any,
+) -> tuple[bool, MemoryExposurePosition | None]:
+    state_present = CONTROL_PAGE_MEMORY_STATE_HEADER in headers
+    boundary_present = CONTROL_PAGE_MEMORY_BOUNDARY_HEADER in headers
+    if state_present != boundary_present:
+        raise MemoryDeletionJournalIntegrityError()
+    if not state_present:
+        if path in MEMORY_HANDOFF_PROXY_PATHS:
+            raise MemoryDeletionJournalIntegrityError()
+        return False, None
+    return True, parse_control_page_memory_handoff_headers(headers)
 
 
 async def proxy_json(request: web.Request, method: str, path: str, *, body: Any = None) -> web.Response | None:
@@ -256,6 +307,12 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
             if method == "POST":
                 async with session.post(url, json=body) as response:
                     text = await response.text()
+                    handoff_present, expected_position = (
+                        proxy_memory_handoff(
+                            path=path,
+                            headers=response.headers,
+                        )
+                    )
                     return proxy_json_response(
                         status=response.status,
                         text=text,
@@ -263,9 +320,15 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
                             response.content_type
                             or "application/json"
                         ),
+                        expected_position=expected_position,
+                        memory_handoff_present=handoff_present,
                     )
             async with session.get(url) as response:
                 text = await response.text()
+                handoff_present, expected_position = proxy_memory_handoff(
+                    path=path,
+                    headers=response.headers,
+                )
                 return proxy_json_response(
                     status=response.status,
                     text=text,
@@ -273,6 +336,8 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
                         response.content_type
                         or "application/json"
                     ),
+                    expected_position=expected_position,
+                    memory_handoff_present=handoff_present,
                 )
     except MemoryDeletionJournalIntegrityError:
         raise
@@ -651,7 +716,13 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
 
 
 def json_response(data: Any, *, status: int = 200) -> web.Response:
-    return web.Response(status=status, text=json.dumps(data, ensure_ascii=False), content_type="application/json")
+    response = web.Response(
+        status=status,
+        text=json.dumps(data, ensure_ascii=False),
+        content_type="application/json",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
@@ -797,6 +868,21 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                 payload["runtime"] = runtime
                 payload["bootProgress"] = boot_progress
                 payload["statusText"] = control_plane["statusText"]
+                if isinstance(
+                    proxied,
+                    ControlPageMemoryGuardedJsonResponse,
+                ):
+                    return control_page_memory_guarded_json_response(
+                        payload,
+                        expected_position=(
+                            proxied.memory_expected_position
+                        ),
+                        memory_index_dir=(
+                            Path(MEMORY_ROOT) / "memory_index"
+                        ),
+                        status=proxied.status,
+                        emit_handoff_headers=False,
+                    )
                 return json_response(payload, status=proxied.status)
         except Exception:
             remember_proxy_failure(

@@ -50,24 +50,31 @@ def build_chat_messages(
     *,
     content_format: str = "plain",
 ) -> list[dict[str, Any]]:
-    if clean_text(content_format).lower() not in {"openai", "content-array", "content_array"}:
-        return list(messages)
-
+    content_array = clean_text(content_format).lower() in {
+        "openai",
+        "content-array",
+        "content_array",
+    }
     normalized: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
         role = clean_text(str(message.get("role") or "user")) or "user"
         content = message.get("content", "")
-        if role == "user":
+        if role == "user" and content_array:
             content = _as_openai_text_content(content)
-        normalized.append(
-            {
-                **message,
-                "role": role,
-                "content": content,
-            }
-        )
+        projected: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+        for optional_key in (
+            "name",
+            "tool_call_id",
+            "tool_calls",
+        ):
+            if optional_key in message:
+                projected[optional_key] = message[optional_key]
+        normalized.append(projected)
     return normalized
 
 

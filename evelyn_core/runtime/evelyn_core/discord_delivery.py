@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .tts_playback import StreamingVoiceDelivery, TTSQueueSink
+from .tts_playback import LazyStreamingVoiceDelivery, TTSQueueSink
 
 
 @dataclass(frozen=True)
@@ -96,24 +96,23 @@ async def send_discord_text(
         )
 
 
-def build_streaming_voice_delivery(request: DiscordStreamingVoiceDeliveryRequest) -> StreamingVoiceDelivery:
+def build_streaming_voice_delivery(request: DiscordStreamingVoiceDeliveryRequest) -> LazyStreamingVoiceDelivery:
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     tts_sink = TTSQueueSink(sentence_queue, log=request.log)
-    playback_task = request.create_playback_task(
-        request.stream_tts_sentences(
-            request.voice_client,
-            sentence_queue,
-            metrics=request.metrics,
-            turn_id=request.turn_id,
-            session_key=request.session_key,
-            turn_scope=request.turn_scope,
-        ),
-        request.turn_scope,
-    )
-    return StreamingVoiceDelivery(
+    return LazyStreamingVoiceDelivery(
         sentence_queue,
         tts_sink,
-        playback_task,
+        lambda: request.create_playback_task(
+            request.stream_tts_sentences(
+                request.voice_client,
+                sentence_queue,
+                metrics=request.metrics,
+                turn_id=request.turn_id,
+                session_key=request.session_key,
+                turn_scope=request.turn_scope,
+            ),
+            request.turn_scope,
+        ),
         metrics=request.metrics,
         log_stage=request.log_stage,
         prefetch_chunks=request.prefetch_chunks,

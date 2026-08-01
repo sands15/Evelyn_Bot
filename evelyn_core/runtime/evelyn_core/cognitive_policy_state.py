@@ -3,8 +3,44 @@ from __future__ import annotations
 import time
 
 from .config import ASK_CONFIDENCE_THRESHOLD_TEXT, ASK_CONFIDENCE_THRESHOLD_VOICE
+from .conversation_memory_receipt import sanitize_memory_receipt_ref
 from .memory import cognitive_state_path, normalize_cognitive_state, read_json_file
 from .text import clean_text, is_user_echo_answer
+
+
+COGNITIVE_STATE_PROVENANCE_SCHEMA = (
+    "cognitive-state.provenance.v1"
+)
+
+
+def _validated_cached_cognitive_state(
+    value: object,
+) -> dict | None:
+    """Accept only cached state proven independent of recalled memory.
+
+    Existing cognitive files predate typed provenance and may contain text
+    derived from notes that were later corrected or deleted.  They are
+    intentionally ignored until writers persist a verifiable source receipt.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    provenance = value.get("memoryProvenance")
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("schema")
+        != COGNITIVE_STATE_PROVENANCE_SCHEMA
+    ):
+        return None
+    receipt_ref = sanitize_memory_receipt_ref(
+        provenance.get("memoryReceiptRef")
+    )
+    if (
+        receipt_ref is None
+        or receipt_ref.get("state") != "not_used"
+    ):
+        return None
+    return normalize_cognitive_state(value)
 
 
 def build_fast_cognitive_state(
@@ -136,18 +172,21 @@ def read_layered_cognitive_state(
 ) -> dict | None:
     if session_memory_key:
         session_state = read_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key))
-        if session_state:
-            return normalize_cognitive_state(session_state)
+        validated = _validated_cached_cognitive_state(session_state)
+        if validated is not None:
+            return validated
     if person_key:
         person_state = read_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key))
-        if person_state:
-            return normalize_cognitive_state(person_state)
+        validated = _validated_cached_cognitive_state(person_state)
+        if validated is not None:
+            return validated
     if room_key:
         room_state = read_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key))
-        if room_state:
-            return normalize_cognitive_state(room_state)
+        validated = _validated_cached_cognitive_state(room_state)
+        if validated is not None:
+            return validated
     guild_state = read_json_file(cognitive_state_path(guild_id))
-    return normalize_cognitive_state(guild_state) if guild_state else None
+    return _validated_cached_cognitive_state(guild_state)
 
 
 def read_cached_cognitive_state(
@@ -168,6 +207,7 @@ def read_cached_cognitive_state(
 
 
 __all__ = [
+    "COGNITIVE_STATE_PROVENANCE_SCHEMA",
     "apply_ask_gating",
     "ask_confidence_threshold_for_source",
     "build_cognitive_fallback_state",

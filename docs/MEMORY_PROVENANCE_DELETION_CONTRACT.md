@@ -131,6 +131,80 @@ fail-closed로 보류한다. 모델에는 content-free `MEMORY_WITHHELD_RULE`만
 `confirmOnlyItemCount`와 `opaqueConfirmOnlyComponentCount`는 원문 component가
 prompt에 남지 않으므로 0이다.
 
+## Conversation receipt and deletion-safe delivery
+
+기억에 의존해 생성될 수 있는 assistant 대화 row는
+`conversation.memory-receipt-ref.v1`을 함께 이동한다. 이 compact receipt는
+`schema`, `state`, `memoryVersion`, 정렬된 canonical `suppliedNoteIds`,
+`suppliedNoteCount`, `contentFree=true`만 가지며 상태는 다음 세 개다.
+
+- `bound`: attributed memory receipt에서 공급 note ID와 memory version을
+  완전히 축약했다.
+- `not_used`: 해당 assistant 텍스트가 저장 기억을 사용하지 않았음이
+  명시적으로 증명됐다.
+- `unattributed`: receipt가 누락됐거나 손상됐고, legacy 의존성을 compact
+  형식으로 완전히 표현할 수 없거나, 기억 비의존성을 증명할 수 없다.
+
+사용자 row는 receipt가 필요 없다. assistant row의 compact receipt는
+process-local history에만 남지 않고 durable continuity checkpoint, restart restore,
+session merge와 Control Page·Discord text·Discord voice의 cross-surface merge까지
+전파된다. 인접한 중복 row를 합칠 때도 누락·서로 다른 version·표현
+불가능한 의존성을 `not_used`로 낮추지 않고 `unattributed`로
+fail-closed한다. receipt는 내부 삭제 선형화에만 사용하고 공개 chat,
+state, action projection에서는 제거한다.
+
+대화 history를 prompt, persona/cognitive state, router/planner, search follow-up
+또는 tool 입력으로 재사용하기 전에 assistant row를 다시 검사한다. receipt가
+없는 legacy row, 손상된 receipt, `unattributed`, 현재 memory version과 다른
+`bound`, tombstoned note에 묶인 `bound`는 모두 제거한다. 필터를 통과한
+`bound` row의 note ID와 deletion position만 typed memory exposure로 합성한다.
+history에서 파생된 persona/cognitive/router cache도 strict receipt로 현재성이
+증명되지 않으면 무시하고, tool/search 결과가 history를 다시 쓸 때는
+필터링된 exposure를 응답 receipt에 병합한다.
+
+Main Control Page와 Fast Control Page의 memory-bound JSON response는 handler
+종료로 경계가 끝나지 않는다. actual HTTP `prepare` 전에 exact deletion
+position을 재검사하고 `write_eof` 종료까지 lease를 유지한다. stale로
+판정되면 응답 본문을 쓰기 전 exact
+`memory_deletion_journal_integrity_failed` 503과 `Cache-Control: no-store`로
+닫힌다. Fast chat stream도 첫 content event 전 `memory_boundary`를 먼저
+전송하고 terminal event에서 같은 경계를 재확인한다.
+
+공개 Control Page의 8798→8799 프록시는 내부 응답을 단순 복사하지 않는다.
+8798은 `bound|not_used`와 content-free exposure를 전용 내부 헤더로 넘기고,
+8799는 필수 state/chat/shutdown/action-events 경로에서 헤더 누락·손상을
+fail-closed한다. upstream EOF 뒤 브라우저 응답 `prepare` 전에 같은 position을
+다시 검증하고 실제 browser `write_eof`까지 새 lease를 유지한다. state를
+재직렬화해 runtime health를 합치는 경우에도 position을 보존한다. 내부 handoff
+헤더와 note ID는 브라우저 응답에 전달하지 않는다.
+
+Control Page text/search와 voice의 assistant side effect는 공용 reply-boundary
+validator를 사용한다. `bound` receipt의 memory version과 정렬된 note ID가 현재
+exposure와 정확히 같아야 하며, `bound`인데 exposure가 없거나 nonempty exposure에
+`not_used`가 붙는 경우도 persistence·continuity·TTS·공개 반환 전에 거부한다.
+
+Discord/in-process TTS는 producer가 잡고 있는 exclusive exposure lease와
+playback task의 lease를 겹치지 않게 handoff한다. streaming chunk를 먼저
+buffer하고 producer close 후 playback owner가 동일 position을 새로 검증해
+합성·재생한다. Windows Local I/O Bridge의 direct Fast stream은 `bound`
+문장·delta를 HTTP EOF까지 합성하거나 재생하지 않는다. EOF로
+server lease가 끝난 뒤에만 wire boundary를 strict parse하고 host guard를
+획득해 TTS/PCM을 시작한다. 경계 누락·손상·불일치·stale는
+장치 write 0회로 fail-closed한다.
+
+성공한 voice 턴의 history/continuity, memory write, search follow-up,
+session/persona 갱신 같은 post-playback side effect는 정확한 reply receipt와
+exposure가 일치하고 실제 playback이 성공한 뒤에만 같은 guard 안에서
+commit한다. stale·receipt mismatch·재생 실패는 assistant 답변과 파생
+side effect를 남기지 않으며, 이미 수용된 사용자 턴만 미응답
+continuity로 내구성 있게 보존할 수 있다.
+
+compact receipt, wire boundary, guard status, voice validation event/report에는 raw
+audio, transcript, prompt/history/assistant content를 저장하지 않는다. 여기의
+`contentFree=true`는 삭제 선형화 메타데이터에 원문을 복제하지 않는다는
+뜻이며, 실제 사용자 대화 history/continuity의 보존은 대화 저장 계약을
+따른다.
+
 ## Two-step provenance backfill
 
 근거 연결은 감사 조회와 분리된 두 POST 요청으로만 수행한다.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .memory_update_runtime import MemoryUpdateRuntimeDeps
@@ -10,6 +11,7 @@ from .search_followup_runtime import SearchFollowupRuntimeDeps
 
 @dataclass(frozen=True)
 class SearchMemoryDependencyCompositionDeps:
+    memory_index_dir: Path
     write_memory_turn_records: Callable[..., Any]
     vision_memory_write_enabled: bool
     record_self_identity_turn: Callable[..., Any]
@@ -118,6 +120,7 @@ class SearchMemoryDependencyComposition:
         return SearchAnswerRuntimeDeps(
             model_name=deps.model_name,
             llm_server_url=deps.llm_server_url,
+            memory_index_dir=deps.memory_index_dir,
             chat_content_format=deps.chat_content_format,
             stop_tokens=deps.stop_tokens,
             get_http_session=deps.get_http_session,
@@ -131,6 +134,7 @@ class SearchMemoryDependencyComposition:
     def build_search_followup_runtime_deps(self) -> SearchFollowupRuntimeDeps:
         deps = self.deps
         return SearchFollowupRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             bot=deps.bot,
             discord_object_factory=deps.discord_object_factory,
             session_followup_targets=deps.session_followup_targets,

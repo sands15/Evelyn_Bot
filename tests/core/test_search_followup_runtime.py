@@ -13,6 +13,9 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
 from evelyn_core.search_followup_runtime import (  # noqa: E402
     SearchFollowupRuntimeDeps,
     build_search_query_from_runtime,
@@ -31,6 +34,7 @@ from tests.continuity_test_support import (  # noqa: E402
 
 def build_deps(
     *,
+    memory_index_dir: Path | None = None,
     get_conversation_history_result=None,
     compact_summary: str = "메모 요약",
     history_calls: list[dict[str, int | str | None]] | None = None,
@@ -60,6 +64,12 @@ def build_deps(
         return durable_continuity_status(1)
 
     return SearchFollowupRuntimeDeps(
+        memory_index_dir=(
+            memory_index_dir
+            if memory_index_dir is not None
+            else Path(tempfile.gettempdir())
+            / "evelyn-search-followup-runtime-tests-memory-index"
+        ),
         bot=object(),
         discord_object_factory=lambda **kwargs: object(),
         session_followup_targets={},
@@ -117,7 +127,7 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
         self.assertEqual(summary_path_calls, [])
         self.assertEqual(summary_read_calls, [])
 
-    def test_build_search_query_uses_history_and_memory_summary_when_messages_missing(self) -> None:
+    def test_build_search_query_does_not_read_history_or_summary_when_messages_missing(self) -> None:
         history_calls: list[dict[str, int | str | None]] = []
         summary_path_calls: list[int | None] = []
         summary_read_calls: list[object] = []
@@ -135,10 +145,10 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             deps=deps,
         )
 
-        self.assertEqual(query, "짧음 compact::raw summary::요약 텍스트")
-        self.assertEqual(history_calls, [{"session_key": "session-42", "guild_id": 42}])
-        self.assertEqual(summary_path_calls, [42])
-        self.assertEqual(summary_read_calls, ["summary:42"])
+        self.assertEqual(query, "짧음")
+        self.assertEqual(history_calls, [])
+        self.assertEqual(summary_path_calls, [])
+        self.assertEqual(summary_read_calls, [])
 
     def test_delivered_text_is_committed_before_optional_voice(self) -> None:
         events: list[str] = []
@@ -350,7 +360,11 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
                 )
                 history = [
                     {"role": "user", "content": "검색해줘"},
-                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                    {
+                        "role": "assistant",
+                        "content": "찾아보고 알려줄게",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
                 ]
                 sent: list[str] = []
 
@@ -460,9 +474,17 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
                 )
                 history = [
                     {"role": "user", "content": "검색해줘"},
-                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                    {
+                        "role": "assistant",
+                        "content": "찾아보고 알려줄게",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
                     {"role": "user", "content": "검색 질의"},
-                    {"role": "assistant", "content": "검색 결과 답변"},
+                    {
+                        "role": "assistant",
+                        "content": "검색 결과 답변",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
                 ]
                 intent_id = journal.begin(
                     guild_id=7,
@@ -614,9 +636,17 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
                 )
                 history = [
                     {"role": "user", "content": "검색해줘"},
-                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                    {
+                        "role": "assistant",
+                        "content": "찾아보고 알려줄게",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
                     {"role": "user", "content": "검색 질의"},
-                    {"role": "assistant", "content": "검색 결과 답변"},
+                    {
+                        "role": "assistant",
+                        "content": "검색 결과 답변",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
                 ]
                 intent_id = journal.begin(
                     guild_id=7,

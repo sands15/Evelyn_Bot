@@ -53,7 +53,7 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn("if deps.should_route_control_page_tool_candidate(text):", self.control_page_tool_runtime)
         self.assertIn("tool_decision_raw = await deps.decide_control_page_tool_call(", self.control_page_tool_runtime)
         self.assertIn("tool_decision = deps.control_page_tool_decision_from_llm(tool_decision_raw)", self.control_page_tool_runtime)
-        self.assertIn("deps.remember_control_page_tool_turn(guild, text, final_reply, tool_decision)", self.control_page_tool_runtime)
+        self.assertIn("memory_receipt_ref=router_receipt_ref", self.control_page_tool_runtime)
         self.assertNotIn("def control_page_memory_panel_action(text: str) -> str | None:", self.main_py)
 
     def test_local_server_only_falls_back_for_explicit_memory_command(self) -> None:

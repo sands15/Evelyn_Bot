@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,56 +59,76 @@ class MainLlmMemoryDeletionBoundaryTests(
         async def get_http_session():
             return session
 
-        deps = SimpleNamespace(
-            get_http_session=get_http_session,
-            llm_server_url="http://llm.invalid/v1/chat/completions",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_index_dir = Path(temp_dir) / "memory_index"
+            deps = SimpleNamespace(
+                get_http_session=get_http_session,
+                llm_server_url=(
+                    "http://llm.invalid/v1/chat/completions"
+                ),
+                memory_index_dir=memory_index_dir,
+            )
+            guarded_indexes: list[Path] = []
 
-        @contextmanager
-        def reject_stale_boundary():
-            raise MemoryDeletionJournalIntegrityError()
-            yield  # pragma: no cover
+            @contextmanager
+            def reject_stale_boundary(*, index_dir: Path):
+                guarded_indexes.append(index_dir)
+                raise MemoryDeletionJournalIntegrityError()
+                yield  # pragma: no cover
 
-        with patch.object(
-            main_llm_runtime,
-            "memory_deletion_outbound_guard",
-            reject_stale_boundary,
-        ):
-            with self.assertRaises(
-                MemoryDeletionJournalIntegrityError
-            ) as raised:
-                await main_llm_runtime.execute_main_llm_once_from_runtime(
-                    deps=deps,
-                    payload={
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "PRIVATE deleted memory canary",
-                            }
-                        ]
-                    },
-                    user_text="question",
-                )
+            with patch.object(
+                main_llm_runtime,
+                "memory_exposure_guard",
+                reject_stale_boundary,
+            ):
+                with self.assertRaises(
+                    MemoryDeletionJournalIntegrityError
+                ) as raised:
+                    await main_llm_runtime.execute_main_llm_once_from_runtime(
+                        deps=deps,
+                        payload={
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "PRIVATE deleted memory canary"
+                                    ),
+                                }
+                            ]
+                        },
+                        user_text="question",
+                    )
+            self.assertEqual(guarded_indexes, [memory_index_dir])
         self.assertEqual(
             str(raised.exception),
             MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
         )
         self.assertEqual(session.post_calls, 0)
 
-    def test_all_primary_memory_sinks_use_outbound_guard(self) -> None:
+    def test_all_primary_memory_sinks_use_exposure_guard(self) -> None:
         expected = {
-            "main_llm_runtime.py": "memory_deletion_outbound_guard",
-            "voice_route_execution.py": "memory_deletion_outbound_request",
-            "voice_response_runtime.py": "memory_deletion_outbound_request",
-            "fast_control_api.py": "memory_deletion_outbound_request",
+            "main_llm_runtime.py": (
+                "memory_exposure_guard",
+                "index_dir=deps.memory_index_dir",
+            ),
+            "voice_route_execution.py": (
+                "memory_exposure_request",
+                "memory_index_dir=deps.memory_index_dir",
+            ),
+            "voice_response_runtime.py": (
+                "memory_exposure_request",
+                "memory_index_dir=deps.memory_index_dir",
+            ),
+            "fast_control_api.py": ("memory_exposure_request",),
         }
         runtime_dir = RUNTIME_ROOT / "evelyn_core"
-        for filename, guard_name in expected.items():
+        for filename, required_fragments in expected.items():
             with self.subTest(filename=filename):
                 source = (runtime_dir / filename).read_text(
                     encoding="utf-8"
                 )
-                self.assertIn(guard_name, source)
+                for fragment in required_fragments:
+                    self.assertIn(fragment, source)
         self.assertNotIn(
             "async with session.post(deps.llm_server_url",
             (runtime_dir / "voice_route_execution.py").read_text(

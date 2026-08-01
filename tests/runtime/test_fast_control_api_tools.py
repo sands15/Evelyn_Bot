@@ -15,6 +15,7 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
+sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 from evelyn_core import explicit_memory_confirmation as explicit_memory  # noqa: E402
@@ -155,6 +156,9 @@ class FastControlApiToolTests(unittest.TestCase):
                     "source": (
                         "fast_control_continuity_restore"
                     ),
+                    "memoryReceiptRef": (
+                        fast_api.not_used_memory_receipt_ref()
+                    ),
                 },
             ]
         )
@@ -233,6 +237,9 @@ class FastControlApiToolTests(unittest.TestCase):
                     {
                         "role": "assistant",
                         "content": "디스코드에서 한 답",
+                        "memoryReceiptRef": (
+                            fast_api.not_used_memory_receipt_ref()
+                        ),
                     },
                 ]
 
@@ -564,9 +571,14 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIn("/shutdown", payload["reply"])
         self.assertEqual(payload["memoryReceipt"]["state"], "not_requested")
         self.assertTrue(payload["memoryReceipt"]["contentFree"])
-        self.assertEqual(
-            payload["state"]["chat"]["messages"][-1]["memoryReceipt"],
-            payload["memoryReceipt"],
+        public_message = payload["state"]["chat"]["messages"][-1]
+        self.assertNotIn(
+            "memoryReceipt",
+            public_message,
+        )
+        self.assertNotIn(
+            "memoryReceiptRef",
+            public_message,
         )
         self.assertEqual(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE, [])
 
@@ -1252,15 +1264,19 @@ class FastControlApiToolTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
+                self.receipts: list[dict[str, object]] = []
 
             def record_completed_turn(
                 self,
                 user_text: str,
                 assistant_text: str,
+                *,
+                memory_receipt=None,
             ):
                 self.calls.append(
                     (user_text, assistant_text)
                 )
+                self.receipts.append(memory_receipt)
                 return durable_continuity_status(7)
 
             @staticmethod
@@ -1318,6 +1334,7 @@ class FastControlApiToolTests(unittest.TestCase):
             owner.calls,
             [("실패 테스트", payload["reply"])],
         )
+        self.assertEqual(owner.receipts[0]["state"], "not_used")
 
     def test_chat_handler_planner_failure_uses_same_durable_boundary(
         self,
@@ -1372,9 +1389,15 @@ class FastControlApiToolTests(unittest.TestCase):
             "fast_control_chat_failed",
         )
         self.assertEqual(payload["continuity"], continuity)
-        commit_turn.assert_called_once_with(
-            "계획 실패 테스트",
-            payload["reply"],
+        commit_turn.assert_called_once()
+        turn_args = commit_turn.call_args
+        self.assertEqual(
+            turn_args.args,
+            ("계획 실패 테스트", payload["reply"]),
+        )
+        self.assertEqual(
+            turn_args.kwargs["memory_receipt"]["state"],
+            "not_used",
         )
         self.assertNotIn(private, str(payload))
 
@@ -1468,9 +1491,18 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskId"], task.task_id)
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskStatus"], "completed")
         self.assertIn("완료: 긴 작업", fast_api.CHAT_MESSAGES[-1]["text"])
-        commit_followup.assert_called_once_with(
-            task.task_id,
-            fast_api.CHAT_MESSAGES[-1]["text"]
+        commit_followup.assert_called_once()
+        followup_args = commit_followup.call_args
+        self.assertEqual(
+            followup_args.args,
+            (
+                task.task_id,
+                fast_api.CHAT_MESSAGES[-1]["text"],
+            ),
+        )
+        self.assertEqual(
+            followup_args.kwargs["memory_receipt"]["state"],
+            "not_used",
         )
 
     def test_background_action_failure_publishes_specific_followup_reply(self) -> None:
@@ -1570,6 +1602,8 @@ class FastControlApiToolTests(unittest.TestCase):
             fast_api.collect_runtime_health = fake_collect_runtime_health
             try:
                 response = await fast_api.chat_handler(_Request())
+                self.assertFalse(fast_api.BACKGROUND_ACTION_TASKS)
+                response._run_after_write()
                 await asyncio.gather(*list(fast_api.BACKGROUND_ACTION_TASKS))
             finally:
                 fast_api.collect_runtime_health = original_collect

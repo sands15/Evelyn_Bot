@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .main_llm_runtime import AskLlmOnceRuntimeDeps, MainLlmRuntimeDeps
@@ -12,6 +13,7 @@ from .voice_stream_chunks import VoiceStreamChunkDeps
 class VoiceResponseDependencyCompositionDeps:
     model_name: str
     llm_server_url: str
+    memory_index_dir: Path
     main_llm_chat_content_format: str
     main_llm_stop_tokens: tuple[str, ...] | list[str]
     voice_llm_max_tokens: int
@@ -67,6 +69,7 @@ class VoiceResponseDependencyComposition:
         return VoiceResponseRuntimeDeps(
             model_name=deps.model_name,
             llm_server_url=deps.llm_server_url,
+            memory_index_dir=deps.memory_index_dir,
             main_llm_chat_content_format=deps.main_llm_chat_content_format,
             main_llm_stop_tokens=tuple(deps.main_llm_stop_tokens),
             voice_llm_max_tokens=deps.voice_llm_max_tokens,
@@ -98,6 +101,7 @@ class VoiceResponseDependencyComposition:
         return MainLlmRuntimeDeps(
             model_name=deps.model_name,
             llm_server_url=deps.llm_server_url,
+            memory_index_dir=deps.memory_index_dir,
             main_llm_chat_content_format=deps.main_llm_chat_content_format,
             main_llm_stop_tokens=tuple(deps.main_llm_stop_tokens),
             voice_llm_max_tokens=deps.voice_llm_max_tokens,

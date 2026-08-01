@@ -1,19 +1,49 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import aiohttp
 
-from .memory_deletion_outbound import memory_deletion_outbound_request
+from .memory_exposure import (
+    MemoryExposurePosition,
+    capture_memory_exposure_position,
+    combine_memory_exposure_positions,
+    current_memory_exposure_position,
+    memory_exposure_request,
+)
 from .text import clean_text, clean_tts_text
 from .voice_pipeline import AnswerPayload
+
+
+_first_response_memory_exposure: ContextVar[
+    MemoryExposurePosition | None
+] = ContextVar("voice_first_response_memory_exposure", default=None)
+
+
+def _combine_response_exposures(
+    first: MemoryExposurePosition | None,
+    followup: MemoryExposurePosition | None,
+) -> MemoryExposurePosition | None:
+    positions = tuple(
+        position for position in (first, followup) if position is not None
+    )
+    if not positions:
+        return None
+    if len(positions) == 1:
+        combined = positions[0]
+    else:
+        combined = combine_memory_exposure_positions(*positions)
+    return capture_memory_exposure_position(combined)
 
 
 @dataclass(frozen=True)
 class VoiceResponseRuntimeDeps:
     model_name: str
     llm_server_url: str
+    memory_index_dir: Path
     main_llm_chat_content_format: str
     main_llm_stop_tokens: tuple[str, ...] | list[str]
     voice_llm_max_tokens: int
@@ -106,10 +136,6 @@ def build_main_response_guidance_from_runtime(
     )
     if persona_hint:
         parts.append(persona_hint)
-    recent_assistant = deps.recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=1) if persona_hint else ""
-    if recent_assistant:
-        parts.append(f"최근 네 말: {recent_assistant}. 반복하지 말고 이어서 답해라.")
-
     action = state.get("action", "answer")
     if state.get("user_intent"):
         parts.append(f"사용자 의도 추정: {state.get('user_intent')}")
@@ -185,6 +211,7 @@ async def build_first_response_from_runtime(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ) -> tuple[AnswerPayload, str, dict | None]:
+    _first_response_memory_exposure.set(None)
     deps.log_voice_stage(metrics, "1단계 first response 생성 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, route_decision, gated_state, _awaiting_user_reply = await deps.prepare_route_context(
         user_text,
@@ -196,6 +223,9 @@ async def build_first_response_from_runtime(
         source=source,
         debug_text=debug_text,
         metrics=metrics,
+    )
+    _first_response_memory_exposure.set(
+        current_memory_exposure_position()
     )
     if route_decision.user_visible_preface and not deps.is_user_echo_answer(user_text, route_decision.user_visible_preface):
         return deps.build_answer_payload_from_text(route_decision.user_visible_preface), "", gated_state
@@ -223,9 +253,10 @@ async def build_first_response_from_runtime(
     }
 
     session = await deps.get_http_session()
-    async with memory_deletion_outbound_request(
+    async with memory_exposure_request(
         session.post,
         deps.llm_server_url,
+        memory_index_dir=deps.memory_index_dir,
         json=payload,
         timeout=aiohttp.ClientTimeout(total=120),
     ) as resp:
@@ -280,6 +311,8 @@ async def build_followup_response_from_runtime(
     metrics: dict | None = None,
 ) -> AnswerPayload:
     deps.log_voice_stage(metrics, "2단계 followup 생성 시작", extra=f"source={source} first_len={len(clean_text(first_response))}")
+    first_response_exposure = _first_response_memory_exposure.get()
+    _first_response_memory_exposure.set(None)
     messages, cognitive_state, _route, _context_policy = await deps.prepare_llm_messages(
         user_text,
         guild_id=guild_id,
@@ -290,6 +323,10 @@ async def build_followup_response_from_runtime(
         source=source,
         debug_text=debug_text,
         metrics=metrics,
+    )
+    combined_exposure = _combine_response_exposures(
+        first_response_exposure,
+        current_memory_exposure_position(),
     )
     live_minecraft_state = None if deps.is_casual_call_or_status_question(user_text) else await deps.observe_live_minecraft_state(guild_id)
     minecraft_summary = deps.format_minecraft_state_summary(live_minecraft_state)
@@ -314,9 +351,12 @@ async def build_followup_response_from_runtime(
         "stop": list(deps.main_llm_stop_tokens),
     }
     session = await deps.get_http_session()
-    async with memory_deletion_outbound_request(
+    async with memory_exposure_request(
         session.post,
         deps.llm_server_url,
+        expected_position=combined_exposure,
+        memory_index_dir=deps.memory_index_dir,
+        memory_boundary_required=combined_exposure is not None,
         json=payload,
         timeout=aiohttp.ClientTimeout(total=120),
     ) as resp:

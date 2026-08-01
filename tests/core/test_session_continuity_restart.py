@@ -17,6 +17,14 @@ REPO_ROOT = next(
 )
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 CRASH_EXIT_CODE = 74
+UNATTRIBUTED_MEMORY_RECEIPT_REF = {
+    "schema": "conversation.memory-receipt-ref.v1",
+    "state": "unattributed",
+    "memoryVersion": 0,
+    "suppliedNoteIds": [],
+    "suppliedNoteCount": 0,
+    "contentFree": True,
+}
 
 WRITER_PROCESS = textwrap.dedent(
     f"""
@@ -271,6 +279,9 @@ class SessionContinuityRestartTests(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": "I will continue after restart",
+                    "memoryReceiptRef": (
+                        UNATTRIBUTED_MEMORY_RECEIPT_REF
+                    ),
                 },
             ],
         )

@@ -16,6 +16,20 @@ from evelyn_core.control_page_text_runtime import (  # noqa: E402
     ControlPageTextRuntimeDeps,
     answer_control_page_text_from_runtime,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA,
+    current_conversation_memory_receipt_ref,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+)
+from evelyn_core.memory_exposure import (  # noqa: E402
+    MemoryExposurePosition,
+    capture_memory_exposure_position,
+    reset_memory_exposure_position,
+)
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -24,6 +38,22 @@ from tests.continuity_test_support import (  # noqa: E402
 class FakeScope:
     def __init__(self, turn_id: str) -> None:
         self.turn_id = turn_id
+
+
+NOTE_ID = "concept-0123456789abcdef"
+
+
+def memory_exposure(version: int) -> MemoryExposurePosition:
+    return MemoryExposurePosition(
+        deletion_position=MemoryDeletionPosition(
+            schema=MEMORY_DELETION_POSITION_SCHEMA,
+            root_digest="1" * 64,
+            sequence=1,
+            position_digest="2" * 64,
+        ),
+        memory_version=version,
+        supplied_note_ids=(NOTE_ID,),
+    )
 
 
 class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +76,14 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def ask_streaming(self, _text: str, **kwargs) -> str:
         if self.ask_error is not None:
             raise self.ask_error
+        kwargs["metrics"]["meta"]["context_pipeline"] = {
+            "memory_receipt": {
+                "schema": "memory.context-receipt.v1",
+                "state": "not_requested",
+                "memoryVersion": 0,
+                "contentFree": True,
+            }
+        }
         if self.black_frame:
             kwargs["metrics"]["meta"]["vision_capture_error"] = "DXGI black frame"
         return "[question-oh] 원본 답변"
@@ -61,6 +99,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return durable_continuity_status(6)
 
         return ControlPageTextRuntimeDeps(
+            memory_index_dir=Path("unused-memory-index"),
             effective_guild_id=lambda guild: guild.id if guild is not None else 0,
             session_key_for_guild=lambda guild_id: f"control:{guild_id}",
             get_session_lock=lambda _key: self.lock,
@@ -107,6 +146,14 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scheduled[0][0], ("원본 답변 추가 질문?",))
         self.assertEqual(self.scheduled[0][1]["turn_id"], "turn-1")
         self.assertEqual(self.summaries[0][1]["event_name"], "text_turn_summary")
+        self.assertEqual(
+            self.finished[0][1]["memory_receipt"]["state"],
+            "not_used",
+        )
+        self.assertEqual(
+            current_conversation_memory_receipt_ref()["state"],
+            "not_used",
+        )
         self.assertEqual(self.detached[0][1], "attached-task")
         self.assertEqual(self.cleared[0][0], "control:7")
 
@@ -183,6 +230,48 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.detached), 1)
         self.assertEqual(len(self.cleared), 1)
         self.assertEqual(self.commits, [])
+
+    async def test_bound_receipt_version_mismatch_reaches_no_sink(
+        self,
+    ) -> None:
+        async def ask_with_mismatched_boundary(
+            _text: str,
+            **kwargs,
+        ) -> str:
+            capture_memory_exposure_position(memory_exposure(7))
+            kwargs["metrics"]["meta"]["context_pipeline"] = {
+                "memory_receipt": {
+                    "schema": CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA,
+                    "state": "bound",
+                    "memoryVersion": 8,
+                    "suppliedNoteIds": [NOTE_ID],
+                    "suppliedNoteCount": 1,
+                    "contentFree": True,
+                }
+            }
+            return "private mismatched reply"
+
+        reset_memory_exposure_position()
+        deps = self.build_deps()
+        deps = ControlPageTextRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "ask_llm_streaming": ask_with_mismatched_boundary,
+            }
+        )
+
+        with self.assertRaises(MemoryDeletionJournalIntegrityError):
+            await answer_control_page_text_from_runtime(
+                None,
+                "질문",
+                deps=deps,
+            )
+
+        self.assertEqual(self.finished, [])
+        self.assertEqual(self.commits, [])
+        self.assertEqual(self.scheduled, [])
+        self.assertEqual(len(self.detached), 1)
+        self.assertEqual(len(self.cleared), 1)
 
     def test_main_delegates_control_page_answer_to_runtime_module(self) -> None:
         source = (

@@ -14,6 +14,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
+from evelyn_core import local_io_bridge  # noqa: E402
 
 
 def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
@@ -79,7 +80,15 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         bridge.mic_input_suppressed_until = time.monotonic() + 0.7
         bridge._post_status = AsyncMock()  # type: ignore[method-assign]
         bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]
-        bridge._chat = AsyncMock(return_value="ok")  # type: ignore[method-assign]
+        bridge._chat = AsyncMock(  # type: ignore[method-assign]
+            return_value=local_io_bridge.LocalChatReply(
+                text="ok",
+                memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                    state="not_used",
+                    position=None,
+                ),
+            )
+        )
         admission = install_admission_grant(bridge)
 
         await bridge._handle_segment(b"user speech", {"source": "test"})

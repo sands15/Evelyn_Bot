@@ -731,15 +731,29 @@ search/tool 전용 sink는 vault memory context를 입력으로 받지 않는다
 다른 호출자가 저장 기억을 새로 주입할 때 required boundary를 빠뜨리지 않도록
 정적 architecture test를 전체 LLM sink로 넓히는 작업은 P1이다.
 
-세 번째 위험은 일반 대화 continuity가 기억 삭제 계약과 별도로 보존된다는
-점이다. Fast의 process-local assistant message에는 현재 `memoryReceipt`가 붙지만
-planner용 projection은 이를 제거하고, restart/cross-surface continuity의 평문에는
-note-level receipt가 이어지지 않는다. 따라서 과거 assistant 답변이 삭제된 기억을
-바탕으로 생성됐더라도 이를 개별 note tombstone과 정확히 연결해 Router/Main
-history에서 제거할 수 없다. 현재 계약상 사용자 대화 자체를 기억 note 삭제로
-지우지는 않으므로 P0 범위 밖이지만, 다음 단계에서는 receipt를 durable/cross-
-surface message까지 전파하고 tombstoned supplied-note와 연결된 assistant history를
-prompt 전에 필터링한 뒤 같은 deletion admission을 적용해야 한다.
+세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
+compact `bound|not_used|unattributed` receipt를 process-local history에만 두지
+않고 durable checkpoint, restart restore, session·cross-surface merge까지 전파한다.
+Main/Fast/Voice/Search/tool이 history를 재사용하기 전에 누락·손상·
+`unattributed`·stale version·tombstoned-note assistant row를 fail-closed로
+제거하고, persona/cognitive/router의 history-derived 상태도 strict receipt가
+없으면 재사용하지 않는다. Main/Fast Control의 actual HTTP write,
+Discord/TTS playback handoff와 Local Bridge의 HTTP EOF 후 host guard도 같은
+deletion position을 재검사한다. receipt와 boundary 메타데이터에는 대화
+원문·transcript·raw audio를 저장하지 않는다.
+
+공개 8799도 8798 응답을 완전히 읽은 뒤 content-free handoff를 strict parse하고
+browser `prepare` 직전에 exposure를 다시 검증한다. state 재직렬화와 실제
+`write_eof`까지 새 lease를 유지하며 내부 handoff header/note ID는 공개하지
+않는다. Control Page text/search는 voice와 같은 공용 validator로 receipt와
+exposure의 state/version/note ID 불일치를 assistant persistence·continuity·TTS
+전에 거부한다.
+
+따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation이 아니라,
+위에 기록한 exclusive reader lease의 shared-reader 가용성과 64 MiB journal
+rotation 공백이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
+계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
+계속 남는다.
 
 다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
 one-shot bootstrap과 pair replay를 먼저 검증한다. 그 다음 Windows shared

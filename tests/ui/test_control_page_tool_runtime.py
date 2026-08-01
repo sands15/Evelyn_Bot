@@ -22,17 +22,29 @@ from evelyn_core.control_page_tool_runtime import (  # noqa: E402
     recent_control_page_history_for_router_from_runtime,
     remember_control_page_tool_turn_from_runtime,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    current_conversation_memory_receipt_ref,
+    not_used_memory_receipt_ref,
+)
 
 
 def _deps(**overrides) -> tuple[ControlPageToolRuntimeDeps, dict[str, object]]:
     state: dict[str, object] = {"ui": [], "records": [], "history": []}
     deps = ControlPageToolRuntimeDeps(
+        memory_index_dir=REPO_ROOT / "unused-memory-index",
         clean_text=lambda text: text.strip(),
         enqueue_control_page_ui_command=lambda action, *, panel_id=None: state["ui"].append((action, panel_id)) or {"action": action},
         memory_panel_reply=lambda action: f"panel:{action}",
         create_task=lambda coro: coro.close(),
         restart_bot_process=lambda: None,
-        recent_history_for_router=lambda **kwargs: state["history"].append(kwargs) or "recent",
+        get_conversation_history=lambda **kwargs: state["history"].append(kwargs) or [
+            {"role": "user", "content": "recent"},
+            {
+                "role": "assistant",
+                "content": "safe reply",
+                "memoryReceiptRef": not_used_memory_receipt_ref(),
+            },
+        ],
         record_tool_assistant_turn=lambda *args, **kwargs: state["records"].append((args, kwargs)),
         control_page_effective_guild_id=lambda guild: int(getattr(guild, "id", 999) or 999),
         control_page_session_key=lambda guild_id: f"control:{guild_id}",
@@ -74,7 +86,7 @@ def _input_deps(**overrides) -> tuple[ControlPageInputRuntimeDeps, dict[str, obj
         control_page_session_key=lambda guild_id: f"control:{guild_id}",
         cheap_control_page_tool_decision=lambda _text: None,
         execute_control_page_tool=execute_tool,
-        remember_control_page_tool_turn=lambda *args: state["remembered"].append(args),
+        remember_control_page_tool_turn=lambda *args, **kwargs: state["remembered"].append((args, kwargs)),
         should_route_control_page_tool_candidate=lambda _text: False,
         decide_control_page_tool_call=decide_tool_call,
         control_page_tool_decision_from_llm=lambda raw: raw if isinstance(raw, dict) and raw.get("tool") else None,
@@ -108,11 +120,10 @@ class ControlPageToolRuntimeTests(unittest.TestCase):
             deps=deps,
         )
 
-        self.assertEqual(history, "recent")
+        self.assertEqual(history, "user: recent\nassistant: safe reply")
         self.assertEqual(state["history"][0]["system_prompt"], "system")
         self.assertEqual(state["history"][0]["session_key"], "session")
         self.assertEqual(state["history"][0]["guild_id"], 7)
-        self.assertEqual(state["history"][0]["limit"], 3)
 
     def test_remember_tool_turn_records_session_metadata(self) -> None:
         deps, state = _deps()
@@ -230,18 +241,41 @@ class ControlPageToolRuntimeTests(unittest.TestCase):
     async def _run_input(self, text: str, deps: ControlPageInputRuntimeDeps, guild=None) -> str:
         return await handle_control_page_input_from_runtime(guild, text, deps=deps)
 
+    async def _run_input_with_receipt(
+        self,
+        text: str,
+        deps: ControlPageInputRuntimeDeps,
+        guild=None,
+    ):
+        reply = await handle_control_page_input_from_runtime(
+            guild,
+            text,
+            deps=deps,
+        )
+        return reply, current_conversation_memory_receipt_ref()
+
     def test_handle_control_page_input_uses_cheap_decision_before_router(self) -> None:
         deps, state = _input_deps(
             cheap_control_page_tool_decision=lambda _text: {"tool": "runtime.status"},
             should_route_control_page_tool_candidate=lambda _text: True,
         )
 
-        reply = asyncio.run(self._run_input("status", deps, guild=SimpleNamespace(id=7)))
+        reply, receipt = asyncio.run(
+            self._run_input_with_receipt(
+                "status",
+                deps,
+                guild=SimpleNamespace(id=7),
+            )
+        )
 
         self.assertEqual(reply, "executed:runtime.status")
         self.assertEqual(len(state["executed"]), 1)
         self.assertEqual(len(state["remembered"]), 1)
         self.assertEqual(state["decided"], [])
+        self.assertEqual(
+            receipt["state"],
+            "not_used",
+        )
 
     def test_handle_control_page_input_blocks_router_policy_before_execution_reply(self) -> None:
         async def decide_tool_call(_text, **_kwargs):
@@ -268,11 +302,17 @@ class ControlPageToolRuntimeTests(unittest.TestCase):
             decide_control_page_tool_call=decide_tool_call,
         )
 
-        reply = asyncio.run(self._run_input("ambiguous", deps))
+        reply, receipt = asyncio.run(
+            self._run_input_with_receipt("ambiguous", deps)
+        )
 
         self.assertEqual(reply, "router says no tool")
         self.assertEqual(state["executed"], [])
         self.assertEqual(state["remembered"], [])
+        self.assertEqual(
+            receipt["state"],
+            "unattributed",
+        )
 
     def test_handle_control_page_input_routes_search_before_main_text(self) -> None:
         deps, _state = _input_deps(should_force_search_query=lambda _text: True)

@@ -24,6 +24,9 @@ from .continuity_authenticity import (
     build_continuity_head,
     validate_continuity_head,
 )
+from .conversation_memory_receipt import (
+    sanitize_memory_receipt_ref,
+)
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
@@ -104,10 +107,15 @@ def _valid_turn_id(value: Any) -> str:
     return text
 
 
-def _safe_history(value: Any, *, max_items: int, max_chars: int) -> list[dict[str, str]]:
+def _safe_history(
+    value: Any,
+    *,
+    max_items: int,
+    max_chars: int,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -115,8 +123,23 @@ def _safe_history(value: Any, *, max_items: int, max_chars: int) -> list[dict[st
         if role not in _ALLOWED_HISTORY_ROLES:
             continue
         content = clean_text(str(item.get("content") or ""))[:max_chars]
-        if content:
-            rows.append({"role": role, "content": content})
+        if not content:
+            continue
+        receipt_present = "memoryReceiptRef" in item
+        if role == "user" and receipt_present:
+            continue
+        row: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+        if role == "assistant" and receipt_present:
+            receipt_ref = sanitize_memory_receipt_ref(
+                item.get("memoryReceiptRef")
+            )
+            if receipt_ref is None:
+                continue
+            row["memoryReceiptRef"] = receipt_ref
+        rows.append(row)
     return rows[-max_items:]
 
 

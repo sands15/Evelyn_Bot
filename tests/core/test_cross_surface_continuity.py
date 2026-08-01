@@ -19,16 +19,25 @@ from evelyn_core.cross_surface_continuity import (  # noqa: E402
     CrossSurfaceContinuityBridge,
     CrossSurfaceContinuityConfig,
     CrossSurfaceMergeOutcome,
+    VerifiedContinuitySnapshot,
     merge_verified_recent_context,
     read_verified_continuity_snapshot,
     session_scope_matches,
 )
 from evelyn_core.session_continuity import (  # noqa: E402
     SessionContinuityCheckpoint,
+    _checkpoint_hash,
 )
 from evelyn_core.session_memory_state import (  # noqa: E402
     SessionStateStore,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    memory_receipt_ref_from_receipt,
+    unattributed_memory_receipt_ref,
+)
+
+
+NOTE_A = "concept-0123456789abcdef"
 
 
 class FakeClock:
@@ -55,6 +64,7 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         *,
         sessions: list[tuple[str, str, str]] | None = None,
         root: Path | None = None,
+        memory_receipt: dict | None = None,
     ) -> None:
         target_root = root or self.root
         target_root.mkdir(parents=True, exist_ok=True)
@@ -75,6 +85,7 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                 assistant_text,
                 system_prompt="secret system prompt",
                 max_history_items=12,
+                memory_receipt=memory_receipt,
             )
             store.mark_active(
                 session_key,
@@ -148,6 +159,9 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": "검증된 답변",
+                    "memoryReceiptRef": (
+                        unattributed_memory_receipt_ref()
+                    ),
                 },
             ],
         )
@@ -165,6 +179,119 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                 snapshot.public_status(),
                 ensure_ascii=False,
             ),
+        )
+
+    def test_bound_receipt_survives_read_and_public_status_is_private(
+        self,
+    ) -> None:
+        self.write_checkpoint(
+            memory_receipt={
+                "schema": "memory.context-receipt.v1",
+                "state": "provided",
+                "groundingState": "attributed",
+                "memoryVersion": 11,
+                "suppliedNoteIds": [NOTE_A],
+                "suppliedNoteCount": 1,
+                "contentFree": True,
+            }
+        )
+
+        snapshot = self.read(guild_id=7, user_id=9)
+
+        self.assertEqual(
+            snapshot.messages[-1]["memoryReceiptRef"][
+                "suppliedNoteIds"
+            ],
+            [NOTE_A],
+        )
+        self.assertNotIn(
+            NOTE_A,
+            json.dumps(
+                snapshot.public_status(),
+                ensure_ascii=False,
+            ),
+        )
+
+    def test_cross_reader_drops_invalid_assistant_receipt_row(self) -> None:
+        self.write_checkpoint()
+        checkpoint_path = self.root / "active.json"
+        head_path = self.root / "checkpoint_head.json"
+        payload = json.loads(
+            checkpoint_path.read_text(encoding="utf-8")
+        )
+        assistant = payload["sessions"][0]["history"][-1]
+        assistant["memoryReceiptRef"]["privateText"] = (
+            "invalid extra field"
+        )
+        payload["checkpointHash"] = _checkpoint_hash(payload)
+        head = json.loads(head_path.read_text(encoding="utf-8"))
+        head["checkpointHash"] = payload["checkpointHash"]
+        checkpoint_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        head_path.write_text(
+            json.dumps(head, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        snapshot = self.read(guild_id=7, user_id=9)
+
+        self.assertTrue(snapshot.verified)
+        self.assertEqual(
+            list(snapshot.messages),
+            [
+                {
+                    "role": "user",
+                    "content": "컨트롤 페이지에서 이어진 질문",
+                }
+            ],
+        )
+
+    def test_adjacent_dedupe_keeps_bound_over_not_used(self) -> None:
+        bound = memory_receipt_ref_from_receipt(
+            {
+                "schema": "memory.context-receipt.v1",
+                "state": "provided",
+                "groundingState": "attributed",
+                "memoryVersion": 2,
+                "suppliedNoteIds": [NOTE_A],
+                "suppliedNoteCount": 1,
+                "contentFree": True,
+            }
+        )
+        snapshot = VerifiedContinuitySnapshot(
+            source="fast_control",
+            state="verified",
+            saved_at=1000.0,
+            generation=1,
+            messages=(
+                {
+                    "role": "assistant",
+                    "content": "같은 답변",
+                    "memoryReceiptRef": bound,
+                },
+            ),
+        )
+
+        merged = merge_verified_recent_context(
+            [
+                {
+                    "role": "assistant",
+                    "content": "같은 답변",
+                    "memoryReceiptRef": (
+                        memory_receipt_ref_from_receipt(None)
+                    ),
+                }
+            ],
+            snapshot,
+            local_saved_at=999.0,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(
+            merged[0]["memoryReceiptRef"],
+            bound,
         )
 
     def test_rejects_tamper_head_mismatch_and_symlink(self) -> None:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -28,7 +31,23 @@ from evelyn_core.llm_context_assembly import (  # noqa: E402
 from evelyn_core.cross_surface_continuity import (  # noqa: E402
     CrossSurfaceMergeOutcome,
 )
-from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionPosition,
+)
+from evelyn_core.memory_deletion_outbound import (  # noqa: E402
+    capture_memory_deletion_outbound_position,
+)
+from evelyn_core.memory_prompt_policy import (  # noqa: E402
+    MEMORY_PROMPT_MAX_CHARS,
+    memory_deletion_boundary_from_position,
+)
+from evelyn_core.skills.routing.voice_llm import (  # noqa: E402
+    build_main_llm_payload,
+)
 from evelyn_core.vision_runtime import VisionEvidence, record_vision_evidence  # noqa: E402
 
 
@@ -161,6 +180,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             clean_text=lambda value: str(value or "").strip(),
             build_local_tool_diagnostic_context=lambda *_args, **_kwargs: "",
             project_root=REPO_ROOT,
+            memory_index_dir=REPO_ROOT / "memory_index",
             build_memory_context=(
                 memory_context_callback
                 or (lambda *_args, **_kwargs: "")
@@ -215,6 +235,9 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                         "role": "assistant",
                         "content": (
                             "다른 surface의 검증된 답"
+                        ),
+                        "memoryReceiptRef": (
+                            not_used_memory_receipt_ref()
                         ),
                     },
                 ),
@@ -313,6 +336,95 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             )
         )
 
+    async def test_receipt_fields_never_enter_context_or_voice_payload(
+        self,
+    ) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        receipt_canary = "CONVERSATION_RECEIPT_CANARY"
+        history = [
+            {
+                "role": "user",
+                "content": "SAFE_USER_HISTORY",
+                "memoryReceipt": {"canary": receipt_canary},
+                "memoryReceiptRef": {"canary": receipt_canary},
+            },
+            {
+                "role": "assistant",
+                "content": "SAFE_ASSISTANT_HISTORY",
+                "memoryReceiptRef": not_used_memory_receipt_ref(),
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            deps = replace(
+                self.build_deps(
+                    no_vision,
+                    conversation_history=history,
+                ),
+                project_root=temp_root / "project",
+                memory_index_dir=temp_root / "memory_index",
+                odyssey_capability_json_dir=(
+                    temp_root / "capabilities"
+                ),
+            )
+            metrics = {
+                "started_at": time.monotonic(),
+                "meta": {},
+                "marks": {},
+            }
+
+            messages, _state, _route, _policy = (
+                await prepare_llm_messages_from_runtime(
+                    "CURRENT_USER_TURN",
+                    deps=deps,
+                    guild_id=7,
+                    session_key="session-7",
+                    metrics=metrics,
+                )
+            )
+            payload = build_main_llm_payload(
+                model_name="test-model",
+                messages=messages,
+                final_user_text="CURRENT_USER_TURN",
+                source="voice",
+                stream=True,
+            )
+
+        self.assertTrue(
+            any(
+                message.get("content") == "SAFE_USER_HISTORY"
+                for message in messages
+            )
+        )
+        self.assertTrue(
+            any(
+                message.get("content") == "SAFE_ASSISTANT_HISTORY"
+                for message in messages
+            )
+        )
+        for projection in (messages, payload["messages"]):
+            serialized = json.dumps(
+                projection,
+                ensure_ascii=False,
+            )
+            self.assertNotIn("memoryReceipt", serialized)
+            self.assertNotIn("memoryReceiptRef", serialized)
+            self.assertNotIn(receipt_canary, serialized)
+            self.assertEqual(
+                sum(
+                    "memoryReceipt" in message
+                    or "memoryReceiptRef" in message
+                    for message in projection
+                ),
+                0,
+            )
+
     async def test_unanswered_history_gets_content_free_continuity_rule(self) -> None:
         async def no_vision(
             _user_text: str,
@@ -379,7 +491,13 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                     no_vision,
                     conversation_history=[
                         {"role": "user", "content": "previous"},
-                        {"role": "assistant", "content": "delivered"},
+                        {
+                            "role": "assistant",
+                            "content": "delivered",
+                            "memoryReceiptRef": (
+                                not_used_memory_receipt_ref()
+                            ),
+                        },
                     ],
                     conversation_context_callback=(
                         build_conversation_state_context
@@ -492,6 +610,15 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             return ""
 
         def grounded_memory(*_args, receipt=None, **_kwargs):
+            deletion_position = MemoryDeletionPosition(
+                schema=MEMORY_DELETION_POSITION_SCHEMA,
+                root_digest="a" * 64,
+                sequence=0,
+                position_digest="b" * 64,
+            )
+            capture_memory_deletion_outbound_position(
+                deletion_position
+            )
             receipt.update(
                 {
                     "schema": "memory.context-receipt.v1",
@@ -502,6 +629,11 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                     "legacyItemCount": 0,
                     "hotContextState": "empty",
                     "memoryVersion": 4,
+                    "deletionBoundary": (
+                        memory_deletion_boundary_from_position(
+                            deletion_position
+                        )
+                    ),
                     "contentFree": True,
                     "privateReceiptField": "PRIVATE_RECEIPT_FIELD",
                 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
@@ -83,6 +84,18 @@ from .control_page_ui_runtime import (
     get_control_page_chat_log_from_runtime,
     sanitize_control_page_welcome_text_from_runtime,
 )
+from .control_page_memory_http import (
+    control_page_memory_guarded_json_response,
+)
+from .conversation_memory_receipt import not_used_memory_receipt_ref
+from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalIntegrityError,
+)
+from .memory_exposure import (
+    current_memory_exposure_position,
+    reset_memory_exposure_position,
+)
 
 
 DepsFactory = Callable[[], Any]
@@ -117,6 +130,7 @@ class ControlPageCompositionDeps:
 
 @dataclass(frozen=True)
 class ControlPageHttpCompositionDeps:
+    memory_index_dir: Path
     docs_dir: Any
     assets_dir: Any
     minecraft_item_icon_loader: Any
@@ -125,7 +139,7 @@ class ControlPageHttpCompositionDeps:
     build_state: Callable[[Any | None], Awaitable[dict[str, Any]]]
     discord_enabled: bool
     effective_guild_id: Callable[[Any | None], int]
-    append_chat_log: Callable[[int, str, str, str], None]
+    append_chat_log: Callable[..., None]
     handle_input: Callable[[Any | None, str], Awaitable[str]]
     ensure_minecraft_snapshot: Callable[..., Awaitable[dict[str, Any]]]
     refresh_runtime_services: Callable[..., Awaitable[dict[str, Any]]]
@@ -181,8 +195,22 @@ class ControlPageComposition:
     def effective_guild_name(self, guild: Any | None) -> str:
         return control_page_effective_guild_name_from_runtime(guild, deps=self.deps.ui())
 
-    def append_chat_log(self, guild_id: int, role: str, author: str, text: str) -> None:
-        append_control_page_chat_log_from_runtime(guild_id, role, author, text, deps=self.deps.ui())
+    def append_chat_log(
+        self,
+        guild_id: int,
+        role: str,
+        author: str,
+        text: str,
+        memory_receipt_ref: Any = None,
+    ) -> None:
+        append_control_page_chat_log_from_runtime(
+            guild_id,
+            role,
+            author,
+            text,
+            deps=self.deps.ui(),
+            memory_receipt_ref=memory_receipt_ref,
+        )
 
     def get_chat_log(self, guild_id: int) -> list[dict[str, Any]]:
         return get_control_page_chat_log_from_runtime(guild_id, deps=self.deps.ui())
@@ -210,7 +238,13 @@ class ControlPageComposition:
             if self.get_chat_log(guild_id):
                 return
             welcome = await self.generate_welcome_text(guild)
-            self.append_chat_log(guild_id, "assistant", "Evelyn", welcome)
+            self.append_chat_log(
+                guild_id,
+                "assistant",
+                "Evelyn",
+                welcome,
+                not_used_memory_receipt_ref(),
+            )
 
     def select_guild(self, requested_guild_id: int | None = None) -> Any | None:
         return select_control_page_guild_from_runtime(requested_guild_id, deps=self.deps.guild_selection())
@@ -313,6 +347,8 @@ class ControlPageComposition:
         user_text: str,
         reply_text: str,
         decision: dict[str, Any],
+        *,
+        memory_receipt_ref: Any = None,
     ) -> None:
         remember_control_page_tool_turn_from_runtime(
             guild,
@@ -320,6 +356,7 @@ class ControlPageComposition:
             reply_text,
             decision,
             deps=self.deps.tool(),
+            memory_receipt_ref=memory_receipt_ref,
         )
 
     async def decide_tool_call(self, text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
@@ -419,26 +456,63 @@ class ControlPageHttpComposition:
         return add_control_page_no_store_headers(web.Response(body=icon_bytes, content_type="image/png"))
 
     async def state(self, request: web.Request) -> web.StreamResponse:
+        reset_memory_exposure_position()
         guild = self.deps.select_guild(parse_control_page_guild_id(request.query.get("guildId")))
-        return control_page_json_response(await self.deps.build_state(guild))
+        try:
+            payload = await self.deps.build_state(guild)
+        except MemoryDeletionJournalIntegrityError:
+            payload = {
+                "ok": False,
+                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            }
+            return control_page_memory_guarded_json_response(
+                payload,
+                expected_position=None,
+                memory_index_dir=self.deps.memory_index_dir,
+                status=503,
+            )
+        return control_page_memory_guarded_json_response(
+            payload,
+            expected_position=current_memory_exposure_position(),
+            memory_index_dir=self.deps.memory_index_dir,
+        )
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
+        reset_memory_exposure_position()
         try:
             payload = await request.json()
         except Exception:
-            return control_page_json_response({"ok": False, "error": "invalid_json"}, status=400)
-        response_payload, status = await handle_control_page_chat_request(
-            payload,
-            discord_enabled=self.deps.discord_enabled,
-            select_guild=self.deps.select_guild,
-            effective_guild_id=self.deps.effective_guild_id,
-            append_chat_log=self.deps.append_chat_log,
-            handle_input=self.deps.handle_input,
-            ensure_minecraft_snapshot=self.deps.ensure_minecraft_snapshot,
-            refresh_runtime_services=self.deps.refresh_runtime_services,
-            build_state=self.deps.build_state,
+            return control_page_memory_guarded_json_response(
+                {"ok": False, "error": "invalid_json"},
+                expected_position=None,
+                memory_index_dir=self.deps.memory_index_dir,
+                status=400,
+            )
+        try:
+            response_payload, status = await handle_control_page_chat_request(
+                payload,
+                discord_enabled=self.deps.discord_enabled,
+                select_guild=self.deps.select_guild,
+                effective_guild_id=self.deps.effective_guild_id,
+                append_chat_log=self.deps.append_chat_log,
+                handle_input=self.deps.handle_input,
+                ensure_minecraft_snapshot=self.deps.ensure_minecraft_snapshot,
+                refresh_runtime_services=self.deps.refresh_runtime_services,
+                build_state=self.deps.build_state,
+            )
+        except MemoryDeletionJournalIntegrityError:
+            response_payload = {
+                "ok": False,
+                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            }
+            status = 503
+            reset_memory_exposure_position()
+        return control_page_memory_guarded_json_response(
+            response_payload,
+            expected_position=current_memory_exposure_position(),
+            memory_index_dir=self.deps.memory_index_dir,
+            status=status,
         )
-        return control_page_json_response(response_payload, status=status)
 
     async def memory_graph(self, request: web.Request) -> web.StreamResponse:
         params = parse_control_page_memory_graph_query(request.query)
@@ -470,13 +544,19 @@ class ControlPageHttpComposition:
         return control_page_json_response(result, status=status)
 
     async def shutdown(self, request: web.Request) -> web.StreamResponse:
+        reset_memory_exposure_position()
         response_payload, status = await handle_control_page_shutdown_request(
             request.query.get("guildId"),
             select_guild=self.deps.select_guild,
             handle_input=self.deps.handle_input,
             build_state=self.deps.build_state,
         )
-        return control_page_json_response(response_payload, status=status)
+        return control_page_memory_guarded_json_response(
+            response_payload,
+            expected_position=current_memory_exposure_position(),
+            memory_index_dir=self.deps.memory_index_dir,
+            status=status,
+        )
 
     async def health(self, _: web.Request) -> web.StreamResponse:
         return control_page_json_response(

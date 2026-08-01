@@ -26,6 +26,7 @@ from evelyn_core.local_mic import (  # noqa: E402
     should_route_discord_user_to_local_mic,
 )
 from evelyn_core.local_io_bridge import LocalIoBridge, iter_pcm_aligned_chunks  # noqa: E402
+from evelyn_core import local_io_bridge  # noqa: E402
 
 
 def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
@@ -198,7 +199,15 @@ class LocalMicRoutingTests(unittest.TestCase):
             bridge = LocalIoBridge()
             bridge._post_status = AsyncMock()  # type: ignore[method-assign]
             bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]
-            bridge._chat = AsyncMock(return_value="사용 가능한 명령 목록")  # type: ignore[method-assign]
+            bridge._chat = AsyncMock(  # type: ignore[method-assign]
+                return_value=local_io_bridge.LocalChatReply(
+                    text="사용 가능한 명령 목록",
+                    memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                        state="not_used",
+                        position=None,
+                    ),
+                )
+            )
             bridge._chat_stream_and_speak = AsyncMock(  # type: ignore[method-assign]
                 side_effect=AssertionError("help must not enter the TTS stream")
             )
@@ -505,7 +514,8 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn('"turnId": str(grant.get("turnId") or "")', bridge_source)
         self.assertIn('"admissionToken": str(grant.get("admissionToken") or "")', bridge_source)
         self.assertIn('if event_type == "progress":', bridge_source)
-        self.assertIn('await websocket.send_json({"type": "commit"})', bridge_source)
+        self.assertIn('await submit_tts_command({"type": "commit"})', bridge_source)
+        self.assertIn("for command in buffered_tts_commands:", bridge_source)
         self.assertIn('"progressCount": progress_count', bridge_source)
         self.assertIn('"firstProgressMs": round(first_progress_ms, 1)', bridge_source)
         self.assertIn("_play_streaming_pcm_response", bridge_source)

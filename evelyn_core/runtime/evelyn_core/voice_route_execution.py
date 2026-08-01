@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Awaitable, Callable, MutableMapping
 
 import aiohttp
 
-from .memory_deletion_outbound import memory_deletion_outbound_request
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
+from .memory_exposure import (
+    MemoryExposurePosition,
+    combine_memory_exposure_positions,
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    memory_exposure_request,
+)
 from .skills import SkillContext, SkillResult
 from .text import ModelStreamPrefixFilter, clean_text, is_user_echo_answer
 from .turn_budget import build_turn_execution_budget
@@ -22,8 +30,23 @@ from .voice_pipeline import (
 )
 
 
+def _combined_optional_exposure(
+    first: MemoryExposurePosition | None,
+    second: MemoryExposurePosition | None,
+) -> MemoryExposurePosition | None:
+    positions = tuple(
+        position for position in (first, second) if position is not None
+    )
+    if not positions:
+        return None
+    if len(positions) == 1:
+        return positions[0]
+    return combine_memory_exposure_positions(*positions)
+
+
 @dataclass(frozen=True)
 class VoiceRouteExecutionDeps:
+    memory_index_dir: Path
     update_session_state: Callable[..., Any]
     emit_delivery_plan_chunks: Callable[..., Awaitable[Any]]
     build_delivery_plan: Callable[..., Any]
@@ -68,6 +91,7 @@ class VoiceRouteExecutionDeps:
 class VoiceMainLlmStreamingDeps:
     model_name: str
     llm_server_url: str
+    memory_index_dir: Path
     main_llm_chat_content_format: str
     voice_llm_max_tokens: int
     main_llm_stop_tokens: tuple[str, ...] | list[str]
@@ -107,6 +131,7 @@ def build_voice_main_llm_streaming_deps(
     *,
     model_name: str,
     llm_server_url: str,
+    memory_index_dir: Path,
     main_llm_chat_content_format: str,
     voice_llm_max_tokens: int,
     main_llm_stop_tokens: tuple[str, ...] | list[str],
@@ -144,6 +169,7 @@ def build_voice_main_llm_streaming_deps(
     return VoiceMainLlmStreamingDeps(
         model_name=model_name,
         llm_server_url=llm_server_url,
+        memory_index_dir=memory_index_dir,
         main_llm_chat_content_format=main_llm_chat_content_format,
         voice_llm_max_tokens=voice_llm_max_tokens,
         main_llm_stop_tokens=tuple(main_llm_stop_tokens),
@@ -415,13 +441,24 @@ async def execute_search_then_answer_action(
         messages=messages,
     )
     try:
-        results = await deps.search_duckduckgo(search_query)
-        answer = await deps.answer_from_search_results(search_query, results)
+        with memory_exposure_guard(
+            index_dir=deps.memory_index_dir,
+        ):
+            results = await deps.search_duckduckgo(search_query)
+        with memory_exposure_guard(
+            index_dir=deps.memory_index_dir,
+        ):
+            answer = await deps.answer_from_search_results(
+                search_query,
+                results,
+            )
         return build_action_result(
             action="search_then_answer",
             answer_text=clean_text(answer) or "지금 검색 결과를 정리하지 못했어. 잠깐 뒤에 다시 시도해줘.",
             metadata={"query": search_query, "result_count": len(results)},
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         return build_action_result(
             action="search_then_answer",
@@ -786,6 +823,7 @@ async def execute_main_llm_streaming_turn(
     suppressed_minecraft_leak_stream = False
     llm_started_at = time.monotonic()
     main_first_token_ms: float | None = None
+    turn_memory_exposure = current_memory_exposure_position()
 
     deps.increment_inflight_llm_requests()
     try:
@@ -796,9 +834,12 @@ async def execute_main_llm_streaming_turn(
             source_mode=source,
             prompt_chars=len(final_user_text),
         )
-        async with memory_deletion_outbound_request(
+        async with memory_exposure_request(
             session.post,
             deps.llm_server_url,
+            expected_position=turn_memory_exposure,
+            memory_index_dir=deps.memory_index_dir,
+            memory_boundary_required=turn_memory_exposure is not None,
             json=payload,
             timeout=timeout,
         ) as resp:
@@ -1015,13 +1056,22 @@ async def execute_main_llm_streaming_turn(
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
-    await deps.flush_streamed_answer_chunks(
-        answer,
-        speech_chunker=speech_chunker,
-        on_sentence=on_sentence,
-        emitted_any=emitted_any,
-        question_stream_state=question_stream_state,
+    delivery_memory_exposure = _combined_optional_exposure(
+        turn_memory_exposure,
+        current_memory_exposure_position(),
     )
+    with memory_exposure_guard(
+        expected_position=delivery_memory_exposure,
+        required=delivery_memory_exposure is not None,
+        index_dir=deps.memory_index_dir,
+    ):
+        await deps.flush_streamed_answer_chunks(
+            answer,
+            speech_chunker=speech_chunker,
+            on_sentence=on_sentence,
+            emitted_any=emitted_any,
+            question_stream_state=question_stream_state,
+        )
     if question_stream_state is not None and metrics is not None:
         metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
 

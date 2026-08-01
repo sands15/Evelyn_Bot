@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import json
 import os
+from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable
 
 from aiohttp import ClientSession, ClientTimeout
 
+from .memory_exposure import (
+    MemoryExposurePosition,
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    memory_exposure_request,
+)
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
 from .text import clean_text
 
 
@@ -53,6 +61,7 @@ ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://router_llm:9822/v1/chat/com
 ROUTER_LLM_MODEL = os.getenv("ROUTER_LLM_MODEL", "gemma-4-E2B-it-Q4_K_M.gguf")
 
 RouterProvider = Callable[[str, list[dict[str, Any]]], Awaitable[dict[str, Any] | None]]
+_MEMORY_EXPOSURE_UNSET = object()
 
 _SEARCH_MARKERS = (
     "검색",
@@ -190,7 +199,7 @@ _CAPABILITY_STATUS_MARKERS = (
 )
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class FastToolPlan:
     intent: str
     tool_name: str
@@ -199,6 +208,11 @@ class FastToolPlan:
     confidence: float
     source: str
     reason: str = ""
+    memory_exposure_position: MemoryExposurePosition | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def is_background(self) -> bool:
@@ -214,6 +228,19 @@ class FastToolPlan:
             "source": self.source,
             "reason": self.reason,
         }
+
+
+def bind_fast_tool_plan_memory_exposure(
+    plan: FastToolPlan,
+    position: MemoryExposurePosition | None,
+) -> FastToolPlan:
+    """Attach an internal memory boundary without changing the public plan."""
+
+    if not isinstance(plan, FastToolPlan):
+        raise TypeError("plan must be a FastToolPlan")
+    if position is not None and not isinstance(position, MemoryExposurePosition):
+        raise MemoryDeletionJournalIntegrityError()
+    return replace(plan, memory_exposure_position=position)
 
 
 def render_fast_tool_registry_context() -> str:
@@ -382,7 +409,25 @@ def _parse_router_json(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-async def default_router_provider(text: str, recent_messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+async def default_router_provider(
+    text: str,
+    recent_messages: list[dict[str, Any]],
+    *,
+    memory_exposure_position: MemoryExposurePosition | None | object = (
+        _MEMORY_EXPOSURE_UNSET
+    ),
+    memory_index_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    expected_position = (
+        current_memory_exposure_position()
+        if memory_exposure_position is _MEMORY_EXPOSURE_UNSET
+        else memory_exposure_position
+    )
+    if expected_position is not None and not isinstance(
+        expected_position,
+        MemoryExposurePosition,
+    ):
+        raise MemoryDeletionJournalIntegrityError()
     recent = [
         {
             "role": clean_text(item.get("role")) or "user",
@@ -412,10 +457,19 @@ async def default_router_provider(text: str, recent_messages: list[dict[str, Any
     }
     try:
         async with ClientSession(timeout=ClientTimeout(total=5.0)) as session:
-            async with session.post(ROUTER_LLM_URL, json=payload) as response:
+            async with memory_exposure_request(
+                session.post,
+                ROUTER_LLM_URL,
+                json=payload,
+                expected_position=expected_position,
+                memory_boundary_required=(expected_position is not None),
+                memory_index_dir=memory_index_dir,
+            ) as response:
                 if response.status != 200:
                     return None
                 data = await response.json(content_type=None)
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         return None
     choices = data.get("choices") or []
@@ -428,6 +482,7 @@ async def plan_fast_tool_request(
     *,
     recent_messages: list[dict[str, Any]] | None = None,
     router_provider: RouterProvider | None = None,
+    memory_index_dir: Path | None = None,
 ) -> FastToolPlan | None:
     recent = [dict(item) for item in list(recent_messages or []) if isinstance(item, dict)]
     rule_plan = _plan_from_rules(text, recent)
@@ -437,7 +492,21 @@ async def plan_fast_tool_request(
         return None
 
     normalized = normalize_stt_tool_text(text, recent_messages=recent)
-    routed = await (router_provider or default_router_provider)(normalized, recent)
+    expected_position = current_memory_exposure_position()
+    if router_provider is None:
+        routed = await default_router_provider(
+            normalized,
+            recent,
+            memory_exposure_position=expected_position,
+            memory_index_dir=memory_index_dir,
+        )
+    else:
+        with memory_exposure_guard(
+            expected_position=expected_position,
+            required=expected_position is not None,
+            index_dir=memory_index_dir,
+        ):
+            routed = await router_provider(normalized, recent)
     if not isinstance(routed, dict):
         return None
     tool_name = clean_text(routed.get("tool")).lower()

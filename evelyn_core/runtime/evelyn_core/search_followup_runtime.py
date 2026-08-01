@@ -3,10 +3,22 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
+)
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+    memory_receipt_ref_from_exposure,
+)
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    reset_memory_exposure_position,
 )
 from .search_followup_recovery import content_sha256
 from .text import clean_text, is_similar, strip_omnivoice_tags
@@ -15,6 +27,7 @@ from .search_query_context import build_search_query_from_context
 
 @dataclass(frozen=True)
 class SearchFollowupRuntimeDeps:
+    memory_index_dir: Path
     bot: Any
     discord_object_factory: Callable[..., Any]
     session_followup_targets: dict[str, dict[str, int]]
@@ -61,16 +74,11 @@ def build_search_query_from_runtime(
     deps: SearchFollowupRuntimeDeps,
 ) -> str:
     context_messages = list(messages or [])
-    if not context_messages and session_key is not None:
-        context_messages = list(deps.get_conversation_history(session_key=session_key, guild_id=guild_id))
-    summary = ""
-    if guild_id is not None:
-        summary = deps.compact_working_summary(deps.read_text_file(deps.memory_summary_path(guild_id)))
     return build_search_query_from_context(
         user_text,
         messages=context_messages,
-        memory_summary=summary,
-        has_memory_scope=guild_id is not None,
+        memory_summary="",
+        has_memory_scope=False,
     )
 
 
@@ -105,6 +113,10 @@ async def deliver_proactive_followup_from_runtime(
         answer,
         session_key=session_key,
     )
+    delivery_exposure_position = current_memory_exposure_position()
+    delivery_memory_receipt_ref = memory_receipt_ref_from_exposure(
+        delivery_exposure_position
+    )
 
     async def prepare_durable_followup() -> None:
         nonlocal prepared
@@ -121,37 +133,48 @@ async def deliver_proactive_followup_from_runtime(
                 answer=plain_answer,
                 display_text=display_answer,
             )
-        deps.append_history(session_key, query, plain_answer, guild_id=guild_id)
-        try:
-            continuity_status = (
-                await deps.commit_session_continuity(
-                    session_key,
-                    str(deps.current_turn_id(session_key) or ""),
+        with memory_exposure_guard(
+            expected_position=delivery_exposure_position,
+            required=(delivery_exposure_position is not None),
+            index_dir=deps.memory_index_dir,
+        ):
+            deps.append_history(
+                session_key,
+                query,
+                plain_answer,
+                guild_id=guild_id,
+                memory_receipt=delivery_memory_receipt_ref,
+            )
+            try:
+                continuity_status = (
+                    await deps.commit_session_continuity(
+                        session_key,
+                        str(deps.current_turn_id(session_key) or ""),
+                    )
                 )
+                continuity_receipt = require_durable_continuity_receipt(
+                    continuity_status
+                )
+            except Exception as exc:
+                deps.log(
+                    "[SEARCH] followup_continuity_commit_failed "
+                    f"guild={guild_id} session={session_key} "
+                    f"errorType={type(exc).__name__}"
+                )
+                raise
+            deps.schedule_memory_update(
+                guild_id,
+                query,
+                plain_answer,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                source=source,
+                user_speaker="search_task",
+                assistant_speaker="Evelyn",
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
             )
-            continuity_receipt = require_durable_continuity_receipt(
-                continuity_status
-            )
-        except Exception as exc:
-            deps.log(
-                "[SEARCH] followup_continuity_commit_failed "
-                f"guild={guild_id} session={session_key} "
-                f"errorType={type(exc).__name__}"
-            )
-            raise
-        deps.schedule_memory_update(
-            guild_id,
-            query,
-            plain_answer,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            user_speaker="search_task",
-            assistant_speaker="Evelyn",
-            turn_scope=turn_scope,
-            runtime_mode=runtime_mode,
-        )
         if recovery_intent_id is not None:
             recovery.mark_delivery_ready(
                 recovery_intent_id,
@@ -180,12 +203,17 @@ async def deliver_proactive_followup_from_runtime(
                 deps.search_followup_recovery.mark_delivery_attempted(
                     recovery_intent_id
                 )
-            await deps.send_discord_text(
-                channel,
-                display_answer,
-                reference_message_id=reply_target_id,
-                reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
-            )
+            with memory_exposure_guard(
+                expected_position=delivery_exposure_position,
+                required=(delivery_exposure_position is not None),
+                index_dir=deps.memory_index_dir,
+            ):
+                await deps.send_discord_text(
+                    channel,
+                    display_answer,
+                    reference_message_id=reply_target_id,
+                    reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
+                )
             if recovery_intent_id is not None:
                 deps.search_followup_recovery.complete(
                     recovery_intent_id
@@ -204,19 +232,26 @@ async def deliver_proactive_followup_from_runtime(
                 deps.search_followup_recovery.mark_delivery_attempted(
                     recovery_intent_id
                 )
-            await deps.speak_answer(
-                vc,
-                answer,
-                turn_id=deps.current_turn_id(session_key),
-                session_key=session_key,
-                turn_scope=turn_scope,
-            )
+            with memory_exposure_guard(
+                expected_position=delivery_exposure_position,
+                required=(delivery_exposure_position is not None),
+                index_dir=deps.memory_index_dir,
+            ):
+                await deps.speak_answer(
+                    vc,
+                    answer,
+                    turn_id=deps.current_turn_id(session_key),
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                )
             if recovery_intent_id is not None:
                 deps.search_followup_recovery.complete(
                     recovery_intent_id
                 )
             else:
                 await prepare_durable_followup()
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception as e:
             deps.log(
                 "[SEARCH] proactive TTS 실패 "
@@ -334,6 +369,7 @@ async def recover_search_followups_from_runtime(
     *,
     deps: SearchFollowupRuntimeDeps,
 ) -> dict[str, int]:
+    reset_memory_exposure_position()
     recovery = deps.search_followup_recovery
     counts = {
         "pending": 0,
@@ -348,6 +384,7 @@ async def recover_search_followups_from_runtime(
     counts["pending"] = len(entries)
     continuity_status = deps.continuity_status()
     for entry in entries:
+        reset_memory_exposure_position()
         intent_id = str(entry["intentId"])
         session_key = str(entry["sessionKey"])
         guild_id = int(entry["guildId"])
@@ -366,27 +403,61 @@ async def recover_search_followups_from_runtime(
                 )
                 counts["uncertain"] += 1
                 continue
-            history = list(
+            persisted_history = list(
                 deps.get_conversation_history(
                     session_key=session_key,
                     guild_id=guild_id,
                 )
             )
+            history_outcome = (
+                filter_conversation_history_for_memory_exposure(
+                    persisted_history,
+                    memory_index_dir=Path(deps.memory_index_dir),
+                )
+            )
+            history = list(history_outcome.messages)
+            recovery_exposure_position = (
+                capture_combined_memory_exposure(
+                    history_outcome.memory_exposure_position
+                )
+            )
+            raw_request_matches = _hashed_history_pairs(
+                persisted_history,
+                user_hash=str(entry["requestUserHash"]),
+                assistant_hash=str(entry["requestAnswerHash"]),
+            )
+            request_matches = _hashed_history_pairs(
+                history,
+                user_hash=str(entry["requestUserHash"]),
+                assistant_hash=str(entry["requestAnswerHash"]),
+            )
+            raw_delivery_matches = _hashed_history_pairs(
+                persisted_history,
+                user_hash=str(entry["queryHash"]),
+                assistant_hash=str(entry["answerHash"]),
+            )
+            delivery_matches = _hashed_history_pairs(
+                history,
+                user_hash=str(entry["queryHash"]),
+                assistant_hash=str(entry["answerHash"]),
+            )
+            if (
+                len(raw_request_matches) != len(request_matches)
+                or len(raw_delivery_matches) != len(delivery_matches)
+            ):
+                raise RuntimeError(
+                    "search_followup_memory_exposure_rejected"
+                )
             if entry["phase"] in {
                 "running",
                 "delivery_preparing",
             }:
-                delivery_matches: list[tuple[str, str]] = []
-                if entry["phase"] == "delivery_preparing":
-                    delivery_matches = _hashed_history_pairs(
-                        history,
-                        user_hash=str(entry["queryHash"]),
-                        assistant_hash=str(entry["answerHash"]),
+                if entry["phase"] != "delivery_preparing":
+                    delivery_matches = []
+                elif len(delivery_matches) > 1:
+                    raise RuntimeError(
+                        "search_followup_delivery_context_ambiguous"
                     )
-                    if len(delivery_matches) > 1:
-                        raise RuntimeError(
-                            "search_followup_delivery_context_ambiguous"
-                        )
                 if delivery_matches:
                     if int(
                         continuity_status[
@@ -534,14 +605,21 @@ async def recover_search_followups_from_runtime(
                         counts["uncertain"] += 1
                         continue
                 recovery.mark_delivery_attempted(intent_id)
-                await deps.send_discord_text(
-                    channel,
-                    display_text,
-                    reference_message_id=reply_to_message_id,
-                    reference_factory=lambda message_id: deps.discord_object_factory(
-                        id=message_id
+                with memory_exposure_guard(
+                    expected_position=recovery_exposure_position,
+                    required=(
+                        recovery_exposure_position is not None
                     ),
-                )
+                    index_dir=deps.memory_index_dir,
+                ):
+                    await deps.send_discord_text(
+                        channel,
+                        display_text,
+                        reference_message_id=reply_to_message_id,
+                        reference_factory=lambda message_id: deps.discord_object_factory(
+                            id=message_id
+                        ),
+                    )
                 recovery.complete(intent_id)
                 counts["redelivered"] += 1
                 continue
@@ -555,13 +633,20 @@ async def recover_search_followups_from_runtime(
                 and voice_client.is_connected()
             ):
                 recovery.mark_delivery_attempted(intent_id)
-                await deps.speak_answer(
-                    voice_client,
-                    answer,
-                    turn_id=entry.get("turnId"),
-                    session_key=session_key,
-                    turn_scope=None,
-                )
+                with memory_exposure_guard(
+                    expected_position=recovery_exposure_position,
+                    required=(
+                        recovery_exposure_position is not None
+                    ),
+                    index_dir=deps.memory_index_dir,
+                ):
+                    await deps.speak_answer(
+                        voice_client,
+                        answer,
+                        turn_id=entry.get("turnId"),
+                        session_key=session_key,
+                        turn_scope=None,
+                    )
                 recovery.complete(intent_id)
                 counts["redelivered"] += 1
                 continue
@@ -584,6 +669,7 @@ async def recover_search_followups_from_runtime(
                 f"guild={guild_id} session={session_key} "
                 f"errorType={type(exc).__name__}"
             )
+    reset_memory_exposure_position()
     return counts
 
 
@@ -671,14 +757,26 @@ async def run_search_followup_from_runtime(
                     return
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
-                results = await deps.search_duckduckgo(query)
+                with memory_exposure_guard(
+                    index_dir=deps.memory_index_dir,
+                ):
+                    results = await deps.search_duckduckgo(query)
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
-                answer = await deps.answer_from_search_results(query, results)
+                with memory_exposure_guard(
+                    index_dir=deps.memory_index_dir,
+                ):
+                    answer = await deps.answer_from_search_results(
+                        query,
+                        results,
+                    )
                 last_error = None
                 break
             except asyncio.CancelledError:
                 raise
+            except MemoryDeletionJournalIntegrityError as exc:
+                last_error = exc
+                break
             except Exception as exc:
                 last_error = exc
                 if recovery_intent_id is not None:

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
 
 
 @dataclass(frozen=True)
@@ -12,6 +18,7 @@ class LocalControlTtsRuntimeDeps:
     speak_answer_local: Callable[..., Awaitable[bool]]
     create_turn_scoped_task: Callable[..., Any]
     log_voice_bottleneck_summary: Callable[..., Any]
+    memory_index_dir: Path
     monotonic: Callable[[], float] = time.monotonic
 
 
@@ -22,6 +29,7 @@ def build_local_control_tts_runtime_deps(
     speak_answer_local: Callable[..., Awaitable[bool]],
     create_turn_scoped_task: Callable[..., Any],
     log_voice_bottleneck_summary: Callable[..., Any],
+    memory_index_dir: Path,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> LocalControlTtsRuntimeDeps:
     return LocalControlTtsRuntimeDeps(
@@ -30,6 +38,7 @@ def build_local_control_tts_runtime_deps(
         speak_answer_local=speak_answer_local,
         create_turn_scoped_task=create_turn_scoped_task,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        memory_index_dir=memory_index_dir,
         monotonic=monotonic,
     )
 
@@ -56,17 +65,23 @@ def schedule_local_control_tts_from_runtime(
         },
         "marks": {},
     }
+    exposure_position = current_memory_exposure_position()
 
     async def _runner() -> None:
         ok = False
         try:
-            ok = await deps.speak_answer_local(
-                answer,
-                turn_id=turn_id,
-                session_key=session_key,
-                turn_scope=turn_scope,
-                metrics=metrics,
-            )
+            with memory_exposure_guard(
+                expected_position=exposure_position,
+                required=(exposure_position is not None),
+                index_dir=deps.memory_index_dir,
+            ):
+                ok = await deps.speak_answer_local(
+                    answer,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                    metrics=metrics,
+                )
         finally:
             deps.log_voice_bottleneck_summary(
                 metrics,

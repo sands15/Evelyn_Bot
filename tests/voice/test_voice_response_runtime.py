@@ -84,7 +84,7 @@ class VoiceResponseRuntimeTests(unittest.TestCase):
 
         self.assertIn("응답 규칙", result)
         self.assertIn("user_friendly", result)
-        self.assertIn("최근 네 말: 이전에 한 말", result)
+        self.assertNotIn("최근 네 말: 이전에 한 말", result)
         self.assertIn("현재 Evelyn 런타임 상태 요약: gpu_ok", result)
         self.assertIn("현재 마인크래프트 실시간 상태: 마인크래프트 상태 없음", result)
         self.assertIn("tool-aware", result)

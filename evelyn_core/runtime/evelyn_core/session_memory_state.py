@@ -5,7 +5,18 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+)
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+    unattributed_memory_receipt_ref,
+)
+from .memory_exposure import current_memory_exposure_position
 from .text import clean_text
 
 
@@ -273,6 +284,7 @@ class SessionStateStore:
         question_ttl_sec: float,
         topic_id: str | None = None,
         now_monotonic: float | None = None,
+        memory_receipt: Any = None,
     ) -> AssistantTextTurnFinish:
         ttl_sec = float(question_ttl_sec if awaiting_user_reply else normal_ttl_sec)
         self.append_history(
@@ -282,6 +294,7 @@ class SessionStateStore:
             system_prompt=system_prompt,
             max_history_items=max_history_items,
             guild_id=guild_id,
+            memory_receipt=memory_receipt,
         )
         self.mark_active(
             session_key,
@@ -341,6 +354,7 @@ class SessionStateStore:
         max_history_items: int,
         guild_id: int | None,
         ttl_sec: float,
+        memory_receipt: Any = None,
         now_monotonic: float | None = None,
     ) -> AssistantTextTurnFinish:
         cleaned_tool = clean_text(tool_name)
@@ -352,6 +366,7 @@ class SessionStateStore:
             system_prompt=system_prompt,
             max_history_items=max_history_items,
             guild_id=guild_id,
+            memory_receipt=memory_receipt,
         )
         self.mark_active(
             session_key,
@@ -416,6 +431,7 @@ class SessionStateStore:
         system_prompt: str,
         max_history_items: int,
         guild_id: int | None = None,
+        memory_receipt: Any = None,
     ) -> None:
         history = self.get_conversation_history(system_prompt=system_prompt, session_key=session_key, guild_id=guild_id)
         history.append({"role": "user", "content": clean_text(user_text)})
@@ -424,6 +440,13 @@ class SessionStateStore:
                 {
                     "role": "assistant",
                     "content": clean_text(answer),
+                    "memoryReceiptRef": (
+                        unattributed_memory_receipt_ref()
+                        if memory_receipt is None
+                        else memory_receipt_ref_from_receipt(
+                            memory_receipt
+                        )
+                    ),
                 }
             )
         self.trim_history(
@@ -437,13 +460,26 @@ class SessionStateStore:
         self,
         *,
         system_prompt: str,
+        memory_index_dir: Path,
         session_key: str | None = None,
         guild_id: int | None = None,
         limit: int = 1,
     ) -> str:
-        history = self.get_conversation_history(system_prompt=system_prompt, session_key=session_key, guild_id=guild_id)
+        history = self.get_conversation_history(
+            system_prompt=system_prompt,
+            session_key=session_key,
+            guild_id=guild_id,
+        )
+        history_outcome = filter_conversation_history_for_memory_exposure(
+            history,
+            memory_index_dir=Path(memory_index_dir),
+        )
+        capture_combined_memory_exposure(
+            current_memory_exposure_position(),
+            history_outcome.memory_exposure_position,
+        )
         replies: list[str] = []
-        for item in reversed(history):
+        for item in reversed(history_outcome.messages):
             if not isinstance(item, dict) or item.get("role") != "assistant":
                 continue
             content = clean_text(str(item.get("content") or ""))
@@ -480,6 +516,7 @@ class SessionStateStore:
         user_text: str,
         *,
         system_prompt: str,
+        memory_index_dir: Path,
         session_key: str | None = None,
         guild_id: int | None = None,
     ) -> str:
@@ -487,6 +524,7 @@ class SessionStateStore:
             return ""
         recent = self.recent_assistant_reply_summary(
             system_prompt=system_prompt,
+            memory_index_dir=memory_index_dir,
             session_key=session_key,
             guild_id=guild_id,
             limit=4,

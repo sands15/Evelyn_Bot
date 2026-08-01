@@ -16,9 +16,38 @@ from evelyn_core.control_page_search_runtime import (  # noqa: E402
     ControlPageSearchRuntimeDeps,
     answer_control_page_search_text_from_runtime,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA,
+)
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionJournalIntegrityError,
+    MemoryDeletionPosition,
+)
+from evelyn_core.memory_exposure import (  # noqa: E402
+    MemoryExposurePosition,
+    capture_memory_exposure_position,
+)
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
+
+
+NOTE_A = "concept-0123456789abcdef"
+NOTE_B = "concept-fedcba9876543210"
+
+
+def memory_exposure() -> MemoryExposurePosition:
+    return MemoryExposurePosition(
+        deletion_position=MemoryDeletionPosition(
+            schema=MEMORY_DELETION_POSITION_SCHEMA,
+            root_digest="1" * 64,
+            sequence=1,
+            position_digest="2" * 64,
+        ),
+        memory_version=7,
+        supplied_note_ids=(NOTE_A,),
+    )
 
 
 def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]:
@@ -40,6 +69,14 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
 
     async def synthesize_tool_result_with_main_llm(**kwargs):
         state["synthesis"].append(kwargs)
+        kwargs["metrics"]["meta"]["context_pipeline"] = {
+            "memory_receipt": {
+                "schema": "memory.context-receipt.v1",
+                "state": "not_requested",
+                "memoryVersion": 0,
+                "contentFree": True,
+            }
+        }
         return "final answer"
 
     def get_session_lock(session_key: str) -> asyncio.Lock:
@@ -57,6 +94,7 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
         control_page_effective_guild_id=lambda guild: int(getattr(guild, "id", 999) or 999),
         control_page_session_key=lambda guild_id: f"control:{guild_id}",
         get_conversation_history=lambda **kwargs: [{"role": "user", "content": "recent"}],
+        memory_index_dir=REPO_ROOT / "unused-memory-index",
         build_route_decision=lambda **kwargs: state["route"].append(kwargs) or SimpleNamespace(**kwargs),
         monotonic=lambda: 12.5,
         execute_search_then_answer_action=execute_search_then_answer_action,
@@ -116,9 +154,21 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             state["synthesis"][0]["metrics"]["meta"]["continuity_generation"],
             4,
         )
+        self.assertEqual(
+            state["history"][0][1]["memory_receipt"]["state"],
+            "not_used",
+        )
 
     def test_search_answer_falls_back_to_action_result_when_synthesis_is_empty(self) -> None:
-        async def synthesize_tool_result_with_main_llm(**_kwargs):
+        async def synthesize_tool_result_with_main_llm(**kwargs):
+            kwargs["metrics"]["meta"]["context_pipeline"] = {
+                "memory_receipt": {
+                    "schema": "memory.context-receipt.v1",
+                    "state": "not_requested",
+                    "memoryVersion": 0,
+                    "contentFree": True,
+                }
+            }
             return "   "
 
         deps, _state = _deps(synthesize_tool_result_with_main_llm=synthesize_tool_result_with_main_llm)
@@ -159,6 +209,36 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             "conversation_continuity_commit_failed",
         )
         self.assertNotIn(private, str(metrics))
+
+    def test_bound_receipt_note_mismatch_reaches_no_sink(self) -> None:
+        async def synthesize_with_mismatched_boundary(**kwargs):
+            capture_memory_exposure_position(memory_exposure())
+            kwargs["metrics"]["meta"]["context_pipeline"] = {
+                "memory_receipt": {
+                    "schema": CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA,
+                    "state": "bound",
+                    "memoryVersion": 7,
+                    "suppliedNoteIds": [NOTE_B],
+                    "suppliedNoteCount": 1,
+                    "contentFree": True,
+                }
+            }
+            return "private mismatched reply"
+
+        deps, state = _deps(
+            synthesize_tool_result_with_main_llm=(
+                synthesize_with_mismatched_boundary
+            )
+        )
+
+        with self.assertRaises(MemoryDeletionJournalIntegrityError):
+            asyncio.run(self._run(deps))
+
+        self.assertEqual(state["history"], [])
+        self.assertEqual(state["active"], [])
+        self.assertEqual(state["commitTargets"], [])
+        self.assertEqual(state["tts"], [])
+        self.assertEqual(state["events"], [])
 
 
 if __name__ == "__main__":

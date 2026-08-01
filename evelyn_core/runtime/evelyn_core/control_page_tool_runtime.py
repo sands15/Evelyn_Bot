@@ -1,17 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+)
+from .conversation_memory_receipt import (
+    capture_conversation_memory_receipt_ref,
+    current_conversation_memory_receipt_ref,
+    not_used_memory_receipt_ref,
+    reset_conversation_memory_receipt_ref,
+    unattributed_memory_receipt_ref,
+)
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    reset_memory_exposure_position,
+)
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
 
 @dataclass(frozen=True)
 class ControlPageToolRuntimeDeps:
+    memory_index_dir: Path
     clean_text: Callable[[str], str]
     enqueue_control_page_ui_command: Callable[..., dict[str, Any]]
     memory_panel_reply: Callable[[str], str]
     create_task: Callable[[Awaitable[Any]], Any]
     restart_bot_process: Callable[[], Awaitable[Any]]
-    recent_history_for_router: Callable[..., str]
+    get_conversation_history: Callable[..., list[dict[str, Any]]]
     record_tool_assistant_turn: Callable[..., None]
     control_page_effective_guild_id: Callable[[Any], int]
     control_page_session_key: Callable[[int | None], str]
@@ -45,7 +64,7 @@ class ControlPageInputRuntimeDeps:
     control_page_session_key: Callable[[int | None], str]
     cheap_control_page_tool_decision: Callable[[str], dict[str, Any] | None]
     execute_control_page_tool: Callable[[Any | None, dict[str, Any]], Awaitable[str]]
-    remember_control_page_tool_turn: Callable[[Any | None, str, str, dict[str, Any]], None]
+    remember_control_page_tool_turn: Callable[..., None]
     should_route_control_page_tool_candidate: Callable[[str], bool]
     decide_control_page_tool_call: Callable[..., Awaitable[dict[str, Any] | None]]
     control_page_tool_decision_from_llm: Callable[[dict[str, Any] | None], dict[str, Any] | None]
@@ -83,12 +102,30 @@ def recent_control_page_history_for_router_from_runtime(
     limit: int = 6,
     deps: ControlPageToolRuntimeDeps,
 ) -> str:
-    return deps.recent_history_for_router(
-        system_prompt=deps.system_prompt,
-        session_key=session_key,
-        guild_id=guild_id,
-        limit=limit,
+    outcome = filter_conversation_history_for_memory_exposure(
+        deps.get_conversation_history(
+            system_prompt=deps.system_prompt,
+            session_key=session_key,
+            guild_id=guild_id,
+        ),
+        memory_index_dir=deps.memory_index_dir,
     )
+    capture_combined_memory_exposure(
+        current_memory_exposure_position(),
+        outcome.memory_exposure_position,
+    )
+    capture_conversation_memory_receipt_ref(
+        outcome.memory_receipt_ref
+    )
+    lines: list[str] = []
+    bounded_limit = max(0, int(limit))
+    recent_rows = outcome.messages[-bounded_limit:] if bounded_limit else ()
+    for row in recent_rows:
+        role = deps.clean_text(str(row.get("role") or ""))
+        content = deps.clean_text(str(row.get("content") or ""))
+        if role and content:
+            lines.append(f"{role}: {content[:180]}")
+    return "\n".join(lines)
 
 
 def remember_control_page_tool_turn_from_runtime(
@@ -98,6 +135,7 @@ def remember_control_page_tool_turn_from_runtime(
     decision: dict[str, Any],
     *,
     deps: ControlPageToolRuntimeDeps,
+    memory_receipt_ref: Any = None,
 ) -> None:
     guild_id = deps.control_page_effective_guild_id(guild)
     session_key = deps.control_page_session_key(guild_id)
@@ -110,6 +148,11 @@ def remember_control_page_tool_turn_from_runtime(
         max_history_items=deps.max_history_items,
         guild_id=guild_id,
         ttl_sec=deps.active_conversation_text_sec,
+        memory_receipt=(
+            memory_receipt_ref
+            if memory_receipt_ref is not None
+            else unattributed_memory_receipt_ref()
+        ),
     )
 
 
@@ -156,17 +199,29 @@ async def decide_control_page_tool_call_from_runtime(
         {"role": "user", "content": user_text},
     ]
     try:
-        return await deps.ask_router_llm(
-            messages,
-            max_tokens=180,
-            timeout_seconds=min(deps.route_timeout_sec, 2.0),
-            purpose="control_page_ui_tool",
-            hot_path=True,
-            turn_id=deps.current_turn_id(session_key) if deps.current_turn_id else None,
-            session_key=session_key,
-            source="control_page",
-            guild_id=guild_id,
-        )
+        exposure_position = current_memory_exposure_position()
+        with memory_exposure_guard(
+            expected_position=exposure_position,
+            required=exposure_position is not None,
+            index_dir=deps.memory_index_dir,
+        ):
+            return await deps.ask_router_llm(
+                messages,
+                max_tokens=180,
+                timeout_seconds=min(deps.route_timeout_sec, 2.0),
+                purpose="control_page_ui_tool",
+                hot_path=True,
+                turn_id=(
+                    deps.current_turn_id(session_key)
+                    if deps.current_turn_id
+                    else None
+                ),
+                session_key=session_key,
+                source="control_page",
+                guild_id=guild_id,
+            )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception as exc:
         if deps.log is not None:
             deps.log(f"[CONTROL PAGE TOOL ROUTER] failed: {exc!r}")
@@ -256,30 +311,69 @@ async def handle_control_page_input_from_runtime(
     *,
     deps: ControlPageInputRuntimeDeps,
 ) -> str:
+    reset_memory_exposure_position()
+    reset_conversation_memory_receipt_ref()
     guild_id = deps.control_page_effective_guild_id(guild)
     session_key = deps.control_page_session_key(guild_id)
     cheap_decision = deps.cheap_control_page_tool_decision(text)
     if cheap_decision is not None:
         reply = await deps.execute_control_page_tool(guild, cheap_decision)
-        deps.remember_control_page_tool_turn(guild, text, reply, cheap_decision)
+        deps.remember_control_page_tool_turn(
+            guild,
+            text,
+            reply,
+            cheap_decision,
+            memory_receipt_ref=not_used_memory_receipt_ref(),
+        )
+        capture_conversation_memory_receipt_ref(
+            not_used_memory_receipt_ref()
+        )
         return reply
     if deps.clean_text(text).startswith("/"):
+        capture_conversation_memory_receipt_ref(
+            not_used_memory_receipt_ref()
+        )
         return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
     if deps.should_route_control_page_tool_candidate(text):
         tool_decision_raw = await deps.decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
+        router_receipt_ref = (
+            current_conversation_memory_receipt_ref()
+            or unattributed_memory_receipt_ref()
+        )
         tool_decision = deps.control_page_tool_decision_from_llm(tool_decision_raw)
         if tool_decision:
             router_policy_error = deps.control_page_tool_policy_error(tool_decision, guild_available=guild is not None)
             if router_policy_error:
-                deps.remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)
+                deps.remember_control_page_tool_turn(
+                    guild,
+                    text,
+                    router_policy_error,
+                    tool_decision,
+                    memory_receipt_ref=router_receipt_ref,
+                )
+                capture_conversation_memory_receipt_ref(
+                    router_receipt_ref
+                )
                 return router_policy_error
             execute_reply = await deps.execute_control_page_tool(guild, tool_decision)
             final_reply = deps.control_page_tool_reply_from_execution(tool_decision, execute_reply)
-            deps.remember_control_page_tool_turn(guild, text, final_reply, tool_decision)
+            deps.remember_control_page_tool_turn(
+                guild,
+                text,
+                final_reply,
+                tool_decision,
+                memory_receipt_ref=router_receipt_ref,
+            )
+            capture_conversation_memory_receipt_ref(
+                router_receipt_ref
+            )
             return final_reply
         if isinstance(tool_decision_raw, dict):
             router_reply = deps.clean_text(str(tool_decision_raw.get("reply") or ""))
             if router_reply:
+                capture_conversation_memory_receipt_ref(
+                    router_receipt_ref
+                )
                 return router_reply
     if deps.should_force_search_query(text):
         return await deps.answer_control_page_search_text(guild, text)

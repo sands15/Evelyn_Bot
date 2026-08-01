@@ -19,6 +19,10 @@ from .continuity_authenticity import (
     ContinuityAuthenticityError,
     validate_continuity_head,
 )
+from .conversation_memory_receipt import (
+    merge_memory_receipt_refs,
+    sanitize_memory_receipt_ref,
+)
 from .session_continuity import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_GUILD_REVOCATIONS,
@@ -201,10 +205,10 @@ def _safe_history(
     *,
     max_items: int,
     max_content_chars: int,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise ValueError("history_rejected")
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("history_rejected")
@@ -214,12 +218,21 @@ def _safe_history(
             raise ValueError("history_rejected")
         if len(content) > max_content_chars:
             raise ValueError("history_rejected")
-        messages.append(
-            {
-                "role": role,
-                "content": content,
-            }
-        )
+        receipt_present = "memoryReceiptRef" in item
+        if role == "user" and receipt_present:
+            continue
+        message: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+        if role == "assistant" and receipt_present:
+            receipt_ref = sanitize_memory_receipt_ref(
+                item.get("memoryReceiptRef")
+            )
+            if receipt_ref is None:
+                continue
+            message["memoryReceiptRef"] = receipt_ref
+        messages.append(message)
     return messages[-max_items:]
 
 
@@ -445,7 +458,7 @@ class VerifiedContinuitySnapshot:
     state: str
     saved_at: float | None = None
     generation: int = 0
-    messages: tuple[dict[str, str], ...] = ()
+    messages: tuple[dict[str, Any], ...] = ()
     session_count: int = 0
     error_code: str = ""
 
@@ -1295,7 +1308,7 @@ def read_verified_continuity_snapshot(
         sessions = checkpoint.get("sessions")
         if not isinstance(sessions, list):
             raise ValueError("continuity_sessions_rejected")
-        selected: list[tuple[str, list[dict[str, str]]]] = []
+        selected: list[tuple[str, list[dict[str, Any]]]] = []
         selection_limit = max(1, int(max_sessions))
         for row in sessions[:DEFAULT_MAX_SESSIONS]:
             if not isinstance(row, dict):
@@ -1336,7 +1349,7 @@ def read_verified_continuity_snapshot(
             )
             if len(selected) >= selection_limit:
                 break
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         # The writer stores newest sessions first. Reverse session order so
         # the newest selected session is closest to the current user turn.
         for _session_key, history in reversed(selected):
@@ -1368,33 +1381,59 @@ def read_verified_continuity_snapshot(
 
 def _normalized_messages(
     messages: Iterable[dict[str, Any]],
-) -> list[dict[str, str]]:
-    normalized: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
         role = clean_text(message.get("role")).lower()
         content = clean_text(message.get("content"))
-        if role in _ALLOWED_ROLES and content:
-            normalized.append(
-                {
-                    "role": role,
-                    "content": content,
-                }
+        if role not in _ALLOWED_ROLES or not content:
+            continue
+        receipt_present = "memoryReceiptRef" in message
+        if role == "user" and receipt_present:
+            continue
+        normalized_message: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+        if role == "assistant" and receipt_present:
+            receipt_ref = sanitize_memory_receipt_ref(
+                message.get("memoryReceiptRef")
             )
+            if receipt_ref is None:
+                continue
+            normalized_message["memoryReceiptRef"] = (
+                receipt_ref
+            )
+        normalized.append(normalized_message)
     return normalized
 
 
 def _dedupe_adjacent(
     messages: Iterable[dict[str, Any]],
-) -> list[dict[str, str]]:
-    deduped: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
     for message in _normalized_messages(messages):
         if (
             deduped
             and deduped[-1]["role"] == message["role"]
             and deduped[-1]["content"] == message["content"]
         ):
+            if message["role"] == "assistant":
+                merged_receipt = merge_memory_receipt_refs(
+                    deduped[-1].get("memoryReceiptRef"),
+                    message.get("memoryReceiptRef"),
+                )
+                if merged_receipt is None:
+                    deduped[-1].pop(
+                        "memoryReceiptRef",
+                        None,
+                    )
+                else:
+                    deduped[-1]["memoryReceiptRef"] = (
+                        merged_receipt
+                    )
             continue
         deduped.append(message)
     return deduped

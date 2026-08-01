@@ -772,6 +772,8 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             def record_completed_turn(
                 user_text: str,
                 assistant_text: str,
+                *,
+                memory_receipt=None,
             ):
                 recorded.append(
                     (user_text, assistant_text)
@@ -985,6 +987,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         commit_turn.assert_called_once_with(
             "stream planner 실패",
             error["message"],
+            memory_receipt=fast_api.not_used_memory_receipt_ref(),
         )
         self.assertNotIn(
             "stream-planner-secret",

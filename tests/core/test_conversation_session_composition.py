@@ -117,6 +117,37 @@ class ConversationSessionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(result, "summary")
 
+    def test_history_adapter_forwards_memory_receipt(self) -> None:
+        composition, session_deps, *_ = self.build_composition()
+        receipt = {
+            "schema": "conversation.memory-receipt-ref.v1",
+            "state": "not_used",
+            "memoryVersion": 0,
+            "suppliedNoteIds": [],
+            "suppliedNoteCount": 0,
+            "contentFree": True,
+        }
+
+        with patch(
+            "evelyn_core.conversation_session_composition.append_history_from_runtime",
+        ) as append:
+            composition.append_history(
+                "session-1",
+                "user",
+                "answer",
+                guild_id=5,
+                memory_receipt=receipt,
+            )
+
+        append.assert_called_once_with(
+            "session-1",
+            "user",
+            "answer",
+            guild_id=5,
+            memory_receipt=receipt,
+            deps=session_deps,
+        )
+
     def test_room_activity_adapters_share_the_injected_store(self) -> None:
         composition, _, store, *_ = self.build_composition()
 
@@ -237,10 +268,25 @@ class ConversationSessionCompositionTests(unittest.TestCase):
             )
 
         mismatches = []
+        receipt_extended = {
+            "finish_assistant_text_turn",
+            "append_history",
+        }
         for old_name, new_name in mapping.items():
             old_signature = signature(old_functions[old_name])
             new_signature = signature(new_methods[new_name], method=True)
-            if old_signature != new_signature:
+            comparable_signature = new_signature
+            if old_name in receipt_extended:
+                self.assertEqual(
+                    new_signature[4][-1],
+                    ("memory_receipt", "None"),
+                )
+                comparable_signature = (
+                    *new_signature[:4],
+                    new_signature[4][:-1],
+                    new_signature[5],
+                )
+            if old_signature != comparable_signature:
                 mismatches.append((old_name, old_signature, new_signature))
 
         self.assertEqual(mismatches, [])

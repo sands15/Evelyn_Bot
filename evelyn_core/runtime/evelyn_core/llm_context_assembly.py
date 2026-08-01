@@ -13,6 +13,15 @@ from .context_pipeline import (
 from .cross_surface_continuity import (
     CrossSurfaceMergeOutcome,
 )
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+    memory_exposure_position_from_receipt,
+)
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+    merge_memory_receipt_refs,
+)
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
     memory_deletion_boundary_not_required,
@@ -21,7 +30,12 @@ from .memory_prompt_policy import (
     validated_memory_grounding_state,
 )
 from .memory_deletion_outbound import (
+    current_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
+)
+from .memory_exposure import (
+    current_memory_exposure_position,
+    reset_memory_exposure_position,
 )
 from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
 
@@ -49,6 +63,7 @@ class LlmContextAssemblyDeps:
     clean_text: Callable[[str], str]
     build_local_tool_diagnostic_context: Callable[..., str]
     project_root: Path
+    memory_index_dir: Path
     build_memory_context: Callable[..., str]
     update_self_state_for_turn: Callable[..., dict[str, Any]]
     observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
@@ -115,6 +130,7 @@ async def prepare_llm_messages_from_runtime(
     turn_scope: Any = None,
 ) -> tuple[list[dict], dict | None, str, ContextPolicy]:
     reset_memory_deletion_outbound_position()
+    reset_memory_exposure_position()
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
     runtime_mode = deps.compute_runtime_mode(metrics)
@@ -129,7 +145,11 @@ async def prepare_llm_messages_from_runtime(
             guild_id=guild_id,
             source=source,
             session_key=session_key,
+            memory_index_dir=deps.memory_index_dir,
         )
+    route_memory_exposure_position = (
+        current_memory_exposure_position()
+    )
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
         metrics.setdefault("meta", {}).update(
@@ -163,6 +183,42 @@ async def prepare_llm_messages_from_runtime(
                 ] = merge_outcome.public_status()
         else:
             messages = list(merge_outcome)
+    history_outcome = filter_conversation_history_for_memory_exposure(
+        messages,
+        memory_index_dir=deps.memory_index_dir,
+    )
+    messages = []
+    for history_message in history_outcome.messages:
+        projected = dict(history_message)
+        projected.pop("memoryReceipt", None)
+        projected.pop("memoryReceiptRef", None)
+        messages.append(projected)
+    history_exposure_position = capture_combined_memory_exposure(
+        route_memory_exposure_position,
+        history_outcome.memory_exposure_position,
+    )
+    history_memory_receipt_ref = dict(
+        history_outcome.memory_receipt_ref
+    )
+    if route_memory_exposure_position is not None:
+        route_memory_receipt_ref = memory_receipt_ref_from_receipt(
+            {
+                "schema": "memory.context-receipt.v1",
+                "state": "provided",
+                "groundingState": "unattributed",
+                "memoryVersion": (
+                    route_memory_exposure_position.memory_version
+                ),
+                "contentFree": True,
+            }
+        )
+        history_memory_receipt_ref = (
+            merge_memory_receipt_refs(
+                history_memory_receipt_ref,
+                route_memory_receipt_ref,
+            )
+            or route_memory_receipt_ref
+        )
     cognitive_state: dict | None = None
 
     if turn_scope is not None:
@@ -196,21 +252,28 @@ async def prepare_llm_messages_from_runtime(
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "fast_path"
     elif should_block_on_cognitive and guild_id is not None:
-        cognitive_state = await deps.update_cognitive_state(
-            guild_id,
+        # The legacy cognitive updater reads summaries/raw/facts without a
+        # source receipt.  Rebinding that text to today's deletion position
+        # would not prove it survived an earlier correction.  Use a
+        # deterministic current-turn state until cognitive artifacts carry
+        # typed provenance.
+        cognitive_state = deps.build_fast_cognitive_state(
             user_text,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            turn_scope=turn_scope,
+            action="answer",
+            current_state=None,
+            reason_brief="cognitive_provenance_unavailable",
         )
         if metrics is not None:
-            metrics.setdefault("meta", {})["cognitive_mode"] = "blocking"
+            metrics.setdefault("meta", {})["cognitive_mode"] = (
+                "current_turn_fail_closed"
+            )
     else:
         cognitive_state = cached_cognitive_state
-        if guild_id is not None and runtime_opts.get("memory_update_mode") != "defer":
+        if (
+            cached_cognitive_state is not None
+            and guild_id is not None
+            and runtime_opts.get("memory_update_mode") != "defer"
+        ):
             deps.schedule_cognitive_refresh(
                 guild_id,
                 user_text,
@@ -312,6 +375,18 @@ async def prepare_llm_messages_from_runtime(
             memory_prompt_boundary,
         )
         memory_context = memory_prompt_boundary.context
+        current_memory_exposure = memory_exposure_position_from_receipt(
+            memory_receipt,
+            deletion_position=current_memory_deletion_outbound_position(),
+            required=bool(
+                deps.clean_text(memory_context)
+                and not memory_prompt_boundary.evidence_withheld
+            ),
+        )
+        capture_combined_memory_exposure(
+            history_exposure_position,
+            current_memory_exposure,
+        )
         if metrics is not None:
             memory_elapsed = (time.monotonic() - memory_started_at) * 1000.0
             metrics.setdefault("marks", {})["memory_ready"] = memory_elapsed
@@ -476,6 +551,12 @@ async def prepare_llm_messages_from_runtime(
             "policy": context_policy.to_dict(),
             "memory_context_chars": len(memory_context),
             "memory_receipt": dict(memory_receipt),
+            "conversation_memory_receipt_ref": dict(
+                history_memory_receipt_ref
+            ),
+            "conversation_memory_history": (
+                history_outcome.public_status()
+            ),
             "tool_decisions": [decision.to_dict() for decision in tool_use_decisions],
             "message_count": len(messages),
             "unanswered_user_turn_context": unanswered_user_turn_context,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, MutableMapping
 
 from .cognitive_policy_state import apply_ask_gating, policy_response_for_state
@@ -30,6 +31,7 @@ from .voice_route_execution import (
 
 @dataclass(frozen=True)
 class VoiceExecutionDependencyCompositionDeps:
+    memory_index_dir: Path
     update_session_state: Callable[..., Any]
     emit_delivery_plan_chunks: Callable[..., Awaitable[Any]]
     split_tts_sentences: Callable[..., Any]
@@ -86,6 +88,7 @@ class VoiceExecutionDependencyComposition:
     def build_voice_route_execution_deps(self) -> VoiceRouteExecutionDeps:
         deps = self.deps
         return VoiceRouteExecutionDeps(
+            memory_index_dir=deps.memory_index_dir,
             update_session_state=deps.update_session_state,
             emit_delivery_plan_chunks=deps.emit_delivery_plan_chunks,
             build_delivery_plan=build_delivery_plan,
@@ -131,6 +134,7 @@ class VoiceExecutionDependencyComposition:
         return build_voice_main_llm_streaming_deps_from_runtime(
             model_name=deps.model_name,
             llm_server_url=deps.llm_server_url,
+            memory_index_dir=deps.memory_index_dir,
             main_llm_chat_content_format=deps.main_llm_chat_content_format,
             voice_llm_max_tokens=deps.voice_llm_max_tokens,
             main_llm_stop_tokens=deps.main_llm_stop_tokens,

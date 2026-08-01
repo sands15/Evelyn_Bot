@@ -53,6 +53,7 @@ class LlmContextAssemblyCompositionDeps:
     build_runtime_status_context: Callable[..., Awaitable[str]]
     project_root: Path
     runtime_artifacts_root: Path
+    memory_index_dir: Path
     observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
     control_page_minecraft_cache_refresh_sec: float
     control_page_minecraft_cache_max_stale_sec: float
@@ -150,6 +151,7 @@ class LlmContextAssemblyComposition:
             clean_text=clean_text,
             build_local_tool_diagnostic_context=build_local_tool_diagnostic_context,
             project_root=deps.project_root,
+            memory_index_dir=deps.memory_index_dir,
             build_memory_context=build_memory_context,
             update_self_state_for_turn=update_self_state_for_turn,
             observe_live_minecraft_state=deps.observe_live_minecraft_state,

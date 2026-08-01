@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +16,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.local_tts_stream_runtime import (  # noqa: E402
     LocalTtsSingleRuntimeDeps,
     speak_answer_local_from_runtime,
+)
+import evelyn_core.local_tts_stream_runtime as local_tts_runtime  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
 )
 
 
@@ -75,6 +80,7 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def build_deps(self, *, clean_text=lambda text: text.strip()) -> LocalTtsSingleRuntimeDeps:
         return LocalTtsSingleRuntimeDeps(
+            memory_index_dir=Path("unused-memory-index"),
             playback_manager=self.manager,
             clean_tts_text=clean_text,
             strip_omnivoice_tags=lambda text: text.replace("[question-oh]", "").strip(),
@@ -159,6 +165,24 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.failures, [])
         self.assertEqual(len(self.detached), 1)
+
+    async def test_stale_memory_boundary_blocks_before_tts(self) -> None:
+        with patch.object(
+            local_tts_runtime,
+            "current_memory_exposure_position",
+            return_value=object(),
+        ), patch.object(
+            local_tts_runtime,
+            "memory_exposure_guard",
+            side_effect=MemoryDeletionJournalIntegrityError(),
+        ):
+            with self.assertRaises(MemoryDeletionJournalIntegrityError):
+                await speak_answer_local_from_runtime(
+                    "stale",
+                    deps=self.build_deps(),
+                )
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.manager.calls, [])
 
     def test_main_delegates_local_single_playback_to_runtime_module(self) -> None:
         source = (

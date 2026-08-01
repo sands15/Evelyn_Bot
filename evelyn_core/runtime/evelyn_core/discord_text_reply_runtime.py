@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
 
 
 @dataclass(frozen=True)
 class DiscordTextReplyRuntimeDeps:
+    memory_index_dir: Path
     attach_current_task: Callable[[Any], Any]
     detach_task: Callable[[Any, Any], Any]
     new_turn_metrics: Callable[..., dict[str, Any]]
@@ -135,43 +142,49 @@ async def stream_text_reply_from_runtime(
             metrics=metrics,
             turn_scope=turn_scope,
         )
-        awaiting_reply = bool(deps.session_state_snapshot(session_key).get("awaiting_user_reply"))
-        if proactive_resolution is not None:
-            metrics.setdefault("meta", {})["proactive_question_resolution"] = proactive_resolution
-        proactive_asked = False
-        if not (proactive_resolution or {}).get("resolved"):
-            answer, proactive_asked = deps.maybe_append_proactive_question(
-                answer,
-                guild_id=guild_id,
-                source=source,
-                user_text=user_text,
-                awaiting_user_reply=awaiting_reply,
-                room_key=room_key,
-                person_key=person_key,
-                session_key=session_key,
-                session_memory_key=session_memory_key,
-                metrics=metrics,
+        response_exposure = current_memory_exposure_position()
+        with memory_exposure_guard(
+            expected_position=response_exposure,
+            required=response_exposure is not None,
+            index_dir=deps.memory_index_dir,
+        ):
+            awaiting_reply = bool(deps.session_state_snapshot(session_key).get("awaiting_user_reply"))
+            if proactive_resolution is not None:
+                metrics.setdefault("meta", {})["proactive_question_resolution"] = proactive_resolution
+            proactive_asked = False
+            if not (proactive_resolution or {}).get("resolved"):
+                answer, proactive_asked = deps.maybe_append_proactive_question(
+                    answer,
+                    guild_id=guild_id,
+                    source=source,
+                    user_text=user_text,
+                    awaiting_user_reply=awaiting_reply,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_key=session_key,
+                    session_memory_key=session_memory_key,
+                    metrics=metrics,
+                )
+            if proactive_asked:
+                deps.update_session_state(
+                    session_key,
+                    speaker="assistant",
+                    awaiting_user_reply=True,
+                    answer_text=answer,
+                    user_text=user_text,
+                )
+            answer_payload = deps.build_answer_payload_from_text(answer)
+            final_text = (
+                deps.format_display_text(answer_payload.display_text, session_key=session_key).strip()
+                or deps.fallback_answer_for(user_text)
             )
-        if proactive_asked:
-            deps.update_session_state(
-                session_key,
-                speaker="assistant",
-                awaiting_user_reply=True,
-                answer_text=answer,
-                user_text=user_text,
+            delivery_plan = deps.build_delivery_plan(
+                answer_payload,
+                include_voice=include_voice,
+                text_message=final_text,
+                split_chunks=deps.split_tts_sentences,
             )
-        answer_payload = deps.build_answer_payload_from_text(answer)
-        final_text = (
-            deps.format_display_text(answer_payload.display_text, session_key=session_key).strip()
-            or deps.fallback_answer_for(user_text)
-        )
-        delivery_plan = deps.build_delivery_plan(
-            answer_payload,
-            include_voice=include_voice,
-            text_message=final_text,
-            split_chunks=deps.split_tts_sentences,
-        )
-        sent_message = (await deps.send_discord_text(channel, final_text)).message
-        return answer, sent_message, metrics, delivery_plan
+            sent_message = (await deps.send_discord_text(channel, final_text)).message
+            return answer, sent_message, metrics, delivery_plan
     finally:
         deps.detach_task(turn_scope, task)

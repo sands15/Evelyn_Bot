@@ -562,7 +562,15 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 raise RuntimeError("stream failed after first audio")
 
             bridge._chat_stream_and_speak = AsyncMock(side_effect=fail_after_audio)
-            bridge._chat = AsyncMock(return_value="duplicate fallback")
+            bridge._chat = AsyncMock(
+                return_value=local_io_bridge.LocalChatReply(
+                    text="duplicate fallback",
+                    memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                        state="not_used",
+                        position=None,
+                    ),
+                )
+            )
             bridge._speak = AsyncMock()
             bridge._emit_validation = Mock()
             install_admission_grant(bridge)
@@ -593,7 +601,15 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 raise LocalChatStreamFailure(bot_dispatched=True)
 
             bridge._chat_stream_and_speak = AsyncMock(side_effect=fail_after_dispatch)
-            bridge._chat = AsyncMock(return_value="duplicate fallback")
+            bridge._chat = AsyncMock(
+                return_value=local_io_bridge.LocalChatReply(
+                    text="duplicate fallback",
+                    memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                        state="not_used",
+                        position=None,
+                    ),
+                )
+            )
             bridge._speak = AsyncMock()
             bridge._emit_validation = Mock()
             install_admission_grant(bridge)
@@ -626,7 +642,15 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             bridge._chat_stream_and_speak = AsyncMock(
                 side_effect=fail_before_dispatch
             )
-            bridge._chat = AsyncMock(return_value="single fallback")
+            bridge._chat = AsyncMock(
+                return_value=local_io_bridge.LocalChatReply(
+                    text="single fallback",
+                    memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                        state="not_used",
+                        position=None,
+                    ),
+                )
+            )
             bridge._speak = AsyncMock()
             bridge._emit_validation = Mock()
             install_admission_grant(bridge)
@@ -912,10 +936,22 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                     self.closed = True
 
             class BlockingContent:
+                def __init__(self) -> None:
+                    self.lines = iter(
+                        (
+                            b'{"type":"memory_boundary","memoryState":"not_used","memoryBoundary":null}\n',
+                            b'{"type":"delta","text":"hello"}\n',
+                        )
+                    )
+
                 def __aiter__(self):
                     return self
 
                 async def __anext__(self):
+                    try:
+                        return next(self.lines)
+                    except StopIteration:
+                        pass
                     await asyncio.Event().wait()
                     raise StopAsyncIteration
 

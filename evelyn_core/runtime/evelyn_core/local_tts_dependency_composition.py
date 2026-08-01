@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .local_tts_stream_runtime import LocalTtsSingleRuntimeDeps, LocalTtsStreamRuntimeDeps
@@ -8,6 +9,7 @@ from .local_tts_stream_runtime import LocalTtsSingleRuntimeDeps, LocalTtsStreamR
 
 @dataclass(frozen=True)
 class LocalTtsDependencyCompositionDeps:
+    memory_index_dir: Path
     playback_manager: Any
     clean_tts_text: Callable[[str], str]
     strip_omnivoice_tags: Callable[[str], str]
@@ -37,6 +39,7 @@ class LocalTtsDependencyComposition:
     def build_local_tts_single_runtime_deps(self) -> LocalTtsSingleRuntimeDeps:
         deps = self.deps
         return LocalTtsSingleRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             playback_manager=deps.playback_manager,
             clean_tts_text=deps.clean_tts_text,
             strip_omnivoice_tags=deps.strip_omnivoice_tags,

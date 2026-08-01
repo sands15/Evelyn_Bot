@@ -22,6 +22,9 @@ from evelyn_core.control_page_http import (  # noqa: E402
     CONTROL_PAGE_CSRF_TOKEN,
     control_page_cors_middleware,
 )
+from evelyn_core.control_page_memory_http import (  # noqa: E402
+    control_page_memory_handoff_headers,
+)
 
 
 class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -124,7 +127,10 @@ class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 }
             )
-            return web.json_response({"ok": True, "reply": "ok"})
+            return web.json_response(
+                {"ok": True, "reply": "ok"},
+                headers=control_page_memory_handoff_headers(None),
+            )
 
         backend = web.Application()
         backend.router.add_post("/api/control-page/chat", bot_chat)

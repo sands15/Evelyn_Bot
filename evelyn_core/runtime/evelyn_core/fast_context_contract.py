@@ -22,6 +22,10 @@ from .context_pipeline import (
     render_tool_use_context,
 )
 from .config import MEMORY_ROOT
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    memory_exposure_position_from_receipt,
+)
 from .fast_action_runtime import compact_local_bridge_context
 from .fast_tool_planner import render_fast_tool_registry_context
 from .host_vision_client import HostVisionResult, request_host_vision
@@ -36,6 +40,11 @@ from .memory_deletion_outbound import (
     capture_memory_deletion_outbound_position,
     current_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
+)
+from .memory_exposure import (
+    MemoryExposurePosition,
+    current_memory_exposure_position,
+    memory_exposure_guard,
 )
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
@@ -71,6 +80,7 @@ class FastControlContext:
     memory_context: str = ""
     memory_receipt: dict[str, Any] = field(default_factory=dict)
     memory_deletion_position: MemoryDeletionPosition | None = None
+    memory_exposure_position: MemoryExposurePosition | None = None
     log_context: str = ""
     local_bridge_context: str = ""
     vision_context: str = ""
@@ -85,6 +95,7 @@ class FastMainLlmRequest:
     context: FastControlContext
     messages: list[dict[str, Any]]
     memory_deletion_position: MemoryDeletionPosition | None = None
+    memory_exposure_position: MemoryExposurePosition | None = None
 
 
 def build_required_evidence_failure_reply(
@@ -712,11 +723,16 @@ async def build_fast_control_context(
             try:
                 from .search_tools import render_search_results_for_llm
 
-                query, results = await (search_provider or default_search_provider)(decision_text)
+                with memory_exposure_guard():
+                    query, results = await (
+                        search_provider or default_search_provider
+                    )(decision_text)
                 search_context = render_search_results_for_llm(query, results)
                 decision.status = "executed" if results else "executed_empty"
                 decision.auto_allowed = True
                 decision.evidence = clean_text(search_context)[:1000]
+            except MemoryDeletionJournalIntegrityError:
+                raise
             except Exception as exc:
                 decision.status = "failed"
                 decision.evidence = clean_text(repr(exc))[:240]
@@ -830,6 +846,18 @@ async def build_fast_control_context(
             current_memory_deletion_outbound_position(),
         ):
             raise MemoryDeletionJournalIntegrityError()
+    current_exposure = memory_exposure_position_from_receipt(
+        memory_receipt,
+        deletion_position=current_memory_deletion_outbound_position(),
+        required=bool(
+            prompt_memory_context
+            and not memory_prompt_boundary.evidence_withheld
+        ),
+    )
+    combined_exposure = capture_combined_memory_exposure(
+        current_memory_exposure_position(),
+        current_exposure,
+    )
     for decision in decisions:
         if decision.tool_name != "memory_recall" or decision.status == "failed":
             continue
@@ -865,6 +893,7 @@ async def build_fast_control_context(
         memory_deletion_position=(
             current_memory_deletion_outbound_position()
         ),
+        memory_exposure_position=combined_exposure,
         log_context=log_context,
         local_bridge_context=local_bridge_context,
         vision_context=vision_context,
@@ -938,6 +967,7 @@ async def build_fast_main_llm_request(
             {"role": "user", "content": final_user_text},
         ],
         memory_deletion_position=context.memory_deletion_position,
+        memory_exposure_position=context.memory_exposure_position,
     )
 
 

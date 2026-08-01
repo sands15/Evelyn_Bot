@@ -75,6 +75,10 @@ from evelyn_core.control_page_state import (  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalIntegrityError,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    capture_conversation_memory_receipt_ref,
+    not_used_memory_receipt_ref,
+)
 
 
 class ControlPageStateModuleTests(unittest.TestCase):
@@ -89,7 +93,20 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(
             store.get(1),
             [
-                {"role": "assistant", "author": "Evelyn", "text": "answer", "at": 11.0},
+                {
+                    "role": "assistant",
+                    "author": "Evelyn",
+                    "text": "answer",
+                    "at": 11.0,
+                    "_memoryReceiptRef": {
+                        "schema": "conversation.memory-receipt-ref.v1",
+                        "state": "unattributed",
+                        "memoryVersion": 0,
+                        "suppliedNoteIds": [],
+                        "suppliedNoteCount": 0,
+                        "contentFree": True,
+                    },
+                },
                 {"role": "user", "author": "정훈", "text": "next", "at": 12.0},
             ],
         )
@@ -688,6 +705,9 @@ class ControlPageStateModuleTests(unittest.TestCase):
         refreshes: list[bool] = []
 
         async def handle_input(_guild, text: str) -> str:
+            capture_conversation_memory_receipt_ref(
+                not_used_memory_receipt_ref()
+            )
             return f"reply:{text}"
 
         async def ensure_snapshot(guild_id: int, *, force: bool, wait: bool) -> None:
@@ -717,7 +737,11 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"ok": True, "reply": "reply:/minecraft status", "state": {"state": "ok"}})
         self.assertEqual(logs[0], (7, "user", "정훈", "/minecraft status"))
-        self.assertEqual(logs[1], (7, "assistant", "Evelyn", "reply:/minecraft status"))
+        self.assertEqual(
+            logs[1][:4],
+            (7, "assistant", "Evelyn", "reply:/minecraft status"),
+        )
+        self.assertEqual(logs[1][4]["state"], "not_used")
         self.assertEqual(snapshots, [(7, True, True)])
         self.assertEqual(refreshes, [True])
 

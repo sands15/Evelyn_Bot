@@ -34,6 +34,7 @@ class LocalControlTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             log_voice_bottleneck_summary=lambda metrics, **kwargs: calls.append(
                 ("summary", (metrics["meta"]["turn_type"], kwargs["extra"], kwargs["event_name"]))
             ),
+            memory_index_dir=REPO_ROOT / "unused-memory-index",
             monotonic=lambda: 123.0,
         )
 
@@ -57,6 +58,7 @@ class LocalControlTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             speak_answer_local=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
             create_turn_scoped_task=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
             log_voice_bottleneck_summary=lambda *_args, **_kwargs: None,
+            memory_index_dir=REPO_ROOT / "unused-memory-index",
         )
 
         self.assertIsNone(schedule_local_control_tts_from_runtime("hello", deps=deps))

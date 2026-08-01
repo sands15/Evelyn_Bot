@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from .config import (
     LOCAL_MIC_START_THRESHOLD,
     LOCAL_MIC_VAD_FILTER_ENABLED,
     LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
+    MEMORY_ROOT,
     OMNIVOICE_LANGUAGE,
     OMNIVOICE_MODEL,
     OMNIVOICE_NUM_STEP,
@@ -61,6 +63,14 @@ from .host_vision_bridge import HostVisionBridge
 from .host_ui_action_bridge import HostUiActionBridge
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+)
+from .memory_exposure import (
+    MemoryExposurePosition,
+    memory_exposure_guard,
+    memory_exposure_position_from_dict,
+)
 from .local_bridge_barge_in import (
     SingleOwnerPlaybackController,
     evaluate_local_barge_in,
@@ -152,6 +162,39 @@ class LocalChatStreamFailure(RuntimeError):
             if self.bot_dispatched
             else "chat_stream_failed_before_dispatch"
         )
+
+
+@dataclass(frozen=True)
+class LocalMemoryHandoff:
+    state: str
+    position: MemoryExposurePosition | None
+
+
+@dataclass(frozen=True)
+class LocalChatReply:
+    text: str
+    memory_handoff: LocalMemoryHandoff
+
+
+def parse_local_memory_handoff(payload: Any) -> LocalMemoryHandoff:
+    """Parse the strict, content-free server-to-host lease handoff."""
+
+    if not isinstance(payload, dict):
+        raise MemoryDeletionJournalIntegrityError()
+    if not {"memoryState", "memoryBoundary"}.issubset(payload):
+        raise MemoryDeletionJournalIntegrityError()
+    state = payload.get("memoryState")
+    raw_boundary = payload.get("memoryBoundary")
+    if state == "bound":
+        if not isinstance(raw_boundary, dict):
+            raise MemoryDeletionJournalIntegrityError()
+        return LocalMemoryHandoff(
+            state="bound",
+            position=memory_exposure_position_from_dict(raw_boundary),
+        )
+    if state == "not_used" and raw_boundary is None:
+        return LocalMemoryHandoff(state="not_used", position=None)
+    raise MemoryDeletionJournalIntegrityError()
 
 
 def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
@@ -1295,7 +1338,8 @@ class LocalIoBridge:
             print(f"[LOCAL BRIDGE] transcript_received chars={len(text)}", flush=True)
             if should_suppress_tts_for_command(text):
                 stage_started = time.perf_counter()
-                reply = await self._chat(text, grant=grant)
+                chat_result = await self._chat(text, grant=grant)
+                reply = chat_result.text
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
                 if reply:
                     self._mark_reply_final_once()
@@ -1332,21 +1376,23 @@ class LocalIoBridge:
                         flush=True,
                     )
                     stage_started = time.perf_counter()
-                    reply = await self._chat(text, grant=grant)
+                    chat_result = await self._chat(text, grant=grant)
+                    reply = chat_result.text
                     chat_ms = (time.perf_counter() - stage_started) * 1000.0
                     if reply:
                         self._mark_reply_final_once()
                         stage_started = time.perf_counter()
-                        await self._speak(reply)
+                        await self._speak_chat_reply(chat_result)
                         tts_ms = (time.perf_counter() - stage_started) * 1000.0
             else:
                 stage_started = time.perf_counter()
-                reply = await self._chat(text, grant=grant)
+                chat_result = await self._chat(text, grant=grant)
+                reply = chat_result.text
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
                 if reply and LOCAL_BRIDGE_TTS_ENABLED:
                     self._mark_reply_final_once()
                     stage_started = time.perf_counter()
-                    await self._speak(reply)
+                    await self._speak_chat_reply(chat_result)
                     tts_ms = (time.perf_counter() - stage_started) * 1000.0
             if reply:
                 self._mark_reply_final_once()
@@ -1430,7 +1476,7 @@ class LocalIoBridge:
         text: str,
         *,
         grant: dict[str, Any],
-    ) -> str:
+    ) -> LocalChatReply:
         assert self.session is not None
         payload = await self._local_voice_chat_payload(text, grant)
         grant["_botDispatched"] = True
@@ -1443,7 +1489,27 @@ class LocalIoBridge:
                 )
             if resp.status != 200 or not isinstance(data, dict) or not data.get("ok"):
                 raise RuntimeError(f"chat_failed_{resp.status}")
-            return clean_text(data.get("reply"))
+            reply = clean_text(data.get("reply"))
+            if not reply:
+                raise RuntimeError("chat_reply_empty")
+            return LocalChatReply(
+                text=reply,
+                memory_handoff=parse_local_memory_handoff(data),
+            )
+
+    async def _speak_chat_reply(self, result: LocalChatReply) -> None:
+        handoff = result.memory_handoff
+        if handoff.state == "not_used":
+            await self._speak(result.text)
+            return
+        if handoff.position is None:
+            raise MemoryDeletionJournalIntegrityError()
+        with memory_exposure_guard(
+            expected_position=handoff.position,
+            required=True,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        ):
+            await self._speak(result.text)
 
     async def _chat_stream_and_speak(
         self,
@@ -1556,6 +1622,9 @@ class LocalIoBridge:
         first_progress_ms: float | None = None
         progress_count = 0
         final_reply = ""
+        memory_handoff: LocalMemoryHandoff | None = None
+        buffered_tts_commands: list[dict[str, str]] = []
+        done_seen = False
         chat_done_ms: float | None = None
         audio_bytes = 0
         played_bytes = 0
@@ -1626,6 +1695,26 @@ class LocalIoBridge:
                     if active_output_stream is stream:
                         active_output_stream = None
 
+        async def ensure_tts_receiver() -> asyncio.Task[None]:
+            nonlocal receiver
+            if receiver is None:
+                receiver = asyncio.create_task(
+                    receive_tts_audio(),
+                    name="local-voxcpm-stream-receiver",
+                )
+            return receiver
+
+        async def submit_tts_command(command: dict[str, str]) -> None:
+            if memory_handoff is None:
+                raise MemoryDeletionJournalIntegrityError()
+            if memory_handoff.state == "bound":
+                buffered_tts_commands.append(dict(command))
+                return
+            if websocket is None:
+                raise RuntimeError("voxcpm_stream_unavailable")
+            await ensure_tts_receiver()
+            await websocket.send_json(command)
+
         try:
             await self._post_status()
             websocket = await self.session.ws_connect(
@@ -1638,7 +1727,6 @@ class LocalIoBridge:
             if clean_text(ready.get("type")) != "ready":
                 raise RuntimeError(f"voxcpm_stream_not_ready: {ready}")
             await websocket.send_json({"type": "start"})
-            receiver = asyncio.create_task(receive_tts_audio(), name="local-voxcpm-stream-receiver")
 
             saw_delta = False
             payload = await self._local_voice_chat_payload(text, grant)
@@ -1671,8 +1759,17 @@ class LocalIoBridge:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
-                        continue
+                        raise MemoryDeletionJournalIntegrityError() from None
+                    if not isinstance(event, dict):
+                        raise MemoryDeletionJournalIntegrityError()
                     event_type = clean_text(event.get("type"))
+                    if event_type == "memory_boundary":
+                        if memory_handoff is not None:
+                            raise MemoryDeletionJournalIntegrityError()
+                        memory_handoff = parse_local_memory_handoff(event)
+                        continue
+                    if memory_handoff is None:
+                        raise MemoryDeletionJournalIntegrityError()
                     if event_type == "progress":
                         progress_text = clean_tts_text(event.get("text"))
                         if not progress_text:
@@ -1680,8 +1777,10 @@ class LocalIoBridge:
                         progress_count += 1
                         if first_progress_ms is None:
                             first_progress_ms = (time.perf_counter() - started_at) * 1000.0
-                        await websocket.send_json({"type": "append", "text": progress_text})
-                        await websocket.send_json({"type": "commit"})
+                        await submit_tts_command(
+                            {"type": "append", "text": progress_text}
+                        )
+                        await submit_tts_command({"type": "commit"})
                         continue
                     if event_type == "delta":
                         fragment = str(event.get("text") or "")
@@ -1690,7 +1789,9 @@ class LocalIoBridge:
                         saw_delta = True
                         if first_delta_ms is None:
                             first_delta_ms = (time.perf_counter() - started_at) * 1000.0
-                        await websocket.send_json({"type": "append", "text": fragment})
+                        await submit_tts_command(
+                            {"type": "append", "text": fragment}
+                        )
                         continue
                     if event_type == "sentence":
                         sentence = clean_tts_text(event.get("text"))
@@ -1700,9 +1801,16 @@ class LocalIoBridge:
                         if first_sentence_ms is None:
                             first_sentence_ms = (time.perf_counter() - started_at) * 1000.0
                         if not saw_delta:
-                            await websocket.send_json({"type": "append", "text": sentence})
+                            await submit_tts_command(
+                                {"type": "append", "text": sentence}
+                            )
                         continue
                     if event_type == "done":
+                        if done_seen:
+                            raise MemoryDeletionJournalIntegrityError()
+                        if parse_local_memory_handoff(event) != memory_handoff:
+                            raise MemoryDeletionJournalIntegrityError()
+                        done_seen = True
                         final_reply = clean_text(event.get("reply"))
                         if final_reply:
                             self._mark_reply_final_once()
@@ -1711,8 +1819,25 @@ class LocalIoBridge:
                     if event_type == "error":
                         raise RuntimeError(clean_text(event.get("error")) or "chat_stream_failed")
 
-            await websocket.send_json({"type": "flush"})
-            await receiver
+            if memory_handoff is None or not done_seen:
+                raise MemoryDeletionJournalIntegrityError()
+            if memory_handoff.state == "bound":
+                if memory_handoff.position is None:
+                    raise MemoryDeletionJournalIntegrityError()
+                with memory_exposure_guard(
+                    expected_position=memory_handoff.position,
+                    required=True,
+                    index_dir=Path(MEMORY_ROOT) / "memory_index",
+                ):
+                    receiver = await ensure_tts_receiver()
+                    for command in buffered_tts_commands:
+                        await websocket.send_json(command)
+                    await websocket.send_json({"type": "flush"})
+                    await receiver
+            else:
+                receiver = await ensure_tts_receiver()
+                await websocket.send_json({"type": "flush"})
+                await receiver
             if audio_bytes <= 0 or played_bytes <= 0:
                 raise RuntimeError(
                     f"voxcpm_stream_empty_audio audio_bytes={audio_bytes} played_bytes={played_bytes}"
@@ -1777,6 +1902,9 @@ class LocalIoBridge:
         sentence_count = 0
         first_sentence_ms: float | None = None
         final_reply = ""
+        memory_handoff: LocalMemoryHandoff | None = None
+        buffered_sentences: list[str] = []
+        done_seen = False
         payload = await self._local_voice_chat_payload(text, grant)
         grant["_botDispatched"] = True
         async with self.session.post(
@@ -1807,8 +1935,17 @@ class LocalIoBridge:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
+                    raise MemoryDeletionJournalIntegrityError() from None
+                if not isinstance(event, dict):
+                    raise MemoryDeletionJournalIntegrityError()
                 event_type = clean_text(event.get("type"))
+                if event_type == "memory_boundary":
+                    if memory_handoff is not None:
+                        raise MemoryDeletionJournalIntegrityError()
+                    memory_handoff = parse_local_memory_handoff(event)
+                    continue
+                if memory_handoff is None:
+                    raise MemoryDeletionJournalIntegrityError()
                 if event_type == "sentence":
                     sentence = clean_text(event.get("text"))
                     if not sentence:
@@ -1816,17 +1953,41 @@ class LocalIoBridge:
                     sentence_count += 1
                     if first_sentence_ms is None:
                         first_sentence_ms = (time.perf_counter() - started_at) * 1000.0
-                    speak_started = time.perf_counter()
-                    await self._speak(sentence)
-                    tts_ms += (time.perf_counter() - speak_started) * 1000.0
+                    if memory_handoff.state == "bound":
+                        buffered_sentences.append(sentence)
+                    else:
+                        speak_started = time.perf_counter()
+                        await self._speak(sentence)
+                        tts_ms += (time.perf_counter() - speak_started) * 1000.0
                     continue
                 if event_type == "done":
+                    if done_seen:
+                        raise MemoryDeletionJournalIntegrityError()
+                    if parse_local_memory_handoff(event) != memory_handoff:
+                        raise MemoryDeletionJournalIntegrityError()
+                    done_seen = True
                     final_reply = clean_text(event.get("reply"))
                     if final_reply:
                         self._mark_reply_final_once()
                     continue
                 if event_type == "error":
                     raise RuntimeError(clean_text(event.get("error")) or "chat_stream_failed")
+        if memory_handoff is None or not done_seen:
+            raise MemoryDeletionJournalIntegrityError()
+        if memory_handoff.state == "bound":
+            if memory_handoff.position is None:
+                raise MemoryDeletionJournalIntegrityError()
+            with memory_exposure_guard(
+                expected_position=memory_handoff.position,
+                required=True,
+                index_dir=Path(MEMORY_ROOT) / "memory_index",
+            ):
+                for sentence in buffered_sentences:
+                    speak_started = time.perf_counter()
+                    await self._speak(sentence)
+                    tts_ms += (
+                        time.perf_counter() - speak_started
+                    ) * 1000.0
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         chat_ms = max(0.0, elapsed_ms - tts_ms)
         print(
@@ -2389,7 +2550,21 @@ class LocalIoBridge:
                     while self.active_turn_task is not None and not self.active_turn_task.done():
                         await asyncio.sleep(0.05)
                     started = time.perf_counter()
-                    await self._speak(text)
+                    raw_boundary = request.get("memoryBoundary")
+                    if raw_boundary is None:
+                        await self._speak(text)
+                    else:
+                        position = memory_exposure_position_from_dict(
+                            raw_boundary
+                        )
+                        with memory_exposure_guard(
+                            expected_position=position,
+                            required=True,
+                            index_dir=(
+                                Path(MEMORY_ROOT) / "memory_index"
+                            ),
+                        ):
+                            await self._speak(text)
                     tts_playback = dict(self.last_tts_playback)
                     self.last_latency = {
                         **dict(self.last_latency),
@@ -2397,6 +2572,13 @@ class LocalIoBridge:
                         "controlTtsFirstPlaybackMs": tts_playback.get("firstPlaybackMs"),
                     }
                     await self._post_status()
+            except MemoryDeletionJournalIntegrityError:
+                print(
+                    "[LOCAL BRIDGE] "
+                    "control_tts_memory_boundary_stale",
+                    flush=True,
+                )
+                await self._post_status()
             except Exception as exc:
                 self.runtime_errors.record("control_tts_failed", exc)
                 self.last_error = repr(exc)

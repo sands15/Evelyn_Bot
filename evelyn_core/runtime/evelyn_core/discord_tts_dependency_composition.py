@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .discord_tts_stream_runtime import (
@@ -11,6 +12,7 @@ from .discord_tts_stream_runtime import (
 
 @dataclass(frozen=True)
 class DiscordTtsDependencyCompositionDeps:
+    memory_index_dir: Path
     is_local_speaker_voice_client: Callable[..., bool]
     speak_answer_local: Callable[..., Any]
     tts_running_state: Any
@@ -43,6 +45,7 @@ class DiscordTtsDependencyComposition:
     def build_discord_tts_single_runtime_deps(self) -> DiscordTtsSingleRuntimeDeps:
         deps = self.deps
         return DiscordTtsSingleRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             is_local_speaker_voice_client=deps.is_local_speaker_voice_client,
             speak_answer_local=deps.speak_answer_local,
             tts_running_state=deps.tts_running_state,

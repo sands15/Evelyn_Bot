@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -47,6 +50,11 @@ class FakeSession:
 
 class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.memory_index_dir = (
+            Path(self.temp_dir.name) / "memory_index"
+        )
         self.response = FakeResponse(data={"choices": [{"message": {"content": " 정리 답변 "}}]})
         self.session = FakeSession(self.response)
         self.build_calls: list[tuple[list[dict], dict]] = []
@@ -62,6 +70,7 @@ class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return SearchAnswerRuntimeDeps(
             model_name="main-model",
             llm_server_url="http://llm/chat",
+            memory_index_dir=self.memory_index_dir,
             chat_content_format="string",
             stop_tokens=("STOP",),
             get_http_session=self.get_session,
@@ -91,6 +100,32 @@ class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["timeout"], {"total": 45})
         self.assertIn("- 제목 | 내용", self.build_calls[0][0][1]["content"])
         self.assertEqual(self.build_calls[0][1]["content_format"], "string")
+
+    async def test_request_uses_injected_memory_index_dir(self) -> None:
+        observed: list[Path] = []
+
+        @asynccontextmanager
+        async def recording_request(
+            request_factory,
+            *args,
+            memory_index_dir,
+            **kwargs,
+        ):
+            observed.append(memory_index_dir)
+            async with request_factory(*args, **kwargs) as response:
+                yield response
+
+        with patch(
+            "evelyn_core.search_answer_runtime.memory_exposure_request",
+            recording_request,
+        ):
+            await answer_from_search_results_from_runtime(
+                "질문",
+                [{"title": "제목", "snippet": "내용"}],
+                deps=self.build_deps(),
+            )
+
+        self.assertEqual(observed, [self.memory_index_dir])
 
     async def test_http_error_includes_bounded_response_text(self) -> None:
         self.response = FakeResponse(status=500, text="x" * 400)

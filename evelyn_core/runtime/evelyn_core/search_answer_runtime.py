@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_exposure import memory_exposure_request
 
 
 @dataclass(frozen=True)
 class SearchAnswerRuntimeDeps:
     model_name: str
     llm_server_url: str
+    memory_index_dir: Path
     chat_content_format: str
     stop_tokens: tuple[str, ...] | list[str]
     get_http_session: Callable[[], Awaitable[Any]]
@@ -65,8 +69,10 @@ async def answer_from_search_results_from_runtime(
         "stop": list(deps.stop_tokens),
     }
 
-    async with session.post(
+    async with memory_exposure_request(
+        session.post,
         deps.llm_server_url,
+        memory_index_dir=deps.memory_index_dir,
         json=payload,
         timeout=deps.client_timeout_factory(total=45),
     ) as resp:

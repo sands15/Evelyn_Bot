@@ -33,7 +33,7 @@ class ControlPageWelcomeTests(unittest.TestCase):
         self.assertIn("control_page_welcome_locks: dict[int, asyncio.Lock] = {}", self.main_py)
         self.assertIn("async def ensure_welcome_message(", self.control_page_composition)
         self.assertIn("if self.get_chat_log(guild_id):", self.control_page_composition)
-        self.assertIn('self.append_chat_log(guild_id, "assistant", "Evelyn", welcome)', self.control_page_composition)
+        self.assertIn("not_used_memory_receipt_ref()", self.control_page_composition)
 
     def test_state_generation_waits_for_main_service_ready(self) -> None:
         self.assertIn('if not bool(services.get("mainReady")):', self.control_page_composition)

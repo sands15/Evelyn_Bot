@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .control_page_guild_runtime import ControlPageGuildSelectionRuntimeDeps
@@ -12,6 +13,7 @@ from .text import clean_text
 
 @dataclass(frozen=True)
 class ControlPageUiDependencyCompositionDeps:
+    memory_index_dir: Path
     control_page: Callable[[], Any]
     control_page_host: str
     control_page_port: int
@@ -51,6 +53,7 @@ class ControlPageUiDependencyComposition:
     def build_control_page_ui_runtime_deps(self) -> ControlPageUiRuntimeDeps:
         deps = self.deps
         return ControlPageUiRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             control_page_host=deps.control_page_host,
             control_page_port=deps.control_page_port,
             local_control_guild_id=deps.local_control_guild_id,

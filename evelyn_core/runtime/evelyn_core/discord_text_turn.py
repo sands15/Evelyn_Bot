@@ -22,6 +22,9 @@ from .explicit_memory_confirmation import (
 from .memory_confirmation_contract import (
     explicit_memory_writer_skip_decision,
 )
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_metrics,
+)
 from .turn_lifecycle import TurnScope
 
 
@@ -176,6 +179,9 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             user_id=message.author.id,
             awaiting_user_reply=awaiting_reply,
             topic_id=topic_id,
+            memory_receipt=(
+                memory_receipt_ref_from_metrics(text_metrics)
+            ),
         )
         try:
             continuity_status = (

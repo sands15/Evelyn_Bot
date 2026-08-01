@@ -91,6 +91,7 @@ class DiscordTextReplyRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(should_play_voice=kwargs["include_voice"], text_message=kwargs["text_message"])
 
         deps = DiscordTextReplyRuntimeDeps(
+            memory_index_dir=Path("unused-memory-index"),
             attach_current_task=lambda turn_scope: calls.append(("attach", turn_scope)) or "task-1",
             detach_task=lambda turn_scope, task: calls.append(("detach", (turn_scope, task))),
             new_turn_metrics=lambda **kwargs: {"meta": {"topic_id": kwargs["topic_id"]}, "marks": {}},
@@ -148,6 +149,7 @@ class DiscordTextReplyRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(message=SimpleNamespace(content=text))
 
         deps = DiscordTextReplyRuntimeDeps(
+            memory_index_dir=Path("unused-memory-index"),
             attach_current_task=lambda _turn_scope: "task-1",
             detach_task=lambda _turn_scope, _task: calls.append("detach"),
             new_turn_metrics=lambda **_kwargs: {"meta": {}, "marks": {}},

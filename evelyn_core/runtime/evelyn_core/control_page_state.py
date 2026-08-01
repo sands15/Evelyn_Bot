@@ -12,6 +12,14 @@ from control_page_runtime_health import (
 
 from .autonomy_failure_contract import autonomy_last_error
 from .control_page_contracts import build_control_page_panel_state_payload
+from .conversation_memory_receipt import (
+    capture_conversation_memory_receipt_ref,
+    current_conversation_memory_receipt_ref,
+    not_used_memory_receipt_ref,
+    reset_conversation_memory_receipt_ref,
+    sanitize_memory_receipt_ref,
+    unattributed_memory_receipt_ref,
+)
 from .minecraft_mode_composition import (
     MINECRAFT_CONNECTED_OUTCOME,
     MINECRAFT_STOPPED_OUTCOME,
@@ -98,6 +106,7 @@ class ControlPageChatLogStore:
         role: str,
         author: str,
         text: str,
+        memory_receipt_ref: Any = None,
         *,
         now: float | None = None,
     ) -> None:
@@ -106,14 +115,22 @@ class ControlPageChatLogStore:
             return
         cleaned_role = clean_text(role)
         rows = self.rows_by_guild.setdefault(int(guild_id), [])
-        rows.append(
-            {
-                "role": cleaned_role,
-                "author": clean_text(author) or ("Evelyn" if cleaned_role == "assistant" else "User"),
-                "text": cleaned_text,
-                "at": time.time() if now is None else float(now),
-            }
-        )
+        row = {
+            "role": cleaned_role,
+            "author": clean_text(author) or ("Evelyn" if cleaned_role == "assistant" else "User"),
+            "text": cleaned_text,
+            "at": time.time() if now is None else float(now),
+        }
+        if cleaned_role == "assistant":
+            sanitized_receipt_ref = sanitize_memory_receipt_ref(
+                memory_receipt_ref
+            )
+            row["_memoryReceiptRef"] = (
+                sanitized_receipt_ref
+                if sanitized_receipt_ref is not None
+                else unattributed_memory_receipt_ref()
+            )
+        rows.append(row)
         if len(rows) > self.limit:
             del rows[:-self.limit]
 
@@ -1125,6 +1142,7 @@ async def handle_control_page_chat_request(
     assistant_author: str = "Evelyn",
     log: Any = print,
 ) -> tuple[dict[str, Any], int]:
+    reset_conversation_memory_receipt_ref()
     chat_request = parse_control_page_chat_payload(payload)
     if not chat_request.get("ok"):
         return (
@@ -1147,7 +1165,22 @@ async def handle_control_page_chat_request(
         error_code = "control_page_chat_failed"
         log("[CONTROL PAGE] chat_failed errorType=", type(exc).__name__)
         reply_text = public_failure_message(error_code)
-    append_chat_log(guild_id, "assistant", assistant_author, reply_text)
+        capture_conversation_memory_receipt_ref(
+            not_used_memory_receipt_ref()
+        )
+    response_receipt_ref = (
+        current_conversation_memory_receipt_ref()
+        or unattributed_memory_receipt_ref()
+    )
+    if response_receipt_ref["state"] == "unattributed":
+        raise MemoryDeletionJournalIntegrityError()
+    append_chat_log(
+        guild_id,
+        "assistant",
+        assistant_author,
+        reply_text,
+        response_receipt_ref,
+    )
 
     refresh_plan = control_page_chat_refresh_plan(text)
     needs_fresh_snapshot = bool(refresh_plan.get("needs_fresh_snapshot"))

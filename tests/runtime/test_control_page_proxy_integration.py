@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import socket
 import sys
 import tempfile
@@ -27,11 +28,21 @@ from evelyn_core.control_page_http import (  # noqa: E402
     control_page_cors_middleware,
     reject_browser_origin_middleware,
 )
+from evelyn_core.control_page_memory_http import (  # noqa: E402
+    CONTROL_PAGE_MEMORY_BOUNDARY_HEADER,
+    CONTROL_PAGE_MEMORY_STATE_HEADER,
+    control_page_memory_guarded_json_response,
+    control_page_memory_handoff_headers,
+)
 from evelyn_core.control_page_state import (  # noqa: E402
     handle_control_page_chat_request,
 )
 from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
 from evelyn_core import memory_deletion_outbound as deletion_outbound  # noqa: E402
+from evelyn_core.memory_exposure import (  # noqa: E402
+    MEMORY_INDEX_DB_NAME,
+    MemoryExposurePosition,
+)
 from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
     MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
     MEMORY_INTEGRITY_BOOTSTRAP_ENV,
@@ -64,6 +75,34 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         sockets = site._server.sockets if site._server else []  # noqa: SLF001
         port = int(sockets[0].getsockname()[1])
         return runner, port
+
+    @staticmethod
+    def write_memory_version(index_dir: Path, version: int) -> None:
+        index_dir.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(index_dir / MEMORY_INDEX_DB_NAME))
+        try:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS metadata "
+                "(key TEXT PRIMARY KEY, value NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("memory_version", str(version)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def bound_position(index_dir: Path, version: int) -> MemoryExposurePosition:
+        return MemoryExposurePosition(
+            deletion_position=(
+                deletion_journal.memory_deletion_journal_position(index_dir)
+            ),
+            memory_version=version,
+            supplied_note_ids=("concept-0123456789abcdef",),
+        )
 
     def service_health(self, *, bot_ready: bool) -> dict[str, object]:
         return {
@@ -129,7 +168,8 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "ok": True,
                     "runtime": {"services": {"botReady": False, "mainReady": False}},
-                }
+                },
+                headers=control_page_memory_handoff_headers(None),
             )
 
         runner, port = await self.start_bot_api(ready_state)
@@ -158,6 +198,9 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["runtime"]["controlPlane"]["botApi"]["state"], "ready")
         self.assertGreater(payload["runtime"]["controlPlane"]["botApi"]["lastSuccessfulStateAt"], 0)
         self.assertIn("both responding", payload["statusText"])
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertNotIn(CONTROL_PAGE_MEMORY_STATE_HEADER, response.headers)
+        self.assertNotIn(CONTROL_PAGE_MEMORY_BOUNDARY_HEADER, response.headers)
 
     async def test_action_events_handler_proxies_followup_events(self) -> None:
         async def action_events(_: web.Request) -> web.Response:
@@ -168,7 +211,8 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "activeCount": 0,
                     "events": [{"id": 2, "type": "completed", "taskId": "fast-action-1"}],
                     "tasks": [{"id": "fast-action-1", "status": "completed"}],
-                }
+                },
+                headers=control_page_memory_handoff_headers(None),
             )
 
         app = web.Application()
@@ -189,6 +233,264 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["events"][0]["type"], "completed")
         self.assertEqual(payload["tasks"][0]["status"], "completed")
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertNotIn(CONTROL_PAGE_MEMORY_STATE_HEADER, response.headers)
+        self.assertNotIn(CONTROL_PAGE_MEMORY_BOUNDARY_HEADER, response.headers)
+
+    async def test_public_chat_rechecks_bound_handoff_before_browser_write(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE_TWO_HOP_CHAT_CANARY"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            memory_root = Path(temp_dir) / "memory"
+            index_dir = memory_root / "memory_index"
+            self.write_memory_version(index_dir, 1)
+            position = self.bound_position(index_dir, 1)
+
+            async def bot_chat(_: web.Request) -> web.StreamResponse:
+                return control_page_memory_guarded_json_response(
+                    {"ok": True, "reply": private_canary},
+                    expected_position=position,
+                    memory_index_dir=index_dir,
+                )
+
+            backend = web.Application()
+            backend.router.add_post("/api/control-page/chat", bot_chat)
+            backend_runner = web.AppRunner(backend)
+            await backend_runner.setup()
+            backend_site = web.TCPSite(backend_runner, "127.0.0.1", 0)
+            await backend_site.start()
+            sockets = backend_site._server.sockets if backend_site._server else []  # noqa: SLF001
+            backend_port = int(sockets[0].getsockname()[1])
+
+            public_app = web.Application(
+                middlewares=[control_page_cors_middleware]
+            )
+            public_app.router.add_post(
+                "/api/control-page/chat",
+                control_page_server.chat_handler,
+            )
+            client = TestClient(TestServer(public_app))
+            await client.start_server()
+            original_proxy_response = control_page_server.proxy_json_response
+            mutated = False
+
+            def mutate_after_upstream_read(**kwargs):
+                nonlocal mutated
+                response = original_proxy_response(**kwargs)
+                if not mutated:
+                    mutated = True
+                    self.write_memory_version(index_dir, 2)
+                return response
+
+            try:
+                with patch.object(
+                    control_page_server,
+                    "BOT_API_BASE",
+                    f"http://127.0.0.1:{backend_port}",
+                ), patch.object(
+                    control_page_server,
+                    "MEMORY_ROOT",
+                    memory_root,
+                ), patch.object(
+                    control_page_server,
+                    "proxy_json_response",
+                    side_effect=mutate_after_upstream_read,
+                ):
+                    response = await client.post(
+                        "/api/control-page/chat",
+                        headers={
+                            CONTROL_PAGE_CSRF_HEADER:
+                            CONTROL_PAGE_CSRF_TOKEN,
+                        },
+                        json={"text": "two hop", "source": "control_page"},
+                    )
+                    payload = await response.json()
+            finally:
+                await client.close()
+                await backend_runner.cleanup()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_canary, json.dumps(payload))
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertNotIn(CONTROL_PAGE_MEMORY_STATE_HEADER, response.headers)
+        self.assertNotIn(CONTROL_PAGE_MEMORY_BOUNDARY_HEADER, response.headers)
+
+    async def test_state_reserialization_keeps_bound_handoff_private_and_guarded(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE_TWO_HOP_STATE_CANARY"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            memory_root = Path(temp_dir) / "memory"
+            index_dir = memory_root / "memory_index"
+            self.write_memory_version(index_dir, 4)
+            position = self.bound_position(index_dir, 4)
+
+            async def bot_state(_: web.Request) -> web.StreamResponse:
+                return control_page_memory_guarded_json_response(
+                    {
+                        "ok": True,
+                        "privateState": private_canary,
+                        "runtime": {"services": {}},
+                    },
+                    expected_position=position,
+                    memory_index_dir=index_dir,
+                )
+
+            runner, port = await self.start_bot_api(bot_state)
+            public_app = web.Application(
+                middlewares=[control_page_cors_middleware]
+            )
+            public_app.router.add_get(
+                "/api/control-page/state",
+                control_page_server.state_handler,
+            )
+            client = TestClient(TestServer(public_app))
+            await client.start_server()
+            original_proxy_response = control_page_server.proxy_json_response
+
+            def mutate_after_upstream_read(**kwargs):
+                response = original_proxy_response(**kwargs)
+                self.write_memory_version(index_dir, 5)
+                return response
+
+            progress = {
+                "ports": {
+                    "bot": True,
+                    "main": True,
+                    "router": True,
+                    "sub": True,
+                    "tts": True,
+                    "voyager": False,
+                    "codex": False,
+                },
+                "bootProgress": {},
+                "serviceHealth": self.service_health(bot_ready=True),
+                "healthCacheAgeSec": 0.0,
+                "botApiCheckedAt": 1.0,
+            }
+            try:
+                with patch.object(
+                    control_page_server,
+                    "BOT_API_BASE",
+                    f"http://127.0.0.1:{port}",
+                ), patch.object(
+                    control_page_server,
+                    "MEMORY_ROOT",
+                    memory_root,
+                ), patch.object(
+                    control_page_server,
+                    "current_boot_progress",
+                    new=AsyncMock(return_value=progress),
+                ), patch.object(
+                    control_page_server,
+                    "proxy_json_response",
+                    side_effect=mutate_after_upstream_read,
+                ):
+                    response = await client.get("/api/control-page/state")
+                    payload = await response.json()
+            finally:
+                await client.close()
+                await runner.cleanup()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "error": "memory_deletion_journal_integrity_failed",
+            },
+        )
+        self.assertNotIn(private_canary, json.dumps(payload))
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertNotIn(CONTROL_PAGE_MEMORY_STATE_HEADER, response.headers)
+        self.assertNotIn(CONTROL_PAGE_MEMORY_BOUNDARY_HEADER, response.headers)
+
+    async def test_required_proxy_handoff_missing_or_malformed_is_exact_503(
+        self,
+    ) -> None:
+        cases = (
+            {},
+            {
+                CONTROL_PAGE_MEMORY_STATE_HEADER: "bound",
+                CONTROL_PAGE_MEMORY_BOUNDARY_HEADER: "not-base64!",
+            },
+        )
+        for headers in cases:
+            with self.subTest(headers=headers):
+                async def bot_chat(_: web.Request) -> web.Response:
+                    return web.json_response(
+                        {"ok": True, "reply": "MUST_NOT_ESCAPE"},
+                        headers=headers,
+                    )
+
+                backend = web.Application()
+                backend.router.add_post("/api/control-page/chat", bot_chat)
+                runner = web.AppRunner(backend)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                sockets = site._server.sockets if site._server else []  # noqa: SLF001
+                port = int(sockets[0].getsockname()[1])
+                public_app = web.Application(
+                    middlewares=[control_page_cors_middleware]
+                )
+                public_app.router.add_post(
+                    "/api/control-page/chat",
+                    control_page_server.chat_handler,
+                )
+                client = TestClient(TestServer(public_app))
+                await client.start_server()
+                try:
+                    with patch.object(
+                        control_page_server,
+                        "BOT_API_BASE",
+                        f"http://127.0.0.1:{port}",
+                    ):
+                        response = await client.post(
+                            "/api/control-page/chat",
+                            headers={
+                                CONTROL_PAGE_CSRF_HEADER:
+                                CONTROL_PAGE_CSRF_TOKEN,
+                            },
+                            json={"text": "handoff", "source": "control_page"},
+                        )
+                        payload = await response.json()
+                finally:
+                    await client.close()
+                    await runner.cleanup()
+
+                self.assertEqual(response.status, 503)
+                self.assertEqual(
+                    payload,
+                    {
+                        "ok": False,
+                        "error": "memory_deletion_journal_integrity_failed",
+                    },
+                )
+                self.assertNotIn("MUST_NOT_ESCAPE", json.dumps(payload))
+                self.assertIn("no-store", response.headers["Cache-Control"])
 
     async def test_chat_proxy_preserves_actual_bot_api_integrity_failure_as_503(
         self,

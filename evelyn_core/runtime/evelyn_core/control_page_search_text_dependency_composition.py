@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .control_page_search_runtime import ControlPageSearchRuntimeDeps
@@ -15,6 +16,7 @@ class ControlPageSearchTextDependencyCompositionDeps:
     effective_guild_id: Callable[..., int]
     session_key_for_guild: Callable[..., str]
     get_conversation_history: Callable[..., Any]
+    memory_index_dir: Path
     monotonic: Callable[[], float]
     execute_search_then_answer_action: Callable[..., Any]
     synthesize_tool_result_with_main_llm: Callable[..., Any]
@@ -58,6 +60,7 @@ class ControlPageSearchTextDependencyComposition:
             control_page_effective_guild_id=deps.effective_guild_id,
             control_page_session_key=deps.session_key_for_guild,
             get_conversation_history=deps.get_conversation_history,
+            memory_index_dir=deps.memory_index_dir,
             build_route_decision=build_route_decision,
             monotonic=deps.monotonic,
             execute_search_then_answer_action=deps.execute_search_then_answer_action,
@@ -79,6 +82,7 @@ class ControlPageSearchTextDependencyComposition:
     def build_control_page_text_runtime_deps(self) -> ControlPageTextRuntimeDeps:
         deps = self.deps
         return ControlPageTextRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             effective_guild_id=deps.effective_guild_id,
             session_key_for_guild=deps.session_key_for_guild,
             get_session_lock=self._get_session_lock,

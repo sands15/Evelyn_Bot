@@ -20,6 +20,14 @@ CRASH_EXIT_CODES = {
     "before_clear": 76,
     "after_clear": 77,
 }
+UNATTRIBUTED_MEMORY_RECEIPT_REF = {
+    "schema": "conversation.memory-receipt-ref.v1",
+    "state": "unattributed",
+    "memoryVersion": 0,
+    "suppliedNoteIds": [],
+    "suppliedNoteCount": 0,
+    "contentFree": True,
+}
 
 WRITER_PROCESS = textwrap.dedent(
     """
@@ -251,6 +259,9 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                         {
                             "role": "assistant",
                             "content": "must survive",
+                            "memoryReceiptRef": (
+                                UNATTRIBUTED_MEMORY_RECEIPT_REF
+                            ),
                         },
                     ],
                 )

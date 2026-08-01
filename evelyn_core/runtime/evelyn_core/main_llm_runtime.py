@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import aiohttp
 
-from .memory_deletion_outbound import memory_deletion_outbound_guard
+from .memory_exposure import memory_exposure_guard
 from .text import clean_text
 
 
@@ -13,6 +14,7 @@ from .text import clean_text
 class MainLlmRuntimeDeps:
     model_name: str
     llm_server_url: str
+    memory_index_dir: Path
     main_llm_chat_content_format: str
     main_llm_stop_tokens: tuple[str, ...] | list[str]
     voice_llm_max_tokens: int
@@ -198,7 +200,7 @@ async def execute_main_llm_once_from_runtime(
 ) -> tuple[str, str]:
     timeout = aiohttp.ClientTimeout(total=120)
     session = await deps.get_http_session()
-    with memory_deletion_outbound_guard():
+    with memory_exposure_guard(index_dir=deps.memory_index_dir):
         async with session.post(
             deps.llm_server_url,
             json=payload,

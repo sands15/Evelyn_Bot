@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .discord_session_policy_runtime import DiscordSessionPolicyRuntimeDeps
@@ -27,6 +28,7 @@ class ConversationPolicyDependencyCompositionDeps:
     maybe_append_proactive_question_payload: Callable[..., Any]
     session_state_store: Any
     system_prompt: str
+    memory_index_dir: Path
     active_conversation_awaiting_reply_sec: float
     active_conversation_text_question_sec: float
     active_conversation_text_sec: float
@@ -111,6 +113,7 @@ class ConversationPolicyDependencyComposition:
         return SessionTurnRuntimeDeps(
             session_state_store=deps.session_state_store,
             system_prompt=deps.system_prompt,
+            memory_index_dir=deps.memory_index_dir,
             active_conversation_awaiting_reply_sec=deps.active_conversation_awaiting_reply_sec,
             active_conversation_text_question_sec=(
                 deps.active_conversation_text_question_sec

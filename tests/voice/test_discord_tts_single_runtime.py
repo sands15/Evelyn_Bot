@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -14,6 +15,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.discord_tts_stream_runtime import (  # noqa: E402
     DiscordTtsSingleRuntimeDeps,
     speak_answer_from_runtime,
+)
+import evelyn_core.discord_tts_stream_runtime as discord_tts_runtime  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalIntegrityError,
 )
 
 
@@ -70,6 +75,7 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def build_deps(self) -> DiscordTtsSingleRuntimeDeps:
         return DiscordTtsSingleRuntimeDeps(
+            memory_index_dir=Path("unused-memory-index"),
             is_local_speaker_voice_client=lambda _vc: self.local,
             speak_answer_local=self.speak_local,
             tts_running_state="tts-running",
@@ -146,6 +152,26 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"turn_id": "turn-2", "chunk_index": 1, "session_key": "session-2"},
         )])
         self.assertEqual(self.latencies[0][1:], ("first_packet_sent_logged", "첫 패킷 송신 시간"))
+
+    async def test_stale_memory_boundary_blocks_before_tts(self) -> None:
+        with patch.object(
+            discord_tts_runtime,
+            "current_memory_exposure_position",
+            return_value=object(),
+        ), patch.object(
+            discord_tts_runtime,
+            "memory_exposure_guard",
+            side_effect=MemoryDeletionJournalIntegrityError(),
+        ):
+            with self.assertRaises(MemoryDeletionJournalIntegrityError):
+                await speak_answer_from_runtime(
+                    SimpleNamespace(guild=SimpleNamespace(id=88)),
+                    "stale",
+                    deps=self.build_deps(),
+                )
+        self.assertEqual(self.cached_calls, [])
+        self.assertEqual(self.source_calls, [])
+        self.assertIsNone(self.manager.request)
 
     def test_main_delegates_single_discord_tts_to_runtime_module(self) -> None:
         source = (

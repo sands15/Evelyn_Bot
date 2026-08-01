@@ -22,6 +22,9 @@ from evelyn_core.control_page_ui_runtime import (
     get_control_page_chat_log_from_runtime,
     sanitize_control_page_welcome_text_from_runtime,
 )  # noqa: E402
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
 
 
 class _UiStore:
@@ -44,13 +47,23 @@ class FakeChatLogStore(_UiStore):
         super().__init__()
         self.rows_by_guild: dict[int, list[dict[str, object]]] = {}
 
-    def append(self, guild_id: int, role: str, author: str, text: str) -> None:
-        self.rows_by_guild.setdefault(int(guild_id), []).append({
+    def append(
+        self,
+        guild_id: int,
+        role: str,
+        author: str,
+        text: str,
+        memory_receipt_ref=None,
+    ) -> None:
+        row = {
             "guild_id": int(guild_id),
             "role": role,
             "author": author,
             "text": text,
-        })
+        }
+        if role == "assistant":
+            row["_memoryReceiptRef"] = memory_receipt_ref
+        self.rows_by_guild.setdefault(int(guild_id), []).append(row)
 
     def get(self, guild_id: int) -> list[dict[str, object]]:
         return list(self.rows_by_guild.get(int(guild_id), []))
@@ -60,6 +73,7 @@ def _build_deps() -> tuple[ControlPageUiRuntimeDeps, FakeCommandStore, FakeChatL
     command_store = FakeCommandStore()
     chat_log_store = FakeChatLogStore()
     deps = ControlPageUiRuntimeDeps(
+        memory_index_dir=REPO_ROOT / "unused-memory-index",
         control_page_host="127.0.0.1",
         control_page_port=8799,
         local_control_guild_id=999,
@@ -96,12 +110,20 @@ class ControlPageUiRuntimeTests(unittest.TestCase):
 
     def test_append_and_read_control_page_chat_log(self) -> None:
         deps, _, chat_log_store = _build_deps()
-        append_control_page_chat_log_from_runtime(11, "assistant", "bot", "hello", deps=deps)
+        append_control_page_chat_log_from_runtime(
+            11,
+            "assistant",
+            "bot",
+            "hello",
+            deps=deps,
+            memory_receipt_ref=not_used_memory_receipt_ref(),
+        )
         append_control_page_chat_log_from_runtime(11, "user", "alice", "hi", deps=deps)
         rows = get_control_page_chat_log_from_runtime(11, deps=deps)
         self.assertEqual(rows[0]["text"], "hello")
         self.assertEqual(rows[1]["author"], "alice")
-        self.assertEqual(chat_log_store.rows_by_guild[11], rows)
+        self.assertNotIn("_memoryReceiptRef", rows[0])
+        self.assertIn("_memoryReceiptRef", chat_log_store.rows_by_guild[11][0])
 
     def test_sanitize_control_page_welcome_text_uses_payload_fallback(self) -> None:
         deps, _, _ = _build_deps()

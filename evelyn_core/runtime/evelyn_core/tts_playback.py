@@ -1910,3 +1910,64 @@ class StreamingVoiceDelivery:
             self.playback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.playback_task
+
+
+class LazyStreamingVoiceDelivery:
+    """Buffer chunks, then start playback after the memory-lease handoff."""
+
+    def __init__(
+        self,
+        sentence_queue: "asyncio.Queue[str | None]",
+        tts_sink: TTSQueueSink,
+        playback_task_factory: Callable[[], asyncio.Task],
+        *,
+        metrics: dict,
+        log_stage: Callable[..., Any] | None = None,
+        prefetch_chunks: int | None = None,
+    ) -> None:
+        self.sentence_queue = sentence_queue
+        self.tts_sink = tts_sink
+        self._playback_task_factory = playback_task_factory
+        self.playback_task: asyncio.Task | None = None
+        self.metrics = metrics
+        self._log_stage = log_stage
+        self._prefetch_chunks = prefetch_chunks
+
+    def _ensure_started(self) -> asyncio.Task:
+        if self.playback_task is None:
+            self.playback_task = self._playback_task_factory()
+        return self.playback_task
+
+    async def on_chunk(self, text: str) -> None:
+        # The producer can still hold the memory-deletion read lease while
+        # yielding model chunks. Starting a child playback task here would
+        # make that task contend with its parent for the same exclusive
+        # lease. Buffer until ``close`` performs the explicit handoff after
+        # upstream response consumption has finished.
+        await self.tts_sink.on_chunk(text)
+
+    async def close(self, final_text: str) -> None:
+        self._ensure_started()
+        await self.tts_sink.close(final_text)
+
+    async def finalize(self) -> int:
+        if self._log_stage is not None:
+            self._log_stage(
+                self.metrics,
+                "sentence TTS queued",
+                extra=(
+                    "sentence_count="
+                    f"{self.tts_sink.queued_sentence_count} "
+                    f"prefetch={self._prefetch_chunks}"
+                ),
+            )
+        await self._ensure_started()
+        return self.tts_sink.queued_sentence_count
+
+    async def abort(self) -> None:
+        task = self.playback_task
+        if task is not None and not task.done():
+            await self.sentence_queue.put(None)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

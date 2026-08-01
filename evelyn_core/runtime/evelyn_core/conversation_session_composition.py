@@ -107,7 +107,13 @@ class ConversationSessionComposition:
         user_id: int | None = None,
         awaiting_user_reply: bool,
         topic_id: str | None = None,
+        memory_receipt: Any = None,
     ) -> Any:
+        receipt_kwargs = (
+            {"memory_receipt": memory_receipt}
+            if memory_receipt is not None
+            else {}
+        )
         return finish_assistant_text_turn_from_runtime(
             session_key,
             user_text,
@@ -116,6 +122,7 @@ class ConversationSessionComposition:
             topic_id=topic_id,
             guild_id=guild_id,
             user_id=user_id,
+            **receipt_kwargs,
             deps=self.deps.session(),
         )
 
@@ -306,12 +313,19 @@ class ConversationSessionComposition:
         answer: str | None,
         *,
         guild_id: int | None = None,
+        memory_receipt: Any = None,
     ) -> None:
+        receipt_kwargs = (
+            {"memory_receipt": memory_receipt}
+            if memory_receipt is not None
+            else {}
+        )
         append_history_from_runtime(
             session_key,
             user_text,
             answer,
             guild_id=guild_id,
+            **receipt_kwargs,
             deps=self.deps.session(),
         )
 

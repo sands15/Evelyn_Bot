@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+)
+from .memory_exposure import current_memory_exposure_position
 
 @dataclass(frozen=True)
 class ControlPageUiRuntimeDeps:
+    memory_index_dir: Path
     control_page_host: str
     control_page_port: int
     local_control_guild_id: int
@@ -166,12 +173,35 @@ def append_control_page_chat_log_from_runtime(
     author: str,
     text: str,
     deps: ControlPageUiRuntimeDeps,
+    *,
+    memory_receipt_ref: Any = None,
 ) -> None:
-    deps.control_page_chat_log_store.append(guild_id, role, author, text)
+    deps.control_page_chat_log_store.append(
+        guild_id,
+        role,
+        author,
+        text,
+        memory_receipt_ref,
+    )
 
 
 def get_control_page_chat_log_from_runtime(guild_id: int, deps: ControlPageUiRuntimeDeps) -> list[dict[str, Any]]:
-    return deps.control_page_chat_log_store.get(guild_id)
+    outcome = filter_conversation_history_for_memory_exposure(
+        deps.control_page_chat_log_store.get(guild_id),
+        memory_index_dir=deps.memory_index_dir,
+    )
+    capture_combined_memory_exposure(
+        current_memory_exposure_position(),
+        outcome.memory_exposure_position,
+    )
+    public_rows: list[dict[str, Any]] = []
+    for message in outcome.messages:
+        public_message = dict(message)
+        public_message.pop("memoryReceipt", None)
+        public_message.pop("memoryReceiptRef", None)
+        public_message.pop("_memoryReceiptRef", None)
+        public_rows.append(public_message)
+    return public_rows
 
 
 def sanitize_control_page_welcome_text_from_runtime(text: str, deps: ControlPageUiRuntimeDeps) -> str:

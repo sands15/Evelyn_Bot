@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-01 KST
-Source branch: `codex/dependency-config-hardening`, current Minecraft world-lease process-lifetime owner-lock increment
+Source branch: `codex/dependency-config-hardening`, current conversation memory receipt/deletion-safe delivery increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -864,8 +864,23 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
     강등하지 않는다. 최외곽 응답은 exact content-free 503과 `no-store`이며,
     stream은 첫 model delta를 요청해 memory build와 upstream admission이
     성공한 뒤에만 HTTP 200을 prepare한다.
+  - 8798→8799 state/chat/shutdown/action-events는 strict content-free handoff
+    header를 사용한다. 공개 프록시는 upstream EOF 뒤 browser write 직전에 같은
+    exposure를 재검증하고 write 종료까지 lease를 유지하며, state 재직렬화에도
+    경계를 보존한다. handoff header와 note ID는 브라우저에 노출하지 않는다.
+  - Control Page text/search와 voice는 공용 reply-boundary validator로 compact
+    receipt의 state, memory version, note ID를 현재 exposure와 정확히 대조한 뒤에만
+    assistant persistence, continuity, TTS와 반환을 수행한다.
 
 ## Verification state
+
+- 이번 working-tree increment는 `core 630`, `runtime 544`, `ui 166`, `voice 547`,
+  `discord_io 109`, `memory 256`, 그 밖의 hygiene/tools/vision/voyager/
+  minecraft/mindcraft 340개, 합계 2,592개를 통과했고 18개는 환경·선택 기능으로
+  skip됐다. Python source 623개 구문 검사, Control Page asset JavaScript 7개
+  `node --check`, Fast Control Compose config와 `git diff --check`도 통과했다.
+  테스트는 임시 memory/runtime root만 사용했고 실제 서비스, 실제 사용자 기억,
+  마이크·스피커·Discord는 시작하지 않았다.
 
 검증한 코드 기준점: `bd0786d`
 
@@ -1586,6 +1601,41 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
   `torch`가 없어 42개 모듈은 import 단계에서 실패했으며, 이번 변경과 직접
   관련된 해당 경로는 위 Docker 통합 검증으로 보완했다. 실제 사용자 memory,
   Discord, 마이크, 스피커, 모델 서비스와 실행 중 컨테이너는 건드리지 않았다.
+- 현재 conversation deletion 증분은 assistant row에 content-free
+  `conversation.memory-receipt-ref.v1`을 부여한다. `bound`는 attributed
+  memory version과 canonical supplied-note ID에 묶이고, `not_used`는 저장
+  기억 비사용이 명시적으로 증명된 row만 표시하며, 누락·손상·
+  표현 불가능한 legacy 의존성은 `unattributed`로 fail-closed한다.
+  receipt는 durable continuity, restart restore, session merge와 Control Page·Discord
+  text·Discord voice cross-surface merge까지 보존된다. 공개 chat/state/action
+  projection은 receipt와 note ID를 제거한다.
+- Main/Fast/Voice/Search/tool의 history assembly는 assistant receipt를 검사해
+  missing legacy, invalid, `unattributed`, stale memory version, tombstoned-note row를
+  prompt 전에 제거한다. 필터를 통과한 결과의 deletion position만
+  persona/cognitive/router/planner, search follow-up와 tool 결과에 병합하고,
+  history-derived cache는 strict receipt로 현재성을 증명하지 못하면 무시한다.
+- Main Control Page와 Fast Control Page는 handler 반환이 아니라 actual HTTP
+  `prepare` 직전부터 `write_eof`까지 exact memory exposure guard를 유지한다.
+  stale guard는 content-free exact 503과 `no-store`로 닫히며, Fast stream은 첫
+  content 전에 typed `memory_boundary`를 전송한다. Discord/in-process TTS는
+  producer lease가 끝난 뒤 playback owner가 동일 경계를 재확인하며,
+  Windows Local I/O Bridge는 bound sentence/delta를 HTTP EOF까지 buffer한 뒤
+  host guard 안에서만 TTS/PCM을 시작한다. missing·malformed·stale
+  boundary는 실제 재생 0회다.
+- voice success side effect는 exact reply receipt와 exposure가 일치하고 실제
+  playback이 성공한 뒤에만 commit한다. 이 단계 이전의 stale·mismatch·
+  재생 실패는 assistant history/continuity, memory write, search follow-up,
+  session/persona 갱신을 남기지 않는다. 수용된 사용자 턴만 미응답
+  continuity로 보존할 수 있다. receipt/boundary/guard/validation 메타데이터에는
+  raw audio, transcript, prompt/history/assistant content를 복제해 저장하지 않는다.
+- 이 증분에서 현재까지 확정된 격리 검증은 session/continuity 66개,
+  Fast delivery boundary 34개, Fast action 77개, voice post-playback side effect
+  12개, TTS handoff 14개, local direct EOF→host handoff 8개, Control Page
+  집중 305개다. 전체 저장소 회귀·정적 검사의 최종 합산은 통합 종료 후
+  갱신한다. 이 검증은 임시 memory/artifact root만 사용했고 실제 사용자
+  기억과 runtime artifact를 읽거나 수정하지 않았다. Discord, 마이크,
+  스피커, Minecraft, Docker 서비스도 시작·교체하지 않았으므로 실제
+  음성 하드웨어 E2E는 여전히 미검증이다.
 
 ## Operational boundaries
 

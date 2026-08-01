@@ -11,6 +11,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 import evelyn_core.cognitive_policy_state as cognitive_policy_state  # noqa: E402
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
 from evelyn_core.cognitive_policy_state import (  # noqa: E402
     apply_ask_gating,
     build_cognitive_fallback_state,
@@ -112,7 +115,17 @@ class FastCognitiveStateSourceTests(unittest.TestCase):
             calls.append(path)
             scope_type, _scope_key = path
             if scope_type == "person":
-                return {"action": "ask", "question_for_user": "확인할까?", "confidence": 1.0}
+                return {
+                    "action": "ask",
+                    "question_for_user": "확인할까?",
+                    "confidence": 1.0,
+                    "memoryProvenance": {
+                        "schema": "cognitive-state.provenance.v1",
+                        "memoryReceiptRef": (
+                            not_used_memory_receipt_ref()
+                        ),
+                    },
+                }
             return {}
 
         with patch.object(cognitive_policy_state, "cognitive_state_path", side_effect=fake_path):
@@ -127,6 +140,21 @@ class FastCognitiveStateSourceTests(unittest.TestCase):
         self.assertEqual(state["action"], "ask")
         self.assertEqual(state["question_for_user"], "확인할까?")
         self.assertEqual(calls, [("session", "session-1"), ("person", "person-1")])
+
+    def test_unproven_cached_cognitive_state_is_ignored(self) -> None:
+        with patch.object(
+            cognitive_policy_state,
+            "cognitive_state_path",
+            return_value=("guild", None),
+        ), patch.object(
+            cognitive_policy_state,
+            "read_json_file",
+            return_value={
+                "action": "ask",
+                "state_summary": "deleted canary",
+            },
+        ):
+            self.assertIsNone(read_layered_cognitive_state(123))
 
     def test_cached_cognitive_state_handles_missing_guild(self) -> None:
         self.assertIsNone(read_cached_cognitive_state(None))

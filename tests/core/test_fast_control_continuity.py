@@ -25,6 +25,22 @@ from evelyn_core.fast_control_continuity import (  # noqa: E402
 )
 
 
+NOTE_A = "concept-0123456789abcdef"
+NOTE_B = "concept-fedcba9876543210"
+
+
+def full_receipt(note_id: str, *, version: int) -> dict:
+    return {
+        "schema": "memory.context-receipt.v1",
+        "state": "provided",
+        "groundingState": "attributed",
+        "memoryVersion": version,
+        "suppliedNoteIds": [note_id],
+        "suppliedNoteCount": 1,
+        "contentFree": True,
+    }
+
+
 class FastControlContinuityTests(unittest.TestCase):
     def test_disabled_owner_never_creates_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -127,6 +143,62 @@ class FastControlContinuityTests(unittest.TestCase):
                 ("assistant", "작업을 완료했어."),
             ],
         )
+
+    def test_receipts_restore_on_completed_turn_and_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            first.record_completed_turn(
+                "기억 질문",
+                "기억 답",
+                memory_receipt=full_receipt(
+                    NOTE_A,
+                    version=4,
+                ),
+            )
+            first.record_assistant_followup(
+                "추가 기억 답",
+                memory_receipt=full_receipt(
+                    NOTE_B,
+                    version=5,
+                ),
+            )
+
+            second = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            restored = second.restored_chat_messages()
+            status = second.status()
+
+        assistants = [
+            item
+            for item in restored
+            if item["role"] == "assistant"
+        ]
+        self.assertEqual(
+            assistants[0]["memoryReceiptRef"][
+                "suppliedNoteIds"
+            ],
+            [NOTE_A],
+        )
+        self.assertEqual(
+            assistants[1]["memoryReceiptRef"][
+                "suppliedNoteIds"
+            ],
+            [NOTE_B],
+        )
+        rendered_status = json.dumps(
+            status,
+            ensure_ascii=False,
+        )
+        self.assertNotIn(NOTE_A, rendered_status)
+        self.assertNotIn(NOTE_B, rendered_status)
 
     def test_status_is_content_free_and_exact(self) -> None:
         private_user = (

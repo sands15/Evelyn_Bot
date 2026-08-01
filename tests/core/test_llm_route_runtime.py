@@ -149,11 +149,12 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["max_question_count"], 1)
         self.assertEqual(meta["context_policy"]["intent"], "question")
         self.assertTrue(meta["context_policy"]["needs_memory"])
-        self.assertEqual(self.load_calls, [("summary", 11), ("state", 11), ("raw", 11), ("facts", 11)])
+        self.assertEqual(self.load_calls, [])
         messages, kwargs = self.router_calls[0]
-        self.assertIn("summary text", messages[1]["content"])
+        self.assertNotIn("summary text", messages[1]["content"])
+        self.assertNotIn("calm", messages[1]["content"])
         self.assertNotIn("{'id': 0}", messages[1]["content"])
-        self.assertIn("{'id': 4}", messages[1]["content"])
+        self.assertNotIn("{'id': 4}", messages[1]["content"])
         self.assertEqual(kwargs["max_tokens"], 321)
         self.assertEqual(kwargs["turn_id"], "turn:session-2")
         self.assertIsInstance(

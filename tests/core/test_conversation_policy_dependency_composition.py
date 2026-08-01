@@ -68,6 +68,7 @@ class ConversationPolicyDependencyCompositionTests(unittest.TestCase):
         self.assertNotIn("globals()", source)
         self.assertNotIn("import main", source)
         self.assertIn("session_state_store=deps.session_state_store", source)
+        self.assertIn("memory_index_dir=deps.memory_index_dir", source)
         self.assertIn("audio_duration_fn=deps.audio_duration", source)
         self.assertIn("session_state_snapshot_fn=deps.session_state_snapshot", source)
 

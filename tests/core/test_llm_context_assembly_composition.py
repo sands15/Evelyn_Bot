@@ -27,6 +27,7 @@ class LlmContextAssemblyCompositionTests(unittest.TestCase):
             extract_question_policy_from_route_meta=callback, update_cognitive_state=async_callback,
             schedule_cognitive_refresh=callback, build_runtime_status_context=async_callback,
             project_root=REPO_ROOT, runtime_artifacts_root=REPO_ROOT / "runtime_artifacts",
+            memory_index_dir=REPO_ROOT / "memory_index",
             observe_live_minecraft_state=async_callback,
             control_page_minecraft_cache_refresh_sec=1.0,
             control_page_minecraft_cache_max_stale_sec=2.0,

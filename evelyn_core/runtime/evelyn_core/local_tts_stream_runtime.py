@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,7 @@ def cleanup_prepared_tts_item(item: object) -> None:
 
 @dataclass(frozen=True)
 class LocalTtsSingleRuntimeDeps:
+    memory_index_dir: Path
     playback_manager: Any
     clean_tts_text: Callable[[str], str]
     strip_omnivoice_tags: Callable[[str], str]
@@ -68,10 +76,18 @@ async def speak_answer_local_from_runtime(
     text = deps.clean_tts_text(deps.strip_omnivoice_tags(answer) or answer)
     if not text:
         return False
-    task = deps.attach_current_task(turn_scope)
-    if turn_scope is not None:
-        turn_scope.transition(deps.tts_running_state, reason="local_speaker_tts")
+    response_exposure = current_memory_exposure_position()
+    memory_guard = memory_exposure_guard(
+        expected_position=response_exposure,
+        required=response_exposure is not None,
+        index_dir=deps.memory_index_dir,
+    )
+    memory_guard.__enter__()
+    task = None
     try:
+        task = deps.attach_current_task(turn_scope)
+        if turn_scope is not None:
+            turn_scope.transition(deps.tts_running_state, reason="local_speaker_tts")
         async with deps.tts_lock:
             source = await deps.create_omnivoice_source(
                 text,
@@ -154,7 +170,11 @@ async def speak_answer_local_from_runtime(
         )
         return False
     finally:
-        deps.detach_task(turn_scope, task)
+        try:
+            deps.detach_task(turn_scope, task)
+        finally:
+            exc_type, exc, traceback = sys.exc_info()
+            memory_guard.__exit__(exc_type, exc, traceback)
 
 
 async def stream_local_tts_sentences_from_runtime(

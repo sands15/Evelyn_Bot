@@ -9,6 +9,11 @@ from .continuity_authenticity import (
     CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
     ContinuityAuthenticity,
 )
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+    sanitize_memory_receipt_ref,
+    unattributed_memory_receipt_ref,
+)
 from .session_continuity import SessionContinuityCheckpoint
 from .session_memory_state import (
     SessionStateStore,
@@ -104,21 +109,30 @@ class FastControlContinuityOwner:
             content = clean_text(item.get("content"))
             if role not in {"user", "assistant"} or not content:
                 continue
-            messages.append(
-                {
-                    "role": role,
-                    "author": (
-                        "정훈"
-                        if role == "user"
-                        else "Evelyn"
-                    ),
-                    "text": content,
-                    "at": restored_at,
-                    "source": (
-                        "fast_control_continuity_restore"
-                    ),
-                }
-            )
+            receipt_present = "memoryReceiptRef" in item
+            if role == "user" and receipt_present:
+                continue
+            message: dict[str, Any] = {
+                "role": role,
+                "author": (
+                    "정훈"
+                    if role == "user"
+                    else "Evelyn"
+                ),
+                "text": content,
+                "at": restored_at,
+                "source": (
+                    "fast_control_continuity_restore"
+                ),
+            }
+            if role == "assistant" and receipt_present:
+                receipt_ref = sanitize_memory_receipt_ref(
+                    item.get("memoryReceiptRef")
+                )
+                if receipt_ref is None:
+                    continue
+                message["memoryReceiptRef"] = receipt_ref
+            messages.append(message)
         return messages[-self.max_history_items :]
 
     def _require_checkpoint(
@@ -134,6 +148,7 @@ class FastControlContinuityOwner:
         assistant_text: str,
         *,
         before_commit: Callable[[int], Any] | None = None,
+        memory_receipt: Any = None,
     ) -> dict[str, Any]:
         cleaned_user = clean_text(user_text)
         cleaned_assistant = clean_text(assistant_text)
@@ -170,6 +185,7 @@ class FastControlContinuityOwner:
                     cleaned_assistant,
                 ),
                 now_monotonic=self.monotonic(),
+                memory_receipt=memory_receipt,
             )
             return checkpoint.commit_completed_turn(
                 FAST_CONTROL_SESSION_KEY,
@@ -181,6 +197,7 @@ class FastControlContinuityOwner:
         assistant_text: str,
         *,
         before_commit: Callable[[int], Any] | None = None,
+        memory_receipt: Any = None,
     ) -> dict[str, Any]:
         cleaned_assistant = clean_text(assistant_text)
         if not cleaned_assistant:
@@ -210,6 +227,13 @@ class FastControlContinuityOwner:
                 {
                     "role": "assistant",
                     "content": cleaned_assistant,
+                    "memoryReceiptRef": (
+                        unattributed_memory_receipt_ref()
+                        if memory_receipt is None
+                        else memory_receipt_ref_from_receipt(
+                            memory_receipt
+                        )
+                    ),
                 }
             )
             self.store.trim_history(

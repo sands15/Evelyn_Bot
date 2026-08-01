@@ -8,11 +8,13 @@ import os
 import random
 import re
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from aiohttp import ClientSession, ClientTimeout, web
 
 from .control_page_http import reject_browser_origin_middleware
+from .control_page_memory_http import control_page_memory_handoff_headers
 from .assistant_prompt_contract import (
     FAST_MAIN_LLM_USER_PREFIX,
     build_evelyn_system_prompt,
@@ -57,6 +59,7 @@ from .fast_action_recovery import (
 from .fast_tool_planner import (
     FastToolPlan,
     answer_fast_tool_capability_question,
+    bind_fast_tool_plan_memory_exposure,
     enforce_registered_tool_capability_truth,
     plan_fast_tool_request,
 )
@@ -99,9 +102,33 @@ from .minecraft_world_lease_http_runtime import (
     MinecraftWorldLeaseHttpRuntime,
 )
 from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
 )
-from .memory_deletion_outbound import memory_deletion_outbound_request
+from .memory_deletion_outbound import (
+    reset_memory_deletion_outbound_position,
+)
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+    memory_receipt_ref_from_exposure,
+)
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+    merge_memory_receipt_refs,
+    not_used_memory_receipt_ref,
+    unattributed_memory_receipt_ref,
+)
+from .config import MEMORY_ROOT
+from .memory_exposure import (
+    MemoryExposurePosition,
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    memory_exposure_position_from_dict,
+    memory_exposure_position_to_dict,
+    memory_exposure_request,
+    reset_memory_exposure_position,
+)
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
     memory_deletion_boundary_not_required,
@@ -157,6 +184,18 @@ FAST_MEMORY_CONTEXT_RECEIPT: ContextVar[dict[str, Any] | None] = ContextVar(
 )
 FAST_MEMORY_DELETION_POSITION: ContextVar[Any | None] = ContextVar(
     "fast_memory_deletion_position",
+    default=None,
+)
+FAST_MEMORY_EXPOSURE_POSITION: ContextVar[
+    MemoryExposurePosition | None
+] = ContextVar(
+    "fast_memory_exposure_position",
+    default=None,
+)
+FAST_HISTORY_MEMORY_RECEIPT_REF: ContextVar[
+    dict[str, Any] | None
+] = ContextVar(
+    "fast_history_memory_receipt_ref",
     default=None,
 )
 RESEARCH_PROGRESS_TEXTS = (
@@ -330,6 +369,136 @@ def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response
     return web.json_response(payload, status=status)
 
 
+class MemoryGuardedJsonResponse(web.Response):
+    """Keep the verified memory boundary through the actual HTTP write."""
+
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_position: MemoryExposurePosition | None,
+        status: int = 200,
+        after_write: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(
+            text=json.dumps(payload, ensure_ascii=False),
+            status=status,
+            content_type="application/json",
+            charset="utf-8",
+        )
+        self._memory_expected_position = expected_position
+        self._memory_guard: Any | None = None
+        self._memory_guard_disabled = False
+        self._after_write = after_write
+        self._after_write_called = False
+        self.headers["Cache-Control"] = "no-store"
+        self.headers.update(
+            control_page_memory_handoff_headers(expected_position)
+        )
+
+    def _replace_with_integrity_failure(self) -> None:
+        """Discard the original body before any response headers are sent."""
+
+        self._memory_expected_position = None
+        self._memory_guard_disabled = True
+        self._after_write = None
+        self.set_status(503)
+        self.text = json.dumps(
+            {
+                "ok": False,
+                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            },
+            ensure_ascii=False,
+        )
+        self.headers.update(
+            {
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
+        self.headers.update(control_page_memory_handoff_headers(None))
+
+    def _enter_memory_guard(self) -> None:
+        if self._memory_guard_disabled or self._memory_guard is not None:
+            return
+        guard = memory_exposure_guard(
+            expected_position=self._memory_expected_position,
+            required=self._memory_expected_position is not None,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        )
+        guard.__enter__()
+        self._memory_guard = guard
+
+    def _exit_memory_guard(self, exc: BaseException | None = None) -> None:
+        guard = self._memory_guard
+        self._memory_guard = None
+        if guard is not None:
+            guard.__exit__(
+                type(exc) if exc is not None else None,
+                exc,
+                exc.__traceback__ if exc is not None else None,
+            )
+
+    def _run_after_write(self) -> None:
+        if self._after_write_called:
+            return
+        self._after_write_called = True
+        callback = self._after_write
+        self._after_write = None
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] post_write_callback_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+
+    async def prepare(self, request: web.BaseRequest) -> Any:
+        try:
+            self._enter_memory_guard()
+            return await super().prepare(request)
+        except MemoryDeletionJournalIntegrityError:
+            self._exit_memory_guard()
+            if self.prepared:
+                raise
+            self._replace_with_integrity_failure()
+            return await super().prepare(request)
+        except BaseException as exc:
+            self._exit_memory_guard(exc)
+            raise
+
+    async def write_eof(self, data: bytes = b"") -> None:
+        try:
+            self._enter_memory_guard()
+            await super().write_eof(data)
+        except BaseException as exc:
+            self._exit_memory_guard(exc)
+            self._run_after_write()
+            raise
+        else:
+            self._exit_memory_guard()
+            self._run_after_write()
+
+
+def memory_guarded_json_response(
+    payload: dict[str, Any],
+    *,
+    expected_position: MemoryExposurePosition | None,
+    status: int = 200,
+    after_write: Callable[[], None] | None = None,
+) -> MemoryGuardedJsonResponse:
+    return MemoryGuardedJsonResponse(
+        payload,
+        expected_position=expected_position,
+        status=status,
+        after_write=after_write,
+    )
+
+
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
@@ -436,6 +605,9 @@ def visible_text(value: Any) -> str:
 
 def reset_fast_memory_context_receipt() -> dict[str, Any]:
     FAST_MEMORY_DELETION_POSITION.set(None)
+    FAST_MEMORY_EXPOSURE_POSITION.set(None)
+    reset_memory_deletion_outbound_position()
+    reset_memory_exposure_position()
     receipt = {
         "schema": "memory.context-receipt.v1",
         "state": "not_requested",
@@ -455,12 +627,24 @@ def reset_fast_memory_context_receipt() -> dict[str, Any]:
         "contentFree": True,
     }
     FAST_MEMORY_CONTEXT_RECEIPT.set(receipt)
+    FAST_HISTORY_MEMORY_RECEIPT_REF.set(
+        memory_receipt_ref_from_receipt(None)
+    )
     return dict(receipt)
 
 
 def current_fast_memory_context_receipt() -> dict[str, Any]:
     receipt = FAST_MEMORY_CONTEXT_RECEIPT.get()
     return dict(receipt) if isinstance(receipt, dict) else reset_fast_memory_context_receipt()
+
+
+def current_fast_response_memory_receipt_ref() -> dict[str, Any]:
+    current_ref = memory_receipt_ref_from_receipt(
+        current_fast_memory_context_receipt()
+    )
+    history_ref = FAST_HISTORY_MEMORY_RECEIPT_REF.get()
+    merged = merge_memory_receipt_refs(history_ref, current_ref)
+    return merged or memory_receipt_ref_from_receipt(None)
 
 
 def append_chat_message(
@@ -486,8 +670,12 @@ def append_chat_message(
         message["taskId"] = clean_text(task_id)
     if clean_text(task_status):
         message["taskStatus"] = clean_text(task_status)
-    if isinstance(memory_receipt, dict):
-        message["memoryReceipt"] = dict(memory_receipt)
+    if clean_text(role).lower() == "assistant":
+        message["memoryReceiptRef"] = (
+            unattributed_memory_receipt_ref()
+            if memory_receipt is None
+            else memory_receipt_ref_from_receipt(memory_receipt)
+        )
     if isinstance(memory_write_receipt, dict):
         message["memoryWriteReceipt"] = dict(
             memory_write_receipt
@@ -541,6 +729,8 @@ def _fast_control_continuity_result(
 def commit_fast_control_turn(
     user_text: str,
     assistant_text: str,
+    *,
+    memory_receipt: Any = None,
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     if not owner.enabled:
@@ -563,6 +753,7 @@ def commit_fast_control_turn(
         raw_status = owner.record_completed_turn(
             user_text,
             assistant_text,
+            memory_receipt=memory_receipt,
         )
     except Exception as exc:
         print(
@@ -579,6 +770,8 @@ def commit_fast_control_turn(
 
 def commit_fast_control_followup(
     assistant_text: str,
+    *,
+    memory_receipt: Any = None,
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     if not owner.enabled:
@@ -587,7 +780,8 @@ def commit_fast_control_followup(
         )
     try:
         raw_status = owner.record_assistant_followup(
-            assistant_text
+            assistant_text,
+            memory_receipt=memory_receipt,
         )
     except Exception as exc:
         print(
@@ -622,6 +816,7 @@ def begin_fast_action_recovery(
                 "작업 복구 상태를 기록하지 못해서 "
                 "장시간 작업을 시작하지 않았어."
             ),
+            memory_receipt=not_used_memory_receipt_ref(),
         )
         print(
             "[FAST CONTROL] action_recovery_begin_failed "
@@ -636,6 +831,8 @@ def begin_fast_action_recovery(
 def commit_fast_control_action_followup(
     task_id: str,
     assistant_text: str,
+    *,
+    memory_receipt: Any = None,
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     journal = FAST_ACTION_RECOVERY_JOURNAL
@@ -656,6 +853,7 @@ def commit_fast_control_action_followup(
         raw_status = owner.record_assistant_followup(
             assistant_text,
             before_commit=prepare_terminal,
+            memory_receipt=memory_receipt,
         )
     except Exception as exc:
         print(
@@ -693,6 +891,8 @@ def commit_fast_control_terminal_turn(
     task_id: str,
     user_text: str,
     assistant_text: str,
+    *,
+    memory_receipt: Any = None,
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     journal = FAST_ACTION_RECOVERY_JOURNAL
@@ -714,6 +914,7 @@ def commit_fast_control_terminal_turn(
             user_text,
             assistant_text,
             before_commit=prepare_terminal,
+            memory_receipt=memory_receipt,
         )
     except Exception as exc:
         print(
@@ -800,9 +1001,11 @@ def recover_fast_control_actions_after_restart(
             "Evelyn",
             FAST_ACTION_RECOVERY_NOTICE,
             source="fast_control_action_recovery",
+            memory_receipt=not_used_memory_receipt_ref(),
         )
         continuity = commit_fast_control_followup(
-            FAST_ACTION_RECOVERY_NOTICE
+            FAST_ACTION_RECOVERY_NOTICE,
+            memory_receipt=not_used_memory_receipt_ref(),
         )
         if continuity.get("durable") is not True:
             return journal.public_status()
@@ -823,15 +1026,26 @@ def recover_fast_control_actions_after_restart(
 
 
 def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[str, str]]:
-    messages = [
-        {
-            "role": clean_text(message.get("role")) or "user",
-            "content": clean_text(message.get("text")),
+    messages: list[dict[str, Any]] = []
+    for raw_message in CHAT_MESSAGES[-max(1, limit + 1) :]:
+        role = clean_text(raw_message.get("role"))
+        content = clean_text(raw_message.get("text"))
+        if role not in {"user", "assistant"} or not content:
+            continue
+        message: dict[str, Any] = {
+            "role": role,
+            "content": content,
         }
-        for message in CHAT_MESSAGES[-max(1, limit + 1) :]
-        if clean_text(message.get("role")) in {"user", "assistant"}
-        and clean_text(message.get("text"))
-    ]
+        if role == "assistant":
+            if "memoryReceiptRef" in raw_message:
+                message["memoryReceiptRef"] = raw_message.get(
+                    "memoryReceiptRef"
+                )
+            elif "memoryReceipt" in raw_message:
+                message["memoryReceipt"] = raw_message.get(
+                    "memoryReceipt"
+                )
+        messages.append(message)
     if (
         messages
         and messages[-1]["role"] == "user"
@@ -842,12 +1056,24 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
         messages,
         current_user_text=text,
     )
+    reset_memory_exposure_position()
+    outcome = filter_conversation_history_for_memory_exposure(
+        merged[-limit:],
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
+    )
+    exposure_position = capture_combined_memory_exposure(
+        outcome.memory_exposure_position,
+    )
+    FAST_MEMORY_EXPOSURE_POSITION.set(exposure_position)
+    FAST_HISTORY_MEMORY_RECEIPT_REF.set(
+        dict(outcome.memory_receipt_ref)
+    )
     return [
         {
             "role": clean_text(message.get("role")),
             "content": clean_text(message.get("content")),
         }
-        for message in merged[-limit:]
+        for message in outcome.messages[-limit:]
         if clean_text(message.get("role"))
         in {"user", "assistant"}
         and clean_text(message.get("content"))
@@ -912,13 +1138,36 @@ def queue_local_bridge_speech(text: str, *, source: str = "control_page") -> dic
         "source": source,
         "createdAt": time.time(),
     }
+    memory_exposure = current_memory_exposure_position()
+    if memory_exposure is not None:
+        request["memoryBoundary"] = (
+            memory_exposure_position_to_dict(memory_exposure)
+        )
     LOCAL_BRIDGE_SPEAK_QUEUE.append(request)
     del LOCAL_BRIDGE_SPEAK_QUEUE[:-8]
     return request
 
 
 def drain_local_bridge_speak_requests() -> list[dict[str, Any]]:
-    requests = list(LOCAL_BRIDGE_SPEAK_QUEUE)
+    requests: list[dict[str, Any]] = []
+    for raw_request in LOCAL_BRIDGE_SPEAK_QUEUE:
+        request = dict(raw_request)
+        raw_boundary = request.get("memoryBoundary")
+        if raw_boundary is None:
+            requests.append(request)
+            continue
+        try:
+            position = memory_exposure_position_from_dict(
+                raw_boundary
+            )
+            with memory_exposure_guard(
+                expected_position=position,
+                required=True,
+                index_dir=Path(MEMORY_ROOT) / "memory_index",
+            ):
+                requests.append(request)
+        except MemoryDeletionJournalIntegrityError:
+            continue
     LOCAL_BRIDGE_SPEAK_QUEUE.clear()
     return requests
 
@@ -1426,6 +1675,7 @@ async def synthesize_tool_evidence_reply(
     user_text: str,
     task_kind: str,
     evidence: str,
+    memory_exposure_position: MemoryExposurePosition | None = None,
 ) -> str:
     system_prompt = "\n\n".join(
         (
@@ -1457,8 +1707,19 @@ async def synthesize_tool_evidence_reply(
     if MAIN_LLM_STOP_TOKENS:
         payload["stop"] = list(MAIN_LLM_STOP_TOKENS)
     timeout = ClientTimeout(total=120)
+    exposure_position = (
+        memory_exposure_position
+        if memory_exposure_position is not None
+        else current_memory_exposure_position()
+    )
     async with ClientSession(timeout=timeout) as session:
-        async with session.post(LLM_SERVER_URL, json=payload) as response:
+        async with memory_exposure_request(
+            session.post,
+            LLM_SERVER_URL,
+            json=payload,
+            expected_position=exposure_position,
+            memory_boundary_required=(exposure_position is not None),
+        ) as response:
             if response.status != 200:
                 detail = await response.text()
                 raise RuntimeError(f"main_llm_tool_synthesis_error {response.status}: {detail[:300]}")
@@ -1479,7 +1740,11 @@ async def execute_web_research_plan(plan: FastToolPlan, user_text: str, source: 
             "research_query_empty",
             reply="무엇을 조사해야 하는지 주제를 잡지 못했어. 대상을 한 번만 더 말해줘.",
         )
-    executed_query, results = await default_search_provider(query)
+    with memory_exposure_guard(
+        expected_position=plan.memory_exposure_position,
+        required=(plan.memory_exposure_position is not None),
+    ):
+        executed_query, results = await default_search_provider(query)
     if not results:
         retry_query = normalize_search_query(
             re.sub(
@@ -1490,7 +1755,13 @@ async def execute_web_research_plan(plan: FastToolPlan, user_text: str, source: 
             )
         )
         if retry_query and retry_query != executed_query:
-            executed_query, results = await default_search_provider(retry_query)
+            with memory_exposure_guard(
+                expected_position=plan.memory_exposure_position,
+                required=(plan.memory_exposure_position is not None),
+            ):
+                executed_query, results = await default_search_provider(
+                    retry_query
+                )
     if not results:
         raise FastActionExecutionError(
             "web_research_empty",
@@ -1502,7 +1773,12 @@ async def execute_web_research_plan(plan: FastToolPlan, user_text: str, source: 
             user_text=user_text,
             task_kind="research_compare",
             evidence=evidence,
+            memory_exposure_position=(
+                plan.memory_exposure_position
+            ),
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         titles = [
             clean_text((item if isinstance(item, dict) else item.to_dict()).get("title"))
@@ -1602,7 +1878,12 @@ async def execute_runtime_investigation_plan(plan: FastToolPlan, user_text: str,
             user_text=user_text,
             task_kind="runtime_investigation",
             evidence=evidence,
+            memory_exposure_position=(
+                plan.memory_exposure_position
+            ),
         )
+    except MemoryDeletionJournalIntegrityError:
+        raise
     except Exception:
         reply = clean_text(
             f"실제 런타임 상태와 로그를 확인했어. "
@@ -1702,6 +1983,7 @@ def prepare_registered_background_action(
                 task.task_id,
                 "background_action_runner_missing",
                 reply="작업 실행기가 연결되지 않아 시작하지 못했어.",
+                memory_receipt=not_used_memory_receipt_ref(),
             )
             return None
         begin_fast_action_recovery(task)
@@ -1713,33 +1995,61 @@ def launch_background_action(
     task: FastActionTask,
     runner: Callable[[str, str], Awaitable[str]],
 ) -> asyncio.Task[Any]:
+    exposure_position = current_memory_exposure_position()
+    memory_receipt_ref = (
+        memory_receipt_ref_from_exposure(exposure_position)
+        if exposure_position is not None
+        else not_used_memory_receipt_ref()
+    )
+
     async def execute() -> None:
+        terminal_reply_recorded = False
         try:
             raw_reply = await runner(task.user_text, task.source)
             final_reply = enforce_action_reply_contract(clean_text(raw_reply))
             if not final_reply:
                 final_reply = "작업은 완료됐지만 전달할 결과가 비어 있어."
-            completed = ACTION_COORDINATOR.complete(task.task_id, final_reply)
-            append_chat_message(
-                "assistant",
-                "Evelyn",
-                completed.final_reply,
-                source="fast_control_action_followup",
-                task_id=completed.task_id,
-                task_status=completed.status,
-            )
-            commit_fast_control_action_followup(
-                completed.task_id,
-                completed.final_reply
-            )
-            queue_local_bridge_speech(completed.final_reply, source="fast_control_action_followup")
+            with memory_exposure_guard(
+                expected_position=exposure_position,
+                required=(exposure_position is not None),
+            ):
+                completed = ACTION_COORDINATOR.complete(
+                    task.task_id,
+                    final_reply,
+                    memory_receipt=memory_receipt_ref,
+                )
+                terminal_reply_recorded = True
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    completed.final_reply,
+                    source="fast_control_action_followup",
+                    task_id=completed.task_id,
+                    task_status=completed.status,
+                    memory_receipt=memory_receipt_ref,
+                )
+                commit_fast_control_action_followup(
+                    completed.task_id,
+                    completed.final_reply,
+                    memory_receipt=memory_receipt_ref,
+                )
+                queue_local_bridge_speech(
+                    completed.final_reply,
+                    source="fast_control_action_followup",
+                )
         except Exception as exc:
             print(
                 "[FAST CONTROL] background_action_failed "
                 f"task={task.task_id} errorType={type(exc).__name__}",
                 flush=True,
             )
-            if isinstance(exc, FastActionExecutionError):
+            if terminal_reply_recorded:
+                return
+            custom_failure = isinstance(
+                exc,
+                FastActionExecutionError,
+            )
+            if custom_failure:
                 error = public_error_code(
                     str(exc),
                     fallback="background_action_failed",
@@ -1753,20 +2063,56 @@ def launch_background_action(
             else:
                 error = "background_action_failed"
                 failed_reply = public_failure_message(error)
-            failed = ACTION_COORDINATOR.fail(task.task_id, error, reply=failed_reply)
-            append_chat_message(
-                "assistant",
-                "Evelyn",
-                failed.final_reply,
-                source="fast_control_action_followup",
-                task_id=failed.task_id,
-                task_status=failed.status,
+            failure_receipt = (
+                memory_receipt_ref
+                if custom_failure
+                else not_used_memory_receipt_ref()
             )
-            commit_fast_control_action_followup(
-                failed.task_id,
-                failed.final_reply
-            )
-            queue_local_bridge_speech(failed.final_reply, source="fast_control_action_followup")
+
+            def persist_failure() -> None:
+                nonlocal terminal_reply_recorded
+                failed = ACTION_COORDINATOR.fail(
+                    task.task_id,
+                    error,
+                    reply=failed_reply,
+                    memory_receipt=failure_receipt,
+                )
+                terminal_reply_recorded = True
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    failed.final_reply,
+                    source="fast_control_action_followup",
+                    task_id=failed.task_id,
+                    task_status=failed.status,
+                    memory_receipt=failure_receipt,
+                )
+                commit_fast_control_action_followup(
+                    failed.task_id,
+                    failed.final_reply,
+                    memory_receipt=failure_receipt,
+                )
+                queue_local_bridge_speech(
+                    failed.final_reply,
+                    source="fast_control_action_followup",
+                )
+
+            if custom_failure:
+                try:
+                    with memory_exposure_guard(
+                        expected_position=exposure_position,
+                        required=exposure_position is not None,
+                    ):
+                        persist_failure()
+                except MemoryDeletionJournalIntegrityError:
+                    if terminal_reply_recorded:
+                        return
+                    error = "background_action_failed"
+                    failed_reply = public_failure_message(error)
+                    failure_receipt = not_used_memory_receipt_ref()
+                    persist_failure()
+            else:
+                persist_failure()
 
     background_task = asyncio.create_task(execute(), name=task.task_id)
     BACKGROUND_ACTION_TASKS.add(background_task)
@@ -1889,9 +2235,100 @@ def build_control_plane_state(
     }
 
 
-def default_chat_messages() -> list[dict[str, Any]]:
+_MEMORY_CHANGED_REPLY_REDACTION = (
+    "메모리가 변경되어 이전 결과를 더 이상 표시하지 않아."
+)
+
+
+def _memory_index_path(
+    memory_index_dir: Path | None,
+) -> Path:
+    return (
+        Path(memory_index_dir)
+        if memory_index_dir is not None
+        else Path(MEMORY_ROOT) / "memory_index"
+    )
+
+
+def _memory_safe_public_rows(
+    rows: list[dict[str, Any]],
+    *,
+    memory_index_dir: Path,
+) -> list[dict[str, Any]]:
+    """Filter memory-derived text before a public state projection."""
+
+    try:
+        outcome = filter_conversation_history_for_memory_exposure(
+            rows,
+            memory_index_dir=Path(memory_index_dir),
+        )
+        capture_combined_memory_exposure(
+            current_memory_exposure_position(),
+            outcome.memory_exposure_position,
+        )
+        return [dict(row) for row in outcome.messages]
+    except MemoryDeletionJournalIntegrityError:
+        # A broken or unavailable index must not make a bound reply public.
+        # Preserve user rows and assistant rows explicitly proven independent
+        # of memory so the surrounding status endpoint remains useful.
+        safe_rows: list[dict[str, Any]] = []
+        for raw_row in rows:
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            role = clean_text(row.get("role")).lower()
+            if role != "assistant":
+                row.pop("memoryReceipt", None)
+                row.pop("memoryReceiptRef", None)
+                safe_rows.append(row)
+                continue
+            if "memoryReceiptRef" in row:
+                receipt = memory_receipt_ref_from_receipt(
+                    row.get("memoryReceiptRef")
+                )
+            elif "memoryReceipt" in row:
+                receipt = memory_receipt_ref_from_receipt(
+                    row.get("memoryReceipt")
+                )
+            else:
+                continue
+            if receipt.get("state") != "not_used":
+                continue
+            row.pop("memoryReceipt", None)
+            row.pop("memoryReceiptRef", None)
+            safe_rows.append(row)
+        return safe_rows
+
+
+def default_chat_messages(
+    *,
+    memory_index_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     if CHAT_MESSAGES:
-        return list(CHAT_MESSAGES)
+        safe_messages = _memory_safe_public_rows(
+            CHAT_MESSAGES,
+            memory_index_dir=_memory_index_path(
+                memory_index_dir
+            ),
+        )
+        public_keys = (
+            "role",
+            "author",
+            "text",
+            "at",
+            "source",
+            "taskId",
+            "taskStatus",
+        )
+        return [
+            {
+                key: message[key]
+                for key in public_keys
+                if key in message
+            }
+            for message in safe_messages
+            if isinstance(message, dict)
+        ]
     return [
         {
             "role": "assistant",
@@ -1900,6 +2337,110 @@ def default_chat_messages() -> list[dict[str, Any]]:
             "at": time.time(),
         }
     ]
+
+
+def _public_fast_action_snapshot(
+    *,
+    memory_index_dir: Path | None = None,
+) -> dict[str, Any]:
+    internal = ACTION_COORDINATOR.internal_snapshot()
+    candidates: list[dict[str, Any]] = []
+
+    for task in internal.get("tasks") or []:
+        if (
+            not isinstance(task, dict)
+            or task.get("status") not in {"completed", "failed"}
+            or not clean_text(task.get("finalReply"))
+        ):
+            continue
+        row: dict[str, Any] = {
+            "role": "assistant",
+            "content": clean_text(task.get("finalReply")),
+            "projectionId": f"task:{task.get('id')}",
+        }
+        if "_memoryReceiptRef" in task:
+            row["memoryReceiptRef"] = task.get(
+                "_memoryReceiptRef"
+            )
+        candidates.append(row)
+
+    for event in internal.get("events") or []:
+        if (
+            not isinstance(event, dict)
+            or event.get("type") not in {"completed", "failed"}
+            or not clean_text(event.get("reply"))
+        ):
+            continue
+        row = {
+            "role": "assistant",
+            "content": clean_text(event.get("reply")),
+            "projectionId": f"event:{event.get('id')}",
+        }
+        if "_memoryReceiptRef" in event:
+            row["memoryReceiptRef"] = event.get(
+                "_memoryReceiptRef"
+            )
+        candidates.append(row)
+
+    kept_projection_ids = {
+        clean_text(row.get("projectionId"))
+        for row in _memory_safe_public_rows(
+            candidates,
+            memory_index_dir=_memory_index_path(
+                memory_index_dir
+            ),
+        )
+        if clean_text(row.get("projectionId"))
+    }
+
+    tasks: list[dict[str, Any]] = []
+    for raw_task in internal.get("tasks") or []:
+        if not isinstance(raw_task, dict):
+            continue
+        task = {
+            key: value
+            for key, value in raw_task.items()
+            if not key.startswith("_")
+        }
+        projection_id = f"task:{task.get('id')}"
+        if (
+            task.get("status") in {"completed", "failed"}
+            and clean_text(task.get("finalReply"))
+            and projection_id not in kept_projection_ids
+        ):
+            task["finalReply"] = (
+                _MEMORY_CHANGED_REPLY_REDACTION
+            )
+            task["replyRedacted"] = True
+        tasks.append(task)
+
+    events: list[dict[str, Any]] = []
+    for raw_event in internal.get("events") or []:
+        if not isinstance(raw_event, dict):
+            continue
+        event = {
+            key: value
+            for key, value in raw_event.items()
+            if not key.startswith("_")
+        }
+        projection_id = f"event:{event.get('id')}"
+        if (
+            event.get("type") in {"completed", "failed"}
+            and clean_text(event.get("reply"))
+            and projection_id not in kept_projection_ids
+        ):
+            event["reply"] = (
+                _MEMORY_CHANGED_REPLY_REDACTION
+            )
+            event["replyRedacted"] = True
+        events.append(event)
+
+    return {
+        "activeCount": int(internal.get("activeCount") or 0),
+        "lastEventId": int(internal.get("lastEventId") or 0),
+        "tasks": tasks,
+        "events": events,
+    }
 
 
 def parse_stream_line(raw_line: bytes) -> dict[str, Any] | None:
@@ -1968,16 +2509,49 @@ async def build_main_llm_request_payload(
         text,
         limit=8,
     )
-    final_user_text = build_fast_main_llm_user_text(text)
-    llm_request = await build_fast_main_llm_request(
-        base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
-        recent_messages=recent_messages,
-        user_text=text,
-        final_user_text=final_user_text,
-        source=source,
-        tool_user_text=tool_plan.query if tool_plan is not None else None,
-        local_bridge_status_provider=local_bridge_status_snapshot,
+    plan_exposure_position = (
+        tool_plan.memory_exposure_position
+        if tool_plan is not None
+        else None
     )
+    combined_prebuild_exposure = capture_combined_memory_exposure(
+        plan_exposure_position,
+        current_memory_exposure_position(),
+    )
+    if plan_exposure_position is not None:
+        merged_history_ref = merge_memory_receipt_refs(
+            FAST_HISTORY_MEMORY_RECEIPT_REF.get(),
+            memory_receipt_ref_from_exposure(
+                plan_exposure_position
+            ),
+        )
+        FAST_HISTORY_MEMORY_RECEIPT_REF.set(
+            merged_history_ref
+            or memory_receipt_ref_from_receipt(None)
+        )
+    FAST_MEMORY_EXPOSURE_POSITION.set(
+        combined_prebuild_exposure
+    )
+    final_user_text = build_fast_main_llm_user_text(text)
+    with memory_exposure_guard(
+        expected_position=combined_prebuild_exposure,
+        required=(combined_prebuild_exposure is not None),
+    ):
+        llm_request = await build_fast_main_llm_request(
+            base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
+            recent_messages=recent_messages,
+            user_text=text,
+            final_user_text=final_user_text,
+            source=source,
+            tool_user_text=(
+                tool_plan.query
+                if tool_plan is not None
+                else None
+            ),
+            local_bridge_status_provider=(
+                local_bridge_status_snapshot
+            ),
+        )
     payload = {
         "model": MODEL_NAME,
         "messages": llm_request.messages,
@@ -2000,6 +2574,9 @@ async def build_main_llm_request_payload(
     )
     FAST_MEMORY_DELETION_POSITION.set(
         getattr(llm_request, "memory_deletion_position", None)
+    )
+    FAST_MEMORY_EXPOSURE_POSITION.set(
+        getattr(llm_request, "memory_exposure_position", None)
     )
     return payload, deterministic_reply
 
@@ -2034,15 +2611,15 @@ async def iter_main_llm_deltas(
         return
     timeout = ClientTimeout(total=120)
     prefix_filter = ModelStreamPrefixFilter()
-    deletion_position = FAST_MEMORY_DELETION_POSITION.get()
+    exposure_position = FAST_MEMORY_EXPOSURE_POSITION.get()
     async with ClientSession(timeout=timeout) as session:
-        async with memory_deletion_outbound_request(
+        async with memory_exposure_request(
             session.post,
             LLM_SERVER_URL,
             json=payload,
-            expected_position=deletion_position,
+            expected_position=exposure_position,
             memory_boundary_required=(
-                deletion_position is not None
+                exposure_position is not None
             ),
         ) as resp:
             if resp.status != 200:
@@ -2285,9 +2862,16 @@ def should_skip_fast_tool_planner(text: str) -> bool:
 async def plan_fast_tool_request_for_turn(text: str) -> FastToolPlan | None:
     if should_skip_fast_tool_planner(text):
         return None
-    return await plan_fast_tool_request(
+    plan = await plan_fast_tool_request(
         text,
         recent_messages=recent_chat_messages_for_planner(text),
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
+    )
+    if plan is None:
+        return None
+    return bind_fast_tool_plan_memory_exposure(
+        plan,
+        current_memory_exposure_position(),
     )
 
 
@@ -2329,7 +2913,11 @@ def build_default_commands() -> list[dict[str, str]]:
     return build_fast_control_default_commands()
 
 
-def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
+def build_control_state(
+    health: dict[str, Any],
+    *,
+    memory_index_dir: Path | None = None,
+) -> dict[str, Any]:
     legacy = dict(health.get("legacyServices") or {})
     services_by_id = _service_by_id(health)
     boot_progress = build_boot_progress(health)
@@ -2386,11 +2974,15 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
         "allCommands": commands,
         "controlPagePanels": build_control_page_panel_state(),
         "chat": {
-            "messages": default_chat_messages(),
+            "messages": default_chat_messages(
+                memory_index_dir=memory_index_dir
+            ),
             "inputEnabled": chat_ready,
         },
         "actions": {
-            **ACTION_COORDINATOR.snapshot(),
+            **_public_fast_action_snapshot(
+                memory_index_dir=memory_index_dir
+            ),
             "recovery": (
                 FAST_ACTION_RECOVERY_JOURNAL.public_status()
             ),
@@ -2616,8 +3208,13 @@ async def minecraft_world_lease_mutation_handler(
 
 
 async def state_handler(_: web.Request) -> web.StreamResponse:
+    reset_memory_exposure_position()
     health = await cached_fast_runtime_health()
-    return json_response(build_control_state(health))
+    state = build_control_state(health)
+    return memory_guarded_json_response(
+        state,
+        expected_position=current_memory_exposure_position(),
+    )
 
 
 async def local_voice_admission_handler(
@@ -2679,16 +3276,141 @@ async def local_voice_admission_handler(
     )
 
 
+async def _finalize_fast_chat_response(
+    *,
+    text: str,
+    reply: str,
+    source: str,
+    suppress_tts: bool,
+    queued_speech_count: int,
+    task_record: FastActionTask | None,
+    task_runner: Callable[[str, str], Awaitable[str]] | None,
+    memory_write_receipt: dict[str, Any] | None,
+    error_code: str,
+) -> web.StreamResponse:
+    response_exposure = capture_combined_memory_exposure(
+        FAST_MEMORY_EXPOSURE_POSITION.get(),
+        current_memory_exposure_position(),
+    )
+    FAST_MEMORY_EXPOSURE_POSITION.set(response_exposure)
+    with memory_exposure_guard(
+        expected_position=response_exposure,
+        required=response_exposure is not None,
+        index_dir=Path(MEMORY_ROOT) / "memory_index",
+    ):
+        response_memory_receipt_ref = (
+            current_fast_response_memory_receipt_ref()
+        )
+        append_chat_message(
+            "assistant",
+            "Evelyn",
+            reply,
+            source="fast_control_api",
+            task_id=(
+                task_record.task_id
+                if task_record is not None
+                else None
+            ),
+            task_status=(
+                task_record.status
+                if task_record is not None
+                else None
+            ),
+            memory_receipt=response_memory_receipt_ref,
+            memory_write_receipt=memory_write_receipt,
+        )
+        continuity = (
+            commit_fast_control_terminal_turn(
+                task_record.task_id,
+                text,
+                reply,
+                memory_receipt=response_memory_receipt_ref,
+            )
+            if (
+                task_record is not None
+                and task_record.status != "running"
+            )
+            else commit_fast_control_turn(
+                text,
+                reply,
+                memory_receipt=response_memory_receipt_ref,
+            )
+        )
+        if (
+            not suppress_tts
+            and should_queue_local_bridge_speech(source)
+            and queued_speech_count <= 0
+        ):
+            queue_local_bridge_speech(reply, source=source)
+        health = await cached_fast_runtime_health()
+        state = build_control_state(health)
+        final_response_exposure = current_memory_exposure_position()
+        result: dict[str, Any] = {
+            "ok": not bool(error_code),
+            "reply": reply,
+            "suppressTts": suppress_tts,
+            "state": state,
+            "continuity": continuity,
+            "memoryReceipt": current_fast_memory_context_receipt(),
+        }
+        if clean_text(source) in {"local_bridge", "local_mic", "voice"}:
+            result["memoryState"] = (
+                "bound" if response_exposure is not None else "not_used"
+            )
+            result["memoryBoundary"] = (
+                memory_exposure_position_to_dict(response_exposure)
+                if response_exposure is not None
+                else None
+            )
+        if memory_write_receipt is not None:
+            result["memoryWriteReceipt"] = memory_write_receipt
+        if error_code:
+            result["error"] = error_code
+        if task_record is not None:
+            result["task"] = task_record.to_dict()
+        after_write: Callable[[], None] | None = None
+        if (
+            task_record is not None
+            and task_runner is not None
+            and task_record.status == "running"
+        ):
+            def launch_after_response_write() -> None:
+                if task_record.status == "running":
+                    launch_background_action(
+                        task_record,
+                        task_runner,
+                    )
+
+            after_write = launch_after_response_write
+        return memory_guarded_json_response(
+            result,
+            expected_position=final_response_exposure,
+            after_write=after_write,
+        )
+
+
 async def chat_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
     except Exception:
-        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+        return memory_guarded_json_response(
+            {"ok": False, "error": "invalid_json"},
+            expected_position=None,
+            status=400,
+        )
     if not isinstance(payload, dict):
-        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+        return memory_guarded_json_response(
+            {"ok": False, "error": "invalid_json"},
+            expected_position=None,
+            status=400,
+        )
     text = clean_text(payload.get("text"))
     if not text:
-        return json_response({"ok": False, "error": "empty_text"}, status=400)
+        return memory_guarded_json_response(
+            {"ok": False, "error": "empty_text"},
+            expected_position=None,
+            status=400,
+        )
     source = clean_text(payload.get("source")).lower() or "control_page"
     action_id = (
         payload.get("turnId")
@@ -2777,51 +3499,21 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
                 task_record.task_id,
                 error_code,
                 reply=public_failure_message(error_code),
+                memory_receipt=not_used_memory_receipt_ref(),
             )
         reply = public_failure_message(error_code)
         task_runner = None
-    append_chat_message(
-        "assistant",
-        "Evelyn",
-        reply,
-        source="fast_control_api",
-        task_id=task_record.task_id if task_record is not None else None,
-        task_status=task_record.status if task_record is not None else None,
-        memory_receipt=current_fast_memory_context_receipt(),
+    return await _finalize_fast_chat_response(
+        text=text,
+        reply=reply,
+        source=source,
+        suppress_tts=suppress_tts,
+        queued_speech_count=queued_speech_count,
+        task_record=task_record,
+        task_runner=task_runner,
         memory_write_receipt=memory_write_receipt,
+        error_code=error_code,
     )
-    continuity = (
-        commit_fast_control_terminal_turn(
-            task_record.task_id,
-            text,
-            reply,
-        )
-        if (
-            task_record is not None
-            and task_record.status != "running"
-        )
-        else commit_fast_control_turn(text, reply)
-    )
-    if not suppress_tts and should_queue_local_bridge_speech(source) and queued_speech_count <= 0:
-        queue_local_bridge_speech(reply, source=source)
-    if task_record is not None and task_runner is not None and task_record.status == "running":
-        launch_background_action(task_record, task_runner)
-    health = await cached_fast_runtime_health()
-    result: dict[str, Any] = {
-        "ok": not bool(error_code),
-        "reply": reply,
-        "suppressTts": suppress_tts,
-        "state": build_control_state(health),
-        "continuity": continuity,
-        "memoryReceipt": current_fast_memory_context_receipt(),
-    }
-    if memory_write_receipt is not None:
-        result["memoryWriteReceipt"] = memory_write_receipt
-    if error_code:
-        result["error"] = error_code
-    if task_record is not None:
-        result["task"] = task_record.to_dict()
-    return json_response(result)
 
 
 async def write_stream_event(response: web.StreamResponse, payload: dict[str, Any]) -> None:
@@ -2880,10 +3572,96 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     memory_write_receipt: dict[str, Any] | None = None
     memory_command_error = ""
     llm_stream: AsyncIterator[str] | None = None
+    response_finished = False
+    terminal_reply_recorded = False
+    local_memory_handoff_required = clean_text(source) in {
+        "local_bridge",
+        "local_mic",
+        "voice",
+    }
+    stream_memory_boundary_emitted = False
+    stream_memory_exposure: MemoryExposurePosition | None = None
 
     async def ensure_response_prepared() -> None:
         if not response.prepared:
             await response.prepare(request)
+
+    def active_stream_memory_exposure() -> MemoryExposurePosition | None:
+        position = capture_combined_memory_exposure(
+            FAST_MEMORY_EXPOSURE_POSITION.get(),
+            current_memory_exposure_position(),
+        )
+        FAST_MEMORY_EXPOSURE_POSITION.set(position)
+        return position
+
+    async def write_event_at_memory_exposure(
+        event_payload: dict[str, Any],
+        position: MemoryExposurePosition | None,
+    ) -> None:
+        with memory_exposure_guard(
+            expected_position=position,
+            required=position is not None,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        ):
+            await ensure_response_prepared()
+            await write_stream_event(response, event_payload)
+
+    async def ensure_local_memory_boundary() -> None:
+        nonlocal stream_memory_boundary_emitted, stream_memory_exposure
+        if not local_memory_handoff_required:
+            return
+        position = active_stream_memory_exposure()
+        if stream_memory_boundary_emitted:
+            if position != stream_memory_exposure:
+                raise MemoryDeletionJournalIntegrityError()
+            return
+        stream_memory_exposure = position
+        stream_memory_boundary_emitted = True
+        await write_event_at_memory_exposure(
+            {
+                "type": "memory_boundary",
+                "memoryState": (
+                    "bound" if position is not None else "not_used"
+                ),
+                "memoryBoundary": (
+                    memory_exposure_position_to_dict(position)
+                    if position is not None
+                    else None
+                ),
+            },
+            position,
+        )
+
+    async def write_response_event(event_payload: dict[str, Any]) -> None:
+        if local_memory_handoff_required:
+            await ensure_local_memory_boundary()
+        position = active_stream_memory_exposure()
+        if (
+            local_memory_handoff_required
+            and position != stream_memory_exposure
+        ):
+            raise MemoryDeletionJournalIntegrityError()
+        await write_event_at_memory_exposure(event_payload, position)
+
+    def local_memory_handoff_fields() -> dict[str, Any]:
+        if not local_memory_handoff_required:
+            return {}
+        if not stream_memory_boundary_emitted:
+            raise MemoryDeletionJournalIntegrityError()
+        return {
+            "memoryState": (
+                "bound"
+                if stream_memory_exposure is not None
+                else "not_used"
+            ),
+            "memoryBoundary": (
+                memory_exposure_position_to_dict(
+                    stream_memory_exposure
+                )
+                if stream_memory_exposure is not None
+                else None
+            ),
+        }
 
     async def emit_delta(fragment: str) -> None:
         nonlocal first_delta_ms
@@ -2892,9 +3670,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if first_delta_ms is None:
             first_delta_ms = elapsed_ms
-        await ensure_response_prepared()
-        await write_stream_event(
-            response,
+        await write_response_event(
             {
                 "type": "delta",
                 "text": fragment,
@@ -2911,9 +3687,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if first_progress_ms is None:
             first_progress_ms = elapsed_ms
-        await ensure_response_prepared()
-        await write_stream_event(
-            response,
+        await write_response_event(
             {
                 "type": "progress",
                 "text": progress_text,
@@ -2934,9 +3708,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if first_sentence_ms is None:
             first_sentence_ms = elapsed_ms
         emitted_chunks.append(chunk)
-        await ensure_response_prepared()
-        await write_stream_event(
-            response,
+        await write_response_event(
             {
                 "type": "sentence",
                 "text": chunk,
@@ -2963,6 +3735,79 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             if has_unbacked_progress_claim(chunk):
                 continue
             await emit_sentence(chunk)
+
+    async def finalize_success_delivery() -> None:
+        nonlocal response_finished, terminal_reply_recorded
+        response_exposure = active_stream_memory_exposure()
+        launch_after_handoff = False
+        try:
+            with memory_exposure_guard(
+                expected_position=response_exposure,
+                required=response_exposure is not None,
+                index_dir=Path(MEMORY_ROOT) / "memory_index",
+            ):
+                await ensure_local_memory_boundary()
+                response_memory_receipt_ref = (
+                    current_fast_response_memory_receipt_ref()
+                )
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    reply,
+                    source="fast_control_api_stream",
+                    task_id=(
+                        task_record.task_id
+                        if task_record is not None
+                        else None
+                    ),
+                    task_status=(
+                        task_record.status
+                        if task_record is not None
+                        else None
+                    ),
+                    memory_receipt=response_memory_receipt_ref,
+                    memory_write_receipt=memory_write_receipt,
+                )
+                terminal_reply_recorded = True
+                continuity = commit_fast_control_turn(
+                    text,
+                    reply,
+                    memory_receipt=response_memory_receipt_ref,
+                )
+                launch_after_handoff = bool(
+                    task_record is not None
+                    and task_runner is not None
+                    and task_record.status == "running"
+                )
+                await write_response_event(
+                    {
+                    "type": "done",
+                    "ok": not bool(memory_command_error),
+                    "error": memory_command_error,
+                    "reply": reply,
+                    "suppressTts": suppress_tts,
+                    "taskId": task_record.task_id if task_record is not None else None,
+                    "taskStatus": task_record.status if task_record is not None else None,
+                    "continuity": continuity,
+                    "memoryReceipt": current_fast_memory_context_receipt(),
+                    "memoryWriteReceipt": memory_write_receipt,
+                    "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
+                    "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
+                    "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
+                    "elapsedMs": round((time.perf_counter() - started_at) * 1000.0, 1),
+                        **local_memory_handoff_fields(),
+                    },
+                )
+                await response.write_eof()
+                response_finished = True
+        finally:
+            if (
+                launch_after_handoff
+                and task_record is not None
+                and task_runner is not None
+                and task_record.status == "running"
+            ):
+                launch_background_action(task_record, task_runner)
 
     try:
         (
@@ -3024,58 +3869,32 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                         await consume_llm_delta(first_delta)
                     async for delta in llm_stream:
                         await consume_llm_delta(delta)
-                    for safe_fragment in speech_filter.finish():
-                        await emit_delta(safe_fragment)
-                    tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
-                    for chunk in tail_chunks:
-                        if has_unbacked_progress_claim(chunk):
-                            continue
-                        await emit_sentence(chunk)
-                    reply = enforce_registered_tool_capability_truth(
-                        enforce_action_reply_contract(visible_text("".join(raw_parts)))
-                    )
-                    if not reply:
-                        reply = "답변이 비어 있었어. 다시 한 번 말해줘."
-                    emitted_text = clean_text(" ".join(emitted_chunks))
-                    if not emitted_text:
-                        await emit_sentence(reply)
-                    elif reply.startswith(emitted_text):
-                        await emit_sentence(reply[len(emitted_text) :])
-                    elif reply != emitted_text:
-                        reply = enforce_action_reply_contract(emitted_text)
-        append_chat_message(
-            "assistant",
-            "Evelyn",
-            reply,
-            source="fast_control_api_stream",
-            task_id=task_record.task_id if task_record is not None else None,
-            task_status=task_record.status if task_record is not None else None,
-            memory_receipt=current_fast_memory_context_receipt(),
-            memory_write_receipt=memory_write_receipt,
-        )
-        continuity = commit_fast_control_turn(text, reply)
-        await ensure_response_prepared()
-        await write_stream_event(
-            response,
-            {
-                "type": "done",
-                "ok": not bool(memory_command_error),
-                "error": memory_command_error,
-                "reply": reply,
-                "suppressTts": suppress_tts,
-                "taskId": task_record.task_id if task_record is not None else None,
-                "taskStatus": task_record.status if task_record is not None else None,
-                "continuity": continuity,
-                "memoryReceipt": current_fast_memory_context_receipt(),
-                "memoryWriteReceipt": memory_write_receipt,
-                "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
-                "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
-                "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
-                "elapsedMs": round((time.perf_counter() - started_at) * 1000.0, 1),
-            },
-        )
-        if task_record is not None and task_runner is not None and task_record.status == "running":
-            launch_background_action(task_record, task_runner)
+                    tail_exposure = FAST_MEMORY_EXPOSURE_POSITION.get()
+                    with memory_exposure_guard(
+                        expected_position=tail_exposure,
+                        required=tail_exposure is not None,
+                        index_dir=Path(MEMORY_ROOT) / "memory_index",
+                    ):
+                        for safe_fragment in speech_filter.finish():
+                            await emit_delta(safe_fragment)
+                        tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
+                        for chunk in tail_chunks:
+                            if has_unbacked_progress_claim(chunk):
+                                continue
+                            await emit_sentence(chunk)
+                        reply = enforce_registered_tool_capability_truth(
+                            enforce_action_reply_contract(visible_text("".join(raw_parts)))
+                        )
+                        if not reply:
+                            reply = "답변이 비어 있었어. 다시 한 번 말해줘."
+                        emitted_text = clean_text(" ".join(emitted_chunks))
+                        if not emitted_text:
+                            await emit_sentence(reply)
+                        elif reply.startswith(emitted_text):
+                            await emit_sentence(reply[len(emitted_text) :])
+                        elif reply != emitted_text:
+                            reply = enforce_action_reply_contract(emitted_text)
+        await finalize_success_delivery()
     except MemoryDeletionJournalIntegrityError:
         raise
     except Exception as exc:
@@ -3086,11 +3905,17 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             f"errorType={type(exc).__name__}",
             flush=True,
         )
+        if terminal_reply_recorded:
+            # The reply and continuity already committed. A failed socket
+            # write must not manufacture a second terminal assistant turn.
+            response_finished = True
+            return response
         if task_record is not None and task_record.status == "running":
             failed = ACTION_COORDINATOR.fail(
                 task_record.task_id,
                 error_code,
                 reply=failure_reply,
+                memory_receipt=not_used_memory_receipt_ref(),
             )
             failure_reply = failed.final_reply
             append_chat_message(
@@ -3100,7 +3925,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 source="fast_control_action_followup",
                 task_id=failed.task_id,
                 task_status=failed.status,
-                memory_receipt=current_fast_memory_context_receipt(),
+                memory_receipt=not_used_memory_receipt_ref(),
             )
         else:
             append_chat_message(
@@ -3108,23 +3933,23 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "Evelyn",
                 failure_reply,
                 source="fast_control_api_stream",
-                memory_receipt=current_fast_memory_context_receipt(),
+                memory_receipt=not_used_memory_receipt_ref(),
             )
         continuity = (
             commit_fast_control_terminal_turn(
                 task_record.task_id,
                 text,
                 failure_reply,
+                memory_receipt=not_used_memory_receipt_ref(),
             )
             if task_record is not None
             else commit_fast_control_turn(
                 text,
                 failure_reply,
+                memory_receipt=not_used_memory_receipt_ref(),
             )
         )
-        await ensure_response_prepared()
-        await write_stream_event(
-            response,
+        await write_response_event(
             {
                 "type": "error",
                 "ok": False,
@@ -3144,8 +3969,15 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             if callable(close_stream):
                 with contextlib.suppress(Exception):
                     await close_stream()
-    await ensure_response_prepared()
-    await response.write_eof()
+    if not response_finished:
+        response_exposure = active_stream_memory_exposure()
+        with memory_exposure_guard(
+            expected_position=response_exposure,
+            required=response_exposure is not None,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        ):
+            await ensure_response_prepared()
+            await response.write_eof()
     return response
 
 
@@ -3382,18 +4214,29 @@ async def action_events_handler(request: web.Request) -> web.StreamResponse:
     try:
         after = int(clean_text(request.query.get("after")) or "0")
     except (TypeError, ValueError):
-        return json_response({"ok": False, "error": "invalid_after_cursor"}, status=400)
-    snapshot = ACTION_COORDINATOR.snapshot()
-    return json_response(
+        return memory_guarded_json_response(
+            {"ok": False, "error": "invalid_after_cursor"},
+            expected_position=None,
+            status=400,
+        )
+    reset_memory_exposure_position()
+    snapshot = _public_fast_action_snapshot()
+    response = memory_guarded_json_response(
         {
             "ok": True,
             "after": max(0, after),
             "lastEventId": snapshot["lastEventId"],
             "activeCount": snapshot["activeCount"],
-            "events": ACTION_COORDINATOR.events_after(after),
+            "events": [
+                event
+                for event in snapshot["events"]
+                if int(event.get("id") or 0) > max(0, after)
+            ],
             "tasks": snapshot["tasks"],
-        }
+        },
+        expected_position=current_memory_exposure_position(),
     )
+    return response
 
 
 async def shutdown_handler(request: web.Request) -> web.StreamResponse:
@@ -3403,7 +4246,10 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
         payload = {}
     source = clean_text((payload or {}).get("source")) or "control_page"
     reason = clean_text((payload or {}).get("reason")) or "shutdown_endpoint"
-    return json_response(request_local_shutdown(source=source, reason=reason))
+    return memory_guarded_json_response(
+        request_local_shutdown(source=source, reason=reason),
+        expected_position=None,
+    )
 
 
 def create_app(

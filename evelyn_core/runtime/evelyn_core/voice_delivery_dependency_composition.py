@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .discord_text_reply_runtime import DiscordTextReplyRuntimeDeps
@@ -12,6 +13,7 @@ from .voice_turn_entry_runtime import VoiceTurnEntryRuntimeDeps
 
 @dataclass(frozen=True)
 class VoiceDeliveryDependencyCompositionDeps:
+    memory_index_dir: Path
     attach_current_task: Callable[..., Any]
     detach_task: Callable[..., Any]
     prepare_route_context: Callable[..., Any]
@@ -91,6 +93,7 @@ class VoiceDeliveryDependencyComposition:
     def build_discord_text_reply_runtime_deps(self) -> DiscordTextReplyRuntimeDeps:
         deps = self.deps
         return DiscordTextReplyRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             attach_current_task=deps.attach_current_task,
             detach_task=deps.detach_task,
             new_turn_metrics=deps.new_turn_metrics,

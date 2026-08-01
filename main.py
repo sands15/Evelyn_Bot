@@ -260,7 +260,7 @@ from evelyn_core.control_page_tools import (
     should_route_control_page_tool_candidate,
 )
 from evelyn_core.tts_playback import (
-    CachedWaveAudioSource, OmniVoicePCMStream, StreamingVoiceDelivery, TTSQueueSink, TtsPlaybackManager, TtsSourcePlaybackRequest,
+    CachedWaveAudioSource, LazyStreamingVoiceDelivery, OmniVoicePCMStream, StreamingVoiceDelivery, TTSQueueSink, TtsPlaybackManager, TtsSourcePlaybackRequest,
     TtsStreamingPlaybackRequest, TtsPlaybackTracker, add_omnivoice_stream_contract, clear_tts_playback_tracking, configure_tts_playback_logging,
     get_tracked_tts_playback, is_tracked_tts_playback_active, prefetch_tts_sources, resolve_cached_tts_audio_path, split_tts_sentences,
     tracked_tts_playback_count, tracked_tts_playback_guild_ids,
@@ -477,6 +477,7 @@ conversation_policy_dependency_composition = ConversationPolicyDependencyComposi
             question_policy_state.maybe_append_proactive_question
         ),
         session_state_store=session_state_store, system_prompt=SYSTEM_PROMPT,
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         max_history_items=MAX_HISTORY_ITEMS, session_topic_ids=session_state_store.topic_ids,
@@ -525,7 +526,6 @@ recent_skill_dispatches: dict[str, float] = {}
 SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
 SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
 SKILL_DISPATCH_CACHE_MAX = 1024
-
 conversation_session_composition = ConversationSessionComposition(
     ConversationSessionCompositionDeps(
         session=build_session_turn_runtime_deps, room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
@@ -534,7 +534,6 @@ conversation_session_composition = ConversationSessionComposition(
         log_event=lambda *args, **kwargs: log_turn_event(*args, **kwargs),
     )
 )
-
 new_conversation_history = conversation_session_composition.new_conversation_history
 remember_session_followup_target = conversation_session_composition.remember_session_followup_target
 build_topic_id = conversation_session_composition.build_topic_id
@@ -564,7 +563,6 @@ trim_history = conversation_session_composition.trim_history
 append_history = conversation_session_composition.append_history
 recent_assistant_reply_summary = conversation_session_composition.recent_assistant_reply_summary
 persona_state_hint_for_turn = conversation_session_composition.persona_state_hint_for_turn
-
 conversation_observability_composition = ConversationObservabilityComposition(
     ConversationObservabilityCompositionDeps(
         question_policy=build_question_policy_runtime_deps, question_policy_state=build_question_policy_state_runtime_deps,
@@ -583,7 +581,6 @@ conversation_observability_composition = ConversationObservabilityComposition(
         voice_validation_observer=observe_turn_trace_for_voice_validation,
     )
 )
-
 log_turn_event = conversation_observability_composition.log_turn_event
 record_model_call_trace = conversation_observability_composition.record_model_call_trace
 record_context_pipeline_benchmark = conversation_observability_composition.record_context_pipeline_benchmark
@@ -629,9 +626,7 @@ summarize_p95_metrics = conversation_observability_composition.summarize_p95_met
 new_turn_metrics = conversation_observability_composition.new_turn_metrics
 mark_turn_stage = conversation_observability_composition.mark_turn_stage
 register_drop_reason = conversation_observability_composition.register_drop_reason
-
 configure_tts_playback_logging(log_turn_event)
-
 # =========================================================
 # 유틸
 # =========================================================
@@ -663,12 +658,10 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
     )
 )
-
 build_autonomy_runtime_factory_deps = (
     autonomy_runtime_composition.build_autonomy_runtime_factory_deps
 )
 get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_autonomy_engine
-
 guild_runtime_reset_composition = GuildRuntimeResetComposition(
     GuildRuntimeResetCompositionDeps(
         session_histories=session_state_store.histories, session_followup_targets=session_state_store.followup_targets,
@@ -694,12 +687,10 @@ build_guild_runtime_reset_deps = (
     guild_runtime_reset_composition.build_guild_runtime_reset_deps
 )
 reset_guild_runtime_state = guild_runtime_reset_composition.reset_guild_runtime_state
-
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
     target_count=VOICE_BARGE_IN_CONTINUITY_TARGET, clean_text=clean_text,
     log_enabled=lambda: VOICE_BOTTLENECK_LOGS, event_logger=log_turn_event,
 )
-
 voice_turn_dependency_composition = VoiceTurnDependencyComposition(
     VoiceTurnDependencyCompositionDeps(
         barge_in_tracker=voice_barge_in_continuity_tracker, command_status=command_status,
@@ -751,7 +742,6 @@ voice_turn_dependency_composition = VoiceTurnDependencyComposition(
         monotonic=time.monotonic, log=print,
     )
 )
-
 build_voice_barge_in_continuity_runtime_deps = (
     voice_turn_dependency_composition.build_voice_barge_in_continuity_runtime_deps
 )
@@ -767,7 +757,6 @@ build_voice_ingress_runtime_deps = (
 build_voice_ingress_entrypoint_deps = (
     voice_turn_dependency_composition.build_voice_ingress_entrypoint_deps
 )
-
 compute_runtime_mode = RuntimeModeResolver(
     tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker), inflight_llm_requests_get=inflight_llm_requests_counter.get,
 )
@@ -776,16 +765,13 @@ estimate_voice_like_probability = partial(
     estimate_voice_like_probability_policy,
     body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
 )
-
 fast_path_policy_composition = FastPathPolicyComposition(
     FastPathPolicyCompositionDeps(
         clean_text=clean_text, normalize_voice_text=normalize_voice_text,
         should_force_search_query=should_force_search_query,
     )
 )
-
 build_fast_path_policy_runtime_deps = fast_path_policy_composition.build_runtime_deps
-
 discord_session_policy_runtime_deps = build_discord_session_policy_runtime_deps()
 should_ignore_short_transcription = partial(
     should_ignore_short_transcription_from_runtime,
@@ -811,7 +797,6 @@ is_tail_fragment_candidate = partial(
     is_tail_fragment_candidate_from_runtime,
     deps=discord_session_policy_runtime_deps,
 )
-
 response_output_policy_runtime_deps = build_response_output_policy_runtime_deps()
 should_label_question_response = partial(
     should_label_question_response_from_runtime,
@@ -839,7 +824,6 @@ get_matching_speculative_policy = partial(
     clean_text=clean_text, is_similar=is_similar,
     monotonic=time.monotonic,
 )
-
 llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
     LlmCognitiveDependencyCompositionDeps(
         read_cached_cognitive_state=read_cached_cognitive_state, apply_ask_gating=apply_ask_gating,
@@ -898,7 +882,6 @@ should_force_search_followup = partial(
     should_force_search_followup_from_runtime,
     deps=cognitive_followup_runtime_deps,
 )
-
 response_context_composition = ResponseContextComposition(
     ResponseContextCompositionDeps(
         runtime_status_enabled=RUNTIME_STATUS_CONTEXT_ENABLED, runtime_status_refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
@@ -916,7 +899,6 @@ response_context_composition = ResponseContextComposition(
         question_feature_enabled=QUESTION_FEATURE_ENABLED,
     )
 )
-
 build_runtime_status_context_deps = response_context_composition.build_runtime_status_context_deps
 build_runtime_status_context = response_context_composition.build_runtime_status_context
 _skill_route_available = response_context_composition.skill_route_available
@@ -924,7 +906,6 @@ build_main_response_guidance = response_context_composition.build_main_response_
 build_main_response_guidance_runtime_deps = (
     response_context_composition.build_main_response_guidance_runtime_deps
 )
-
 vision_request_composition = VisionRequestComposition(
     VisionRequestCompositionDeps(
         screenshot_dir=VISION_SCREENSHOT_DIR, capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
@@ -936,7 +917,6 @@ vision_request_composition = VisionRequestComposition(
         monotonic=time.monotonic,
     )
 )
-
 build_vision_watch_runtime_deps = vision_request_composition.build_vision_watch_runtime_deps
 build_vision_observation_prompt = vision_request_composition.build_vision_observation_prompt
 _capture_local_screen_sync = vision_request_composition.capture_local_screen_sync
@@ -950,7 +930,6 @@ build_live_vision_context_runtime_deps = (
 build_live_vision_context = vision_request_composition.build_live_vision_context
 build_vision_watch_prompt = vision_request_composition.build_vision_watch_prompt
 vision_watch_scene_looks_bad = vision_request_composition.vision_watch_scene_looks_bad
-
 vision_watch_composition = VisionWatchComposition(
     VisionWatchCompositionDeps(
         enabled=VISION_WATCH_ENABLED, interval_sec=VISION_WATCH_INTERVAL_SEC,
@@ -987,6 +966,7 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
         schedule_cognitive_refresh=lambda *args, **kwargs: schedule_cognitive_refresh(*args, **kwargs),
         build_runtime_status_context=build_runtime_status_context, project_root=PROJECT_ROOT, runtime_artifacts_root=RUNTIME_ARTIFACTS_ROOT,
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(*args, **kwargs),
         control_page_minecraft_cache_refresh_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC, local_tts_snapshot=local_tts_playback_manager.snapshot,
@@ -1027,6 +1007,7 @@ redact_vision_text_for_memory = partial(
 
 search_memory_dependency_composition = SearchMemoryDependencyComposition(
     SearchMemoryDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         write_memory_turn_records=write_memory_turn_records, vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
         record_self_identity_turn=record_self_identity_turn, append_raw_transcript_rows=append_raw_transcript_rows,
         append_turn_rows_to_memory_vault=append_turn_rows_to_memory_vault,
@@ -1443,6 +1424,7 @@ build_voice_tts_interrupt_gate_deps = (
 
 discord_tts_dependency_composition = DiscordTtsDependencyComposition(
     DiscordTtsDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         is_local_speaker_voice_client=is_local_speaker_voice_client, speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
         tts_running_state=TurnState.TTS_RUNNING,
         play_cached_answer_audio=lambda *args, **kwargs: play_cached_answer_audio(
@@ -1469,6 +1451,7 @@ build_discord_tts_stream_runtime_deps = (
 
 local_tts_dependency_composition = LocalTtsDependencyComposition(
     LocalTtsDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         playback_manager=local_tts_playback_manager, clean_tts_text=clean_tts_text,
         strip_omnivoice_tags=strip_omnivoice_tags, attach_current_task=_attach_current_task,
         detach_task=_detach_task, tts_running_state=TurnState.TTS_RUNNING,
@@ -1493,21 +1476,25 @@ build_local_tts_stream_runtime_deps = (
 
 delivery_entry_composition = DeliveryEntryComposition(
     LocalDeliveryEntryDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         queue_factory=lambda: asyncio.Queue(), sink_factory=TTSQueueSink,
         stream_local_tts_sentences=(
             lambda *args, **kwargs: stream_local_tts_sentences(*args, **kwargs)
         ),
-        create_scoped_task=create_turn_scoped_task, streaming_delivery_factory=StreamingVoiceDelivery,
+        create_scoped_task=create_turn_scoped_task, streaming_delivery_factory=LazyStreamingVoiceDelivery,
         log_voice_stage=log_voice_stage, mark_turn_stage=mark_turn_stage,
         log_voice_latency=log_voice_latency,
         local_control_tts=lambda: build_local_control_tts_runtime_deps(
             local_only_mode=LOCAL_ONLY_MODE, local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
             speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs), create_turn_scoped_task=create_turn_scoped_task,
-            log_voice_bottleneck_summary=log_voice_bottleneck_summary, monotonic=time.monotonic,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+            memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
+            monotonic=time.monotonic,
         ),
         prefetch_chunks=TTS_PREFETCH_CHUNKS, log=print,
     ),
     DiscordDeliveryEntryDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         request_factory=DiscordStreamingVoiceDeliveryRequest, build_streaming_delivery=build_streaming_voice_delivery,
         stream_tts_sentences=lambda *args, **kwargs: stream_tts_sentences(*args, **kwargs), create_scoped_task=create_turn_scoped_task,
         log_voice_stage=log_voice_stage, prefetch_chunks=TTS_PREFETCH_CHUNKS,
@@ -1528,6 +1515,7 @@ start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voic
 voice_response_dependency_composition = VoiceResponseDependencyComposition(
     VoiceResponseDependencyCompositionDeps(
         model_name=MODEL_NAME, llm_server_url=LLM_SERVER_URL,
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT, main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
         voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS, get_http_session=get_http_session,
         build_chat_messages=build_chat_messages, fallback_answer_for=fallback_answer_for,
@@ -1647,6 +1635,7 @@ set_minecraft_goal = minecraft_world_lease_owner.set_goal
 
 control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
     ControlPageUiDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         control_page=lambda: control_page_composition, control_page_host=CONTROL_PAGE_HOST,
         control_page_port=CONTROL_PAGE_PORT, local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
         local_control_guild_name=LOCAL_CONTROL_GUILD_NAME, control_page_welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
@@ -1755,6 +1744,7 @@ build_control_page_runtime_services_probe_runtime_deps = (
 
 control_page_status_tool_composition = ControlPageStatusToolComposition(
     ControlPageStatusToolCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         control_page=lambda: control_page_composition, model_name=MODEL_NAME,
         router_model_name=ROUTER_MODEL_NAME, summary_model_name=SUMMARY_MODEL_NAME,
         stt_model_name=STT_MODEL_NAME, discord_enabled=DISCORD_ENABLED,
@@ -1775,7 +1765,8 @@ control_page_status_tool_composition = ControlPageStatusToolComposition(
         ),
         autonomy_engines=autonomy_engines, get_routed_autonomy_executor=get_routed_autonomy_executor,
         clean_text=clean_text, create_task=asyncio.create_task,
-        restart_bot_process=restart_bot_process, recent_history_for_router=session_state_store.recent_history_for_router,
+        restart_bot_process=restart_bot_process,
+        get_conversation_history=session_state_store.get_conversation_history,
         record_tool_assistant_turn=session_state_store.record_tool_assistant_turn,
         control_page_effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
             *args, **kwargs
@@ -1817,6 +1808,7 @@ control_page_search_text_dependency_composition = ControlPageSearchTextDependenc
         get_conversation_history=lambda *args, **kwargs: get_conversation_history(
             *args, **kwargs
         ),
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         monotonic=time.monotonic,
         execute_search_then_answer_action=lambda *args, **kwargs: execute_search_then_answer_action(
             *args, **kwargs
@@ -1932,6 +1924,7 @@ control_page_composition = ControlPageComposition(
 )
 control_page_http_composition = ControlPageHttpComposition(
     ControlPageHttpCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         docs_dir=CONTROL_PAGE_DOCS_DIR, assets_dir=CONTROL_PAGE_ASSETS_DIR,
         minecraft_item_icon_loader=control_page_minecraft_item_icon_loader, normalize_minecraft_item_name=normalize_minecraft_item_name,
         select_guild=control_page_composition.select_guild, build_state=build_control_page_state,
@@ -1973,6 +1966,7 @@ decrement_inflight_llm_requests = inflight_llm_requests_counter.decrement
 
 voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
     VoiceExecutionDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         update_session_state=update_session_state, emit_delivery_plan_chunks=lambda *args, **kwargs: emit_delivery_plan_chunks(*args, **kwargs),
         split_tts_sentences=split_tts_sentences, build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
         search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
@@ -2016,6 +2010,7 @@ build_voice_main_llm_streaming_deps = (
 
 voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
     VoiceDeliveryDependencyCompositionDeps(
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
         attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs), detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
         prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
         maybe_handle_short_circuit_route=lambda *args, **kwargs: maybe_handle_short_circuit_route(

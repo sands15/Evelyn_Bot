@@ -5,8 +5,12 @@ import re
 import time
 from typing import Any, Callable
 
-from .text import clean_text
+from .conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+    unattributed_memory_receipt_ref,
+)
 from .public_error_contract import public_error_code
+from .text import clean_text
 
 
 UNBACKED_PROGRESS_FALLBACK = (
@@ -561,6 +565,10 @@ class FastActionTask:
     finished_at: float | None = None
     final_reply: str = ""
     error: str = ""
+    memory_receipt_ref: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -575,6 +583,14 @@ class FastActionTask:
             "finalReply": self.final_reply,
             "error": self.error,
         }
+
+    def to_internal_dict(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        if self.memory_receipt_ref is not None:
+            payload["_memoryReceiptRef"] = dict(
+                self.memory_receipt_ref
+            )
+        return payload
 
 
 class FastActionExecutionError(RuntimeError):
@@ -626,16 +642,41 @@ class FastActionCoordinator:
         self._append_event(task, event_type="started", reply=task.start_reply)
         return task
 
-    def complete(self, task_id: str, reply: str) -> FastActionTask:
+    def complete(
+        self,
+        task_id: str,
+        reply: str,
+        *,
+        memory_receipt: Any = None,
+    ) -> FastActionTask:
         task = self._require_task(task_id)
         task.status = "completed"
         task.finished_at = self.time_fn()
         task.final_reply = clean_text(reply)
         task.error = ""
-        self._append_event(task, event_type="completed", reply=task.final_reply)
+        task.memory_receipt_ref = (
+            unattributed_memory_receipt_ref()
+            if memory_receipt is None
+            else memory_receipt_ref_from_receipt(
+                memory_receipt
+            )
+        )
+        self._append_event(
+            task,
+            event_type="completed",
+            reply=task.final_reply,
+            memory_receipt=task.memory_receipt_ref,
+        )
         return task
 
-    def fail(self, task_id: str, error: str, *, reply: str = "") -> FastActionTask:
+    def fail(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        reply: str = "",
+        memory_receipt: Any = None,
+    ) -> FastActionTask:
         task = self._require_task(task_id)
         task.status = "failed"
         task.finished_at = self.time_fn()
@@ -644,7 +685,18 @@ class FastActionCoordinator:
             fallback="background_action_failed",
         )
         task.final_reply = clean_text(reply)
-        self._append_event(task, event_type="failed", reply=task.final_reply, error=task.error)
+        task.memory_receipt_ref = (
+            unattributed_memory_receipt_ref()
+            if memory_receipt is None
+            else memory_receipt_ref_from_receipt(memory_receipt)
+        )
+        self._append_event(
+            task,
+            event_type="failed",
+            reply=task.final_reply,
+            error=task.error,
+            memory_receipt=task.memory_receipt_ref,
+        )
         return task
 
     def get(self, task_id: str) -> FastActionTask | None:
@@ -655,12 +707,49 @@ class FastActionCoordinator:
             cursor = max(0, int(event_id))
         except (TypeError, ValueError):
             cursor = 0
-        return [dict(event) for event in self._events if int(event.get("id") or 0) > cursor]
+        return [
+            self._public_event(event)
+            for event in self._events
+            if int(event.get("id") or 0) > cursor
+        ]
+
+    def internal_events_after(
+        self,
+        event_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            cursor = max(0, int(event_id))
+        except (TypeError, ValueError):
+            cursor = 0
+        return [
+            dict(event)
+            for event in self._events
+            if int(event.get("id") or 0) > cursor
+        ]
 
     def snapshot(self) -> dict[str, Any]:
         tasks = [task.to_dict() for task in self._tasks.values()]
         return {
             "activeCount": sum(1 for task in tasks if task["status"] == "running"),
+            "lastEventId": self._event_sequence,
+            "tasks": tasks,
+            "events": [
+                self._public_event(event)
+                for event in self._events
+            ],
+        }
+
+    def internal_snapshot(self) -> dict[str, Any]:
+        tasks = [
+            task.to_internal_dict()
+            for task in self._tasks.values()
+        ]
+        return {
+            "activeCount": sum(
+                1
+                for task in tasks
+                if task["status"] == "running"
+            ),
             "lastEventId": self._event_sequence,
             "tasks": tasks,
             "events": [dict(event) for event in self._events],
@@ -673,6 +762,7 @@ class FastActionCoordinator:
         event_type: str,
         reply: str = "",
         error: str = "",
+        memory_receipt: Any = None,
     ) -> None:
         self._event_sequence += 1
         event = {
@@ -685,8 +775,26 @@ class FastActionCoordinator:
             "error": clean_text(error),
             "at": self.time_fn(),
         }
+        if event_type in {"completed", "failed"}:
+            event["_memoryReceiptRef"] = (
+                unattributed_memory_receipt_ref()
+                if memory_receipt is None
+                else memory_receipt_ref_from_receipt(
+                    memory_receipt
+                )
+            )
         self._events.append(event)
         del self._events[:-self.history_limit]
+
+    @staticmethod
+    def _public_event(
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in event.items()
+            if not key.startswith("_")
+        }
 
     def _trim_tasks(self) -> None:
         while len(self._tasks) > self.history_limit:

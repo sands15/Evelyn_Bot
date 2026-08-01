@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .control_page_contracts import memory_panel_reply
@@ -32,6 +33,7 @@ from .memory_vault import ensure_memory_vault_layout
 
 @dataclass(frozen=True)
 class ControlPageStatusToolCompositionDeps:
+    memory_index_dir: Path
     control_page: Callable[[], Any]
     model_name: str
     router_model_name: str
@@ -54,7 +56,7 @@ class ControlPageStatusToolCompositionDeps:
     clean_text: Callable[[str], str]
     create_task: Callable[..., Any]
     restart_bot_process: Callable[..., Any]
-    recent_history_for_router: Callable[..., Any]
+    get_conversation_history: Callable[..., list[dict[str, Any]]]
     record_tool_assistant_turn: Callable[..., Any]
     control_page_effective_guild_id: Callable[..., int]
     control_page_session_key: Callable[..., str]
@@ -127,12 +129,13 @@ class ControlPageStatusToolComposition:
         deps = self.deps
         control_page = deps.control_page()
         return ControlPageToolRuntimeDeps(
+            memory_index_dir=deps.memory_index_dir,
             clean_text=deps.clean_text,
             enqueue_control_page_ui_command=control_page.enqueue_ui_command,
             memory_panel_reply=memory_panel_reply,
             create_task=deps.create_task,
             restart_bot_process=deps.restart_bot_process,
-            recent_history_for_router=deps.recent_history_for_router,
+            get_conversation_history=deps.get_conversation_history,
             record_tool_assistant_turn=deps.record_tool_assistant_turn,
             control_page_effective_guild_id=deps.control_page_effective_guild_id,
             control_page_session_key=deps.control_page_session_key,

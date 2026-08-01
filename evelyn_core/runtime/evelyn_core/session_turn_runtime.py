@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .session_memory_state import SessionStateStore, new_conversation_history as create_empty_conversation_history
@@ -10,6 +11,7 @@ from .session_memory_state import SessionStateStore, new_conversation_history as
 class SessionTurnRuntimeDeps:
     session_state_store: SessionStateStore
     system_prompt: str
+    memory_index_dir: Path
     active_conversation_awaiting_reply_sec: float
     active_conversation_text_question_sec: float
     active_conversation_text_sec: float
@@ -91,8 +93,14 @@ def finish_assistant_text_turn_from_runtime(
     user_id: int | None = None,
     awaiting_user_reply: bool,
     topic_id: str | None = None,
+    memory_receipt: Any = None,
     deps: SessionTurnRuntimeDeps,
 ) -> Any:
+    receipt_kwargs = (
+        {"memory_receipt": memory_receipt}
+        if memory_receipt is not None
+        else {}
+    )
     return deps.session_state_store.finish_assistant_text_turn(
         session_key,
         user_text,
@@ -105,6 +113,7 @@ def finish_assistant_text_turn_from_runtime(
         normal_ttl_sec=deps.active_conversation_text_sec,
         question_ttl_sec=deps.active_conversation_text_question_sec,
         topic_id=topic_id,
+        **receipt_kwargs,
     )
 
 
@@ -204,8 +213,14 @@ def append_history_from_runtime(
     answer: str | None,
     *,
     guild_id: int | None = None,
+    memory_receipt: Any = None,
     deps: SessionTurnRuntimeDeps,
 ) -> None:
+    receipt_kwargs = (
+        {"memory_receipt": memory_receipt}
+        if memory_receipt is not None
+        else {}
+    )
     deps.session_state_store.append_history(
         session_key,
         user_text,
@@ -213,6 +228,7 @@ def append_history_from_runtime(
         system_prompt=deps.system_prompt,
         max_history_items=deps.max_history_items,
         guild_id=guild_id,
+        **receipt_kwargs,
     )
 
 
@@ -225,6 +241,7 @@ def recent_assistant_reply_summary_from_runtime(
 ) -> str:
     return deps.session_state_store.recent_assistant_reply_summary(
         system_prompt=deps.system_prompt,
+        memory_index_dir=deps.memory_index_dir,
         session_key=session_key,
         guild_id=guild_id,
         limit=limit,
@@ -241,6 +258,7 @@ def persona_state_hint_for_turn_from_runtime(
     return deps.session_state_store.persona_state_hint_for_turn(
         user_text,
         system_prompt=deps.system_prompt,
+        memory_index_dir=deps.memory_index_dir,
         session_key=session_key,
         guild_id=guild_id,
     )

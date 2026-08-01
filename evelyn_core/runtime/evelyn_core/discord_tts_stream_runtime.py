@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
 
 
 @dataclass(frozen=True)
 class DiscordTtsSingleRuntimeDeps:
+    memory_index_dir: Path
     is_local_speaker_voice_client: Callable[[Any], bool]
     speak_answer_local: Callable[..., Awaitable[None]]
     tts_running_state: Any
@@ -63,46 +70,57 @@ async def speak_answer_from_runtime(
     if turn_scope is not None:
         turn_scope.transition(deps.tts_running_state, reason="speak_answer")
 
-    if await deps.play_cached_answer_audio(
-        vc,
-        answer,
-        turn_id=turn_id,
-        session_key=session_key,
-        metrics=metrics,
+    response_exposure = current_memory_exposure_position()
+    with memory_exposure_guard(
+        expected_position=response_exposure,
+        required=response_exposure is not None,
+        index_dir=deps.memory_index_dir,
     ):
-        return
-
-    async with deps.tts_lock:
-        source = await deps.create_omnivoice_source(
+        if await deps.play_cached_answer_audio(
+            vc,
             answer,
             turn_id=turn_id,
-            chunk_index=1,
             session_key=session_key,
-            turn_scope=turn_scope,
-            trace_payload={"source_type": "OmniVoicePCMStream"},
-            on_first_packet_sent=lambda: deps.log_turn_event(
-                "first_packet_sent",
+            metrics=metrics,
+        ):
+            return
+
+    with memory_exposure_guard(
+        expected_position=response_exposure,
+        required=response_exposure is not None,
+        index_dir=deps.memory_index_dir,
+    ):
+        async with deps.tts_lock:
+            source = await deps.create_omnivoice_source(
+                answer,
                 turn_id=turn_id,
                 chunk_index=1,
                 session_key=session_key,
-            ) or deps.log_voice_latency(
-                metrics,
-                "first_packet_sent_logged",
-                "첫 패킷 송신 시간",
-            ),
-        )
-        await deps.playback_manager.play_source_once(
-            deps.source_playback_request_factory(
-                vc,
-                source,
-                guild_id=guild_id,
-                turn_id=turn_id,
-                session_key=session_key,
-                metrics=metrics,
-                trace_payload={},
-                clear_registry_on_finish=False,
+                turn_scope=turn_scope,
+                trace_payload={"source_type": "OmniVoicePCMStream"},
+                on_first_packet_sent=lambda: deps.log_turn_event(
+                    "first_packet_sent",
+                    turn_id=turn_id,
+                    chunk_index=1,
+                    session_key=session_key,
+                ) or deps.log_voice_latency(
+                    metrics,
+                    "first_packet_sent_logged",
+                    "첫 패킷 송신 시간",
+                ),
             )
-        )
+            await deps.playback_manager.play_source_once(
+                deps.source_playback_request_factory(
+                    vc,
+                    source,
+                    guild_id=guild_id,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    metrics=metrics,
+                    trace_payload={},
+                    clear_registry_on_finish=False,
+                )
+            )
 
 
 async def stream_tts_sentences_from_runtime(

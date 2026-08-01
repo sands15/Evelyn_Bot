@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import sqlite3
 import sys
+import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -17,6 +23,41 @@ from evelyn_core.session_memory_state import (  # noqa: E402
     new_conversation_history,
     runtime_session_key,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    memory_receipt_ref_from_receipt,
+    not_used_memory_receipt_ref,
+    unattributed_memory_receipt_ref,
+)
+from evelyn_core import memory_deletion_journal as journal  # noqa: E402
+from evelyn_core import memory_exposure  # noqa: E402
+from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
+    MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
+    MEMORY_INTEGRITY_BOOTSTRAP_ENV,
+    MEMORY_INTEGRITY_KEY_FILE_ENV,
+)
+
+
+NOTE_A = "concept-0123456789abcdef"
+NOTE_STALE = "concept-1111111111111111"
+NOTE_TOMBSTONED = "concept-fedcba9876543210"
+
+
+def unattributed_ref() -> dict:
+    return unattributed_memory_receipt_ref()
+
+
+def bound_ref(note_id: str, *, memory_version: int) -> dict:
+    return memory_receipt_ref_from_receipt(
+        {
+            "schema": "memory.context-receipt.v1",
+            "state": "provided",
+            "groundingState": "attributed",
+            "memoryVersion": memory_version,
+            "suppliedNoteIds": [note_id],
+            "suppliedNoteCount": 1,
+            "contentFree": True,
+        }
+    )
 
 
 def make_store() -> SessionStateStore:
@@ -40,6 +81,65 @@ def make_store() -> SessionStateStore:
 
 
 class SessionMemoryStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.memory_index_dir = (
+            Path(self.temp_dir.name) / "memory_index"
+        )
+        memory_exposure.reset_memory_exposure_position()
+
+    def tearDown(self) -> None:
+        memory_exposure.reset_memory_exposure_position()
+        self.temp_dir.cleanup()
+
+    @contextmanager
+    def unconfigured_authenticity(self):
+        with patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            yield
+
+    def write_memory_version(self, version: int) -> None:
+        self.memory_index_dir.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(
+            str(
+                self.memory_index_dir
+                / memory_exposure.MEMORY_INDEX_DB_NAME
+            )
+        )
+        try:
+            connection.execute(
+                """
+                CREATE TABLE metadata (
+                    key TEXT PRIMARY KEY,
+                    value NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?)",
+                ("memory_version", str(version)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def tombstone(note_id: str, *, second: int = 0) -> dict[str, object]:
+        return {
+            "schema": journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+            "noteId": note_id,
+            "noteType": "concept",
+            "sourceType": "conversation",
+            "reason": "privacy_request",
+            "deletedAt": f"2026-08-01T00:00:{second:02d}Z",
+        }
+
     def test_create_empty_owns_independent_backing_maps(self) -> None:
         first = SessionStateStore.create_empty()
         second = SessionStateStore.create_empty()
@@ -67,13 +167,22 @@ class SessionMemoryStateTests(unittest.TestCase):
                 f"answer {index}",
                 system_prompt="system",
                 max_history_items=4,
+                memory_receipt=not_used_memory_receipt_ref(),
             )
 
         history = store.get_conversation_history(system_prompt="system", guild_id=1)
         self.assertEqual(history[0], {"role": "system", "content": "system"})
         self.assertEqual(len(history), 5)
         self.assertEqual(history[1]["content"], "user 1")
-        self.assertEqual(store.recent_assistant_reply_summary(system_prompt="system", guild_id=1, limit=2), "answer 1 / answer 2")
+        self.assertEqual(
+            store.recent_assistant_reply_summary(
+                system_prompt="system",
+                memory_index_dir=self.memory_index_dir,
+                guild_id=1,
+                limit=2,
+            ),
+            "answer 1 / answer 2",
+        )
 
     def test_unanswered_user_turn_is_preserved_without_fake_assistant_reply(
         self,
@@ -193,7 +302,17 @@ class SessionMemoryStateTests(unittest.TestCase):
         )
 
         history = store.get_conversation_history(system_prompt="system", session_key="s1", guild_id=1)
-        self.assertEqual(history[-2:], [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "answer"}])
+        self.assertEqual(
+            history[-2:],
+            [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    "memoryReceiptRef": unattributed_ref(),
+                },
+            ],
+        )
         self.assertEqual(finished.ttl_sec, 300.0)
         self.assertTrue(finished.awaiting_user_reply)
         self.assertEqual(store.active_until["s1"], 310.0)
@@ -225,7 +344,14 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertEqual(store.followup_targets["s1"], {"channel_id": 22, "message_id": 33})
         self.assertEqual(
             store.get_conversation_history(system_prompt="system", session_key="s1", guild_id=1)[-2:],
-            [{"role": "user", "content": "마크상태"}, {"role": "assistant", "content": "status reply"}],
+            [
+                {"role": "user", "content": "마크상태"},
+                {
+                    "role": "assistant",
+                    "content": "status reply",
+                    "memoryReceiptRef": unattributed_ref(),
+                },
+            ],
         )
         self.assertEqual(store.active_until["s1"], 110.0)
         self.assertEqual(store.topic_ids["s1"], build_topic_id("마크상태", "status reply"))
@@ -250,7 +376,11 @@ class SessionMemoryStateTests(unittest.TestCase):
             history[-2:],
             [
                 {"role": "user", "content": "메모리 열어줘"},
-                {"role": "assistant", "content": "도구 실행: memory.open_vault 결과: 응, 열게."},
+                {
+                    "role": "assistant",
+                    "content": "도구 실행: memory.open_vault 결과: 응, 열게.",
+                    "memoryReceiptRef": unattributed_ref(),
+                },
             ],
         )
         self.assertFalse(finished.awaiting_user_reply)
@@ -267,6 +397,40 @@ class SessionMemoryStateTests(unittest.TestCase):
 
         self.assertEqual(store.followup_targets["s1"], {"channel_id": 1, "message_id": 2})
 
+    def test_assistant_history_always_has_compact_receipt_ref(self) -> None:
+        store = make_store()
+        full_receipt = {
+            "schema": "memory.context-receipt.v1",
+            "state": "provided",
+            "groundingState": "attributed",
+            "memoryVersion": 3,
+            "suppliedNoteIds": [NOTE_A],
+            "suppliedNoteCount": 1,
+            "contentFree": True,
+        }
+
+        store.append_history(
+            "s1",
+            "기억을 사용해 답해줘",
+            "기억에 근거한 답",
+            system_prompt="system",
+            max_history_items=10,
+            memory_receipt=full_receipt,
+        )
+
+        user_row, assistant_row = store.histories["s1"][-2:]
+        self.assertNotIn("memoryReceiptRef", user_row)
+        self.assertEqual(
+            assistant_row["memoryReceiptRef"]["state"],
+            "bound",
+        )
+        self.assertEqual(
+            assistant_row["memoryReceiptRef"][
+                "suppliedNoteIds"
+            ],
+            [NOTE_A],
+        )
+
     def test_casual_status_question_detection(self) -> None:
         self.assertTrue(is_casual_call_or_status_question("이블린"))
         self.assertTrue(is_casual_call_or_status_question("뭐하고 있어?"))
@@ -274,12 +438,190 @@ class SessionMemoryStateTests(unittest.TestCase):
 
     def test_persona_hint_uses_recent_reply_context(self) -> None:
         store = make_store()
-        store.append_history("s1", "user", "최근 답변", system_prompt="system", max_history_items=10)
+        store.append_history(
+            "s1",
+            "user",
+            "최근 답변",
+            system_prompt="system",
+            max_history_items=10,
+            memory_receipt=not_used_memory_receipt_ref(),
+        )
 
-        hint = store.persona_state_hint_for_turn("뭐해?", system_prompt="system", session_key="s1")
+        hint = store.persona_state_hint_for_turn(
+            "뭐해?",
+            system_prompt="system",
+            memory_index_dir=self.memory_index_dir,
+            session_key="s1",
+        )
 
         self.assertIn("호출/근황 질문", hint)
         self.assertIn("최근 답변", hint)
+
+    def test_persona_hint_filters_unproven_stale_and_tombstoned_replies(
+        self,
+    ) -> None:
+        store = make_store()
+        self.write_memory_version(7)
+        with self.unconfigured_authenticity():
+            journal.append_memory_deletion_tombstone(
+                self.memory_index_dir,
+                self.tombstone(NOTE_TOMBSTONED),
+            )
+            store.histories["s1"] = [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "MISSING_CANARY"},
+                {
+                    "role": "assistant",
+                    "content": "UNATTRIBUTED_CANARY",
+                    "memoryReceiptRef": unattributed_ref(),
+                },
+                {
+                    "role": "assistant",
+                    "content": "STALE_CANARY",
+                    "memoryReceiptRef": bound_ref(
+                        NOTE_STALE,
+                        memory_version=6,
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": "TOMBSTONED_CANARY",
+                    "memoryReceiptRef": bound_ref(
+                        NOTE_TOMBSTONED,
+                        memory_version=7,
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": "SAFE_STATIC_REPLY",
+                    "memoryReceiptRef": not_used_memory_receipt_ref(
+                        memory_version=7
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": "SAFE_BOUND_REPLY",
+                    "memoryReceiptRef": bound_ref(
+                        NOTE_A,
+                        memory_version=7,
+                    ),
+                },
+            ]
+
+            hint = store.persona_state_hint_for_turn(
+                "뭐해?",
+                system_prompt="system",
+                memory_index_dir=self.memory_index_dir,
+                session_key="s1",
+            )
+
+        self.assertIn("SAFE_STATIC_REPLY", hint)
+        self.assertIn("SAFE_BOUND_REPLY", hint)
+        for canary in (
+            "MISSING_CANARY",
+            "UNATTRIBUTED_CANARY",
+            "STALE_CANARY",
+            "TOMBSTONED_CANARY",
+            NOTE_A,
+            NOTE_STALE,
+            NOTE_TOMBSTONED,
+            "memoryReceiptRef",
+        ):
+            self.assertNotIn(canary, hint)
+        captured = memory_exposure.current_memory_exposure_position()
+        self.assertIsNotNone(captured)
+        self.assertEqual(captured.supplied_note_ids, (NOTE_A,))
+
+    def test_persona_hint_boundary_rejects_delete_race_before_delivery(
+        self,
+    ) -> None:
+        store = make_store()
+        self.write_memory_version(7)
+        store.histories["s1"] = [
+            {"role": "system", "content": "system"},
+            {
+                "role": "assistant",
+                "content": "BOUND_REPLY_CANARY",
+                "memoryReceiptRef": bound_ref(
+                    NOTE_A,
+                    memory_version=7,
+                ),
+            },
+        ]
+
+        with self.unconfigured_authenticity():
+            hint = store.persona_state_hint_for_turn(
+                "이블린",
+                system_prompt="system",
+                memory_index_dir=self.memory_index_dir,
+                session_key="s1",
+            )
+            captured = memory_exposure.current_memory_exposure_position()
+            journal.append_memory_deletion_tombstone(
+                self.memory_index_dir,
+                self.tombstone(NOTE_A),
+            )
+            with self.assertRaises(
+                journal.MemoryDeletionJournalIntegrityError
+            ):
+                with memory_exposure.memory_exposure_guard(
+                    expected_position=captured,
+                    required=True,
+                    index_dir=self.memory_index_dir,
+                ):
+                    self.fail("stale persona hint reached delivery")
+
+        self.assertIn("BOUND_REPLY_CANARY", hint)
+
+    def test_persona_hint_delivery_lease_rejects_concurrent_delete(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            store = make_store()
+            self.write_memory_version(7)
+            store.histories["s1"] = [
+                {"role": "system", "content": "system"},
+                {
+                    "role": "assistant",
+                    "content": "LEASED_REPLY_CANARY",
+                    "memoryReceiptRef": bound_ref(
+                        NOTE_A,
+                        memory_version=7,
+                    ),
+                },
+            ]
+            hint = store.persona_state_hint_for_turn(
+                "뭐해?",
+                system_prompt="system",
+                memory_index_dir=self.memory_index_dir,
+                session_key="s1",
+            )
+            captured = memory_exposure.current_memory_exposure_position()
+            self.assertIn("LEASED_REPLY_CANARY", hint)
+
+            with memory_exposure.memory_exposure_guard(
+                expected_position=captured,
+                required=True,
+                index_dir=self.memory_index_dir,
+            ):
+                async def delete_now() -> None:
+                    journal.append_memory_deletion_tombstone(
+                        self.memory_index_dir,
+                        self.tombstone(NOTE_A),
+                    )
+
+                with self.assertRaises(
+                    journal.MemoryDeletionJournalIntegrityError
+                ):
+                    await asyncio.create_task(delete_now())
+
+            journal.append_memory_deletion_tombstone(
+                self.memory_index_dir,
+                self.tombstone(NOTE_A),
+            )
+
+        with self.unconfigured_authenticity():
+            asyncio.run(exercise())
 
     def test_recent_history_for_router_formats_role_lines(self) -> None:
         store = make_store()

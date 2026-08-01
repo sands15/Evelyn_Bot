@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
+from .conversation_memory_receipt import (
+    capture_conversation_memory_receipt_ref,
+    memory_receipt_ref_from_metrics,
+)
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
+from .reply_memory_boundary import validate_reply_memory_boundary
 
 @dataclass(frozen=True)
 class ControlPageTextRuntimeDeps:
+    memory_index_dir: Path
     effective_guild_id: Callable[[Any | None], int | None]
     session_key_for_guild: Callable[[int | None], str]
     get_session_lock: Callable[[str], Any]
@@ -110,52 +122,72 @@ async def answer_control_page_text_from_runtime(
         if proactive_asked:
             answer = plain_answer
             awaiting_reply = True
-        async with state_lock:
-            deps.finish_assistant_text_turn(
-                session_key,
-                user_text,
-                plain_answer,
-                guild_id=guild_id,
-                awaiting_user_reply=awaiting_reply,
-                topic_id=topic_id,
+        response_receipt_ref = memory_receipt_ref_from_metrics(text_metrics)
+        response_exposure, response_receipt_ref = (
+            validate_reply_memory_boundary(
+                memory_exposure_position=(
+                    current_memory_exposure_position()
+                ),
+                memory_receipt=response_receipt_ref,
             )
-            try:
-                continuity_status = (
-                    await deps.commit_session_continuity(
-                        session_key,
-                        started_turn.turn_id,
-                    )
-                )
-                continuity_receipt = (
-                    require_durable_continuity_receipt(
-                        continuity_status
-                    )
-                )
-                text_metrics.setdefault("meta", {}).update(
-                    {
-                        "continuity_commit": "durable",
-                        "continuity_generation": int(
-                            continuity_receipt["generation"]
-                        ),
-                    }
-                )
-            except Exception as exc:
-                text_metrics.setdefault("meta", {}).update(
-                    {
-                        "continuity_commit": "failed",
-                        "continuity_error": (
-                            "conversation_continuity_commit_failed"
-                        ),
-                    }
-                )
-                deps.log(
-                    (
-                        "[CONTROL PAGE] "
-                        "continuity_commit_failed "
-                        "errorType="
+        )
+        capture_conversation_memory_receipt_ref(response_receipt_ref)
+        with memory_exposure_guard(
+            expected_position=response_exposure,
+            required=response_exposure is not None,
+            index_dir=deps.memory_index_dir,
+        ):
+            async with state_lock:
+                deps.finish_assistant_text_turn(
+                    session_key,
+                    user_text,
+                    plain_answer,
+                    guild_id=guild_id,
+                    awaiting_user_reply=awaiting_reply,
+                    topic_id=topic_id,
+                    memory_receipt=(
+                        response_receipt_ref
                     ),
-                    type(exc).__name__,
                 )
+                try:
+                    continuity_status = (
+                        await deps.commit_session_continuity(
+                            session_key,
+                            started_turn.turn_id,
+                        )
+                    )
+                    continuity_receipt = (
+                        require_durable_continuity_receipt(
+                            continuity_status
+                        )
+                    )
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "continuity_commit": "durable",
+                            "continuity_generation": int(
+                                continuity_receipt["generation"]
+                            ),
+                        }
+                    )
+                except MemoryDeletionJournalIntegrityError:
+                    raise
+                except Exception as exc:
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "continuity_commit": "failed",
+                            "continuity_error": (
+                                "conversation_continuity_commit_failed"
+                            ),
+                        }
+                    )
+                    deps.log(
+                        (
+                            "[CONTROL PAGE] "
+                            "continuity_commit_failed "
+                            "errorType="
+                        ),
+                        type(exc).__name__,
+                    )
         deps.log_voice_bottleneck_summary(
             text_metrics,
             label="text_turn",
@@ -166,12 +198,17 @@ async def answer_control_page_text_from_runtime(
             event_name="text_turn_summary",
         )
         text_turn_summary_logged = True
-        deps.schedule_local_control_tts(
-            plain_answer,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-        )
+        with memory_exposure_guard(
+            expected_position=response_exposure,
+            required=response_exposure is not None,
+            index_dir=deps.memory_index_dir,
+        ):
+            deps.schedule_local_control_tts(
+                plain_answer,
+                turn_id=turn_id,
+                session_key=session_key,
+                turn_scope=turn_scope,
+            )
         return deps.format_display_text(plain_answer, session_key=session_key).strip() or deps.fallback_answer_for(
             user_text
         )
