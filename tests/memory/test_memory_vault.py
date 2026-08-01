@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -178,7 +179,10 @@ class MemoryVaultTests(unittest.TestCase):
             first = recall_memory_vault(request, root=root)
             self.assertTrue(first.ok)
             db_path = memory_vault_module.memory_index_db_path(root)
-            with sqlite3.connect(db_path) as conn:
+            # sqlite3's connection context manager commits or rolls back but
+            # does not close.  Explicitly close before TemporaryDirectory
+            # removes memory.sqlite on Windows.
+            with closing(sqlite3.connect(db_path)) as conn:
                 row = conn.execute(
                     "SELECT cache_key, payload FROM retrieval_cache"
                 ).fetchone()
@@ -206,6 +210,102 @@ class MemoryVaultTests(unittest.TestCase):
         )
         self.assertEqual(receipt["retrievalMode"], "unknown")
         self.assertNotIn(private_canary, str(receipt))
+
+    def test_cache_hit_closes_every_product_index_connection(
+        self,
+    ) -> None:
+        opened: list[sqlite3.Connection] = []
+        real_connect = sqlite3.connect
+
+        class TrackingConnection(sqlite3.Connection):
+            close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        def tracked_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            kwargs["factory"] = TrackingConnection
+            connection = real_connect(*args, **kwargs)
+            opened.append(connection)
+            return connection
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concepts = memory_vault_root(root) / "concepts"
+            concepts.mkdir(parents=True)
+            (concepts / "cache-close.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "id: cache-close",
+                        "type: concept",
+                        "title: Cache Close",
+                        "---",
+                        "",
+                        "Cache connection lifetime fixture.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            request = MemoryRecallRequest(
+                turn_id="turn-cache-close",
+                session_key="session",
+                guild_id=None,
+                user_text="cache connection lifetime fixture",
+                topic_id=None,
+                source="test",
+                max_items=3,
+            )
+            first = recall_memory_vault(request, root=root)
+            self.assertTrue(first.ok)
+
+            with patch.object(
+                memory_vault_module.sqlite3,
+                "connect",
+                side_effect=tracked_connect,
+            ):
+                cached = recall_memory_vault(request, root=root)
+
+            self.assertTrue(cached.ok)
+            self.assertTrue(cached.metadata["cache_hit"])
+            self.assertGreaterEqual(len(opened), 2)
+            self.assertTrue(
+                all(
+                    getattr(connection, "close_calls", 0) == 1
+                    for connection in opened
+                )
+            )
+
+    def test_index_setup_failure_closes_connection(
+        self,
+    ) -> None:
+        class SetupFailingConnection:
+            row_factory: object | None = None
+            closed = False
+
+            def execute(self, _statement: str) -> None:
+                raise sqlite3.OperationalError("synthetic pragma failure")
+
+            def close(self) -> None:
+                self.closed = True
+
+        connection = SetupFailingConnection()
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory_index" / "memory.sqlite"
+            with patch.object(
+                memory_vault_module.sqlite3,
+                "connect",
+                return_value=connection,
+            ):
+                with self.assertRaisesRegex(
+                    sqlite3.OperationalError,
+                    "synthetic pragma failure",
+                ):
+                    with memory_vault_module._open_index(db_path):
+                        self.fail("setup failure must prevent context entry")
+
+        self.assertTrue(connection.closed)
 
     def test_append_turn_rows_creates_daily_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

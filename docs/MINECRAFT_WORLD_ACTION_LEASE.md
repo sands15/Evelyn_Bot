@@ -217,10 +217,12 @@ cross-container lock handoff or Minecraft connect/goal/stop E2E has been
 performed for the current increment.
 
 The current lifetime-lock source passed 156 bundled-Python Minecraft tests
-(8 environment skips) and 518 runtime tests (4 skips). Full discovery ran
-2,476 tests and retained only three unrelated known issues: one stale opaque
-note-ID expectation, one Windows SQLite temporary-file handle, and one missing
-Voyager `requests` import; 18 tests were skipped. Python compilation, every
-Control Page asset JavaScript syntax check, and `git diff --check` passed. The
-mixed bundled/.venv `pip check` still reports six pre-existing platform-tag
-issues. These are source checks, not live main/Minecraft/container evidence.
+(8 environment skips) and 518 runtime tests (4 skips). A follow-up source
+verification cleanup aligned the stale opaque note-ID expectation with the
+privacy contract, closed the Windows SQLite connection lifetime across setup
+failures and cache-hit early returns, and decoupled Voyager's lightweight text
+index import from optional runtime dependencies. Full discovery then passed all
+2,482 tests with 18 skips. Python compilation, every Control Page asset
+JavaScript syntax check, and `git diff --check` passed. The mixed
+bundled/.venv `pip check` still reports six pre-existing platform-tag issues.
+These are source checks, not live main/Minecraft/container evidence.

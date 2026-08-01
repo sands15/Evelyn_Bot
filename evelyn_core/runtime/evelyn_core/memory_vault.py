@@ -12,11 +12,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import closing
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .assistant_contracts import MemoryRecallRequest, MemoryRecallResult
 from .config import MEMORY_ROOT, MEMORY_ROW_MAX_CHARS, SUMMARY_LLM_URL, SUMMARY_MODEL_NAME
@@ -473,12 +473,23 @@ def parse_memory_note(path: Path, text: str | None = None) -> MemoryVaultNote:
     )
 
 
-def _connect_index(db_path: Path) -> sqlite3.Connection:
+@contextmanager
+def _open_index(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Open one index connection and always release its OS resources.
+
+    ``sqlite3.Connection``'s own context manager only controls transactions;
+    it does not close the connection.  Keep creation, connection setup and
+    close in this context manager so an early return or a setup failure cannot
+    leave ``memory.sqlite`` open on Windows.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA synchronous=NORMAL")
+        yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -708,7 +719,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
     index_path = db_path or memory_index_db_path(root)
     note_paths = sorted(path for path in vault.rglob("*.md") if path.is_file())
 
-    with closing(_connect_index(index_path)) as conn:
+    with _open_index(index_path) as conn:
         _ensure_schema(conn)
         force_reindex = _get_metadata_int(conn, "schema_version", 0) < 6
         existing = {
@@ -1326,7 +1337,7 @@ def export_memory_graph(
         hidden_filter = f"AND lower(note_type) NOT IN ({','.join('?' for _ in hidden_types)})"
         hidden_params = hidden_types
 
-    with closing(_connect_index(memory_index_db_path(root))) as conn:
+    with _open_index(memory_index_db_path(root)) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
             f"""
@@ -3153,7 +3164,7 @@ def recall_memory_vault(
         focus_tokens = _tokenize(" ".join(clean_text(str(item)) for item in focus_items))
         cache_key = _cache_key(request, version)
 
-        with closing(_connect_index(index_path)) as conn:
+        with _open_index(index_path) as conn:
             _ensure_schema(conn)
             cached = _read_retrieval_cache(conn, cache_key, version)
             if cached is not None:
@@ -7596,7 +7607,7 @@ def refresh_memory_hot_context(
     prompt_dir = memory_index_dir(root) / "prompt_blocks"
     prompt_dir.mkdir(parents=True, exist_ok=True)
 
-    with closing(_connect_index(index_path)) as conn:
+    with _open_index(index_path) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
             """

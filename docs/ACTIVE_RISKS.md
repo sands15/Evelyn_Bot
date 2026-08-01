@@ -84,12 +84,13 @@ transcript, Minecraft chat과 token을 저장하지 않는다.
 connect/goal/stop live E2E는 계속 미검증이다.
 
 현재 lifetime-lock increment는 같은 bundled Python에서 Minecraft 156개(skip 8)와
-runtime 518개(skip 4)를 통과했다. 전체 discover 2,476개에서는 이 변경과 무관한
-기존 opaque note ID 기대값 1건, Windows SQLite 임시파일 handle 1건, Voyager
-`requests` 미설치 import 1건만 남았고 skip은 18개였다. Python `compileall`, 모든
-Control Page asset JavaScript의 `node --check`, `git diff --check`도 통과했다. 혼합
-bundled/.venv `pip check`의 기존 platform-tag 6건과 실제 main/Minecraft/Docker
-smoke는 이 증거에 포함하지 않는다.
+runtime 518개(skip 4)를 통과했다. 후속 source-verification 정리에서 stale opaque
+note ID 기대값을 비식별화 계약에 맞췄고, Windows SQLite 연결 수명을 setup 실패와
+cache-hit 조기 반환까지 닫았으며, Voyager의 경량 local-text-index import를 선택
+runtime 의존성과 분리했다. 전체 discover 2,482개는 실패 없이 통과했고 skip은
+18개였다. Python `compileall`, 모든 Control Page asset JavaScript의 `node --check`,
+`git diff --check`도 통과했다. 혼합 bundled/.venv `pip check`의 기존 platform-tag
+6건과 실제 main/Minecraft/Docker smoke는 이 증거에 포함하지 않는다.
 
 artifact secret·claim을 모두 바꿀 수 없는 극단 실패에서는 shutdown이
 `world_action.lock`과 lifetime owner lock을 31초 stale fence까지 유지한다. Bot API

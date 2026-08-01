@@ -486,6 +486,8 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertEqual(context_meta["vision_evidence_state"], "failed")
 
     async def test_memory_receipt_reaches_context_metrics_without_memory_text(self) -> None:
+        private_note_id = "note-verified"
+
         async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
             return ""
 
@@ -495,7 +497,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                     "schema": "memory.context-receipt.v1",
                     "state": "provided",
                     "groundingState": "attributed",
-                    "suppliedNoteIds": ["note-verified"],
+                    "suppliedNoteIds": [private_note_id],
                     "suppliedNoteCount": 1,
                     "legacyItemCount": 0,
                     "hotContextState": "empty",
@@ -525,7 +527,12 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertEqual(receipt["groundingState"], "attributed")
         self.assertEqual(receipt["usePolicy"], "memory.context-use.v1")
         self.assertEqual(receipt["confirmOnlyItemCount"], 0)
-        self.assertEqual(receipt["suppliedNoteIds"], ["note-verified"])
+        self.assertEqual(len(receipt["suppliedNoteIds"]), 1)
+        self.assertRegex(
+            receipt["suppliedNoteIds"][0],
+            r"^opaque-[0-9a-f]{64}$",
+        )
+        self.assertNotIn(private_note_id, str(receipt))
         self.assertNotIn("PRIVATE_MEMORY_TEXT", str(receipt))
         self.assertNotIn("PRIVATE_RECEIPT_FIELD", str(receipt))
 

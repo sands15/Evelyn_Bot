@@ -210,7 +210,7 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 않는다. 현재 lifetime lock도 Docker Desktop bind mount를 공유하는 실제 두
 컨테이너 사이의 exclusion과 SIGKILL crash release는 별도 live 증거가 필요하다.
 현재 increment의 source 회귀는 Minecraft 156개(skip 8), runtime 518개(skip 4)를
-통과했다. 전체 discover 2,476개의 잔여 3건은
-기존 opaque note ID 기대값,
-Windows SQLite 임시파일 handle, Voyager `requests` 미설치이며 이 lock 변경의
-실패는 아니다.
+통과했다. 후속 정리에서 stale opaque note ID 기대값, Windows SQLite 연결 수명,
+Voyager 경량 import의 선택 `requests` 결합을 각각 수정했고, 전체 discover
+2,482개도 실패 없이 통과했다(skip 18). 이는 source-level 증거이며 실제
+Minecraft 연결이나 컨테이너 간 lifetime lock의 live 증거를 대신하지 않는다.

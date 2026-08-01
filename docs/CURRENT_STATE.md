@@ -68,11 +68,12 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
     513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제
     Minecraft connect/goal/stop E2E는 아직 확인된 사실로 기록하지 않는다.
   - 현재 lifetime-lock increment는 bundled Python의 Minecraft 156개(skip 8),
-    runtime 518개(skip 4)를 통과했다. 전체 discover 2,476개에서는 기존 opaque
-    note ID 기대값, Windows SQLite 임시파일 handle, Voyager `requests` 미설치의
-    무관한 3건만 남았고 skip은 18개였다. `compileall`, 모든 Control Page asset
-    JavaScript 구문 검사와 `git diff --check`도 통과했다. 혼합 환경 `pip check`의
-    기존 platform-tag 6건과 실제 main/Minecraft/Docker smoke는 미검증이다.
+    runtime 518개(skip 4)를 통과했다. 후속 source-verification 정리에서 stale
+    opaque note ID 기대값, Windows SQLite 연결 수명, Voyager 경량 import의 선택
+    `requests` 결합을 각각 수정했다. 전체 discover 2,482개는 실패 없이 통과했고
+    skip은 18개였다. `compileall`, 모든 Control Page asset JavaScript 구문 검사와
+    `git diff --check`도 통과했다. 혼합 환경 `pip check`의 기존 platform-tag 6건과
+    실제 main/Minecraft/Docker smoke는 미검증이다.
 - 음성 P0 검증 FSM과 로컬 재생 연속성 경계를 강화했다.
   - 현재 surface와 barge-in에 연결된 interrupt 단계만 이벤트를 받을 수 있다.
     지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.
