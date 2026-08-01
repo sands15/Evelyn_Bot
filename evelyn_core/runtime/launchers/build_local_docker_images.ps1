@@ -1,7 +1,7 @@
 param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot '..\..\..'),
-    [ValidateSet('bot_api', 'control_page', 'vision')]
-    [string[]]$Services = @('bot_api', 'control_page', 'vision')
+    [ValidateSet('bot_api', 'control_page', 'discord_bot', 'vision')]
+    [string[]]$Services = @('bot_api', 'control_page', 'discord_bot', 'vision')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +9,12 @@ $ErrorActionPreference = 'Stop'
 $resolvedProjectRoot = [System.IO.Path]::GetFullPath(
     [string](Resolve-Path -LiteralPath $ProjectRoot -ErrorAction Stop)
 ).TrimEnd('\')
+$sourceRevisionHelper = Join-Path $PSScriptRoot 'source_revision.ps1'
+if (-not (Test-Path -LiteralPath $sourceRevisionHelper -PathType Leaf)) {
+    throw "Source revision helper not found: $sourceRevisionHelper"
+}
+. $sourceRevisionHelper
+$sourceRevision = Initialize-EvelynSourceRevision -ProjectRoot $resolvedProjectRoot
 $imageDefinitions = @{
     bot_api = @{
         Dockerfile = 'docker\Dockerfile.bot-api'
@@ -17,6 +23,10 @@ $imageDefinitions = @{
     control_page = @{
         Dockerfile = 'docker\Dockerfile.control-page'
         Image = 'evelyn-fast-control-control_page'
+    }
+    discord_bot = @{
+        Dockerfile = 'docker\Dockerfile.discord-bot'
+        Image = 'evelyn-fast-control-discord_bot'
     }
     vision = @(
         @{
@@ -77,6 +87,7 @@ function Invoke-DockerBuild {
         'build',
         '--file', $Dockerfile,
         '--tag', $Image,
+        '--build-arg', "EVELYN_SOURCE_REVISION=$sourceRevision",
         '.'
     )
     $previousErrorActionPreference = $ErrorActionPreference

@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from .paths import get_runtime_artifacts_root
 from .runtime_error_observability import RuntimeErrorCounter
+from .runtime_source_identity import runtime_source_identity
+from .voice_validation import emit_silence_liveness_event
 
 
 DISCORD_STATUS_SCHEMA = "discord_runtime.status.v1"
@@ -74,6 +76,7 @@ class DiscordRuntimeStatus:
         self.last_error = f"{snapshot['lastErrorCode']}:{error_type}".rstrip(":")
 
     def snapshot(self) -> dict[str, Any]:
+        source_identity = runtime_source_identity()
         try:
             gateway_connected = self.gateway_ready() is True
         except Exception as exc:
@@ -126,6 +129,8 @@ class DiscordRuntimeStatus:
             "voiceConnected": any(row["connected"] for row in voice_rows),
             "listening": any(row["listening"] for row in voice_rows),
             "voiceConnections": voice_rows,
+            "sourceReady": source_identity.get("ready") is True,
+            "sourceIdentity": source_identity,
             "searchFollowupRecovery": search_recovery,
             "lastError": self.last_error,
             **self.runtime_errors.snapshot(),
@@ -138,6 +143,16 @@ class DiscordRuntimeStatus:
             self.last_error = ""
         except Exception as exc:
             self.record_error("status_write_failed", exc)
+        try:
+            emit_silence_liveness_event(
+                "discord",
+                root=self.status_path.parent.parent,
+                heartbeat_at=payload["heartbeatAt"],
+                gateway_connected=payload["gatewayConnected"],
+                voice_connections=payload["voiceConnections"],
+            )
+        except Exception as exc:
+            self.record_error("silence_liveness_emit_failed", exc)
         return payload
 
     def start(self) -> asyncio.Task[Any]:

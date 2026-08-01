@@ -142,6 +142,7 @@ from .runtime_health import (
 from .runtime_health_snapshot_cache import (
     RuntimeHealthSnapshotCache,
 )
+from .runtime_source_identity import runtime_source_identity
 from .runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest
 from .text import (
     ModelStreamPrefixFilter,
@@ -2879,7 +2880,11 @@ def _service_by_id(health: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(service.get("id") or ""): dict(service) for service in health.get("services") or [] if isinstance(service, dict)}
 
 
-def build_boot_progress(health: dict[str, Any]) -> dict[str, Any]:
+def build_boot_progress(
+    health: dict[str, Any],
+    *,
+    source_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     services = _service_by_id(health)
     steps: list[dict[str, Any]] = []
     for service_id, label in BOOT_STEPS:
@@ -2894,6 +2899,32 @@ def build_boot_progress(health: dict[str, Any]) -> dict[str, Any]:
                 "detail": str(service.get("reason") or ""),
             }
         )
+    identity = (
+        dict(source_identity)
+        if isinstance(source_identity, dict)
+        else runtime_source_identity()
+    )
+    source_ready = identity.get("ready") is True
+    steps.append(
+        {
+            "key": "source_identity",
+            "label": "Runtime source",
+            "done": source_ready,
+            "status": (
+                "done"
+                if source_ready
+                else str(identity.get("state") or "unverified")
+            ),
+            "detail": (
+                ""
+                if source_ready
+                else str(
+                    identity.get("reasonCode")
+                    or "source_identity_unverified"
+                )
+            ),
+        }
+    )
     done_count = sum(1 for step in steps if step["done"])
     percent = round((done_count / max(1, len(steps))) * 100)
     current = next((step for step in steps if not step["done"]), steps[-1])
@@ -2920,11 +2951,27 @@ def build_control_state(
 ) -> dict[str, Any]:
     legacy = dict(health.get("legacyServices") or {})
     services_by_id = _service_by_id(health)
-    boot_progress = build_boot_progress(health)
-    control_ready = (services_by_id.get("control_page") or {}).get("state") == "up"
-    bot_ready = bool(legacy.get("botReady"))
-    chat_ready = bool(legacy.get("mainReady") and legacy.get("routerReady"))
-    voice_ready = bool(legacy.get("ttsReady") and legacy.get("sttReady"))
+    source_identity = runtime_source_identity()
+    source_ready = source_identity.get("ready") is True
+    boot_progress = build_boot_progress(
+        health,
+        source_identity=source_identity,
+    )
+    control_ready = bool(
+        (services_by_id.get("control_page") or {}).get("state") == "up"
+        and source_ready
+    )
+    bot_ready = bool(legacy.get("botReady") and source_ready)
+    chat_ready = bool(
+        legacy.get("mainReady")
+        and legacy.get("routerReady")
+        and source_ready
+    )
+    voice_ready = bool(
+        legacy.get("ttsReady")
+        and legacy.get("sttReady")
+        and source_ready
+    )
     core_ready = bool(
         health.get(
             "ok",
@@ -2935,8 +2982,15 @@ def build_control_state(
             and legacy.get("ttsReady")
             and legacy.get("sttReady"),
         )
+        and source_ready
     )
-    fully_healthy = bool(health.get("fullyHealthy", str(health.get("overallState") or "up") == "up"))
+    fully_healthy = bool(
+        health.get(
+            "fullyHealthy",
+            str(health.get("overallState") or "up") == "up",
+        )
+        and source_ready
+    )
     commands = build_default_commands()
     summary = str(health.get("summary") or health.get("overallState") or "unknown")
     bridge_status = local_bridge_status_snapshot()
@@ -3011,12 +3065,14 @@ def build_control_state(
                 "chatReady": chat_ready,
                 "voiceReady": voice_ready,
                 "coreReady": core_ready,
+                "sourceAligned": source_ready,
                 "fullReady": fully_healthy,
                 "optionalDegraded": bool(health.get("optionalDegraded", not fully_healthy and core_ready)),
                 "voyagerHttpReady": bool(legacy.get("voyagerHttpReady")),
                 "voyagerRuntimeReady": bool(legacy.get("voyagerRuntimeReady")),
             },
             "controlPlane": control_plane,
+            "sourceIdentity": source_identity,
             "continuity": (
                 FAST_CONTROL_CONTINUITY_OWNER.status()
             ),
@@ -3034,12 +3090,27 @@ def build_control_state(
 async def fast_control_probe_runner(service: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
     if service.id == "bot_api":
         target = f"{check.host}:{check.port}{check.path}"
+        source_identity = runtime_source_identity()
+        source_ready = source_identity.get("ready") is True
         return {
             "kind": check.kind,
-            "ok": True,
-            "reason": "fast_control_self",
+            "ok": source_ready,
+            "reason": (
+                "fast_control_self"
+                if source_ready
+                else str(
+                    source_identity.get("reasonCode")
+                    or "source_identity_unverified"
+                )
+            ),
             "target": target,
-            "status": 200 if check.kind == "http" else None,
+            "status": (
+                200
+                if check.kind == "http" and source_ready
+                else 503
+                if check.kind == "http"
+                else None
+            ),
             "elapsedMs": 0.0,
         }
     return await default_probe_runner(service, check)
@@ -3099,15 +3170,19 @@ async def minecraft_world_lease_owner_context(
 
 
 async def health_handler(_: web.Request) -> web.StreamResponse:
+    source_identity = runtime_source_identity()
+    source_ready = source_identity.get("ready") is True
     return json_response(
         {
-            "ok": True,
+            "ok": source_ready,
             "role": "fast-control-bot-api",
             "port": PORT,
+            "sourceIdentity": source_identity,
             "minecraftWorldLease": (
                 MINECRAFT_WORLD_LEASE_OWNER.status()
             ),
-        }
+        },
+        status=200 if source_ready else 503,
     )
 
 

@@ -106,6 +106,40 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("STT_SERVICE_FALLBACK_LOCAL: \"false\"", source)
         self.assertIn("VISION_WATCH_ENABLED: \"false\"", source)
 
+    def test_app_images_are_built_and_started_with_one_source_revision(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+
+        for service, next_service in (
+            ("bot_api", "control_page"),
+            ("control_page", "discord_bot"),
+            ("discord_bot", "main_llm"),
+        ):
+            section = source.split(f"  {service}:\n", 1)[1].split(
+                f"\n  {next_service}:",
+                1,
+            )[0]
+            self.assertIn(
+                'EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"',
+                section,
+            )
+            self.assertIn(
+                'EVELYN_EXPECTED_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"',
+                section,
+            )
+
+        for name, role in (
+            ("Dockerfile.bot-api", "bot_api"),
+            ("Dockerfile.control-page", "control_page"),
+            ("Dockerfile.discord-bot", "discord_bot"),
+        ):
+            dockerfile = (DOCKER_DIR / name).read_text(encoding="utf-8")
+            self.assertIn("ARG EVELYN_SOURCE_REVISION=unversioned", dockerfile)
+            self.assertIn(f"ENV EVELYN_RUNTIME_ROLE={role}", dockerfile)
+            self.assertIn(
+                "ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}",
+                dockerfile,
+            )
+
     def test_cross_surface_scope_is_wired_to_both_checkpoint_readers(
         self,
     ) -> None:

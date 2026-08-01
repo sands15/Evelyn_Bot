@@ -82,6 +82,7 @@ from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
 from .voice_validation import (
     active_validation_context,
+    emit_silence_liveness_event,
     emit_transcript_validation_event,
     emit_voice_validation_event,
     validation_attempt_binding_is_current,
@@ -2459,6 +2460,18 @@ class LocalIoBridge:
         else:
             if self.last_error.startswith("heartbeat_write_failed:"):
                 self.last_error = ""
+        try:
+            await asyncio.to_thread(
+                emit_silence_liveness_event,
+                "local",
+                root=LOCAL_BRIDGE_STATUS_PATH.parent.parent,
+                heartbeat_at=payload["heartbeatAt"],
+                bridge_ready=payload["ready"],
+                mic_enabled=payload["micEnabled"],
+                capture_ready=mic_stats.get("captureReady"),
+            )
+        except Exception as exc:
+            self.runtime_errors.record("silence_liveness_emit_failed", exc)
         try:
             async with self.session.post(f"{BOT_API_BASE}/api/local-bridge/status", json=payload, timeout=aiohttp.ClientTimeout(total=2)) as resp:
                 data = await resp.json(content_type=None)

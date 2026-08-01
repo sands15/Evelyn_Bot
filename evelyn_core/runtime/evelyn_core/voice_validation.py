@@ -29,6 +29,18 @@ EVENT_REORDER_GRACE_SEC = 2.0
 ALLOWED_SURFACES = ("local", "discord")
 TERMINAL_STATES = frozenset({"passed", "failed", "aborted"})
 LATENCY_WARNING_MS = {"local": 2500.0, "discord": 3000.0}
+SILENCE_LIVENESS_MAX_GAP_SEC = {"local": 2.0, "discord": 3.0}
+SILENCE_LIVENESS_SAMPLE_LIMIT = 64
+_SILENCE_LIVENESS_CLOCK_SKEW_SEC = 0.5
+_SILENCE_LIVENESS_STEP_KEYS = (
+    "silenceStartedAt",
+    "silenceCompletedAt",
+    "silenceLivenessFirstAt",
+    "silenceLivenessLastAt",
+    "silenceLivenessMaxGapSec",
+    "silenceLivenessReadyCount",
+    "_silenceLivenessSamples",
+)
 SILENCE_NON_ACCEPTED_DROP_REASONS = frozenset(
     {
         "env_ignore",
@@ -82,9 +94,56 @@ _ALLOWED_EVENT_TYPES = frozenset(
         "voice_drop_summary",
         "tts_interrupt",
         "barge_in_continuity",
+        "silence_liveness",
         "error",
     }
 )
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _silence_liveness_is_complete(
+    step: dict[str, Any],
+    *,
+    boundary_at: float | None = None,
+) -> bool:
+    surface = str(step.get("surface") or "")
+    max_gap = SILENCE_LIVENESS_MAX_GAP_SEC.get(surface)
+    started_at = _finite_number(step.get("silenceStartedAt"))
+    completed_at = _finite_number(
+        boundary_at if boundary_at is not None else step.get("silenceCompletedAt")
+    )
+    first_at = _finite_number(step.get("silenceLivenessFirstAt"))
+    last_at = _finite_number(step.get("silenceLivenessLastAt"))
+    observed_max_gap = _finite_number(step.get("silenceLivenessMaxGapSec"))
+    ready_count = step.get("silenceLivenessReadyCount")
+    silence_sec = _finite_number(step.get("silenceSec"))
+    if (
+        max_gap is None
+        or started_at is None
+        or completed_at is None
+        or first_at is None
+        or last_at is None
+        or observed_max_gap is None
+        or silence_sec is None
+        or isinstance(ready_count, bool)
+        or not isinstance(ready_count, int)
+        or ready_count < 2
+    ):
+        return False
+    skew = _SILENCE_LIVENESS_CLOCK_SKEW_SEC
+    return bool(
+        completed_at - started_at >= max(1.0, silence_sec)
+        and started_at - skew <= first_at <= started_at + max_gap
+        and first_at <= last_at
+        and observed_max_gap <= max_gap
+        and completed_at - max_gap <= last_at <= completed_at + skew
+    )
 
 
 def _suite_steps() -> list[dict[str, Any]]:
@@ -418,6 +477,7 @@ def _validation_context_from_snapshot(
         "stepId": step_id,
         "surface": surface,
         "kind": str(target_step.get("kind") or ""),
+        "status": str(target_step.get("status") or ""),
         "attempt": int(target_step.get("attempt") or 1),
         "attemptId": attempt_id,
         "discordTarget": deepcopy(discord_target),
@@ -761,6 +821,93 @@ def emit_voice_validation_event(
     return record
 
 
+def emit_silence_liveness_event(
+    surface: str,
+    *,
+    heartbeat_at: Any,
+    root: Path | None = None,
+    now: Any | None = None,
+    bridge_ready: Any = None,
+    mic_enabled: Any = None,
+    capture_ready: Any = None,
+    gateway_connected: Any = None,
+    voice_connections: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Persist content-free, attempt-bound liveness for the active silence step."""
+
+    normalized_surface = str(surface or "").strip().lower()
+    observed_at = _finite_number(heartbeat_at)
+    if normalized_surface not in ALLOWED_SURFACES or observed_at is None:
+        return None
+    context = active_validation_context(
+        surface=normalized_surface,
+        root=root,
+        now=now,
+    )
+    if (
+        context is None
+        or context.get("kind") != "silence"
+        or context.get("status") != "pending"
+    ):
+        return None
+
+    payload: dict[str, Any]
+    if normalized_surface == "local":
+        ready = bool(
+            bridge_ready is True
+            and mic_enabled is True
+            and capture_ready is True
+        )
+        payload = {
+            "ready": ready,
+            "bridgeReady": bridge_ready is True,
+            "micEnabled": mic_enabled is True,
+            "captureReady": capture_ready is True,
+        }
+    else:
+        target = _normalize_discord_target(context.get("discordTarget"))
+        target_matched = False
+        target_connected = False
+        target_listening = False
+        for row in voice_connections or ():
+            if not isinstance(row, dict) or target is None:
+                continue
+            if (
+                str(row.get("guildId") or "") != target["guildId"]
+                or str(row.get("channelId") or "") != target["channelId"]
+            ):
+                continue
+            target_matched = True
+            target_connected = row.get("connected") is True
+            target_listening = row.get("listening") is True
+            break
+        ready = bool(
+            gateway_connected is True
+            and target_matched
+            and target_connected
+            and target_listening
+        )
+        payload = {
+            "ready": ready,
+            "gatewayConnected": gateway_connected is True,
+            "voiceConnected": target_connected,
+            "listeningReady": target_listening,
+            "targetMatched": target_matched,
+        }
+
+    return emit_voice_validation_event(
+        normalized_surface,
+        "silence_liveness",
+        root=root,
+        session_id=str(context.get("sessionId") or ""),
+        step_id=str(context.get("stepId") or ""),
+        attempt_id=str(context.get("attemptId") or ""),
+        now=now,
+        at=observed_at,
+        **payload,
+    )
+
+
 def emit_transcript_validation_event(
     surface: str,
     transcript: Any,
@@ -922,7 +1069,11 @@ class VoiceValidationManager:
                     "barge_in_continuity",
                 )
             )
-            return count("silence_completed") == 1 and voice_activity == 0
+            return bool(
+                count("silence_completed") == 1
+                and voice_activity == 0
+                and _silence_liveness_is_complete(step)
+            )
         stt_finals = count("stt_final")
         accepted = count("turn_accepted")
         reply_started = count("reply_started")
@@ -1073,6 +1224,37 @@ class VoiceValidationManager:
                 or float(latency) < 0
             ):
                 return False
+            if step.get("kind") == "silence":
+                for key in (
+                    "silenceStartedAt",
+                    "silenceCompletedAt",
+                    "silenceLivenessFirstAt",
+                    "silenceLivenessLastAt",
+                    "silenceLivenessMaxGapSec",
+                ):
+                    value = step.get(key)
+                    if value is not None and (
+                        _finite_number(value) is None or float(value) < 0
+                    ):
+                        return False
+                ready_count = step.get("silenceLivenessReadyCount")
+                if ready_count is not None and (
+                    isinstance(ready_count, bool)
+                    or not isinstance(ready_count, int)
+                    or ready_count < 0
+                ):
+                    return False
+                samples = step.get("_silenceLivenessSamples")
+                if samples is not None:
+                    if (
+                        not isinstance(samples, list)
+                        or len(samples) > SILENCE_LIVENESS_SAMPLE_LIMIT
+                        or any(_finite_number(value) is None for value in samples)
+                    ):
+                        return False
+                    normalized_samples = [float(value) for value in samples]
+                    if normalized_samples != sorted(set(normalized_samples)):
+                        return False
             if (
                 step.get("status") == "passed"
                 and not cls._persisted_step_pass_evidence_is_complete(step)
@@ -1553,6 +1735,62 @@ class VoiceValidationManager:
         event_type = str(event.get("event") or "")
         events = step.setdefault("events", {})
         events[event_type] = int(events.get(event_type) or 0) + 1
+        if event_type == "silence_liveness":
+            event_at = _finite_number(event.get("at"))
+            started_at = _finite_number(step.get("silenceStartedAt"))
+            current_time = self.now()
+            ready = event.get("ready") is True
+            if surface == "local":
+                ready = bool(
+                    ready
+                    and event.get("bridgeReady") is True
+                    and event.get("micEnabled") is True
+                    and event.get("captureReady") is True
+                )
+                unavailable_code = "local_silence_capture_liveness_unavailable"
+            else:
+                ready = bool(
+                    ready
+                    and event.get("gatewayConnected") is True
+                    and event.get("voiceConnected") is True
+                    and event.get("listeningReady") is True
+                    and event.get("targetMatched") is True
+                )
+                unavailable_code = "discord_silence_listening_liveness_unavailable"
+            if (
+                step.get("kind") != "silence"
+                or event_at is None
+                or started_at is None
+                or event_at < started_at - _SILENCE_LIVENESS_CLOCK_SKEW_SEC
+                or event_at > current_time + _SILENCE_LIVENESS_CLOCK_SKEW_SEC
+            ):
+                self._fail_attempt(step, "silence_liveness_timestamp_invalid")
+            elif not ready:
+                self._fail_attempt(step, unavailable_code)
+            else:
+                samples = [
+                    float(value)
+                    for value in step.get("_silenceLivenessSamples") or []
+                    if _finite_number(value) is not None
+                ]
+                if event_at not in samples:
+                    samples.append(event_at)
+                samples = sorted(set(samples))
+                if len(samples) > SILENCE_LIVENESS_SAMPLE_LIMIT:
+                    self._fail_attempt(
+                        step,
+                        "silence_liveness_sample_limit_exceeded",
+                    )
+                else:
+                    gaps = [
+                        later - earlier
+                        for earlier, later in zip(samples, samples[1:])
+                    ]
+                    step["_silenceLivenessSamples"] = samples
+                    step["silenceLivenessFirstAt"] = samples[0]
+                    step["silenceLivenessLastAt"] = samples[-1]
+                    step["silenceLivenessMaxGapSec"] = max(gaps, default=0.0)
+                    step["silenceLivenessReadyCount"] = len(samples)
         if event_type == "stt_final":
             step["match"] = {
                 "matched": bool(event.get("matched")),
@@ -1721,7 +1959,7 @@ class VoiceValidationManager:
             )
             if voice_activity:
                 self._fail_attempt(step, "silence_activity_detected")
-            elif silence_completed == 1:
+            elif silence_completed == 1 and _silence_liveness_is_complete(step):
                 step["status"] = "passed"
         if step.get("status") == "passed" and self._step_is_current(step):
             self._advance()
@@ -1886,6 +2124,9 @@ class VoiceValidationManager:
             step.pop("terminalEventObservedAt", None)
             step.pop("acceptedTurnId", None)
             step.pop("qualifiedTtsInterruptTurnId", None)
+            if step.get("kind") == "silence":
+                for key in _SILENCE_LIVENESS_STEP_KEYS:
+                    step.pop(key, None)
             if rewind_source is not None and rewind_source_index is not None:
                 rewind_source.update(
                     {
@@ -2027,6 +2268,11 @@ class VoiceValidationManager:
                 "prompt",
                 "silenceSec",
                 "silenceStartedAt",
+                "silenceCompletedAt",
+                "silenceLivenessFirstAt",
+                "silenceLivenessLastAt",
+                "silenceLivenessMaxGapSec",
+                "silenceLivenessReadyCount",
                 "surface",
                 "status",
                 "attempt",
@@ -2057,19 +2303,39 @@ class VoiceValidationManager:
             return
         started_at = float(step.get("silenceStartedAt") or self.now())
         silence_sec = max(1.0, float(step.get("silenceSec") or 15.0))
-        if self.now() - started_at < silence_sec:
+        boundary_at = self.now()
+        if boundary_at - started_at < silence_sec:
             return
-        events = step.setdefault("events", {})
-        events["silence_completed"] = 1
-        if (
-            self._event_count(step, "turn_accepted")
-            or self._event_count(step, "reply_started")
-            or self._event_count(step, "playback_started")
+        if any(
+            self._event_count(step, event)
+            for event in (
+                "stt_final",
+                "turn_accepted",
+                "reply_started",
+                "reply_final",
+                "playback_started",
+                "playback_completed",
+                "playback_cancelled",
+                "barge_in_accepted",
+                "tts_interrupt",
+                "barge_in_continuity",
+            )
         ):
             self._fail_attempt(step, "silence_activity_detected")
             self._update_summary()
             self._persist()
             return
+        if not _silence_liveness_is_complete(step, boundary_at=boundary_at):
+            self._fail_attempt(
+                step,
+                f"{step.get('surface')}_silence_liveness_unproven",
+            )
+            self._update_summary()
+            self._persist()
+            return
+        events = step.setdefault("events", {})
+        events["silence_completed"] = 1
+        step["silenceCompletedAt"] = boundary_at
         self._evaluate_step(step)
         self._update_summary()
         self._persist()
@@ -2482,6 +2748,7 @@ __all__ = [
     "SUITE_ID",
     "VoiceValidationManager",
     "active_validation_context",
+    "emit_silence_liveness_event",
     "emit_voice_validation_event",
     "emit_transcript_validation_event",
     "get_voice_validation_manager",

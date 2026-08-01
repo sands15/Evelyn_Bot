@@ -1666,5 +1666,29 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   Minecraft runner, Docker 이미지/서비스는 시작하거나 교체하지 않았으므로
   surface별 10턴·무음과 실제 owner handoff/effect 증거는 계속
   [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에 남는다.
+- 2026-08-01의 추가 runtime identity 경계는 Bot API, Control Page와 Discord
+  이미지에 동일한 exact 40/64자리 source revision을 build-time에 넣고, 실행 시
+  기대 revision과 일치할 때만 `runtime_source_identity.v1`을 `aligned`로 판정한다.
+  누락·손상은 `unverified`, exact 불일치는 `mismatch`이며 Bot state/chat/voice와
+  Control Page proxy/health, Discord artifact readiness가 모두 fail-closed한다.
+  launcher는 clean Git HEAD 또는 그와 같은 명시 revision만 허용하고 dirty tree와
+  오래된 환경 revision을 거부한다. `EVELYN_DOCKER_BUILD=true`의 허용 이미지에는
+  Discord도 포함돼 Bot/Control만 새롭고 Discord가 오래된 혼합 배포를 막는다.
+- Windows background launcher는 Supervisor의 `localBridge.running`만 신뢰하지
+  않는다. 별도 Local I/O Bridge status의 exact schema, `ready`, mic 상태와
+  `captureReady`를 확인하고 Supervisor/Bridge 양쪽 heartbeat가 각각 두 번
+  증가해야 시작 완료를 반환한다. Voice P0 무음 단계도 서버의 15초 타이머만으로
+  통과하지 않는다. Local은 bridge+mic+capture, Discord는 선택 guild/channel의
+  gateway+voice connection+listening heartbeat가 현재 attempt에 연속 결합돼야
+  하며 최대 gap은 각각 2초/3초다. stale/false heartbeat, 중간 단절, 이전 retry
+  attempt와 순서가 뒤집힌 샘플로 gap을 숨기는 경우를 모두 실패 처리한다.
+- 이 증분의 current-source 검증은 runtime 574개(skip 4), voice 547개, UI
+  166개(skip 7)를 통과했다. core 630개는 기능 실패 0개였고 검증 이미지의 `git`
+  부재로 난 기존 signature 검사 2개를 Windows bundled Python에서 별도로
+  통과시켰다. source identity/launcher/Compose/무음 liveness 집중 149개와
+  source identity API 포함 Control Page 집중 95개, 기본·전체 profile Compose
+  config와 Python/PowerShell 구문 검사도 통과했다. 실행 중인 오래된 Bot API와
+  Control Page는 교체하지 않았고 실제 마이크, 스피커, Discord, Minecraft와
+  사용자 runtime artifact를 시작하거나 변경하지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

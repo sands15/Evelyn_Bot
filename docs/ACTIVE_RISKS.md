@@ -417,6 +417,13 @@ host 설정, PID, 출력 장치명과 임의 legacy/observability 확장 필드�
 응답 형식을 계속 제공한다. 이는 loopback 경계 안의 로컬 정보 노출이지만 새
 계약이 live 상태라는 뜻은 아니다.
 
+새 소스에는 이미지/실행 source revision 일치 게이트도 추가됐다. Bot API,
+Control Page와 Discord가 같은 clean Git revision으로 빌드·기동되지 않으면
+state/chat/voice readiness와 Control Page proxy/health가 닫힌다. 직접 Compose를
+실행해 revision이 `unversioned`인 경우도 정상처럼 표시하지 않는다. 다만 현재
+실행 중인 두 컨테이너는 이 게이트 이전 이미지이므로, 게이트 자체의 live 배포
+증거는 아직 없다.
+
 다음 조치: 사용자가 서비스 교체를 허용한 유지보수 세션에서 새 Bot API와
 Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/state`와
 `/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
@@ -475,6 +482,14 @@ event보다 먼저 단일 실패로 닫으므로 barge-source가 늦은 오류�
 통과하거나 단계가 무기한 대기하지 않는다. 새 Discord 이미지의 전체 음성 회귀와
 Bot API의 검증/API/runtime/UI 회귀, 호스트 focused 회귀는 통과했지만 이는 합성
 입력과 mock 장치를 사용한 계약 검증이다.
+
+무음 단계의 마지막 timer-only false positive도 닫았다. Local Bridge는 bridge,
+mic, `captureReady`의 content-free heartbeat를 현재 silence attempt에 전달하고,
+Discord는 선택된 guild/channel의 live gateway, connected, listening 상태를
+전달한다. 15초 전체에서 첫/마지막 신선도와 최대 gap(Local 2초, Discord 3초)을
+만족해야 하며 증거 누락, false readiness, 중간 단절, retry 이전 attempt와
+out-of-order 샘플은 통과 근거가 아니다. 실제 방과 실제 Discord 채널에서 이
+연속 heartbeat가 유지되는지는 아직 live 검증하지 않았다.
 
 추가 source P0 감사에서는 세 가지 admission/readiness false-positive도 닫았다.
 로컬 barge-in에 화자 검증이 요구되면 verifier가 정확히 `matched=true`를 반환한

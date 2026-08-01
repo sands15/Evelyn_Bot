@@ -56,7 +56,10 @@
           "kind": "http",
           "path": "/api/control-page/state",
           "timeout_ms": 6000,
-          "expect_status": 200
+          "expect_status": 200,
+          "expect_json": {
+            "ok": true
+          }
         }
       ],
       "launcher": "launchers/start_bot.ps1",
@@ -393,7 +396,8 @@
           "timeout_ms": 300,
           "stale_after_sec": 5,
           "expect_json": {
-            "schema": "discord_runtime.status.v1"
+            "schema": "discord_runtime.status.v1",
+            "sourceReady": true
           }
         }
       ],

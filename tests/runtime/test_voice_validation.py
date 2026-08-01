@@ -22,6 +22,7 @@ from evelyn_core.voice_validation import (  # noqa: E402
     SUITE_ID,
     VoiceValidationManager,
     active_validation_context,
+    emit_silence_liveness_event,
     emit_transcript_validation_event,
     emit_voice_validation_event,
     observe_turn_trace_for_voice_validation,
@@ -218,6 +219,66 @@ class VoiceValidationTests(unittest.TestCase):
             heard=True,
         )
         self.assertTrue(result["ok"], result)
+
+    def complete_until_silence(self) -> dict:
+        while self.manager.snapshot()["currentStep"]["kind"] != "silence":
+            snapshot = self.manager.snapshot()
+            step = snapshot["currentStep"]
+            if step["kind"] == "normal":
+                self.complete_normal_step()
+            elif step["kind"] == "barge_source":
+                source_turn_id = f"turn-{step['id']}"
+                self.record("stt_final", transcript=step["prompt"])
+                self.record("turn_accepted", turnId=source_turn_id)
+                self.record(
+                    "tts_interrupt",
+                    turnId=source_turn_id,
+                    sourceTurnId=source_turn_id,
+                    qualified=True,
+                )
+                self.record("reply_started")
+                self.record("reply_final")
+                self.record("playback_started")
+                self.record("playback_cancelled")
+            else:
+                self.record("stt_final", transcript=step["prompt"])
+                self.record("turn_accepted")
+                self.record("barge_in_accepted")
+                self.record("reply_started")
+                self.record("reply_final")
+                self.record("playback_started")
+                self.record("playback_completed")
+                self.record("barge_in_continuity")
+                result = self.manager.confirm(
+                    session_id=snapshot["sessionId"],
+                    step_id=step["id"],
+                    attempt=step["attempt"],
+                    heard=True,
+                )
+                self.assertTrue(result["ok"], result)
+        return self.manager.snapshot()
+
+    def record_ready_silence_liveness(self) -> None:
+        surface = self.manager.snapshot()["surface"]
+        payload = {"at": self.clock(), "ready": True}
+        if surface == "local":
+            payload.update(
+                {
+                    "bridgeReady": True,
+                    "micEnabled": True,
+                    "captureReady": True,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "gatewayConnected": True,
+                    "voiceConnected": True,
+                    "listeningReady": True,
+                    "targetMatched": True,
+                }
+            )
+        self.record("silence_liveness", **payload)
 
     def test_transcript_normalization_keywords_and_similarity(self) -> None:
         keyword_match = transcript_match(
@@ -1834,6 +1895,193 @@ class VoiceValidationTests(unittest.TestCase):
         self.assertEqual(snapshot["currentStep"]["status"], "failed")
         self.assertEqual(snapshot["lastFailureCode"], "silence_activity_detected")
 
+    def test_silence_step_fails_closed_without_surface_liveness(self) -> None:
+        self.start()
+        self.complete_until_silence()
+
+        self.clock.advance(16)
+        snapshot = self.manager.snapshot()
+
+        self.assertEqual(snapshot["currentStep"]["status"], "failed")
+        self.assertEqual(
+            snapshot["lastFailureCode"],
+            "local_silence_liveness_unproven",
+        )
+        self.assertEqual(
+            snapshot["currentStep"]["events"].get("silence_completed", 0),
+            0,
+        )
+
+    def test_local_silence_liveness_requires_live_capture(self) -> None:
+        self.start()
+        self.complete_until_silence()
+        context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertIsNotNone(context)
+
+        emitted = emit_silence_liveness_event(
+            "local",
+            root=self.root,
+            now=self.clock,
+            heartbeat_at=self.clock(),
+            bridge_ready=True,
+            mic_enabled=True,
+            capture_ready=False,
+        )
+        self.assertIsNotNone(emitted)
+        self.assertEqual(emitted["attemptId"], context["attemptId"])
+        self.assertFalse(emitted["ready"])
+
+        failed = self.manager.snapshot()
+        self.assertEqual(failed["currentStep"]["status"], "failed")
+        self.assertEqual(
+            failed["lastFailureCode"],
+            "local_silence_capture_liveness_unavailable",
+        )
+
+    def test_silence_step_requires_continuous_attempt_bound_liveness(self) -> None:
+        self.start()
+        self.complete_until_silence()
+        old_context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertIsNotNone(old_context)
+        old_started_at = self.manager.snapshot()["currentStep"]["silenceStartedAt"]
+        self.record_ready_silence_liveness()
+        self.clock.advance(1)
+        self.record_ready_silence_liveness()
+        self.clock.advance(14)
+
+        failed = self.manager.snapshot()
+        self.assertEqual(failed["currentStep"]["status"], "failed")
+        self.assertEqual(
+            failed["lastFailureCode"],
+            "local_silence_liveness_unproven",
+        )
+        retried = self.manager.retry(
+            session_id=failed["sessionId"],
+            step_id=failed["currentStep"]["id"],
+            attempt=failed["currentStep"]["attempt"],
+        )
+        self.assertTrue(retried["ok"], retried)
+        current = retried["session"]["currentStep"]
+        self.assertGreater(current["silenceStartedAt"], old_started_at)
+        self.assertEqual(current["events"], {"silence_started": 1})
+
+        stale = self.manager.record_event(
+            {
+                "event": "silence_liveness",
+                "surface": "local",
+                "stepId": current["id"],
+                "attemptId": old_context["attemptId"],
+                "at": self.clock(),
+                "ready": True,
+                "bridgeReady": True,
+                "micEnabled": True,
+                "captureReady": True,
+            }
+        )
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["error"], "validation_attempt_binding_mismatch")
+
+    def test_silence_step_passes_with_fresh_continuous_liveness(self) -> None:
+        self.start()
+        self.complete_until_silence()
+
+        for _ in range(8):
+            self.record_ready_silence_liveness()
+            self.clock.advance(2)
+        snapshot = self.manager.snapshot()
+
+        self.assertEqual(snapshot["state"], "passed")
+        self.assertEqual(snapshot["summary"]["surfacesPassed"], 1)
+
+    def test_reordered_silence_samples_cannot_hide_a_heartbeat_gap(self) -> None:
+        self.start()
+        self.complete_until_silence()
+
+        ready = {
+            "ready": True,
+            "bridgeReady": True,
+            "micEnabled": True,
+            "captureReady": True,
+        }
+        started_at = self.manager.snapshot()["currentStep"]["silenceStartedAt"]
+        self.clock.advance(8)
+        self.record("silence_liveness", at=started_at + 8, **ready)
+        self.record("silence_liveness", at=started_at + 2, **ready)
+        for offset in (10, 12, 14, 16):
+            self.clock.value = started_at + offset
+            self.record("silence_liveness", at=self.clock(), **ready)
+
+        snapshot = self.manager.snapshot()
+        self.assertEqual(snapshot["currentStep"]["status"], "failed")
+        self.assertEqual(
+            snapshot["lastFailureCode"],
+            "local_silence_liveness_unproven",
+        )
+        self.assertEqual(
+            snapshot["currentStep"]["silenceLivenessMaxGapSec"],
+            6.0,
+        )
+
+    def test_discord_silence_liveness_is_bound_to_selected_target(self) -> None:
+        self.start(surfaces=("discord",))
+        self.complete_until_silence()
+        context = active_validation_context(
+            surface="discord",
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertIsNotNone(context)
+
+        emitted = emit_silence_liveness_event(
+            "discord",
+            root=self.root,
+            now=self.clock,
+            heartbeat_at=self.clock(),
+            gateway_connected=True,
+            voice_connections=[
+                {
+                    "guildId": 7,
+                    "channelId": 9,
+                    "connected": True,
+                    "listening": True,
+                }
+            ],
+        )
+        self.assertIsNotNone(emitted)
+        self.assertEqual(emitted["attemptId"], context["attemptId"])
+        self.manager.snapshot()
+        self.clock.advance(1)
+        emit_silence_liveness_event(
+            "discord",
+            root=self.root,
+            now=self.clock,
+            heartbeat_at=self.clock(),
+            gateway_connected=True,
+            voice_connections=[
+                {
+                    "guildId": 7,
+                    "channelId": 10,
+                    "connected": True,
+                    "listening": True,
+                }
+            ],
+        )
+
+        failed = self.manager.snapshot()
+        self.assertEqual(failed["currentStep"]["status"], "failed")
+        self.assertEqual(
+            failed["lastFailureCode"],
+            "discord_silence_listening_liveness_unavailable",
+        )
+
     def test_discord_turn_summary_maps_playback_latency_and_outcome_events(self) -> None:
         payload = {
             "validation_session_id": "validation-1",
@@ -2291,7 +2539,9 @@ class VoiceValidationTests(unittest.TestCase):
                     heard=True,
                 )
             elif step["kind"] == "silence":
-                self.clock.advance(16)
+                for _ in range(8):
+                    self.record_ready_silence_liveness()
+                    self.clock.advance(2)
                 self.manager.snapshot()
             else:
                 self.fail(f"unknown step kind: {step['kind']}")

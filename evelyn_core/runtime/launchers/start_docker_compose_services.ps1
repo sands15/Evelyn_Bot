@@ -14,6 +14,14 @@ if (-not (Test-Path -LiteralPath $composeFile)) {
     throw "Compose file not found: $composeFile"
 }
 
+$sourceRevisionHelper = Join-Path $PSScriptRoot 'source_revision.ps1'
+if (-not (Test-Path -LiteralPath $sourceRevisionHelper -PathType Leaf)) {
+    throw "Source revision helper not found: $sourceRevisionHelper"
+}
+. $sourceRevisionHelper
+$sourceRevision = Initialize-EvelynSourceRevision -ProjectRoot $projectRoot
+Write-Host "[Evelyn] Runtime source revision: $sourceRevision"
+
 function Invoke-DockerCommand {
     param([string[]]$Arguments)
 

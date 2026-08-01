@@ -142,6 +142,52 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("-WindowStyle $windowStyle", script)
         self.assertNotIn("py -3.11 -m evelyn_core.host_supervisor", script)
 
+    def test_local_launcher_requires_two_fresh_supervisor_and_bridge_heartbeats(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        readiness = script[
+            script.index("function Wait-HostSupervisorReady") :
+            script.index("function Assert-TtsProfileReady")
+        ]
+
+        self.assertIn(
+            "$localBridgeStatus = Join-Path $projectRoot "
+            "'runtime_artifacts\\local_bridge\\status.json'",
+            script,
+        )
+        self.assertIn("Get-Content -Raw -LiteralPath $supervisorStatus", readiness)
+        self.assertIn("Get-Content -Raw -LiteralPath $localBridgeStatus", readiness)
+        self.assertIn("'host_supervisor.status.v1'", readiness)
+        self.assertIn("'local_io_bridge.status.v1'", readiness)
+        self.assertIn("$lastSupervisorHeartbeat = 0.0", readiness)
+        self.assertIn("$lastBridgeHeartbeat = 0.0", readiness)
+        self.assertIn(
+            "$supervisorHeartbeat -gt $lastSupervisorHeartbeat",
+            readiness,
+        )
+        self.assertIn("$bridgeHeartbeat -gt $lastBridgeHeartbeat", readiness)
+        self.assertIn("$consecutiveFreshHeartbeats -ge 2", readiness)
+        self.assertGreaterEqual(
+            readiness.count("$consecutiveFreshHeartbeats = 0"),
+            3,
+        )
+        self.assertIn("($bridge.ready -is [bool])", readiness)
+        self.assertIn("$bridge.ready -eq $true", readiness)
+
+    def test_local_launcher_requires_capture_ready_when_mic_is_enabled(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        readiness = script[
+            script.index("function Wait-HostSupervisorReady") :
+            script.index("function Assert-TtsProfileReady")
+        ]
+
+        self.assertIn("($bridge.micEnabled -is [bool])", readiness)
+        self.assertIn("($bridge.mic.enabled -is [bool])", readiness)
+        self.assertIn("$bridge.micEnabled -eq $bridge.mic.enabled", readiness)
+        self.assertIn("$bridge.micEnabled -eq $false -or", readiness)
+        self.assertIn("($bridge.mic.captureReady -is [bool])", readiness)
+        self.assertIn("$bridge.mic.captureReady -eq $true", readiness)
+        self.assertIn("$captureReady", readiness)
+
     def test_host_runtime_bootstrap_is_locked_and_keeps_torch_optional(self) -> None:
         bootstrap = self.read_script("bootstrap_host_runtime.ps1")
         lock = (REPO_ROOT / "requirements.host.lock").read_text(encoding="utf-8")
@@ -212,7 +258,11 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
         self.assertIn("build_local_docker_images.ps1", launcher)
         self.assertIn("& $dockerImageBuilder -ProjectRoot $projectRoot", launcher)
-        self.assertIn("'bot_api',\n            'control_page',\n            'vision'", launcher)
+        self.assertIn(
+            "'bot_api',\n            'control_page',\n"
+            "            'discord_bot',\n            'vision'",
+            launcher,
+        )
         self.assertIn("Stop-BotApiForImageRefresh", launcher)
         self.assertIn("'--timeout', '60'", launcher)
         self.assertIn("$minecraftOwnerClaim", launcher)
@@ -231,7 +281,10 @@ class ShutdownScriptContractTests(unittest.TestCase):
         )
         self.assertNotIn("@('compose') + $composeBaseArgs + @('build'", launcher)
 
-        self.assertIn("[ValidateSet('bot_api', 'control_page', 'vision')]", builder)
+        self.assertIn(
+            "[ValidateSet('bot_api', 'control_page', 'discord_bot', 'vision')]",
+            builder,
+        )
         self.assertIn("$requiresAsciiAlias", builder)
         self.assertIn("QueryDosDevice", builder)
         self.assertIn("& subst.exe $candidate $resolvedProjectRoot", builder)
@@ -239,11 +292,31 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("& subst.exe $mappedDrive '/D'", builder)
         self.assertIn("'evelyn-fast-control-bot_api'", builder)
         self.assertIn("'evelyn-fast-control-control_page'", builder)
+        self.assertIn("'evelyn-fast-control-discord_bot'", builder)
         self.assertIn("'evelyn-fast-control-vision'", builder)
         self.assertIn("'evelyn-fast-control-vision_runtime'", builder)
         self.assertIn("'docker\\Dockerfile.vision-ingress'", builder)
         self.assertIn("'docker\\Dockerfile.vision'", builder)
         self.assertNotIn("Invoke-Expression", builder)
+
+    def test_runtime_launchers_require_an_exact_clean_source_revision(self) -> None:
+        local_launcher = self.read_script("start_local_background.ps1")
+        compose_launcher = self.read_script("start_docker_compose_services.ps1")
+        builder = self.read_script("build_local_docker_images.ps1")
+        revision_helper = self.read_script("source_revision.ps1")
+
+        for script in (local_launcher, compose_launcher, builder):
+            self.assertIn("source_revision.ps1", script)
+            self.assertIn("Initialize-EvelynSourceRevision", script)
+        self.assertIn("status --porcelain --untracked-files=all", revision_helper)
+        self.assertIn("rev-parse HEAD", revision_helper)
+        self.assertIn("dirty source tree", revision_helper)
+        self.assertIn("40- or 64-character hexadecimal revision", revision_helper)
+        self.assertIn("does not match the checked-out Evelyn source revision", revision_helper)
+        self.assertIn(
+            "'--build-arg', \"EVELYN_SOURCE_REVISION=$sourceRevision\"",
+            builder,
+        )
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")

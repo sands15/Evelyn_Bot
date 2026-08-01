@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -91,12 +92,38 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
         self.assertTrue(payload["guildConnected"])
         self.assertTrue(payload["voiceConnected"])
         self.assertTrue(payload["listening"])
+        self.assertTrue(payload["sourceReady"])
+        self.assertEqual(payload["sourceIdentity"]["state"], "development")
         self.assertEqual(persisted["heartbeatAt"], 1234.5)
         self.assertEqual(
             persisted["searchFollowupRecovery"]["pendingCount"],
             1,
         )
         self.assertNotIn("transcript", persisted)
+
+    def test_heartbeat_forwards_targetable_silence_liveness_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discord" / "status.json"
+            guild = SimpleNamespace(id=11, voice_client=FakeVoiceClient())
+            status = DiscordRuntimeStatus(
+                gateway_ready=lambda: True,
+                bot_guilds=lambda: [guild],
+                voice_client_type=FakeVoiceClient,
+                status_path=path,
+                now=lambda: 1234.5,
+            )
+            with patch(
+                "evelyn_core.discord_runtime_status.emit_silence_liveness_event"
+            ) as emit_liveness:
+                payload = status.write_once()
+
+        emit_liveness.assert_called_once_with(
+            "discord",
+            root=path.parent.parent,
+            heartbeat_at=1234.5,
+            gateway_connected=True,
+            voice_connections=payload["voiceConnections"],
+        )
 
     def test_disconnected_voice_is_not_reported_as_ready(self):
         guild = SimpleNamespace(

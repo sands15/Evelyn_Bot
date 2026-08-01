@@ -2,6 +2,13 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = if ($env:EVELYN_PROJECT_ROOT) { Resolve-Path $env:EVELYN_PROJECT_ROOT } else { Resolve-Path (Join-Path $PSScriptRoot '..\..\..') }
 $projectRoot = [string]$projectRoot
+$sourceRevisionHelper = Join-Path $PSScriptRoot 'source_revision.ps1'
+if (-not (Test-Path -LiteralPath $sourceRevisionHelper -PathType Leaf)) {
+    throw "Source revision helper not found: $sourceRevisionHelper"
+}
+. $sourceRevisionHelper
+$sourceRevision = Initialize-EvelynSourceRevision -ProjectRoot $projectRoot
+Write-Host "[Evelyn] Runtime source revision: $sourceRevision"
 $coreRuntime = Join-Path $projectRoot 'evelyn_core\runtime'
 $composeFile = Join-Path $projectRoot 'docker-compose.fast-control.yml'
 $controlPagePublicPort = if ($env:CONTROL_PAGE_PUBLIC_PORT) { [int]$env:CONTROL_PAGE_PUBLIC_PORT } else { 8799 }
@@ -11,6 +18,7 @@ $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
 $logDir = Join-Path $projectRoot 'runtime_artifacts\logs\background_start'
 $supervisorLog = Join-Path $logDir 'Host-Supervisor.log'
 $supervisorStatus = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\status.json'
+$localBridgeStatus = Join-Path $projectRoot 'runtime_artifacts\local_bridge\status.json'
 $dockerImageBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
 $minecraftOwnerClaim = Join-Path $projectRoot 'runtime_artifacts\minecraft_world_lease\owner_claim.json'
 $ttsProfilesRoot = if ($env:EVELYN_OMNIVOICE_PROFILES_DIR) {
@@ -197,28 +205,67 @@ function Wait-HostSupervisorReady {
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    $lastHeartbeat = 0.0
+    $lastSupervisorHeartbeat = 0.0
+    $lastBridgeHeartbeat = 0.0
     $consecutiveFreshHeartbeats = 0
     while ((Get-Date) -lt $deadline) {
         try {
-            if (Test-Path -LiteralPath $supervisorStatus -PathType Leaf) {
-                $status = Get-Content -Raw -LiteralPath $supervisorStatus | ConvertFrom-Json
-                $heartbeat = [double]$status.heartbeatAt
-                $ready = (
-                    [string]$status.schema -eq 'host_supervisor.status.v1' -and
-                    [string]$status.state -eq 'running' -and
-                    [bool]$status.localBridge.running -and
-                    $heartbeat -ge $MinimumHeartbeat
+            if (
+                (Test-Path -LiteralPath $supervisorStatus -PathType Leaf) -and
+                (Test-Path -LiteralPath $localBridgeStatus -PathType Leaf)
+            ) {
+                $supervisor = Get-Content -Raw -LiteralPath $supervisorStatus |
+                    ConvertFrom-Json
+                $bridge = Get-Content -Raw -LiteralPath $localBridgeStatus |
+                    ConvertFrom-Json
+                $supervisorHeartbeat = [double]$supervisor.heartbeatAt
+                $bridgeHeartbeat = [double]$bridge.heartbeatAt
+                $supervisorReady = (
+                    [string]$supervisor.schema -eq 'host_supervisor.status.v1' -and
+                    [string]$supervisor.state -eq 'running' -and
+                    ($supervisor.localBridge.running -is [bool]) -and
+                    $supervisor.localBridge.running -eq $true -and
+                    $supervisorHeartbeat -ge $MinimumHeartbeat
                 )
-                if ($ready -and $heartbeat -gt $lastHeartbeat) {
-                    $lastHeartbeat = $heartbeat
+                $micStateMatches = (
+                    ($bridge.micEnabled -is [bool]) -and
+                    ($bridge.mic.enabled -is [bool]) -and
+                    $bridge.micEnabled -eq $bridge.mic.enabled
+                )
+                $captureReady = (
+                    $micStateMatches -and
+                    (
+                        $bridge.micEnabled -eq $false -or
+                        (
+                            ($bridge.mic.captureReady -is [bool]) -and
+                            $bridge.mic.captureReady -eq $true
+                        )
+                    )
+                )
+                $bridgeReady = (
+                    [string]$bridge.schema -eq 'local_io_bridge.status.v1' -and
+                    ($bridge.ready -is [bool]) -and
+                    $bridge.ready -eq $true -and
+                    $captureReady -and
+                    $bridgeHeartbeat -ge $MinimumHeartbeat
+                )
+                if (
+                    $supervisorReady -and
+                    $bridgeReady -and
+                    $supervisorHeartbeat -gt $lastSupervisorHeartbeat -and
+                    $bridgeHeartbeat -gt $lastBridgeHeartbeat
+                ) {
+                    $lastSupervisorHeartbeat = $supervisorHeartbeat
+                    $lastBridgeHeartbeat = $bridgeHeartbeat
                     $consecutiveFreshHeartbeats += 1
                     if ($consecutiveFreshHeartbeats -ge 2) {
                         return
                     }
-                } elseif (-not $ready) {
+                } elseif (-not $supervisorReady -or -not $bridgeReady) {
                     $consecutiveFreshHeartbeats = 0
                 }
+            } else {
+                $consecutiveFreshHeartbeats = 0
             }
         } catch {
             $consecutiveFreshHeartbeats = 0
@@ -349,6 +396,7 @@ function Start-DockerCore {
         & $dockerImageBuilder -ProjectRoot $projectRoot -Services @(
             'bot_api',
             'control_page',
+            'discord_bot',
             'vision'
         )
         Stop-BotApiForImageRefresh

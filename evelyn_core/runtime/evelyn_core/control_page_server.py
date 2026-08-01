@@ -64,6 +64,10 @@ from .runtime_health import (
 from .runtime_health_snapshot_cache import (
     RuntimeHealthSnapshotCache,
 )
+from .runtime_source_identity import (
+    runtime_source_identity,
+    source_identities_compatible,
+)
 from .runtime_error_observability import collect_runtime_error_observability
 from .runtime_repair import (
     append_repair_event,
@@ -214,6 +218,55 @@ async def probe_port(port: int, host: str = "127.0.0.1", timeout_sec: float = 0.
         return True
     except Exception:
         return False
+
+
+def source_identity_from_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    direct = payload.get("sourceIdentity")
+    if isinstance(direct, dict):
+        return dict(direct)
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    nested = runtime.get("sourceIdentity")
+    return dict(nested) if isinstance(nested, dict) else None
+
+
+def bot_source_identity_compatible(payload: Any) -> bool:
+    local_identity = runtime_source_identity()
+    remote_identity = source_identity_from_payload(payload)
+    if (
+        local_identity.get("mode") == "development"
+        and remote_identity is None
+    ):
+        # Backward-compatible only for an unversioned host development pair.
+        return True
+    return bool(
+        remote_identity is not None
+        and source_identities_compatible(
+            local_identity,
+            remote_identity,
+        )
+    )
+
+
+async def probe_bot_health_identity() -> tuple[bool, dict[str, Any] | None]:
+    timeout = ClientTimeout(total=min(PROXY_TIMEOUT_SEC, 3.0))
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            async with session.get(f"{BOT_API_BASE}/health") as response:
+                payload = await response.json(content_type=None)
+                identity = source_identity_from_payload(payload)
+                ready = bool(
+                    response.status == 200
+                    and isinstance(payload, dict)
+                    and payload.get("ok") is True
+                    and bot_source_identity_compatible(payload)
+                )
+                return ready, identity
+    except Exception:
+        return False, None
 
 
 async def collect_control_page_runtime_health() -> dict[str, Any]:
@@ -520,6 +573,11 @@ def control_plane_status_text(
         return f"Control-Page is live on {PORT}; Bot API is not reachable on {BOT_API_PORT}.{cache_note}"
     if proxy_failure:
         kind = str(proxy_failure.get("kind") or "proxy_error")
+        if kind == "source_revision_mismatch":
+            return (
+                "Control-Page is live; Bot API source revision does not "
+                f"match the running Control-Page.{cache_note}"
+            )
         if kind == "http_timeout":
             return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but the proxy timed out.{cache_note}"
         if kind == "json_parse_failed":
@@ -575,7 +633,11 @@ def build_control_plane_state(
     }
 
 
-def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
+def build_boot_progress_from_ports(
+    ports: dict[str, bool],
+    *,
+    source_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     steps = [
         {
             "key": key,
@@ -585,6 +647,24 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
         }
         for key, label in BOOT_PORT_STEPS
     ]
+    identity = (
+        dict(source_identity)
+        if isinstance(source_identity, dict)
+        else runtime_source_identity()
+    )
+    source_ready = identity.get("ready") is True
+    steps.append(
+        {
+            "key": "source_identity",
+            "label": "Runtime source",
+            "done": source_ready,
+            "status": (
+                "done"
+                if source_ready
+                else str(identity.get("state") or "unverified")
+            ),
+        }
+    )
     done_count = sum(1 for step in steps if step["done"])
     percent = round((done_count / max(1, len(steps))) * 100)
     current = next((step for step in steps if not step["done"]), steps[-1])
@@ -631,18 +711,38 @@ async def current_boot_progress() -> dict[str, Any]:
 async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict[str, Any]:
     progress_state = await current_boot_progress()
     ports = dict(progress_state["ports"])
-    inferred_bot_port_open = bool(proxy_failure and str(proxy_failure.get("kind") or "") != "port_closed")
+    inferred_bot_port_open = bool(
+        proxy_failure
+        and str(proxy_failure.get("kind") or "") != "port_closed"
+    )
     if inferred_bot_port_open:
         ports["bot"] = True
-    boot_progress = build_boot_progress_from_ports(ports) if inferred_bot_port_open else progress_state["bootProgress"]
+    boot_ports = dict(ports)
+    if proxy_failure:
+        boot_ports["bot"] = False
+    boot_progress = (
+        build_boot_progress_from_ports(boot_ports)
+        if inferred_bot_port_open
+        else progress_state["bootProgress"]
+    )
     service_health = progress_state.get("serviceHealth")
-    legacy_services = dict(service_health.get("legacyServices") or {}) if isinstance(service_health, dict) else {}
+    legacy_services = (
+        dict(service_health.get("legacyServices") or {})
+        if isinstance(service_health, dict)
+        else {}
+    )
     control_plane = build_control_plane_state(
         ports=ports,
         proxy_failure=proxy_failure,
         cache_age_sec=progress_state.get("healthCacheAgeSec"),
         bot_checked_at=progress_state.get("botApiCheckedAt"),
         bot_state_success_at=progress_state.get("botStateLastSuccessAt"),
+    )
+    source_identity = runtime_source_identity()
+    source_aligned = bool(
+        source_identity.get("ready") is True
+        and str((proxy_failure or {}).get("kind") or "")
+        != "source_revision_mismatch"
     )
     return {
         "ok": False,
@@ -651,7 +751,11 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
         "bootProgress": boot_progress,
         "ui": {
             "mode": "default",
-            "submode": "offline" if not ports.get("bot") else "idle",
+            "submode": (
+                "offline"
+                if proxy_failure or not ports.get("bot")
+                else "idle"
+            ),
             "reason": "bot_api_unavailable" if not ports.get("bot") else "bot_api_proxy_pending",
         },
         "commands": default_commands(),
@@ -675,7 +779,8 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
             "inflightLlmRequests": 0,
             "ttsBacklog": 0,
             "services": {
-                "botReady": bool(ports.get("bot")),
+                "botReady": bool(ports.get("bot") and not proxy_failure),
+                "sourceAligned": source_aligned,
                 "mainReady": bool(ports.get("main")),
                 "routerReady": bool(ports.get("router")),
                 "subReady": bool(ports.get("sub")),
@@ -687,6 +792,7 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
                 "summary": str(legacy_services.get("summary") or service_summary(ports)),
             },
             "controlPlane": control_plane,
+            "sourceIdentity": source_identity,
             "bootProgress": boot_progress,
             "manifestVersion": service_health.get("manifestVersion") if isinstance(service_health, dict) else None,
             "capabilities": dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {},
@@ -829,6 +935,16 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
         try:
             payload = json.loads(proxied.text or "{}")
             if isinstance(payload, dict):
+                if not bot_source_identity_compatible(payload):
+                    failure = proxy_failure_payload(
+                        "source_revision_mismatch",
+                        url=f"{BOT_API_BASE}/api/control-page/state",
+                        detail="Bot API source identity is missing or incompatible.",
+                    )
+                    remember_proxy_failure(request, failure)
+                    return json_response(
+                        await degraded_state(proxy_failure=failure)
+                    )
                 if 200 <= proxied.status < 300:
                     bot_state_last_success_at = time.time()
                 progress_state = await current_boot_progress()
@@ -860,6 +976,7 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                     services[key] = value
                 runtime["services"] = services
                 runtime["controlPlane"] = control_plane
+                runtime["sourceIdentity"] = runtime_source_identity()
                 runtime["bootProgress"] = boot_progress
                 runtime["manifestVersion"] = service_health.get("manifestVersion") if isinstance(service_health, dict) else None
                 runtime["capabilities"] = dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {}
@@ -904,8 +1021,20 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
 
 
 async def health_handler(_: web.Request) -> web.StreamResponse:
-    bot_ready = await probe_port(BOT_API_PORT, host=BOT_API_HOST)
-    return json_response({"ok": True, "role": "control-page", "botProxyReady": bot_ready, "botApiPort": BOT_API_PORT})
+    source_identity = runtime_source_identity()
+    bot_ready, bot_identity = await probe_bot_health_identity()
+    ready = bool(source_identity.get("ready") is True and bot_ready)
+    return json_response(
+        {
+            "ok": ready,
+            "role": "control-page",
+            "botProxyReady": bot_ready,
+            "botApiPort": BOT_API_PORT,
+            "sourceIdentity": source_identity,
+            "botSourceIdentity": bot_identity,
+        },
+        status=200 if ready else 503,
+    )
 
 
 async def runtime_health_handler(_: web.Request) -> web.StreamResponse:
