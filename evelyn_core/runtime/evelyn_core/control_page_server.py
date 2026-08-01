@@ -2022,6 +2022,24 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
     except Exception:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    requested_source = str(payload.get("source") or "").strip().lower()
+    reserved_voice_fields = {
+        "admissionToken",
+        "bridgeInstanceId",
+        "validation",
+        "validationBinding",
+    }
+    if (
+        requested_source not in {"", "control_page"}
+        or any(field in payload for field in reserved_voice_fields)
+    ):
+        return json_response(
+            {"ok": False, "error": "unsupported_chat_source"},
+            status=400,
+        )
+    payload = {**payload, "source": "control_page"}
     text = str((payload or {}).get("text") or "").strip()
     normalized = text.lower()
     if normalized in LOCAL_HELP_COMMANDS:

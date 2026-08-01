@@ -21,9 +21,42 @@ from evelyn_core.local_bridge_barge_in import (  # noqa: E402
     evaluate_local_barge_in,
     local_barge_source_binding_matches,
 )
-from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
+from evelyn_core.local_io_bridge import (  # noqa: E402
+    LocalChatStreamFailure,
+    LocalIoBridge,
+)
 from evelyn_core import local_io_bridge  # noqa: E402
 from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
+
+
+def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
+    async def issue(
+        text: str,
+        *,
+        turn_id: str,
+        validation=None,
+        expected_epoch=None,
+    ):
+        return {
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": turn_id,
+            "originalText": text,
+            "forwardText": text,
+            "admissionToken": "a" * 32,
+            "validation": dict(validation or {}),
+            "mode": "wake_entry",
+            "issuedMonotonic": local_io_bridge.time.monotonic(),
+            "epoch": (
+                bridge.admission_epoch
+                if expected_epoch is None
+                else expected_epoch
+            ),
+            "_botDispatched": False,
+        }
+
+    admission = AsyncMock(side_effect=issue)
+    bridge._request_voice_admission = admission  # type: ignore[method-assign]
+    return admission
 
 
 class LocalBridgeBargeInTests(unittest.TestCase):
@@ -381,7 +414,8 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="hello")
 
-            async def fail_after_audio(_text: str) -> dict:
+            async def fail_after_audio(_text: str, *, grant: dict) -> dict:
+                grant["_botDispatched"] = True
                 bridge.playback_started_for_turn = True
                 raise RuntimeError("stream failed after first audio")
 
@@ -389,6 +423,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             bridge._chat = AsyncMock(return_value="duplicate fallback")
             bridge._speak = AsyncMock()
             bridge._emit_validation = Mock()
+            install_admission_grant(bridge)
             with (
                 patch.object(local_io_bridge, "LOCAL_BRIDGE_STREAMING_TTS_ENABLED", True),
                 patch.object(local_io_bridge, "LOCAL_BRIDGE_TTS_ENABLED", True),
@@ -404,6 +439,68 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertIn("playback_failed", events)
         self.assertIn("error", events)
         self.assertLess(events.index("playback_failed"), events.index("error"))
+
+    def test_stream_failure_after_bot_dispatch_never_falls_back_without_pcm(self):
+        async def runner() -> tuple[LocalIoBridge, list[str]]:
+            bridge = LocalIoBridge()
+            bridge._post_status = AsyncMock()
+            bridge._transcribe = AsyncMock(return_value="hello")
+
+            async def fail_after_dispatch(_text: str, *, grant: dict) -> dict:
+                grant["_botDispatched"] = True
+                raise LocalChatStreamFailure(bot_dispatched=True)
+
+            bridge._chat_stream_and_speak = AsyncMock(side_effect=fail_after_dispatch)
+            bridge._chat = AsyncMock(return_value="duplicate fallback")
+            bridge._speak = AsyncMock()
+            bridge._emit_validation = Mock()
+            install_admission_grant(bridge)
+            with (
+                patch.object(local_io_bridge, "LOCAL_BRIDGE_STREAMING_TTS_ENABLED", True),
+                patch.object(local_io_bridge, "LOCAL_BRIDGE_TTS_ENABLED", True),
+            ):
+                await bridge._handle_segment(b"pcm", {"turnId": "turn-a"})
+            events = [call.args[0] for call in bridge._emit_validation.call_args_list]
+            return bridge, events
+
+        bridge, events = asyncio.run(runner())
+
+        self.assertFalse(bridge.playback_started_for_turn)
+        bridge._chat.assert_not_awaited()
+        bridge._speak.assert_not_awaited()
+        self.assertIn("playback_failed", events)
+        self.assertIn("error", events)
+
+    def test_stream_failure_before_bot_dispatch_falls_back_exactly_once(self):
+        async def runner() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge._post_status = AsyncMock()
+            bridge._transcribe = AsyncMock(return_value="hello")
+
+            async def fail_before_dispatch(_text: str, *, grant: dict) -> dict:
+                self.assertFalse(grant["_botDispatched"])
+                raise LocalChatStreamFailure(bot_dispatched=False)
+
+            bridge._chat_stream_and_speak = AsyncMock(
+                side_effect=fail_before_dispatch
+            )
+            bridge._chat = AsyncMock(return_value="single fallback")
+            bridge._speak = AsyncMock()
+            bridge._emit_validation = Mock()
+            install_admission_grant(bridge)
+            with (
+                patch.object(local_io_bridge, "LOCAL_BRIDGE_STREAMING_TTS_ENABLED", True),
+                patch.object(local_io_bridge, "LOCAL_BRIDGE_TTS_ENABLED", True),
+            ):
+                await bridge._handle_segment(b"pcm", {"turnId": "turn-a"})
+            return bridge
+
+        bridge = asyncio.run(runner())
+
+        bridge._chat_stream_and_speak.assert_awaited_once()
+        bridge._chat.assert_awaited_once()
+        bridge._speak.assert_awaited_once_with("single fallback")
+        self.assertEqual(bridge.last_error, "")
 
     def test_unbound_segment_captured_before_validation_is_dropped_before_stt(self):
         async def runner() -> LocalIoBridge:
@@ -524,6 +621,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 "validationAttempt": 1,
                 "validationAttemptId": "private-attempt-camel",
                 "validation_attempt_id": "private-attempt-snake",
+                "_admissionEpoch": bridge.admission_epoch,
                 "_bargeSource": {"ownerToken": "private-owner"},
             }
 
@@ -538,6 +636,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertEqual(public_meta["validationSessionId"], "validation-a")
         self.assertNotIn("validationAttemptId", public_meta)
         self.assertNotIn("validation_attempt_id", public_meta)
+        self.assertNotIn("_admissionEpoch", public_meta)
         self.assertNotIn("_bargeSource", public_meta)
         self.assertEqual(private_meta["validationAttemptId"], "private-attempt-camel")
 
@@ -706,9 +805,24 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             bridge.session = session
             bridge.active_turn_id = "turn-a"
             bridge._post_status = AsyncMock()
+            grant = {
+                "bridgeInstanceId": bridge.bridge_instance_id,
+                "turnId": "turn-a",
+                "originalText": "hello",
+                "forwardText": "hello",
+                "admissionToken": "a" * 32,
+                "validation": {},
+                "mode": "wake_entry",
+                "issuedMonotonic": local_io_bridge.time.monotonic(),
+                "epoch": bridge.admission_epoch,
+                "_botDispatched": False,
+            }
             with patch.object(local_io_bridge, "sd", sound_device):
                 parent = asyncio.create_task(
-                    bridge._chat_delta_stream_and_speak("hello")
+                    bridge._chat_delta_stream_and_speak(
+                        "hello",
+                        grant=grant,
+                    )
                 )
                 self.assertTrue(
                     await asyncio.to_thread(write_started.wait, 1.0)

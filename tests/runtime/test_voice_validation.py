@@ -16,6 +16,7 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core import voice_validation as voice_validation_module  # noqa: E402
 from evelyn_core.voice_validation import (  # noqa: E402
     MAX_ATTEMPTS,
     SUITE_ID,
@@ -28,6 +29,7 @@ from evelyn_core.voice_validation import (  # noqa: E402
     sanitize_validation_event,
     transcript_match,
     validation_attempt_binding_is_current,
+    validation_transcript_admission_status,
 )
 
 
@@ -73,6 +75,110 @@ class VoiceValidationTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"], result)
         return result["session"]
+
+    def test_transcript_admission_status_is_read_only_and_content_free(self) -> None:
+        self.start()
+        context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertIsNotNone(context)
+        binding = {
+            "sessionId": context["sessionId"],
+            "stepId": context["stepId"],
+            "attempt": context["attempt"],
+            "attemptId": context["attemptId"],
+        }
+        active_path = self.root / "voice_validation" / "active.json"
+        before = active_path.read_bytes()
+
+        matched = validation_transcript_admission_status(
+            "local",
+            "이블린",
+            binding,
+            root=self.root,
+            now=self.clock,
+        )
+        mismatched = validation_transcript_admission_status(
+            "local",
+            "주변 사람의 unrelated private sentence",
+            binding,
+            root=self.root,
+            now=self.clock,
+        )
+
+        self.assertTrue(matched["current"])
+        self.assertTrue(matched["matched"])
+        self.assertEqual(matched["reason"], "validation_transcript_matched")
+        self.assertTrue(mismatched["current"])
+        self.assertFalse(mismatched["matched"])
+        self.assertEqual(mismatched["reason"], "validation_transcript_mismatch")
+        self.assertEqual(active_path.read_bytes(), before)
+        public_text = json.dumps([matched, mismatched], ensure_ascii=False)
+        self.assertNotIn("unrelated private sentence", public_text)
+        self.assertNotIn(context["attemptId"], public_text)
+
+    def test_attempt_rotation_uses_one_canonical_snapshot(self) -> None:
+        self.start()
+        active_path = self.root / "voice_validation" / "active.json"
+        old_active = json.loads(active_path.read_text(encoding="utf-8"))
+        old_step = old_active["currentStep"]
+        old_internal_step = next(
+            step
+            for step in old_active["_steps"]
+            if step["id"] == old_step["id"]
+        )
+        old_binding = {
+            "sessionId": old_active["sessionId"],
+            "stepId": old_step["id"],
+            "attempt": old_internal_step["attempt"],
+            "attemptId": old_internal_step["_attemptId"],
+        }
+        self.record("stt_final", transcript=old_internal_step["prompt"])
+        self.record("turn_accepted", eventId="accepted-a")
+        self.record("turn_accepted", eventId="accepted-b")
+        failed = self.manager.snapshot()
+        retried = self.manager.retry(
+            session_id=failed["sessionId"],
+            step_id=failed["currentStep"]["id"],
+            attempt=failed["currentStep"]["attempt"],
+        )
+        self.assertTrue(retried["ok"], retried)
+        new_active = json.loads(active_path.read_text(encoding="utf-8"))
+
+        with patch.object(
+            voice_validation_module,
+            "_safe_json_read",
+            side_effect=[deepcopy(new_active), deepcopy(old_active)],
+        ) as read_active:
+            current = validation_attempt_binding_is_current(
+                old_binding,
+                surface="local",
+                root=self.root,
+                now=self.clock,
+                reject_unbound_when_active=True,
+            )
+
+        self.assertFalse(current)
+        self.assertEqual(read_active.call_count, 1)
+
+        with patch.object(
+            voice_validation_module,
+            "_safe_json_read",
+            side_effect=[deepcopy(new_active), deepcopy(old_active)],
+        ) as read_active:
+            transcript = validation_transcript_admission_status(
+                "local",
+                old_internal_step["prompt"],
+                old_binding,
+                root=self.root,
+                now=self.clock,
+            )
+
+        self.assertFalse(transcript["current"])
+        self.assertFalse(transcript["matched"])
+        self.assertEqual(read_active.call_count, 1)
 
     def record(self, event: str, **payload):
         session = self.manager.snapshot()

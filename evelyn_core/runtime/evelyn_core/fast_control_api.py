@@ -84,6 +84,10 @@ from .host_ui_action_client import (
     discover_host_ui_action,
     preview_host_ui_action,
 )
+from .local_voice_admission import (
+    LocalVoiceAdmissionManager,
+    normalize_validation_binding,
+)
 from .minecraft_world_lease import MinecraftWorldLeaseOwner
 from .minecraft_world_lease_delegation import (
     MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER,
@@ -116,6 +120,10 @@ from .text import (
     ModelStreamPrefixFilter,
     should_suppress_tts_for_command,
     visible_text as shared_visible_text,
+)
+from .voice_validation import (
+    validation_attempt_binding_is_current,
+    validation_transcript_admission_status,
 )
 
 
@@ -258,6 +266,7 @@ LOCAL_BRIDGE_STATUS: dict[str, Any] = {
     "ready": False,
     "mode": "windows_io_bridge",
 }
+LOCAL_VOICE_ADMISSION = LocalVoiceAdmissionManager()
 LOCAL_BRIDGE_SPEAK_QUEUE: list[dict[str, Any]] = []
 LOCAL_BRIDGE_SPEAK_SEQ = 0
 LOCAL_AUDIO_DEVICE_STATE_PATH = get_runtime_artifacts_root() / "state" / "local_audio_devices.json"
@@ -323,6 +332,64 @@ def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response
 
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+_INVALID_LOCAL_VOICE_VALIDATION_BINDING = object()
+
+
+def local_voice_no_store_response(
+    payload: dict[str, Any],
+    *,
+    status: int,
+) -> web.Response:
+    response = json_response(payload, status=status)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def local_voice_validation_binding(payload: dict[str, Any]) -> Any:
+    if "validation" in payload and "validationBinding" in payload:
+        if payload.get("validation") != payload.get("validationBinding"):
+            return _INVALID_LOCAL_VOICE_VALIDATION_BINDING
+    if "validation" in payload:
+        return payload.get("validation")
+    return payload.get("validationBinding")
+
+
+def local_voice_validation_binding_is_current(binding: dict[str, Any]) -> bool:
+    normalized = normalize_validation_binding(binding)
+    if normalized is None:
+        return False
+    return validation_attempt_binding_is_current(
+        normalized,
+        surface="local",
+        reject_unbound_when_active=True,
+    )
+
+
+def consume_local_voice_admission(
+    payload: dict[str, Any],
+    *,
+    text: str,
+    source: str,
+) -> tuple[str, web.Response | None]:
+    if clean_text(source).lower() != "local_bridge":
+        return text, None
+    result = LOCAL_VOICE_ADMISSION.consume(
+        payload.get("admissionToken"),
+        payload.get("bridgeInstanceId"),
+        payload.get("turnId"),
+        text,
+        validation_binding=local_voice_validation_binding(payload),
+        validation_is_current=local_voice_validation_binding_is_current,
+    )
+    if result.get("admitted") is not True:
+        return "", local_voice_no_store_response(result, status=409)
+    admitted_text = clean_text(result.get("forwardText"))
+    if not admitted_text:
+        failed = LOCAL_VOICE_ADMISSION.reject("admission_forward_text_invalid")
+        return "", local_voice_no_store_response(failed, status=409)
+    return admitted_text, None
 
 
 def should_emit_memory_recall_progress(text: str, *, source: str) -> bool:
@@ -789,6 +856,8 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
 
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
     snapshot = dict(LOCAL_BRIDGE_STATUS)
+    snapshot.pop("bridgeInstanceId", None)
+    snapshot["voiceAdmission"] = LOCAL_VOICE_ADMISSION.public_status()
     raw_error = clean_text(snapshot.get("lastError"))
     error_fallback = (
         "mic_control_failed"
@@ -870,6 +939,8 @@ def set_local_bridge_output_device(output_device: str, *, source: str = "control
 
 
 def request_local_bridge_mic_control(enabled: bool, *, source: str = "control_page") -> dict[str, Any]:
+    if not enabled:
+        LOCAL_VOICE_ADMISSION.reset("mic_disabled")
     current_revision = int(LOCAL_BRIDGE_MIC_CONTROL_REQUEST.get("revision") or 0)
     revision = max(current_revision + 1, int(time.time() * 1000))
     LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
@@ -1735,6 +1806,7 @@ def execute_memory_panel_action(action: str) -> str:
 
 
 def request_local_shutdown(*, source: str, reason: str = "") -> dict[str, Any]:
+    LOCAL_VOICE_ADMISSION.reset("shutdown_requested")
     SHUTDOWN_REQUEST.update(
         {
             "requested": True,
@@ -1751,6 +1823,7 @@ def request_local_shutdown(*, source: str, reason: str = "") -> dict[str, Any]:
 
 
 def request_local_restart(*, source: str, reason: str = "") -> dict[str, Any]:
+    LOCAL_VOICE_ADMISSION.reset("restart_requested")
     RESTART_REQUEST.update(
         {
             "requested": True,
@@ -2504,20 +2577,88 @@ async def state_handler(_: web.Request) -> web.StreamResponse:
     return json_response(build_control_state(health))
 
 
+async def local_voice_admission_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return local_voice_no_store_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if not isinstance(payload, dict):
+        return local_voice_no_store_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if (
+        "validation" in payload
+        and "validationBinding" in payload
+        and payload.get("validation") != payload.get("validationBinding")
+    ):
+        return local_voice_no_store_response(
+            LOCAL_VOICE_ADMISSION.reject("validation_binding_invalid"),
+            status=409,
+        )
+    text = clean_text(payload.get("text"))
+    binding = local_voice_validation_binding(payload)
+    normalized_binding = normalize_validation_binding(binding)
+    if normalized_binding:
+        transcript_admission = validation_transcript_admission_status(
+            "local",
+            text,
+            normalized_binding,
+        )
+        if transcript_admission.get("current") is not True:
+            return local_voice_no_store_response(
+                LOCAL_VOICE_ADMISSION.reject("validation_attempt_stale"),
+                status=409,
+            )
+        if transcript_admission.get("matched") is not True:
+            return local_voice_no_store_response(
+                LOCAL_VOICE_ADMISSION.reject(
+                    clean_text(transcript_admission.get("reason"))
+                    or "validation_transcript_mismatch"
+                ),
+                status=409,
+            )
+    result = LOCAL_VOICE_ADMISSION.issue(
+        payload.get("bridgeInstanceId"),
+        payload.get("turnId"),
+        text,
+        validation_binding=binding,
+        validation_is_current=local_voice_validation_binding_is_current,
+    )
+    return local_voice_no_store_response(
+        result,
+        status=200 if result.get("admitted") is True else 409,
+    )
+
+
 async def chat_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
     except Exception:
         return json_response({"ok": False, "error": "invalid_json"}, status=400)
-    text = clean_text((payload or {}).get("text"))
+    if not isinstance(payload, dict):
+        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+    text = clean_text(payload.get("text"))
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
-    source = clean_text((payload or {}).get("source")) or "control_page"
+    source = clean_text(payload.get("source")).lower() or "control_page"
     action_id = (
-        (payload or {}).get("turnId")
-        or (payload or {}).get("requestId")
+        payload.get("turnId")
+        or payload.get("requestId")
         or ""
     )
+    text, admission_rejection = consume_local_voice_admission(
+        payload,
+        text=text,
+        source=source,
+    )
+    if admission_rejection is not None:
+        return admission_rejection
     reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
@@ -2649,15 +2790,24 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
     except Exception:
         return json_response({"ok": False, "error": "invalid_json"}, status=400)
-    text = clean_text((payload or {}).get("text"))
+    if not isinstance(payload, dict):
+        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+    text = clean_text(payload.get("text"))
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
-    source = clean_text((payload or {}).get("source")) or "local_bridge"
+    source = clean_text(payload.get("source")).lower() or "control_page"
     action_id = (
-        (payload or {}).get("turnId")
-        or (payload or {}).get("requestId")
+        payload.get("turnId")
+        or payload.get("requestId")
         or ""
     )
+    text, admission_rejection = consume_local_voice_admission(
+        payload,
+        text=text,
+        source=source,
+    )
+    if admission_rejection is not None:
+        return admission_rejection
     reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
@@ -2964,6 +3114,16 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
         except Exception:
             payload = {}
         if isinstance(payload, dict):
+            bridge_instance_id = payload.get("bridgeInstanceId")
+            if bridge_instance_id:
+                LOCAL_VOICE_ADMISSION.observe_bridge_instance(
+                    bridge_instance_id
+                )
+            mic = payload.get("mic")
+            if payload.get("micEnabled") is False or (
+                isinstance(mic, dict) and mic.get("enabled") is False
+            ):
+                LOCAL_VOICE_ADMISSION.reset("mic_disabled")
             LOCAL_BRIDGE_STATUS.update(payload)
             try:
                 minecraft_revision = int(payload.get("minecraftCommandRevision") or 0)
@@ -2987,6 +3147,7 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
             "minecraftCommandRequest": dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST),
             "restart": dict(RESTART_REQUEST),
             "shutdown": dict(SHUTDOWN_REQUEST),
+            "voiceAdmission": LOCAL_VOICE_ADMISSION.public_status(),
         }
     )
 
@@ -3013,6 +3174,8 @@ async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
             value = False
         else:
             return json_response({"ok": False, "error": "missing_mic_enabled"}, status=400)
+    if value is False:
+        LOCAL_VOICE_ADMISSION.reset("mic_disabled")
     request_state = request_local_bridge_mic_control(
         value,
         source=clean_text((payload or {}).get("source")) or "control_page",
@@ -3226,6 +3389,10 @@ def create_app(
         minecraft_world_lease_mutation_handler,
     )
     app.router.add_get("/api/control-page/state", state_handler)
+    app.router.add_post(
+        "/api/local-voice/admission",
+        local_voice_admission_handler,
+    )
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_post("/api/control-page/chat-stream", chat_stream_handler)
     app.router.add_get("/api/control-page/action-events", action_events_handler)

@@ -131,6 +131,23 @@ LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC = max(
     float(os.getenv("LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC", "300")),
 )
 LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
+LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
+
+
+class LocalVoiceAdmissionDrop(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        self.reason = clean_text(reason).lower() or "local_voice_wake_required"
+        super().__init__(self.reason)
+
+
+class LocalChatStreamFailure(RuntimeError):
+    def __init__(self, *, bot_dispatched: bool) -> None:
+        self.bot_dispatched = bool(bot_dispatched)
+        super().__init__(
+            "chat_stream_failed_after_dispatch"
+            if self.bot_dispatched
+            else "chat_stream_failed_before_dispatch"
+        )
 
 
 def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
@@ -213,6 +230,13 @@ class LocalIoBridge:
         self._barge_source_snapshot: dict[str, Any] | None = None
         self._speaker_verifier: Any | None = None
         self._speaker_verifier_initialized = False
+        self.bridge_instance_id = uuid.uuid4().hex
+        self.admission_epoch = 0
+        self.admission_active = False
+        self.admission_mode = "inactive"
+        self.admission_accepted_count = 0
+        self.admission_rejected_count = 0
+        self.admission_last_reason = "not_started"
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -318,6 +342,7 @@ class LocalIoBridge:
         loop = asyncio.get_running_loop()
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
+            captured_admission_epoch = self.admission_epoch
             with self._barge_source_lock:
                 barge_source = (
                     dict(self._barge_source_snapshot)
@@ -346,8 +371,14 @@ class LocalIoBridge:
                 )
 
             def enqueue() -> None:
+                if not self._voice_admission_lifecycle_is_current(
+                    captured_admission_epoch
+                ):
+                    self.discarded_pending_mic_segment_count += 1
+                    return
                 segment_meta = dict(meta)
                 segment_meta.setdefault("turnId", uuid.uuid4().hex)
+                segment_meta["_admissionEpoch"] = captured_admission_epoch
                 if barge_source is not None:
                     segment_meta["_bargeSource"] = dict(barge_source)
                     validation = interrupt_validation
@@ -405,6 +436,7 @@ class LocalIoBridge:
 
     async def _stop_mic(self) -> None:
         self.mic_enabled = False
+        self._invalidate_local_voice_admission("mic_disabled")
         service = self.service
         self.service = None
         self._discard_pending_mic_segments()
@@ -630,6 +662,234 @@ class LocalIoBridge:
             }
         return None
 
+    def _admission_validation_binding(
+        self,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        context = self._validation_context_from_meta(meta)
+        if not context:
+            return {}
+        return {
+            "sessionId": str(context.get("sessionId") or ""),
+            "stepId": str(context.get("stepId") or ""),
+            "attempt": context.get("attempt"),
+            "attemptId": str(context.get("attemptId") or ""),
+        }
+
+    def _apply_voice_admission_status(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        status = payload.get("voiceAdmission")
+        if not isinstance(status, dict):
+            status = payload.get("admission")
+        if (
+            not isinstance(status, dict)
+            or status.get("schema") != "local_voice.admission.status.v1"
+            or status.get("contentFree") is not True
+        ):
+            return
+        mode = clean_text(status.get("mode")).lower()
+        reason = clean_text(status.get("lastReason")).lower()
+        if mode not in {"inactive", "wake_entry", "followup", "validation"}:
+            mode = "inactive"
+        if not re.fullmatch(r"[a-z0-9_]{1,80}", reason):
+            reason = "admission_status_invalid"
+        try:
+            accepted_count = max(0, int(status.get("acceptedCount") or 0))
+            rejected_count = max(0, int(status.get("rejectedCount") or 0))
+        except (TypeError, ValueError, OverflowError):
+            return
+        self.admission_active = bool(status.get("active"))
+        self.admission_mode = mode if self.admission_active else "inactive"
+        self.admission_accepted_count = accepted_count
+        self.admission_rejected_count = rejected_count
+        self.admission_last_reason = reason
+
+    def _invalidate_local_voice_admission(self, reason: str) -> None:
+        self.admission_epoch += 1
+        self.admission_active = False
+        self.admission_mode = "inactive"
+        normalized = clean_text(reason).lower()
+        self.admission_last_reason = (
+            normalized
+            if re.fullmatch(r"[a-z0-9_]{1,80}", normalized)
+            else "admission_invalidated"
+        )
+
+    def _record_local_voice_admission_rejection(self, reason: str) -> None:
+        normalized = clean_text(reason).lower()
+        self.admission_rejected_count += 1
+        self.admission_last_reason = (
+            normalized
+            if re.fullmatch(r"[a-z0-9_]{1,80}", normalized)
+            else "local_voice_wake_required"
+        )
+
+    def _voice_admission_public_status(self) -> dict[str, Any]:
+        return {
+            "schema": "local_voice.admission.status.v1",
+            "active": self.admission_active,
+            "mode": self.admission_mode if self.admission_active else "inactive",
+            "acceptedCount": self.admission_accepted_count,
+            "rejectedCount": self.admission_rejected_count,
+            "lastReason": self.admission_last_reason,
+            "contentFree": True,
+        }
+
+    def _voice_admission_lifecycle_is_current(self, epoch: Any) -> bool:
+        if isinstance(epoch, bool):
+            return False
+        try:
+            normalized_epoch = int(epoch)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return bool(
+            normalized_epoch == self.admission_epoch
+            and self.mic_enabled
+            and not self.restart_started
+            and not self.shutdown_started
+        )
+
+    async def _request_voice_admission(
+        self,
+        text: str,
+        *,
+        turn_id: str,
+        validation: dict[str, Any] | None = None,
+        expected_epoch: int | None = None,
+    ) -> dict[str, Any] | None:
+        if self.session is None:
+            self._record_local_voice_admission_rejection(
+                "admission_service_unavailable"
+            )
+            return None
+        request_epoch = (
+            self.admission_epoch
+            if expected_epoch is None
+            else expected_epoch
+        )
+        if not self._voice_admission_lifecycle_is_current(request_epoch):
+            self._record_local_voice_admission_rejection(
+                "admission_epoch_stale"
+            )
+            return None
+        binding = dict(validation or {})
+        payload: dict[str, Any] = {
+            "bridgeInstanceId": self.bridge_instance_id,
+            "turnId": turn_id,
+            "text": text,
+        }
+        if binding:
+            payload["validation"] = binding
+        try:
+            async with self.session.post(
+                f"{BOT_API_BASE}/api/local-voice/admission",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                data = await response.json(content_type=None)
+                self._apply_voice_admission_status(data)
+                if (
+                    response.status != 200
+                    or not isinstance(data, dict)
+                    or data.get("admitted") is not True
+                ):
+                    if not isinstance(data, dict) or not isinstance(
+                        data.get("admission"), dict
+                    ):
+                        self._record_local_voice_admission_rejection(
+                            clean_text((data or {}).get("reason"))
+                            if isinstance(data, dict)
+                            else "local_voice_wake_required"
+                        )
+                    return None
+        except Exception:
+            self._record_local_voice_admission_rejection(
+                "admission_service_unavailable"
+            )
+            return None
+        if not self._voice_admission_lifecycle_is_current(request_epoch):
+            self._record_local_voice_admission_rejection(
+                "admission_epoch_stale"
+            )
+            return None
+        forward_text = clean_text(data.get("forwardText"))
+        token = str(data.get("admissionToken") or "")
+        mode = clean_text(data.get("mode")).lower()
+        if (
+            not forward_text
+            or len(token) < 24
+            or mode not in {"wake_entry", "followup", "validation"}
+        ):
+            self._record_local_voice_admission_rejection(
+                "admission_response_invalid"
+            )
+            return None
+        return {
+            "bridgeInstanceId": self.bridge_instance_id,
+            "turnId": turn_id,
+            "originalText": text,
+            "forwardText": forward_text,
+            "admissionToken": token,
+            "validation": binding,
+            "mode": mode,
+            "issuedMonotonic": time.monotonic(),
+            "epoch": request_epoch,
+            "_botDispatched": False,
+        }
+
+    async def _ensure_fresh_voice_admission(
+        self,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            grant_epoch = int(grant.get("epoch"))
+        except (TypeError, ValueError, OverflowError):
+            grant_epoch = -1
+        if (
+            not self._voice_admission_lifecycle_is_current(grant_epoch)
+            or grant.get("bridgeInstanceId") != self.bridge_instance_id
+            or grant.get("turnId") != self.active_turn_id
+        ):
+            raise LocalVoiceAdmissionDrop("admission_epoch_stale")
+        issued_at = float(grant.get("issuedMonotonic") or 0.0)
+        if time.monotonic() - issued_at < LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC:
+            return grant
+        refreshed = await self._request_voice_admission(
+            str(grant.get("originalText") or ""),
+            turn_id=str(grant.get("turnId") or ""),
+            validation=dict(grant.get("validation") or {}),
+            expected_epoch=grant_epoch,
+        )
+        if refreshed is None:
+            raise LocalVoiceAdmissionDrop("admission_refresh_rejected")
+        if refreshed.get("forwardText") != grant.get("forwardText"):
+            raise LocalVoiceAdmissionDrop("admission_refresh_mismatch")
+        dispatched = bool(grant.get("_botDispatched"))
+        grant.update(refreshed)
+        grant["_botDispatched"] = dispatched
+        return grant
+
+    async def _local_voice_chat_payload(
+        self,
+        text: str,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self._ensure_fresh_voice_admission(grant)
+        if clean_text(text) != clean_text(grant.get("forwardText")):
+            raise LocalVoiceAdmissionDrop("admission_text_mismatch")
+        payload: dict[str, Any] = {
+            "text": clean_text(grant.get("forwardText")),
+            "source": "local_bridge",
+            "turnId": str(grant.get("turnId") or ""),
+            "bridgeInstanceId": str(grant.get("bridgeInstanceId") or ""),
+            "admissionToken": str(grant.get("admissionToken") or ""),
+        }
+        validation = dict(grant.get("validation") or {})
+        if validation:
+            payload["validation"] = validation
+        return payload
+
     def _emit_validation(
         self,
         event: str,
@@ -781,7 +1041,24 @@ class LocalIoBridge:
         while True:
             pcm_bytes, meta = await self.barge_in_queue.get()
             try:
+                segment_epoch = meta.get(
+                    "_admissionEpoch",
+                    self.admission_epoch,
+                )
+                if not self._voice_admission_lifecycle_is_current(
+                    segment_epoch
+                ):
+                    continue
                 verification = await self._verify_barge_in_speaker(pcm_bytes)
+                if not self._voice_admission_lifecycle_is_current(
+                    segment_epoch
+                ):
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        reason="admission_epoch_stale",
+                    )
+                    continue
                 decision = evaluate_local_barge_in(
                     meta,
                     body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
@@ -896,17 +1173,31 @@ class LocalIoBridge:
 
     def _discard_pending_mic_segments(self) -> int:
         discarded = 0
-        while True:
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            self.queue.task_done()
-            discarded += 1
+        for source_queue in (
+            self.queue,
+            self.priority_queue,
+            self.barge_in_queue,
+        ):
+            while True:
+                try:
+                    source_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                source_queue.task_done()
+                discarded += 1
         self.discarded_pending_mic_segment_count += discarded
         return discarded
 
     async def _handle_segment(self, pcm_bytes: bytes, meta: dict[str, Any]) -> None:
+        turn_admission_epoch = meta.get(
+            "_admissionEpoch",
+            self.admission_epoch,
+        )
+        if not self._voice_admission_lifecycle_is_current(
+            turn_admission_epoch
+        ):
+            self.discarded_pending_mic_segment_count += 1
+            return
         turn_started = time.perf_counter()
         self.active_turn_started_at = turn_started
         self.active_turn_id = str(meta.get("turnId") or uuid.uuid4().hex)
@@ -928,6 +1219,7 @@ class LocalIoBridge:
         )
         public_segment_meta = dict(meta)
         public_segment_meta.pop("_bargeSource", None)
+        public_segment_meta.pop("_admissionEpoch", None)
         public_segment_meta.pop("validationAttemptId", None)
         public_segment_meta.pop("validation_attempt_id", None)
         await self._post_status(extra={"lastSegmentMeta": public_segment_meta})
@@ -949,48 +1241,81 @@ class LocalIoBridge:
             ):
                 self.discarded_pending_mic_segment_count += 1
                 return
+            if not self._voice_admission_lifecycle_is_current(
+                turn_admission_epoch
+            ):
+                self.discarded_pending_mic_segment_count += 1
+                return
             if len(text) < LOCAL_BRIDGE_MIN_TEXT_CHARS:
                 return
+            transcript_text = text
             context = self._validation_context_from_meta(meta)
             if context:
                 emit_transcript_validation_event(
                     "local",
-                    text,
+                    transcript_text,
                     session_id=context.get("sessionId"),
                     step_id=context.get("stepId"),
                     attempt_id=context.get("attemptId"),
                     turnId=self.active_turn_id,
                 )
+            grant = await self._request_voice_admission(
+                transcript_text,
+                turn_id=self.active_turn_id,
+                validation=self._admission_validation_binding(meta),
+                expected_epoch=int(turn_admission_epoch),
+            )
+            if grant is None:
+                return
+            text = clean_text(grant.get("forwardText"))
+            if not text:
+                self._record_local_voice_admission_rejection(
+                    "admission_forward_text_invalid"
+                )
+                return
             self.transcript_count += 1
             self._emit_validation("turn_accepted", meta=meta)
             print(f"[LOCAL BRIDGE] transcript_received chars={len(text)}", flush=True)
             if should_suppress_tts_for_command(text):
                 stage_started = time.perf_counter()
-                reply = await self._chat(text)
+                reply = await self._chat(text, grant=grant)
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
                 if reply:
                     self._mark_reply_final_once()
                 tts_ms = 0.0
             elif LOCAL_BRIDGE_STREAMING_TTS_ENABLED and LOCAL_BRIDGE_TTS_ENABLED:
                 try:
-                    stream_result = await self._chat_stream_and_speak(text)
+                    stream_result = await self._chat_stream_and_speak(
+                        text,
+                        grant=grant,
+                    )
                     reply = clean_text(stream_result.get("reply"))
                     chat_ms = stream_result.get("chatMs")
                     tts_ms = stream_result.get("ttsMs")
+                except LocalVoiceAdmissionDrop:
+                    raise
                 except Exception as stream_exc:
                     self.runtime_errors.record("chat_stream_failed", stream_exc)
-                    if self.playback_started_for_turn:
+                    dispatched = not (
+                        isinstance(stream_exc, LocalChatStreamFailure)
+                        and not stream_exc.bot_dispatched
+                    )
+                    if dispatched:
                         self._emit_validation(
                             "playback_failed",
                             meta=meta,
-                            errorCode="streaming_tts_failed_after_playback_started",
+                            errorCode="streaming_tts_failed_after_dispatch",
                         )
                         raise RuntimeError(
-                            "streaming_tts_failed_after_playback_started"
+                            "streaming_tts_failed_after_dispatch"
                         ) from stream_exc
-                    print(f"[LOCAL BRIDGE] chat_stream_failed fallback_to_full err={stream_exc!r}", flush=True)
+                    print(
+                        "[LOCAL BRIDGE] chat_stream_failed_before_dispatch "
+                        "fallback_to_full=true",
+                        flush=True,
+                    )
                     stage_started = time.perf_counter()
-                    reply = await self._chat(text)
+                    reply = await self._chat(text, grant=grant)
                     chat_ms = (time.perf_counter() - stage_started) * 1000.0
                     if reply:
                         self._mark_reply_final_once()
@@ -999,7 +1324,7 @@ class LocalIoBridge:
                         tts_ms = (time.perf_counter() - stage_started) * 1000.0
             else:
                 stage_started = time.perf_counter()
-                reply = await self._chat(text)
+                reply = await self._chat(text, grant=grant)
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
                 if reply and LOCAL_BRIDGE_TTS_ENABLED:
                     self._mark_reply_final_once()
@@ -1024,6 +1349,13 @@ class LocalIoBridge:
                     errorCode="playback_not_started",
                 )
             print(f"[LOCAL BRIDGE] reply_ready chars={len(reply or '')}", flush=True)
+        except LocalVoiceAdmissionDrop as exc:
+            self._record_local_voice_admission_rejection(exc.reason)
+            self._emit_validation(
+                "error",
+                meta=meta,
+                errorCode=exc.reason,
+            )
         except asyncio.CancelledError:
             if self.playback_started_for_turn and not self.playback_cancelled_for_turn:
                 self.playback_cancelled_for_turn = True
@@ -1076,23 +1408,51 @@ class LocalIoBridge:
                 raise RuntimeError(f"stt_failed {resp.status}: {data}")
             return clean_text(data.get("text"))
 
-    async def _chat(self, text: str) -> str:
+    async def _chat(
+        self,
+        text: str,
+        *,
+        grant: dict[str, Any],
+    ) -> str:
         assert self.session is not None
-        payload = {
-            "text": text,
-            "source": "local_bridge",
-            "turnId": self.active_turn_id,
-        }
+        payload = await self._local_voice_chat_payload(text, grant)
+        grant["_botDispatched"] = True
         async with self.session.post(f"{BOT_API_BASE}/api/control-page/chat", json=payload, timeout=aiohttp.ClientTimeout(total=150)) as resp:
             data = await resp.json(content_type=None)
-            if resp.status != 200 or not data.get("ok"):
-                raise RuntimeError(f"chat_failed {resp.status}: {data}")
+            self._apply_voice_admission_status(data)
+            if resp.status == 409 and isinstance(data, dict) and data.get("error") == "local_voice_wake_required":
+                raise LocalVoiceAdmissionDrop(
+                    clean_text(data.get("reason")) or "local_voice_wake_required"
+                )
+            if resp.status != 200 or not isinstance(data, dict) or not data.get("ok"):
+                raise RuntimeError(f"chat_failed_{resp.status}")
             return clean_text(data.get("reply"))
 
-    async def _chat_stream_and_speak(self, text: str) -> dict[str, Any]:
-        if LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED and sd is not None:
-            return await self._chat_delta_stream_and_speak(text)
-        return await self._chat_sentence_stream_and_speak(text)
+    async def _chat_stream_and_speak(
+        self,
+        text: str,
+        *,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
+        grant["_botDispatched"] = False
+        try:
+            if LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED and sd is not None:
+                return await self._chat_delta_stream_and_speak(
+                    text,
+                    grant=grant,
+                )
+            return await self._chat_sentence_stream_and_speak(
+                text,
+                grant=grant,
+            )
+        except LocalVoiceAdmissionDrop:
+            raise
+        except LocalChatStreamFailure:
+            raise
+        except Exception as exc:
+            raise LocalChatStreamFailure(
+                bot_dispatched=bool(grant.get("_botDispatched")),
+            ) from exc
 
     @staticmethod
     def _stop_delta_output_stream(stream: Any | None) -> None:
@@ -1165,13 +1525,13 @@ class LocalIoBridge:
             await self._await_delta_task_shutdown(receiver, cancel=False)
         self._release_playback_owner(playback_owner)
 
-    async def _chat_delta_stream_and_speak(self, text: str) -> dict[str, Any]:
+    async def _chat_delta_stream_and_speak(
+        self,
+        text: str,
+        *,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
         assert self.session is not None
-        payload = {
-            "text": text,
-            "source": "local_bridge",
-            "turnId": self.active_turn_id,
-        }
         started_at = time.perf_counter()
         sentence_count = 0
         first_sentence_ms: float | None = None
@@ -1264,14 +1624,29 @@ class LocalIoBridge:
             receiver = asyncio.create_task(receive_tts_audio(), name="local-voxcpm-stream-receiver")
 
             saw_delta = False
+            payload = await self._local_voice_chat_payload(text, grant)
+            grant["_botDispatched"] = True
             async with self.session.post(
                 f"{BOT_API_BASE}/api/control-page/chat-stream",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
                 if resp.status != 200:
-                    detail = await resp.text()
-                    raise RuntimeError(f"chat_stream_failed {resp.status}: {detail[:300]}")
+                    try:
+                        failure = await resp.json(content_type=None)
+                    except Exception:
+                        failure = {}
+                    self._apply_voice_admission_status(failure)
+                    if (
+                        resp.status == 409
+                        and isinstance(failure, dict)
+                        and failure.get("error") == "local_voice_wake_required"
+                    ):
+                        raise LocalVoiceAdmissionDrop(
+                            clean_text(failure.get("reason"))
+                            or "local_voice_wake_required"
+                        )
+                    raise RuntimeError(f"chat_stream_failed_{resp.status}")
                 async for raw_line in resp.content:
                     line = raw_line.decode("utf-8", errors="ignore").strip()
                     if not line:
@@ -1373,26 +1748,41 @@ class LocalIoBridge:
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
             await self._post_status()
 
-    async def _chat_sentence_stream_and_speak(self, text: str) -> dict[str, Any]:
+    async def _chat_sentence_stream_and_speak(
+        self,
+        text: str,
+        *,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
         assert self.session is not None
-        payload = {
-            "text": text,
-            "source": "local_bridge",
-            "turnId": self.active_turn_id,
-        }
         started_at = time.perf_counter()
         tts_ms = 0.0
         sentence_count = 0
         first_sentence_ms: float | None = None
         final_reply = ""
+        payload = await self._local_voice_chat_payload(text, grant)
+        grant["_botDispatched"] = True
         async with self.session.post(
             f"{BOT_API_BASE}/api/control-page/chat-stream",
             json=payload,
             timeout=aiohttp.ClientTimeout(total=180),
         ) as resp:
             if resp.status != 200:
-                detail = await resp.text()
-                raise RuntimeError(f"chat_stream_failed {resp.status}: {detail[:300]}")
+                try:
+                    failure = await resp.json(content_type=None)
+                except Exception:
+                    failure = {}
+                self._apply_voice_admission_status(failure)
+                if (
+                    resp.status == 409
+                    and isinstance(failure, dict)
+                    and failure.get("error") == "local_voice_wake_required"
+                ):
+                    raise LocalVoiceAdmissionDrop(
+                        clean_text(failure.get("reason"))
+                        or "local_voice_wake_required"
+                    )
+                raise RuntimeError(f"chat_stream_failed_{resp.status}")
             async for raw_line in resp.content:
                 line = raw_line.decode("utf-8", errors="ignore").strip()
                 if not line:
@@ -1772,6 +2162,7 @@ class LocalIoBridge:
         payload: dict[str, Any] = {
             "schema": "local_io_bridge.status.v1",
             "heartbeatAt": time.time(),
+            "bridgeInstanceId": self.bridge_instance_id,
             "enabled": True,
             "ready": self.ready,
             "micEnabled": self.mic_enabled,
@@ -1804,6 +2195,7 @@ class LocalIoBridge:
             "mic": mic_stats,
             "lastLatency": dict(self.last_latency),
             "lastTtsPlayback": dict(self.last_tts_playback),
+            "voiceAdmission": self._voice_admission_public_status(),
             "ttsWarmup": {
                 "enabled": LOCAL_BRIDGE_TTS_ENABLED and LOCAL_BRIDGE_TTS_WARMUP_ENABLED,
                 "done": self.tts_warmup_done,
@@ -1852,12 +2244,14 @@ class LocalIoBridge:
             pass
 
     def _handle_control_response(self, data: dict[str, Any]) -> None:
+        self._apply_voice_admission_status(data)
         self._handle_mic_control_request(data)
         self._handle_output_device_request(data)
         self._handle_minecraft_command_request(data)
 
         restart = data.get("restart") if isinstance(data, dict) else None
         if isinstance(restart, dict) and restart.get("requested") and not self.restart_started:
+            self._invalidate_local_voice_admission("restart_requested")
             self.restart_started = True
             self.last_error = "restart_requested"
             self._start_restart_script()
@@ -1885,6 +2279,7 @@ class LocalIoBridge:
         shutdown = data.get("shutdown") if isinstance(data, dict) else None
         if not isinstance(shutdown, dict) or not shutdown.get("requested") or self.shutdown_started:
             return
+        self._invalidate_local_voice_admission("shutdown_requested")
         self.shutdown_started = True
         self.last_error = "shutdown_requested"
         self._start_shutdown_script()

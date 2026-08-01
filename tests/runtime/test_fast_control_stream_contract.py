@@ -26,6 +26,15 @@ from tests.continuity_test_support import (  # noqa: E402
 
 class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self._original_local_voice_admission = fast_api.LOCAL_VOICE_ADMISSION
+        fast_api.LOCAL_VOICE_ADMISSION = fast_api.LocalVoiceAdmissionManager()
+        self._validation_context_patcher = patch.object(
+            fast_api,
+            "local_voice_validation_binding_is_current",
+            side_effect=lambda binding: not binding,
+        )
+        self._validation_context_patcher.start()
+        self._voice_turn_seq = 0
         fast_api.CHAT_MESSAGES.clear()
         fast_api.ACTION_COORDINATOR.clear()
         fast_api.clear_background_action_handlers()
@@ -47,6 +56,31 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         fast_api.clear_background_action_handlers()
+        self._validation_context_patcher.stop()
+        fast_api.LOCAL_VOICE_ADMISSION = self._original_local_voice_admission
+
+    def admitted_local_payload(self, text: str) -> dict[str, object]:
+        self._voice_turn_seq += 1
+        bridge_instance_id = "test-fast-stream-bridge"
+        turn_id = f"test-fast-stream-turn-{self._voice_turn_seq}"
+        fast_api.LOCAL_VOICE_ADMISSION.observe_bridge_instance(
+            bridge_instance_id
+        )
+        issued = fast_api.LOCAL_VOICE_ADMISSION.issue(
+            bridge_instance_id,
+            turn_id,
+            f"이블린 {text}",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        self.assertTrue(issued.get("admitted"), issued)
+        return {
+            "text": issued["forwardText"],
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_instance_id,
+            "turnId": turn_id,
+            "admissionToken": issued["admissionToken"],
+        }
 
     async def post_stream(self, text: str) -> list[dict[str, object]]:
         client = TestClient(TestServer(fast_api.create_app()))
@@ -54,7 +88,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         try:
             response = await client.post(
                 "/api/control-page/chat-stream",
-                json={"text": text, "source": "local_bridge"},
+                json=self.admitted_local_payload(text),
             )
             self.assertEqual(response.status, 200)
             body = await response.text()
@@ -133,6 +167,113 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(authorized_payload),
         )
         self.assertEqual(len(owner.calls), 1)
+
+    async def test_local_voice_stream_missing_token_has_no_turn_side_effects(
+        self,
+    ) -> None:
+        client = TestClient(TestServer(fast_api.create_app()))
+        await client.start_server()
+        try:
+            before_actions = fast_api.ACTION_COORDINATOR.snapshot()
+            with patch.object(
+                fast_api,
+                "reset_fast_memory_context_receipt",
+            ) as reset_receipt, patch.object(
+                fast_api,
+                "append_chat_message",
+            ) as append_message, patch.object(
+                fast_api,
+                "execute_explicit_memory_confirmation",
+            ) as memory_write, patch.object(
+                fast_api,
+                "plan_fast_tool_request_for_turn",
+                new=AsyncMock(),
+            ) as planner, patch.object(
+                fast_api,
+                "iter_main_llm_deltas",
+            ) as llm_stream, patch.object(
+                fast_api,
+                "commit_fast_control_turn",
+            ) as continuity, patch.object(
+                fast_api,
+                "queue_local_bridge_speech",
+            ) as queue_speech:
+                response = await client.post(
+                    "/api/control-page/chat-stream",
+                    json={
+                        "text": "주변 대화가 잘못 들어온 문장",
+                        "source": "local_bridge",
+                        "bridgeInstanceId": "test-fast-stream-bridge",
+                        "turnId": "missing-token-turn",
+                    },
+                )
+                payload = await response.json()
+        finally:
+            await client.close()
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["error"], "local_voice_wake_required")
+        self.assertEqual(payload["reason"], "admission_token_missing")
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertEqual(fast_api.CHAT_MESSAGES, [])
+        self.assertEqual(fast_api.ACTION_COORDINATOR.snapshot(), before_actions)
+        reset_receipt.assert_not_called()
+        append_message.assert_not_called()
+        memory_write.assert_not_called()
+        planner.assert_not_awaited()
+        llm_stream.assert_not_called()
+        continuity.assert_not_called()
+        queue_speech.assert_not_called()
+
+    async def test_local_voice_stream_token_cannot_be_reused(self) -> None:
+        request_payload = self.admitted_local_payload("한 번만 처리해줘")
+        llm_calls = 0
+
+        async def fake_iter(_text: str, *, source: str):
+            nonlocal llm_calls
+            self.assertEqual(source, "local_bridge")
+            llm_calls += 1
+            yield "한 번만 답했어."
+
+        client = TestClient(TestServer(fast_api.create_app()))
+        await client.start_server()
+        try:
+            with patch.object(
+                fast_api,
+                "execute_explicit_memory_confirmation",
+                return_value=(False, "", None, ""),
+            ), patch.object(
+                fast_api,
+                "plan_fast_tool_request_for_turn",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "resolve_pre_llm_reply",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                fast_api,
+                "iter_main_llm_deltas",
+                new=fake_iter,
+            ):
+                first = await client.post(
+                    "/api/control-page/chat-stream",
+                    json=request_payload,
+                )
+                first_body = await first.text()
+                history_after_first = list(fast_api.CHAT_MESSAGES)
+                second = await client.post(
+                    "/api/control-page/chat-stream",
+                    json=request_payload,
+                )
+                second_payload = await second.json()
+        finally:
+            await client.close()
+
+        self.assertEqual(first.status, 200, first_body)
+        self.assertEqual(second.status, 409)
+        self.assertEqual(second_payload["reason"], "admission_token_reused")
+        self.assertEqual(llm_calls, 1)
+        self.assertEqual(fast_api.CHAT_MESSAGES, history_after_first)
 
     async def test_minecraft_owner_api_rejects_browser_origin(
         self,
@@ -386,10 +527,9 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             ):
                 response = await client.post(
                     "/api/control-page/chat-stream",
-                    json={
-                        "text": "경계 스트림 응답 테스트",
-                        "source": "local_bridge",
-                    },
+                    json=self.admitted_local_payload(
+                        "경계 스트림 응답 테스트"
+                    ),
                 )
                 body = await response.text()
                 payload = json.loads(body)

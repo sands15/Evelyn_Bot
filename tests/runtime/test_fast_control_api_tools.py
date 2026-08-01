@@ -25,6 +25,22 @@ from tests.continuity_test_support import (  # noqa: E402
 
 class FastControlApiToolTests(unittest.TestCase):
     def setUp(self) -> None:
+        original_local_voice_admission = fast_api.LOCAL_VOICE_ADMISSION
+        fast_api.LOCAL_VOICE_ADMISSION = fast_api.LocalVoiceAdmissionManager()
+        self.addCleanup(
+            setattr,
+            fast_api,
+            "LOCAL_VOICE_ADMISSION",
+            original_local_voice_admission,
+        )
+        validation_context_patcher = patch.object(
+            fast_api,
+            "local_voice_validation_binding_is_current",
+            side_effect=lambda binding: not binding,
+        )
+        validation_context_patcher.start()
+        self.addCleanup(validation_context_patcher.stop)
+        self._voice_turn_seq = 0
         fast_api.FAST_RUNTIME_HEALTH_CACHE.clear()
         fast_api.CHAT_MESSAGES.clear()
         fast_api.ACTION_COORDINATOR.clear()
@@ -49,6 +65,29 @@ class FastControlApiToolTests(unittest.TestCase):
         )
         fast_api.SHUTDOWN_REQUEST.update({"requested": False, "requestedAt": None, "source": "", "reason": ""})
         fast_api.RESTART_REQUEST.update({"requested": False, "requestedAt": None, "source": "", "reason": ""})
+
+    def admitted_local_payload(self, text: str) -> dict[str, object]:
+        self._voice_turn_seq += 1
+        bridge_instance_id = "test-fast-api-tools-bridge"
+        turn_id = f"test-fast-api-tools-turn-{self._voice_turn_seq}"
+        fast_api.LOCAL_VOICE_ADMISSION.observe_bridge_instance(
+            bridge_instance_id
+        )
+        issued = fast_api.LOCAL_VOICE_ADMISSION.issue(
+            bridge_instance_id,
+            turn_id,
+            f"이블린 {text}",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        self.assertTrue(issued.get("admitted"), issued)
+        return {
+            "text": issued["forwardText"],
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_instance_id,
+            "turnId": turn_id,
+            "admissionToken": issued["admissionToken"],
+        }
 
     def test_memory_panel_slash_command_routes_without_main_llm(self) -> None:
         self.assertEqual(fast_api.detect_memory_panel_action("/memory"), "toggle")
@@ -948,10 +987,73 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIn("active_action_id", fast_api.FAST_MAIN_LLM_SYSTEM_PROMPT)
         self.assertIn("확인해볼게", fast_api.FAST_MAIN_LLM_SYSTEM_PROMPT)
 
-    def test_natural_mic_status_executes_before_main_llm(self) -> None:
+    def test_local_voice_nonstream_missing_token_has_no_turn_side_effects(
+        self,
+    ) -> None:
         class _Request:
             async def json(self):
-                return {"text": "마이크 입력이 되고 있어?", "source": "local_bridge"}
+                return {
+                    "text": "주변 대화가 잘못 들어온 문장",
+                    "source": "local_bridge",
+                    "bridgeInstanceId": "test-fast-api-tools-bridge",
+                    "turnId": "missing-token-turn",
+                }
+
+        before_actions = fast_api.ACTION_COORDINATOR.snapshot()
+        with patch.object(
+            fast_api,
+            "reset_fast_memory_context_receipt",
+        ) as reset_receipt, patch.object(
+            fast_api,
+            "append_chat_message",
+        ) as append_message, patch.object(
+            fast_api,
+            "execute_explicit_memory_confirmation",
+        ) as memory_write, patch.object(
+            fast_api,
+            "plan_fast_tool_request_for_turn",
+            new=AsyncMock(),
+        ) as planner, patch.object(
+            fast_api,
+            "resolve_pre_llm_reply",
+            new=AsyncMock(),
+        ) as pre_llm, patch.object(
+            fast_api,
+            "ask_main_llm",
+            new=AsyncMock(),
+        ) as main_llm, patch.object(
+            fast_api,
+            "commit_fast_control_turn",
+        ) as continuity, patch.object(
+            fast_api,
+            "queue_local_bridge_speech",
+        ) as queue_speech:
+            response = asyncio.run(fast_api.chat_handler(_Request()))
+
+        payload = fast_api.json.loads(response.text or "{}")
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["error"], "local_voice_wake_required")
+        self.assertEqual(payload["reason"], "admission_token_missing")
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertEqual(fast_api.CHAT_MESSAGES, [])
+        self.assertEqual(fast_api.ACTION_COORDINATOR.snapshot(), before_actions)
+        reset_receipt.assert_not_called()
+        append_message.assert_not_called()
+        memory_write.assert_not_called()
+        planner.assert_not_awaited()
+        pre_llm.assert_not_awaited()
+        main_llm.assert_not_awaited()
+        continuity.assert_not_called()
+        queue_speech.assert_not_called()
+
+    def test_natural_mic_status_executes_before_main_llm(self) -> None:
+        request_payload = self.admitted_local_payload(
+            "마이크 입력이 되고 있어?"
+        )
+
+        class _Request:
+            async def json(self):
+                return dict(request_payload)
 
         async def fake_collect_runtime_health(*, manifest, probe_runner):
             return {
@@ -1040,9 +1142,11 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertNotEqual(reply, "마이크 입력을 껐어.")
 
     def test_mic_command_runs_before_main_llm_and_uses_actual_ack(self) -> None:
+        request_payload = self.admitted_local_payload("/mic on")
+
         class _Request:
             async def json(self):
-                return {"text": "/mic on", "source": "local_bridge"}
+                return dict(request_payload)
 
         async def fake_collect_runtime_health(*, manifest, probe_runner):
             return {
@@ -1087,9 +1191,11 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["text"], "마이크 입력을 켰어.")
 
     def test_chat_handler_blocks_future_claim_without_task_id(self) -> None:
+        request_payload = self.admitted_local_payload("설정 확인해줘")
+
         class _Request:
             async def json(self):
-                return {"text": "설정 확인해줘", "source": "local_bridge"}
+                return dict(request_payload)
 
         async def fake_collect_runtime_health(*, manifest, probe_runner):
             return {
@@ -1435,9 +1541,11 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertNotIn("C:\\\\private", snapshot_text)
 
     def test_chat_handler_returns_real_task_id_before_background_followup(self) -> None:
+        request_payload = self.admitted_local_payload("긴 작업")
+
         class _Request:
             async def json(self):
-                return {"text": "긴 작업", "source": "local_bridge"}
+                return dict(request_payload)
 
         async def runner(user_text: str, source: str) -> str:
             await asyncio.sleep(0)

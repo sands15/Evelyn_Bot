@@ -43,3 +43,23 @@ blocker가 없으면 같은 세션으로 `running` 전환된다.
 상태 파일은 누적 로그가 아니라 단일 최신 상태이며, ON 요청 전에 `enabling`,
 OFF 요청 전에 `revoking`을 먼저 기록해 재시작 시 fail-closed 복구할 수 있게
 한다.
+
+## 캡처 동의와 발화 admission의 분리
+
+활성 동의는 검증에 필요한 마이크 캡처만 허용한다. 주변 발화를 대화·도구·
+변경성 동작에 전달하는 권한은 별도의
+`docs/LOCAL_VOICE_ADMISSION_CONTRACT.md`가 판정한다.
+
+- 일반 로컬 음성은 정확한 선행 호출어 `이블린`을 요구한다.
+- 호출을 소비한 뒤의 follow-up은 45초 동안만 유효하다.
+- shutdown/restart, mic 변경, Minecraft 변경 의도는 follow-up 중에도 새
+  호출어를 요구한다.
+- 검증 예외는 현재 session/step/attempt/attemptId와 기대 transcript 판정이
+  모두 일치할 때만 허용되고, 10초 일회성 capability 소비 시 binding을 다시
+  확인한다. 이 예외는 일반 45초 follow-up 창을 열거나 갱신하지 않는다.
+- 동의 철회·mic-off·bridge instance 교체는 아직 소비하지 않은 admission과
+  follow-up 상태를 폐기한다.
+
+이 경계의 합성 테스트와 공개 브라우저 source-spoof 차단은 구현됐지만 실제
+마이크·스피커 10턴과 silence의 live E2E는 아직 사용자 청취 확인과 함께
+검증하지 않았다.

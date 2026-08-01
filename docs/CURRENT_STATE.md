@@ -39,6 +39,22 @@ Source branch: `codex/dependency-config-hardening`, current memory-deletion inte
     않는다. 재생 중 발화는 기존 barge-in 큐와 VAD/RMS/화자 검증을 유지한다.
   - clone TTS 실패 시 같은 playback owner 안에서 `auto` voice로 한 번
     fallback하므로 재귀 claim 충돌과 이중 재생을 만들지 않는다.
+  - 현재 소스에는 로컬 STT admission 경계가 추가됐다. 초기 발화는 정확한
+    선행 `이블린`, 성공 소비 뒤 일반 follow-up은 45초를 요구하며,
+    shutdown/restart, mic, Minecraft 변경 의도는 follow-up 중에도 새 호출을
+    요구한다.
+  - admission capability는 10초 일회성이고 bridge instance, turn,
+    canonical forward-text SHA-256, mode와 exact validation attempt에 묶인다.
+    user row·planner·LLM·side effect보다 먼저 소비하며, 소비된 turn은 120초
+    replay ledger로 stream/non-stream 이중 실행을 막는다. validation-bound
+    소비는 일반 follow-up 창을 열거나 갱신하지 않는다.
+  - 공개 Control Page chat은 source를 `control_page`로 고정하고 브라우저의
+    `local_bridge` 주장과 admission/bridge/validation 필드를 Bot API에
+    전달하지 않는다. 공개 admission status는 count와 고정 reason만 남기며
+    audio, transcript, raw text, token을 포함하지 않는다.
+  - 이 변경은 현재 worktree의 소스·합성 계약이며 실행 중인 Bot API/Bridge를
+    교체하거나 실제 마이크를 켜지 않았다. 실제 10턴·barge-in·silence live
+    hardware 증거는 여전히 없다.
 - 루트 Python 의존성은 `requirements.lock`으로 고정했다.
 - GitHub Actions는 Windows/Python 3.11/Node 24에서 전체 회귀 테스트와 실제 `main.py` 프로세스 smoke를 실행한다.
 - 단기 대화 연속성 checkpoint의 guild 초기화 경계를 강화했다.

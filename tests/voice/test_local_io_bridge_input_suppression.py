@@ -16,6 +16,36 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
 
 
+def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
+    async def issue(
+        text: str,
+        *,
+        turn_id: str,
+        validation=None,
+        expected_epoch=None,
+    ):
+        return {
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": turn_id,
+            "originalText": text,
+            "forwardText": text,
+            "admissionToken": "a" * 32,
+            "validation": dict(validation or {}),
+            "mode": "wake_entry",
+            "issuedMonotonic": time.monotonic(),
+            "epoch": (
+                bridge.admission_epoch
+                if expected_epoch is None
+                else expected_epoch
+            ),
+            "_botDispatched": False,
+        }
+
+    admission = AsyncMock(side_effect=issue)
+    bridge._request_voice_admission = admission  # type: ignore[method-assign]
+    return admission
+
+
 class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
     def test_speaking_input_is_not_discarded_but_post_playback_cooldown_is(self) -> None:
         bridge = LocalIoBridge()
@@ -33,12 +63,16 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         bridge = LocalIoBridge()
         bridge.queue.put_nowait((b"one", {"source": "test"}))
         bridge.queue.put_nowait((b"two", {"source": "test"}))
+        bridge.priority_queue.put_nowait((b"priority", {"source": "test"}))
+        bridge.barge_in_queue.put_nowait((b"barge", {"source": "test"}))
 
-        self.assertEqual(bridge._discard_pending_mic_segments(), 2)
+        self.assertEqual(bridge._discard_pending_mic_segments(), 4)
         self.assertTrue(bridge.queue.empty())
-        self.assertEqual(bridge.discarded_pending_mic_segment_count, 2)
+        self.assertTrue(bridge.priority_queue.empty())
+        self.assertTrue(bridge.barge_in_queue.empty())
+        self.assertEqual(bridge.discarded_pending_mic_segment_count, 4)
         self.assertEqual(bridge._discard_pending_mic_segments(), 0)
-        self.assertEqual(bridge.discarded_pending_mic_segment_count, 2)
+        self.assertEqual(bridge.discarded_pending_mic_segment_count, 4)
 
     async def test_already_queued_segment_survives_post_playback_cooldown(self) -> None:
         bridge = LocalIoBridge()
@@ -46,9 +80,11 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         bridge._post_status = AsyncMock()  # type: ignore[method-assign]
         bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]
         bridge._chat = AsyncMock(return_value="ok")  # type: ignore[method-assign]
+        admission = install_admission_grant(bridge)
 
         await bridge._handle_segment(b"user speech", {"source": "test"})
 
+        admission.assert_awaited_once()
         self.assertEqual(bridge.segment_count, 1)
         self.assertEqual(bridge.transcript_count, 1)
         self.assertEqual(bridge.suppressed_mic_segment_count, 0)

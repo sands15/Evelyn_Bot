@@ -2,10 +2,11 @@
 
 import asyncio
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import numpy as np
 
@@ -25,6 +26,36 @@ from evelyn_core.local_mic import (  # noqa: E402
     should_route_discord_user_to_local_mic,
 )
 from evelyn_core.local_io_bridge import LocalIoBridge, iter_pcm_aligned_chunks  # noqa: E402
+
+
+def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
+    async def issue(
+        text: str,
+        *,
+        turn_id: str,
+        validation=None,
+        expected_epoch=None,
+    ):
+        return {
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": turn_id,
+            "originalText": text,
+            "forwardText": text,
+            "admissionToken": "a" * 32,
+            "validation": dict(validation or {}),
+            "mode": "wake_entry",
+            "issuedMonotonic": time.monotonic(),
+            "epoch": (
+                bridge.admission_epoch
+                if expected_epoch is None
+                else expected_epoch
+            ),
+            "_botDispatched": False,
+        }
+
+    admission = AsyncMock(side_effect=issue)
+    bridge._request_voice_admission = admission  # type: ignore[method-assign]
+    return admission
 
 
 class LocalMicRoutingTests(unittest.TestCase):
@@ -115,6 +146,7 @@ class LocalMicRoutingTests(unittest.TestCase):
 
     def test_local_io_bridge_shutdown_starts_script_and_exits_once(self) -> None:
         bridge = LocalIoBridge()
+        bridge.admission_active = True
 
         with (
             patch.object(bridge, "_start_shutdown_script") as start_shutdown,
@@ -124,11 +156,14 @@ class LocalMicRoutingTests(unittest.TestCase):
             bridge._handle_control_response({"shutdown": {"requested": True}})
 
         self.assertTrue(bridge.shutdown_started)
+        self.assertFalse(bridge.admission_active)
+        self.assertEqual(bridge.admission_epoch, 1)
         start_shutdown.assert_called_once_with()
         schedule_exit.assert_called_once_with()
 
     def test_local_io_bridge_restart_starts_script_and_exits_once(self) -> None:
         bridge = LocalIoBridge()
+        bridge.admission_active = True
 
         with (
             patch.object(bridge, "_start_restart_script") as start_restart,
@@ -138,6 +173,8 @@ class LocalMicRoutingTests(unittest.TestCase):
             bridge._handle_control_response({"restart": {"requested": True}})
 
         self.assertTrue(bridge.restart_started)
+        self.assertFalse(bridge.admission_active)
+        self.assertEqual(bridge.admission_epoch, 1)
         start_restart.assert_called_once_with()
         schedule_exit.assert_called_once_with()
 
@@ -168,12 +205,13 @@ class LocalMicRoutingTests(unittest.TestCase):
             bridge._speak = AsyncMock(  # type: ignore[method-assign]
                 side_effect=AssertionError("help must not enter one-shot TTS")
             )
+            install_admission_grant(bridge)
             await bridge._handle_segment(b"pcm", {"source": "test"})
             return bridge
 
         bridge = asyncio.run(scenario())
 
-        bridge._chat.assert_awaited_once_with("/help")  # type: ignore[union-attr]
+        bridge._chat.assert_awaited_once_with("/help", grant=ANY)  # type: ignore[union-attr]
         bridge._chat_stream_and_speak.assert_not_awaited()  # type: ignore[union-attr]
         bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
         self.assertEqual(bridge.last_latency["ttsMs"], 0.0)
@@ -224,15 +262,10 @@ class LocalMicRoutingTests(unittest.TestCase):
         async def scenario() -> LocalIoBridge:
             bridge = LocalIoBridge()
             bridge.mic_enabled = True
+            bridge.admission_active = True
             bridge.queue.put_nowait((b"pcm", {"source": "test"}))
-
-            async def stop_mic() -> None:
-                bridge.mic_enabled = False
-                bridge._discard_pending_mic_segments()
-                bridge.ready = True
-                bridge.last_error = ""
-
-            bridge._stop_mic = AsyncMock(side_effect=stop_mic)  # type: ignore[method-assign]
+            bridge.priority_queue.put_nowait((b"priority", {"source": "test"}))
+            bridge.barge_in_queue.put_nowait((b"barge", {"source": "test"}))
             bridge._handle_control_response(
                 {"micControlRequest": {"revision": 23, "enabled": False}}
             )
@@ -242,10 +275,14 @@ class LocalMicRoutingTests(unittest.TestCase):
         bridge = asyncio.run(scenario())
 
         self.assertFalse(bridge.mic_enabled)
+        self.assertFalse(bridge.admission_active)
+        self.assertEqual(bridge.admission_epoch, 1)
         self.assertTrue(bridge.ready)
         self.assertEqual(bridge.queue.qsize(), 0)
+        self.assertEqual(bridge.priority_queue.qsize(), 0)
+        self.assertEqual(bridge.barge_in_queue.qsize(), 0)
+        self.assertEqual(bridge.discarded_pending_mic_segment_count, 3)
         self.assertEqual(bridge.mic_control_request_revision, 23)
-        bridge._stop_mic.assert_awaited_once()  # type: ignore[union-attr]
 
     def test_local_io_bridge_rejects_minecraft_world_action_without_lease_owner(self) -> None:
         async def scenario() -> LocalIoBridge:
@@ -464,7 +501,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_TEXT", bridge_source)
         self.assertIn("tts_warmup_done", bridge_source)
         self.assertIn("/api/control-page/chat-stream", bridge_source)
-        self.assertIn('"turnId": self.active_turn_id', bridge_source)
+        self.assertIn("async def _local_voice_chat_payload", bridge_source)
+        self.assertIn('"turnId": str(grant.get("turnId") or "")', bridge_source)
+        self.assertIn('"admissionToken": str(grant.get("admissionToken") or "")', bridge_source)
         self.assertIn('if event_type == "progress":', bridge_source)
         self.assertIn('await websocket.send_json({"type": "commit"})', bridge_source)
         self.assertIn('"progressCount": progress_count', bridge_source)

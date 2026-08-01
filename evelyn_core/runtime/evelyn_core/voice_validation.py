@@ -348,11 +348,10 @@ def resolve_discord_validation_target(
     return {"ok": True, "discordTarget": candidates[0]}
 
 
-def active_validation_context(
+def _active_validation_session_snapshot(
     *,
     surface: str,
     root: Path | None = None,
-    prefer_interrupt: bool = False,
     now: Any | None = None,
 ) -> dict[str, Any] | None:
     base = Path(root or get_runtime_artifacts_root()) / "voice_validation"
@@ -373,6 +372,18 @@ def active_validation_context(
     current_time = (now or time.time)()
     if _session_expiry_state(active, now=current_time) != "active":
         return None
+    current = active.get("currentStep")
+    if not isinstance(current, dict) or not current.get("id"):
+        return None
+    return active
+
+
+def _validation_context_from_snapshot(
+    active: dict[str, Any],
+    *,
+    surface: str,
+    prefer_interrupt: bool,
+) -> dict[str, Any] | None:
     current = active.get("currentStep")
     if not isinstance(current, dict) or not current.get("id"):
         return None
@@ -415,6 +426,73 @@ def active_validation_context(
     }
 
 
+def _validation_contexts_from_snapshot(
+    active: dict[str, Any],
+    *,
+    surface: str,
+) -> tuple[dict[str, Any], ...]:
+    contexts: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int, str]] = set()
+    for prefer_interrupt in (False, True):
+        context = _validation_context_from_snapshot(
+            active,
+            surface=surface,
+            prefer_interrupt=prefer_interrupt,
+        )
+        if context is None:
+            continue
+        key = (
+            str(context.get("sessionId") or ""),
+            str(context.get("stepId") or ""),
+            int(context.get("attempt") or 0),
+            str(context.get("attemptId") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        contexts.append(context)
+    return tuple(contexts)
+
+
+def _active_validation_contexts(
+    *,
+    surface: str,
+    root: Path | None = None,
+    now: Any | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Return normal/interrupt contexts from one canonical active.json read."""
+
+    active = _active_validation_session_snapshot(
+        surface=surface,
+        root=root,
+        now=now,
+    )
+    if active is None:
+        return ()
+    return _validation_contexts_from_snapshot(active, surface=surface)
+
+
+def active_validation_context(
+    *,
+    surface: str,
+    root: Path | None = None,
+    prefer_interrupt: bool = False,
+    now: Any | None = None,
+) -> dict[str, Any] | None:
+    active = _active_validation_session_snapshot(
+        surface=surface,
+        root=root,
+        now=now,
+    )
+    if active is None:
+        return None
+    return _validation_context_from_snapshot(
+        active,
+        surface=surface,
+        prefer_interrupt=prefer_interrupt,
+    )
+
+
 def validation_attempt_binding_is_current(
     metadata: dict[str, Any] | None,
     *,
@@ -427,47 +505,191 @@ def validation_attempt_binding_is_current(
     session_id = str(
         source.get("validation_session_id")
         or source.get("validationSessionId")
+        or source.get("sessionId")
         or ""
     )
     step_id = str(
         source.get("validation_step_id")
         or source.get("validationStepId")
+        or source.get("stepId")
         or ""
     )
     attempt_id = str(
         source.get("validation_attempt_id")
         or source.get("validationAttemptId")
+        or source.get("attemptId")
         or ""
     )
-    if not (session_id or step_id or attempt_id):
+    raw_attempt = source.get("validation_attempt")
+    if raw_attempt is None:
+        raw_attempt = source.get("validationAttempt")
+    if raw_attempt is None:
+        raw_attempt = source.get("attempt")
+    attempt = (
+        _parse_attempt_revision(raw_attempt)
+        if raw_attempt is not None
+        else None
+    )
+    if not (session_id or step_id or attempt_id or raw_attempt is not None):
         if not reject_unbound_when_active:
             return True
-        return not any(
-            active_validation_context(
-                surface=surface,
-                root=root,
-                prefer_interrupt=prefer_interrupt,
-                now=now,
-            )
-            for prefer_interrupt in (False, True)
+        return not _active_validation_contexts(
+            surface=surface,
+            root=root,
+            now=now,
         )
     if not (session_id and step_id and attempt_id):
         return False
-    for prefer_interrupt in (False, True):
-        context = active_validation_context(
-            surface=surface,
-            root=root,
-            prefer_interrupt=prefer_interrupt,
-            now=now,
-        )
+    if raw_attempt is not None and attempt is None:
+        return False
+    for context in _active_validation_contexts(
+        surface=surface,
+        root=root,
+        now=now,
+    ):
         if (
             context
             and context.get("sessionId") == session_id
             and context.get("stepId") == step_id
             and context.get("attemptId") == attempt_id
+            and (
+                attempt is None
+                or int(context.get("attempt") or 0) == attempt
+            )
         ):
             return True
     return False
+
+
+def validation_transcript_admission_status(
+    surface: str,
+    transcript: Any,
+    metadata: dict[str, Any] | None,
+    *,
+    root: Path | None = None,
+    now: Any | None = None,
+) -> dict[str, Any]:
+    """Read-only, content-free validation of a transcript-bound test attempt.
+
+    This helper deliberately does not ingest the validation event log or persist
+    the session.  It is safe for the Bot API admission boundary to call while the
+    Control Page process remains the validation session writer.
+    """
+
+    result: dict[str, Any] = {
+        "schema": "voice_validation.transcript-admission.v1",
+        "current": False,
+        "matched": False,
+        "kind": "",
+        "similarity": 0.0,
+        "keywordRatio": 0.0,
+        "matchedKeywordCount": 0,
+        "requiredKeywordCount": 0,
+        "threshold": 0.70,
+        "reason": "validation_attempt_stale",
+        "contentFree": True,
+    }
+    normalized_surface = str(surface or "").strip().lower()
+    if normalized_surface not in ALLOWED_SURFACES:
+        result["reason"] = "validation_surface_invalid"
+        return result
+
+    source = metadata if isinstance(metadata, dict) else {}
+    session_id = str(
+        source.get("validation_session_id")
+        or source.get("validationSessionId")
+        or source.get("sessionId")
+        or ""
+    )
+    step_id = str(
+        source.get("validation_step_id")
+        or source.get("validationStepId")
+        or source.get("stepId")
+        or ""
+    )
+    attempt_id = str(
+        source.get("validation_attempt_id")
+        or source.get("validationAttemptId")
+        or source.get("attemptId")
+        or ""
+    )
+    attempt = _parse_attempt_revision(
+        source.get("validation_attempt")
+        or source.get("validationAttempt")
+        or source.get("attempt")
+    )
+    if not (session_id and step_id and attempt_id and attempt is not None):
+        return result
+
+    artifacts_root = Path(root or get_runtime_artifacts_root())
+    active = _active_validation_session_snapshot(
+        surface=normalized_surface,
+        root=artifacts_root,
+        now=now,
+    )
+    if active is None:
+        return result
+    context = next(
+        (
+            candidate
+            for candidate in _validation_contexts_from_snapshot(
+                active,
+                surface=normalized_surface,
+            )
+            if candidate
+            and candidate.get("sessionId") == session_id
+            and candidate.get("stepId") == step_id
+            and candidate.get("attemptId") == attempt_id
+            and int(candidate.get("attempt") or 0) == attempt
+        ),
+        None,
+    )
+    if context is None:
+        return result
+
+    step = next(
+        (
+            item
+            for item in (active or {}).get("_steps") or []
+            if isinstance(item, dict)
+            and item.get("surface") == normalized_surface
+            and item.get("id") == step_id
+            and item.get("_attemptId") == attempt_id
+            and _parse_attempt_revision(item.get("attempt")) == attempt
+        ),
+        None,
+    )
+    if step is None:
+        return result
+
+    match = transcript_match(
+        transcript,
+        step.get("prompt"),
+        keywords=step.get("keywords") or (),
+    )
+    kind = str(step.get("kind") or "")
+    result.update(
+        {
+            "current": True,
+            "matched": bool(match.get("matched")) and kind != "silence",
+            "kind": kind,
+            "similarity": float(match.get("similarity") or 0.0),
+            "keywordRatio": float(match.get("keywordRatio") or 0.0),
+            "matchedKeywordCount": int(match.get("matchedKeywordCount") or 0),
+            "requiredKeywordCount": int(match.get("requiredKeywordCount") or 0),
+            "threshold": float(match.get("threshold") or 0.70),
+            "reason": (
+                "validation_silence_activity"
+                if kind == "silence"
+                else (
+                    "validation_transcript_matched"
+                    if bool(match.get("matched"))
+                    else "validation_transcript_mismatch"
+                )
+            ),
+        }
+    )
+    return result
 
 
 def emit_voice_validation_event(
@@ -2269,4 +2491,5 @@ __all__ = [
     "resolve_discord_validation_target",
     "transcript_match",
     "validation_attempt_binding_is_current",
+    "validation_transcript_admission_status",
 ]

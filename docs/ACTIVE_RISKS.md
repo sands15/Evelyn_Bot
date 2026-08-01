@@ -370,6 +370,18 @@ token은 120초·일회용이고, 동의는 세션 연결 전 최대 5분과 연
 fail-closed 요청한다. 상태는 제어 메타데이터만 저장하고 음성·transcript를
 저장하지 않는다. 현재 실제 마이크는 계속 비활성 상태다.
 
+현재 소스에는 캡처 동의와 별도의 발화 admission 경계도 추가됐다. 정확한 선행
+`이블린`, 성공 소비 뒤 45초 follow-up, shutdown/restart·mic·Minecraft 변경의
+매회 fresh wake를 요구한다. 10초 일회성 capability는 bridge instance, turn,
+canonical forward-text digest, mode와 exact validation attempt에 묶이고 user
+row·planner·LLM·side effect보다 먼저 소비된다. validation은 현재 step의 기대
+transcript 판정을 통과한 exact binding만 발급하며 소비 때 binding을 재검사한다.
+validation-bound 소비는 일반 follow-up lease를 열거나 갱신하지 않는다.
+공개 Control Page는 `local_bridge` source와 admission/bridge/validation 필드
+spoof를 Bot API 프록시 전에 거부한다. 다만 이 소스는 실행 중 서비스에 배포하지
+않았고 실제 방 안의 주변 발화·TV/TTS echo·동시 화자 corpus로 false accept와
+false reject를 측정하지 않았다.
+
 검증 FSM은 이제 현재 단계와 연결된 interrupt 단계 외 이벤트를 거부하고,
 재생 완료 전 청취 확인과 지난 단계 재시도를 허용하지 않는다. STT 불일치,
 중복 final/turn/playback/interrupt, 완료·취소 동시 관측, 무음 구간 활동도
@@ -442,8 +454,9 @@ voice 상태와 turn summary에는 고정 오류 코드·예외 타입만 남긴
 failure-injection은 아직 수행하지 않았다.
 
 다음 조치: 사용자가 Control Page의 “검증 세션 동안 마이크 허용”을 직접 확인한
-뒤 로컬/Discord 10턴, barge-in, 무음 구간과 연결/TTS failure-injection을
-실행하고 비식별 보고서를 기록한다.
+뒤 먼저 dormant 상태의 주변 발화·중간/유사 호출어·고영향 follow-up이 실제
+side effect 전에 거부되는지 확인한다. 이어 로컬/Discord 10턴, barge-in, 무음
+구간과 연결/TTS failure-injection을 실행하고 비식별 보고서를 기록한다.
 
 ## P1 — 과거 기억의 누락된 파생 provenance와 재합성 지연
 

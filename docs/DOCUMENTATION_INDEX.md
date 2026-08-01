@@ -1,6 +1,6 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-07-31
+Last reviewed: 2026-08-01
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
@@ -41,6 +41,15 @@ implemented behavior.
 
 - `docs/RUNTIME_ARTIFACTS_RETENTION.md`
   - Current retention guidance for runtime artifacts.
+
+- `docs/LOCAL_VOICE_ADMISSION_CONTRACT.md`
+  - 로컬 STT가 대화·도구·side effect로 들어가기 전의 정확한 선행 호출어,
+    45초 follow-up, 고영향 fresh-wake, validation 한정 예외, 10초 일회성
+    capability와 browser source-spoof 차단·privacy 계약.
+
+- `docs/VOICE_CAPTURE_CONSENT.md`
+  - Control Page 로컬 검증의 시간 제한 마이크 캡처 동의와 철회 계약. 캡처
+    동의가 발화 admission 권한을 대신하지 않는 경계를 함께 설명한다.
 
 - `docs/DEPENDENCY_CONFIG_CREDENTIAL_HARDENING.md`
   - Current dependency compatibility matrix, typed owner configuration,
