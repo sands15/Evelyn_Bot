@@ -47,6 +47,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "conversation_continuity_guild_reset_revoke_failed",
         "conversation_continuity_restore_failed",
         "docker_compose_failed",
+        "gateway_readiness_probe_failed",
         "heartbeat_write_failed",
         "host_action_launch_failed",
         "local_bridge_unexpected_exit",

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -18,6 +19,20 @@ from evelyn_core import mindcraft_service  # noqa: E402
 
 
 class MindcraftRuntimeContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.world_action_lock_path = (
+            Path(self.temp_dir.name) / "world_action.lock"
+        )
+        lock_path_patch = patch.object(
+            mindcraft_service,
+            "WORLD_ACTION_LOCK_PATH",
+            self.world_action_lock_path,
+        )
+        lock_path_patch.start()
+        self.addCleanup(lock_path_patch.stop)
+
     def test_default_goal_targets_the_ender_dragon_with_survival_prerequisites(self) -> None:
         goal = mindcraft_service.DEFAULT_GOAL
         self.assertIn("Defeat the Ender Dragon", goal)
@@ -99,6 +114,125 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
 
         runtime._ensure_process_running.assert_called_once_with()
         self.assertTrue(runtime._manual_stop)
+
+    def test_reconcile_holds_action_lock_through_auto_restart_effect(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        effect_entered = threading.Event()
+        allow_effect = threading.Event()
+        results: list[bool] = []
+        errors: list[BaseException] = []
+
+        def ensure_process_running() -> None:
+            effect_entered.set()
+            if not allow_effect.wait(timeout=5.0):
+                raise RuntimeError("auto-restart effect gate timed out")
+
+        def reconcile() -> None:
+            try:
+                results.append(runtime.reconcile_world_lease())
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        runtime._ensure_process_running = ensure_process_running
+        with patch.object(
+            mindcraft_service,
+            "load_guarded_world_lease",
+            return_value=({"active": True, "processNonce": "old-epoch"}, ""),
+        ):
+            worker = threading.Thread(target=reconcile, daemon=True)
+            worker.start()
+            self.assertTrue(effect_entered.wait(timeout=5.0))
+
+            successor = mindcraft_service.MinecraftOwnerLock(
+                self.world_action_lock_path
+            )
+            try:
+                with self.assertRaises(
+                    mindcraft_service.MinecraftOwnerLockBusy
+                ):
+                    successor.acquire()
+            finally:
+                successor.release()
+                allow_effect.set()
+                worker.join(timeout=5.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [True])
+
+    def test_shutdown_handoff_blocks_old_epoch_auto_restart(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._ensure_process_running = Mock()
+        guarded_load = Mock(
+            return_value=(
+                {"active": True, "processNonce": "old-epoch"},
+                "",
+            )
+        )
+        shutdown_boundary = mindcraft_service.MinecraftOwnerLock(
+            self.world_action_lock_path
+        )
+        shutdown_boundary.acquire()
+        try:
+            with patch.object(
+                mindcraft_service,
+                "load_guarded_world_lease",
+                guarded_load,
+            ):
+                authorized = runtime.reconcile_world_lease()
+        finally:
+            shutdown_boundary.release()
+
+        self.assertFalse(authorized)
+        self.assertEqual(
+            runtime._last_world_lease_error_code,
+            "minecraft_world_action_lock_busy",
+        )
+        guarded_load.assert_not_called()
+        runtime._ensure_process_running.assert_not_called()
+
+    def test_reconcile_rejects_forged_action_lock_capability(self) -> None:
+        unacquired_lock = mindcraft_service.MinecraftOwnerLock(
+            self.world_action_lock_path
+        )
+        wrong_path_lock = mindcraft_service.MinecraftOwnerLock(
+            self.world_action_lock_path.with_name("wrong.lock")
+        )
+        wrong_path_lock.acquire()
+        self.addCleanup(wrong_path_lock.release)
+
+        for action_lock in (unacquired_lock, wrong_path_lock):
+            with self.subTest(lock_path=action_lock.path):
+                runtime = mindcraft_service.MindcraftRuntime()
+                runtime._manual_stop = False
+                runtime.stop = Mock()
+                runtime._ensure_process_running = Mock()
+                guarded_load = Mock(
+                    return_value=(
+                        {"active": True, "processNonce": "old-epoch"},
+                        "",
+                    )
+                )
+
+                with patch.object(
+                    mindcraft_service,
+                    "load_guarded_world_lease",
+                    guarded_load,
+                ):
+                    authorized = runtime.reconcile_world_lease(
+                        world_action_lock=action_lock
+                    )
+
+                self.assertFalse(authorized)
+                self.assertEqual(
+                    runtime._last_world_lease_error_code,
+                    "minecraft_world_action_lock_unavailable",
+                )
+                runtime.stop.assert_called_once_with()
+                guarded_load.assert_not_called()
+                runtime._ensure_process_running.assert_not_called()
 
     def test_status_uses_fresh_mindcraft_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

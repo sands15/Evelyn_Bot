@@ -39,6 +39,8 @@ class VoiceCapabilitiesTests(unittest.TestCase):
                         "micEnabled": True,
                         "mic": {"enabled": True, "captureReady": True},
                         "outputDevice": "default",
+                        "outputReady": True,
+                        "outputErrorCode": "",
                         "ttsWarmup": {"enabled": True, "done": True, "error": ""},
                         "hostVision": {
                             "schema": "host_vision.status.v1",
@@ -82,6 +84,34 @@ class VoiceCapabilitiesTests(unittest.TestCase):
         self.assertEqual(capabilities["voiceLocal"]["state"], "unavailable")
         self.assertIn("local_mic_capture_not_ready", codes)
         self.assertIn("tts_warmup_incomplete", codes)
+
+    def test_local_output_format_support_is_a_hard_blocker(self):
+        health = self.ready_health()
+        bridge = next(row for row in health["services"] if row["id"] == "local_io_bridge")
+        payload = bridge["checks"][0]["payload"]
+        payload["outputReady"] = False
+        payload["outputErrorCode"] = "local_output_format_unsupported"
+
+        capability = build_voice_capabilities(health)["voiceLocal"]
+        codes = {item["code"] for item in capability["blockers"]}
+
+        self.assertFalse(capability["ready"])
+        self.assertEqual(capability["state"], "unavailable")
+        self.assertIn("local_output_format_unsupported", codes)
+
+    def test_local_output_ready_requires_exact_boolean_true(self):
+        health = self.ready_health()
+        bridge = next(row for row in health["services"] if row["id"] == "local_io_bridge")
+        payload = bridge["checks"][0]["payload"]
+        payload["outputReady"] = "true"
+        payload["outputErrorCode"] = "private-arbitrary-output-error"
+
+        capability = build_voice_capabilities(health)["voiceLocal"]
+        codes = {item["code"] for item in capability["blockers"]}
+
+        self.assertFalse(capability["ready"])
+        self.assertIn("local_output_readiness_unknown", codes)
+        self.assertNotIn("private-arbitrary-output-error", codes)
 
     def test_discord_connection_and_listening_are_hard_blockers(self):
         health = self.ready_health()

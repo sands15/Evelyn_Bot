@@ -25,11 +25,22 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def discord_gateway_connected(bot: Any) -> bool:
+    """Return true only while discord.py has a live, ready gateway socket."""
+
+    if bot.is_closed() is True or bot.is_ready() is not True:
+        return False
+    websocket = getattr(bot, "ws", None)
+    if websocket is None:
+        return False
+    return getattr(websocket, "open", False) is True
+
+
 class DiscordRuntimeStatus:
     def __init__(
         self,
         *,
-        bot_user: Callable[[], Any],
+        gateway_ready: Callable[[], bool],
         bot_guilds: Callable[[], list[Any]],
         voice_client_type: type,
         status_path: Path | None = None,
@@ -37,7 +48,7 @@ class DiscordRuntimeStatus:
         now: Callable[[], float] = time.time,
         search_followup_recovery_status: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
-        self.bot_user = bot_user
+        self.gateway_ready = gateway_ready
         self.bot_guilds = bot_guilds
         self.voice_client_type = voice_client_type
         self.status_path = status_path or (
@@ -63,6 +74,11 @@ class DiscordRuntimeStatus:
         self.last_error = f"{snapshot['lastErrorCode']}:{error_type}".rstrip(":")
 
     def snapshot(self) -> dict[str, Any]:
+        try:
+            gateway_connected = self.gateway_ready() is True
+        except Exception as exc:
+            self.record_error("gateway_readiness_probe_failed", exc)
+            gateway_connected = False
         guilds = list(self.bot_guilds() or [])
         voice_rows: list[dict[str, Any]] = []
         for guild in guilds:
@@ -104,7 +120,7 @@ class DiscordRuntimeStatus:
             "heartbeatAt": self.now(),
             "startedAt": self.started_at,
             "pid": os.getpid(),
-            "gatewayConnected": self.bot_user() is not None,
+            "gatewayConnected": gateway_connected,
             "guildConnected": bool(guilds),
             "guildCount": len(guilds),
             "voiceConnected": any(row["connected"] for row in voice_rows),
@@ -139,4 +155,8 @@ class DiscordRuntimeStatus:
             await asyncio.sleep(self.interval_sec)
 
 
-__all__ = ["DISCORD_STATUS_SCHEMA", "DiscordRuntimeStatus"]
+__all__ = [
+    "DISCORD_STATUS_SCHEMA",
+    "DiscordRuntimeStatus",
+    "discord_gateway_connected",
+]

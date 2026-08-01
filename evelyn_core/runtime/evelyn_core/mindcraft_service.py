@@ -359,20 +359,59 @@ class MindcraftRuntime:
                 )
                 _write_json(STATUS_PATH, telemetry)
 
-    def reconcile_world_lease(self) -> bool:
-        lease_status, error = load_guarded_world_lease(
-            WORLD_LEASE_STATUS_PATH,
-            WORLD_LEASE_SECRET_PATH,
-            owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH,
-        )
-        authorized = bool(lease_status)
-        self._last_world_lease_error_code = error
-        if not authorized:
-            if self.process_alive() or not self._manual_stop:
-                self.stop()
-            return False
-        self._ensure_process_running()
-        return True
+    def reconcile_world_lease(
+        self,
+        *,
+        world_action_lock: MinecraftOwnerLock | None = None,
+    ) -> bool:
+        action_lock = world_action_lock
+        release_action_lock = False
+        if action_lock is not None:
+            if (
+                not action_lock.acquired
+                or action_lock.path != WORLD_ACTION_LOCK_PATH
+            ):
+                self._last_world_lease_error_code = (
+                    "minecraft_world_action_lock_unavailable"
+                )
+                if self.process_alive() or not self._manual_stop:
+                    self.stop()
+                return False
+        else:
+            action_lock = MinecraftOwnerLock(WORLD_ACTION_LOCK_PATH)
+            try:
+                action_lock.acquire()
+                release_action_lock = True
+            except MinecraftOwnerLockBusy:
+                self._last_world_lease_error_code = (
+                    "minecraft_world_action_lock_busy"
+                )
+                return False
+            except (MinecraftOwnerLockUnavailable, OSError):
+                self._last_world_lease_error_code = (
+                    "minecraft_world_action_lock_unavailable"
+                )
+                if self.process_alive() or not self._manual_stop:
+                    self.stop()
+                return False
+
+        try:
+            lease_status, error = load_guarded_world_lease(
+                WORLD_LEASE_STATUS_PATH,
+                WORLD_LEASE_SECRET_PATH,
+                owner_claim_path=WORLD_LEASE_OWNER_CLAIM_PATH,
+            )
+            authorized = bool(lease_status)
+            self._last_world_lease_error_code = error
+            if not authorized:
+                if self.process_alive() or not self._manual_stop:
+                    self.stop()
+                return False
+            self._ensure_process_running()
+            return True
+        finally:
+            if release_action_lock:
+                action_lock.release()
 
     def stop(self) -> None:
         with self._lock:
@@ -416,8 +455,14 @@ class MindcraftRuntime:
                 self.stop()
                 self.start(goal)
 
-    def build_status(self) -> dict[str, Any]:
-        world_lease_authorized = self.reconcile_world_lease()
+    def build_status(
+        self,
+        *,
+        world_action_lock: MinecraftOwnerLock | None = None,
+    ) -> dict[str, Any]:
+        world_lease_authorized = self.reconcile_world_lease(
+            world_action_lock=world_action_lock,
+        )
         process = self._process
         if process is not None and process.poll() is not None:
             self._last_exit_code = process.returncode
@@ -583,7 +628,9 @@ async def start(request: web.Request) -> web.Response:
         STATE.start(
             _clean_goal((payload or {}).get("goal") or STATE.get_goal())
         )
-        return web.json_response(STATE.build_status())
+        return web.json_response(
+            STATE.build_status(world_action_lock=action_lock)
+        )
     finally:
         action_lock.release()
 
@@ -615,7 +662,9 @@ async def set_goal(request: web.Request) -> web.Response:
                 content_type="application/json",
             )
         STATE.restart_for_goal(goal)
-        return web.json_response(STATE.build_status())
+        return web.json_response(
+            STATE.build_status(world_action_lock=action_lock)
+        )
     finally:
         action_lock.release()
 

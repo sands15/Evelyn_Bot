@@ -32,6 +32,10 @@ Minecraft runner may start or accept a goal.
   stop, artifact fence, and owner-lock release. Service-side busy or
   unavailable locks fail with a fixed 503 error, so an already-validated old
   proof cannot cross handoff or run after a verified shutdown stop.
+  Mindcraft background reconciliation also acquires this lock before reading
+  the guarded lease snapshot and keeps it through stop or ensure-start. An
+  endpoint may reuse only an already-acquired capability for this exact lock
+  path; busy, unavailable, unacquired, or forged capabilities fail closed.
 - The default TTL is 1 hour; the maximum is 4 hours.
 - A lease belongs to one guild/context and one issuing process nonce.
 - An owner-process restart never restores the previous lease.
@@ -226,3 +230,10 @@ index import from optional runtime dependencies. Full discovery then passed all
 JavaScript syntax check, and `git diff --check` passed. The mixed
 bundled/.venv `pip check` still reports six pre-existing platform-tag issues.
 These are source checks, not live main/Minecraft/container evidence.
+
+The follow-up auto-reconcile TOCTOU increment passed 18 Mindcraft tests, 157
+Minecraft tests with 8 environment skips, and full repository discovery of
+2,503 tests with 18 skips. Its adversarial tests cover shutdown handoff during
+the guarded read-to-effect interval and forged lock capabilities. They remain
+source-level evidence and do not replace a live two-process/container handoff
+or a real Minecraft world effect.

@@ -50,6 +50,9 @@ class BlockingMindcraftState:
         self.effect_entered = effect_entered
         self.allow_effect = allow_effect
         self.started_with: list[str] = []
+        self.status_lock_observations: list[
+            tuple[bool, Path | None]
+        ] = []
 
     def get_goal(self) -> str:
         return "existing goal"
@@ -60,7 +63,24 @@ class BlockingMindcraftState:
             raise RuntimeError("mindcraft effect gate timed out")
         self.started_with.append(goal)
 
-    def build_status(self) -> dict[str, object]:
+    def build_status(
+        self,
+        *,
+        world_action_lock: MinecraftOwnerLock | None = None,
+    ) -> dict[str, object]:
+        self.status_lock_observations.append(
+            (
+                bool(
+                    world_action_lock is not None
+                    and world_action_lock.acquired
+                ),
+                (
+                    world_action_lock.path
+                    if world_action_lock is not None
+                    else None
+                ),
+            )
+        )
         return {"running": bool(self.started_with)}
 
 
@@ -160,7 +180,60 @@ class MinecraftServiceWorldActionLockTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([response.status for response in responses], [200])
         self.assertEqual(state.started_with, ["new goal"])
+        self.assertEqual(
+            state.status_lock_observations,
+            [(True, self.lock_path)],
+        )
         self.assertTrue(self.lock_path.exists())
+
+    def test_mindcraft_goal_reuses_acquired_lock_for_status_reconcile(
+        self,
+    ) -> None:
+        observations: list[tuple[bool, Path | None]] = []
+        state = Mock()
+
+        def build_status(
+            *,
+            world_action_lock: MinecraftOwnerLock | None = None,
+        ) -> dict[str, object]:
+            observations.append(
+                (
+                    bool(
+                        world_action_lock is not None
+                        and world_action_lock.acquired
+                    ),
+                    (
+                        world_action_lock.path
+                        if world_action_lock is not None
+                        else None
+                    ),
+                )
+            )
+            return {"running": True}
+
+        state.build_status.side_effect = build_status
+        with (
+            patch.object(mindcraft_service, "STATE", state),
+            patch.object(
+                mindcraft_service,
+                "WORLD_ACTION_LOCK_PATH",
+                self.lock_path,
+            ),
+            patch.object(
+                mindcraft_service,
+                "validate_world_lease_request",
+                return_value=(True, ""),
+            ),
+        ):
+            response = asyncio.run(
+                mindcraft_service.set_goal(
+                    FakeRequest({"goal": "replacement goal"})
+                )
+            )
+
+        self.assertEqual(response.status, 200)
+        state.restart_for_goal.assert_called_once_with("replacement goal")
+        self.assertEqual(observations, [(True, self.lock_path)])
 
     def test_voyager_goal_holds_lock_from_validation_through_effect(
         self,

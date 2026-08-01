@@ -146,7 +146,7 @@ from evelyn_core.runtime_lifecycle_composition import (
 from evelyn_core.discord_app_composition_runtime import (
     DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps, build_discord_intents,
 )
-from evelyn_core.discord_runtime_status import DiscordRuntimeStatus
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus, discord_gateway_connected
 from evelyn_core.voice_validation import active_validation_context, observe_turn_trace_for_voice_validation
 from evelyn_core.search_memory_dependency_composition import SearchMemoryDependencyComposition, SearchMemoryDependencyCompositionDeps
 from evelyn_core.memory_context_state import build_memory_context
@@ -2405,7 +2405,7 @@ discord_app_composition = DiscordAppComposition(
             text_message_handler=build_discord_text_message_handler_deps,
             log=print, recover_search_followups=partial(recover_search_followups_from_runtime, deps=build_search_followup_runtime_deps()),
             runtime_status=DiscordRuntimeStatus(
-                bot_user=lambda: bot.user, bot_guilds=lambda: list(bot.guilds),
+                gateway_ready=lambda: discord_gateway_connected(bot), bot_guilds=lambda: list(bot.guilds),
                 voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
             ),
         ),

@@ -63,6 +63,12 @@ owner를 교체하는 근거가 아니다. Discord 인증 위임과 split Fast C
 경로도 구현했고 Local I/O Bridge와 legacy auto-start 우회는 차단했다.
 `world_action.lock`은 Mindcraft/Voyager의 proof 검증부터 start/goal effect까지와
 successor의 token 폐기·epoch publication을 직렬화해 검증-효과 TOCTOU를 막는다.
+Mindcraft의 background reconcile도 이제 같은 lock을 먼저 획득한 뒤 guarded lease
+snapshot을 읽고 runner stop 또는 ensure-start effect가 끝날 때까지 유지한다.
+`/start`·`/goal`이 이미 획득한 exact-path lock capability는 같은 effect 경계에
+재사용하고, busy·unavailable lock이나 획득되지 않은/다른 경로 capability는 고정
+오류로 fail-closed한다. 따라서 shutdown·owner handoff와 경합한 이전 epoch의
+자동 재시작 우회는 source 계약에서 차단됐다.
 
 2026-08-01 worktree의 추가 source 계약은 world lease event 행을 append 뒤
 flush+`fsync`하며 POSIX의 새 daily file은 parent directory entry까지 sync한다.
@@ -469,6 +475,18 @@ event보다 먼저 단일 실패로 닫으므로 barge-source가 늦은 오류�
 통과하거나 단계가 무기한 대기하지 않는다. 새 Discord 이미지의 전체 음성 회귀와
 Bot API의 검증/API/runtime/UI 회귀, 호스트 focused 회귀는 통과했지만 이는 합성
 입력과 mock 장치를 사용한 계약 검증이다.
+
+추가 source P0 감사에서는 세 가지 admission/readiness false-positive도 닫았다.
+로컬 barge-in에 화자 검증이 요구되면 verifier가 정확히 `matched=true`를 반환한
+경우만 중단을 허용하고, 미등록·too-short·unavailable·오류처럼 판정이 없는 입력은
+`speaker_verification_unverified`로 거부한다. 로컬 출력은 `default` 문자열이나 TTS
+bytes만으로 준비됐다고 보지 않고, 선택/default 장치 조회와 24 kHz mono `int16`
+출력 설정의 비가청 검사를 모두 통과해 `outputReady=true`여야 한다. Discord
+gateway도 cached `bot.user` 대신 현재 `bot.is_ready()`, not-closed와 live
+`bot.ws.open`을 모두 만족한 연결만 ready heartbeat로 게시한다. 이 검사는 실제
+스트림을 열거나 소리를 재생하지
+않았으므로 장치 독점, 드라이버 단절, 실제 Discord 송수신 성공의 live 증거는
+아니다.
 
 추가 인과성 감사에서는 retry·abort 뒤 오래된 작업이 실제 출력으로 이어지는
 경계도 닫았다. local/Discord ingress, STT 전후, interrupt debounce, 답변 dispatch와

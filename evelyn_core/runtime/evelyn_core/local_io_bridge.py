@@ -109,7 +109,11 @@ LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC = max(
 )
 TTS_PCM_RATE = int(os.getenv("OMNIVOICE_PCM_RATE", "24000"))
 TTS_PCM_CHANNELS = int(os.getenv("OMNIVOICE_PCM_CHANNELS", "1"))
+TTS_PCM_DTYPE = "int16"
 TTS_SAMPLE_WIDTH_BYTES = 2
+LOCAL_OUTPUT_BACKEND_UNAVAILABLE = "local_output_backend_unavailable"
+LOCAL_OUTPUT_DEVICE_UNAVAILABLE = "local_output_device_unavailable"
+LOCAL_OUTPUT_FORMAT_UNSUPPORTED = "local_output_format_unsupported"
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
 STOP_SCRIPT = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
 START_LOCAL_BAT = PROJECT_ROOT / "evelyn_core" / "start_local.bat"
@@ -196,6 +200,8 @@ class LocalIoBridge:
         self.last_tts_playback: dict[str, Any] = {}
         self.started_at = time.time()
         self.output_device = normalize_output_device(LOCAL_TTS_OUTPUT_DEVICE)
+        self.output_ready = False
+        self.output_error_code = LOCAL_OUTPUT_BACKEND_UNAVAILABLE
         self.shutdown_started = False
         self.restart_started = False
         self.speak_request_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
@@ -995,9 +1001,7 @@ class LocalIoBridge:
         if self._speaker_verifier_initialized:
             return self._speaker_verifier
         self._speaker_verifier_initialized = True
-        apply_to = str(SPEAKER_VERIFICATION_APPLY_TO or "").lower()
-        applies = apply_to in {"1", "true", "on", "all", "always", "local", "local_mic"}
-        if not SPEAKER_VERIFICATION_ENABLED or not applies:
+        if not self._speaker_verification_required_for_barge_in():
             return None
         try:
             from .speaker_verification import SpeakerVerificationConfig, SpeakerVerifier
@@ -1020,6 +1024,15 @@ class LocalIoBridge:
             self.last_error = f"speaker_verifier_unavailable: {type(exc).__name__}"
             self._speaker_verifier = None
         return self._speaker_verifier
+
+    @staticmethod
+    def _speaker_verification_required_for_barge_in() -> bool:
+        apply_to = str(SPEAKER_VERIFICATION_APPLY_TO or "").strip().lower()
+        return bool(
+            SPEAKER_VERIFICATION_ENABLED
+            and apply_to
+            in {"1", "true", "on", "all", "always", "local", "local_mic"}
+        )
 
     async def _verify_barge_in_speaker(self, pcm_bytes: bytes) -> Any | None:
         verifier = self._speaker_verifier_for_barge_in()
@@ -1049,6 +1062,9 @@ class LocalIoBridge:
                     segment_epoch
                 ):
                     continue
+                verification_required = (
+                    self._speaker_verification_required_for_barge_in()
+                )
                 verification = await self._verify_barge_in_speaker(pcm_bytes)
                 if not self._voice_admission_lifecycle_is_current(
                     segment_epoch
@@ -1063,6 +1079,7 @@ class LocalIoBridge:
                     meta,
                     body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
                     speaker_verification=verification,
+                    speaker_verification_required=verification_required,
                 )
                 decision_payload = {
                     "reason": decision.reason,
@@ -1556,7 +1573,7 @@ class LocalIoBridge:
             with sd.RawOutputStream(
                 samplerate=TTS_PCM_RATE,
                 channels=TTS_PCM_CHANNELS,
-                dtype="int16",
+                dtype=TTS_PCM_DTYPE,
                 device=self.output_device,
             ) as stream:
                 active_output_stream = stream
@@ -1875,7 +1892,7 @@ class LocalIoBridge:
                 default_output = None
         except Exception as exc:
             self.runtime_errors.record("output_device_probe_failed", exc)
-            self.last_error = repr(exc)
+            self.last_error = "output_device_probe_failed"
             return []
 
         output_devices: list[dict[str, Any]] = []
@@ -1943,6 +1960,43 @@ class LocalIoBridge:
 
     def _current_output_device_id(self) -> str:
         return str(self.output_device if self.output_device is not None else "default")
+
+    def _refresh_output_readiness(self) -> None:
+        """Validate the selected output format without opening or writing a stream."""
+
+        if sd is None or not callable(getattr(sd, "check_output_settings", None)):
+            self.output_ready = False
+            self.output_error_code = LOCAL_OUTPUT_BACKEND_UNAVAILABLE
+            return
+        try:
+            device_info = sd.query_devices(self.output_device, "output")
+        except Exception:
+            self.output_ready = False
+            self.output_error_code = LOCAL_OUTPUT_DEVICE_UNAVAILABLE
+            return
+        try:
+            max_channels = int(device_info.get("max_output_channels") or 0)
+        except (AttributeError, TypeError, ValueError):
+            self.output_ready = False
+            self.output_error_code = LOCAL_OUTPUT_DEVICE_UNAVAILABLE
+            return
+        if max_channels < TTS_PCM_CHANNELS:
+            self.output_ready = False
+            self.output_error_code = LOCAL_OUTPUT_FORMAT_UNSUPPORTED
+            return
+        try:
+            sd.check_output_settings(
+                device=self.output_device,
+                channels=TTS_PCM_CHANNELS,
+                dtype=TTS_PCM_DTYPE,
+                samplerate=TTS_PCM_RATE,
+            )
+        except Exception:
+            self.output_ready = False
+            self.output_error_code = LOCAL_OUTPUT_FORMAT_UNSUPPORTED
+            return
+        self.output_ready = True
+        self.output_error_code = ""
 
     def _ensure_tts_warmup(self) -> None:
         if not LOCAL_BRIDGE_TTS_ENABLED or not LOCAL_BRIDGE_TTS_WARMUP_ENABLED:
@@ -2078,7 +2132,7 @@ class LocalIoBridge:
         with sd.RawOutputStream(
             samplerate=TTS_PCM_RATE,
             channels=TTS_PCM_CHANNELS,
-            dtype="int16",
+            dtype=TTS_PCM_DTYPE,
             device=self.output_device,
         ) as stream:
             async for chunk in resp.content.iter_chunked(4096):
@@ -2116,7 +2170,7 @@ class LocalIoBridge:
         with sd.RawOutputStream(
             samplerate=TTS_PCM_RATE,
             channels=TTS_PCM_CHANNELS,
-            dtype="int16",
+            dtype=TTS_PCM_DTYPE,
             device=self.output_device,
         ) as stream:
             for chunk in iter_pcm_aligned_chunks(chunks):
@@ -2132,6 +2186,7 @@ class LocalIoBridge:
     async def _post_status(self, extra: dict[str, Any] | None = None) -> None:
         if self.session is None:
             return
+        self._refresh_output_readiness()
         mic_stats: dict[str, Any] = {"enabled": self.mic_enabled}
         if self.service is not None:
             last_input_at = self.service.last_input_at
@@ -2186,6 +2241,13 @@ class LocalIoBridge:
             "startedAt": self.started_at,
             "device": LOCAL_MIC_DEVICE or "default",
             "outputDevice": self._current_output_device_id(),
+            "outputReady": self.output_ready,
+            "outputErrorCode": self.output_error_code,
+            "outputFormat": {
+                "sampleRate": TTS_PCM_RATE,
+                "channels": TTS_PCM_CHANNELS,
+                "dtype": TTS_PCM_DTYPE,
+            },
             "outputDevices": self._output_devices_snapshot(),
             "streamingTts": LOCAL_BRIDGE_STREAMING_TTS_ENABLED,
             "inputStreamingTts": LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED,
@@ -2298,6 +2360,7 @@ class LocalIoBridge:
         output_device = clean_text(request.get("outputDevice")) or "default"
         self.output_device = normalize_output_device(output_device)
         self.output_device_request_revision = revision
+        self._refresh_output_readiness()
         print(
             "[LOCAL BRIDGE] output_device_selected "
             f"device={self.output_device if self.output_device is not None else 'default'} "

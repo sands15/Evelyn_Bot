@@ -4,6 +4,14 @@ from copy import deepcopy
 from typing import Any, Iterable
 
 
+_LOCAL_OUTPUT_BLOCKER_MESSAGES = {
+    "local_output_backend_unavailable": "로컬 오디오 출력 백엔드를 사용할 수 없습니다.",
+    "local_output_device_unavailable": "선택한 로컬 출력 장치를 사용할 수 없습니다.",
+    "local_output_format_unsupported": "선택한 로컬 출력 장치가 TTS PCM 형식을 지원하지 않습니다.",
+    "local_output_readiness_unknown": "로컬 출력 장치 지원 여부가 검증되지 않았습니다.",
+}
+
+
 def _service_map(health: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     rows = (health or {}).get("services") if isinstance(health, dict) else None
     return {
@@ -157,6 +165,18 @@ def build_voice_capabilities(health: dict[str, Any] | None) -> dict[str, Any]:
                 local_blockers,
                 "local_output_device_missing",
                 "로컬 출력 장치가 선택되지 않았습니다.",
+                service_id="local_io_bridge",
+            )
+        if bridge_payload.get("outputReady") is not True:
+            output_error_code = str(
+                bridge_payload.get("outputErrorCode") or ""
+            )
+            if output_error_code not in _LOCAL_OUTPUT_BLOCKER_MESSAGES:
+                output_error_code = "local_output_readiness_unknown"
+            _blocker(
+                local_blockers,
+                output_error_code,
+                _LOCAL_OUTPUT_BLOCKER_MESSAGES[output_error_code],
                 service_id="local_io_bridge",
             )
         warmup = (

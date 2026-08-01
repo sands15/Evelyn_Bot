@@ -158,6 +158,7 @@ def evaluate_local_barge_in(
     *,
     body_rms_min: float,
     speaker_verification: Any = None,
+    speaker_verification_required: bool = False,
 ) -> LocalBargeInDecision:
     interrupt_meta = build_local_tts_interrupt_meta(
         segment_meta,
@@ -181,6 +182,15 @@ def evaluate_local_barge_in(
                 interrupt_meta=interrupt_meta,
                 speaker_verification=speaker_payload,
             )
+    else:
+        matched = None
+    if speaker_verification_required and matched is not True:
+        return LocalBargeInDecision(
+            accepted=False,
+            reason="speaker_verification_unverified",
+            interrupt_meta=interrupt_meta,
+            speaker_verification=speaker_payload,
+        )
     if not should_interrupt_tts(interrupt_meta):
         return LocalBargeInDecision(
             accepted=False,

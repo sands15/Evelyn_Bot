@@ -96,9 +96,141 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             self.strong_meta(),
             body_rms_min=0.01,
             speaker_verification=verification,
+            speaker_verification_required=True,
         )
         self.assertFalse(decision.accepted)
         self.assertEqual(decision.reason, "speaker_verification_rejected")
+
+    def test_required_speaker_verification_only_accepts_verified_match(self):
+        verified = SimpleNamespace(
+            matched=True,
+            to_dict=lambda: {"status": "verified", "score": 0.9},
+        )
+
+        decision = evaluate_local_barge_in(
+            self.strong_meta(),
+            body_rms_min=0.01,
+            speaker_verification=verified,
+            speaker_verification_required=True,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertEqual(decision.reason, "qualified_user_audio")
+
+    def test_required_speaker_verification_fails_closed_for_no_result(self):
+        decision = evaluate_local_barge_in(
+            self.strong_meta(),
+            body_rms_min=0.01,
+            speaker_verification=None,
+            speaker_verification_required=True,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, "speaker_verification_unverified")
+
+    def test_required_speaker_verification_fails_closed_for_unverified_statuses(self):
+        for status in ("too_short", "not_enrolled", "unavailable", "error"):
+            with self.subTest(status=status):
+                verification = SimpleNamespace(
+                    matched=None,
+                    to_dict=lambda status=status: {"status": status},
+                )
+                decision = evaluate_local_barge_in(
+                    self.strong_meta(),
+                    body_rms_min=0.01,
+                    speaker_verification=verification,
+                    speaker_verification_required=True,
+                )
+
+                self.assertFalse(decision.accepted)
+                self.assertEqual(
+                    decision.reason,
+                    "speaker_verification_unverified",
+                )
+
+    def test_disabled_or_non_local_speaker_verification_is_not_required(self):
+        cases = (
+            (False, "local_mic"),
+            (True, "discord"),
+            (True, ""),
+        )
+        for enabled, apply_to in cases:
+            with (
+                self.subTest(enabled=enabled, apply_to=apply_to),
+                patch.object(
+                    local_io_bridge,
+                    "SPEAKER_VERIFICATION_ENABLED",
+                    enabled,
+                ),
+                patch.object(
+                    local_io_bridge,
+                    "SPEAKER_VERIFICATION_APPLY_TO",
+                    apply_to,
+                ),
+            ):
+                self.assertFalse(
+                    LocalIoBridge._speaker_verification_required_for_barge_in()
+                )
+
+    def test_local_speaker_verification_configuration_is_required(self):
+        with (
+            patch.object(
+                local_io_bridge,
+                "SPEAKER_VERIFICATION_ENABLED",
+                True,
+            ),
+            patch.object(
+                local_io_bridge,
+                "SPEAKER_VERIFICATION_APPLY_TO",
+                "local_mic",
+            ),
+        ):
+            self.assertTrue(
+                LocalIoBridge._speaker_verification_required_for_barge_in()
+            )
+
+    def test_worker_fails_closed_when_required_verifier_is_unavailable(self):
+        async def runner() -> tuple[list[str], list[str], int]:
+            bridge = LocalIoBridge()
+            cancelled: list[str] = []
+            self.assertTrue(
+                bridge.playback_controller.claim(
+                    "turn-a",
+                    lambda: cancelled.append("turn-a"),
+                )
+            )
+            bridge.active_turn_id = "turn-a"
+            bridge._verify_barge_in_speaker = AsyncMock(return_value=None)
+            bridge._emit_validation = Mock()
+            await bridge.barge_in_queue.put((b"pcm", self.strong_meta()))
+            with (
+                patch.object(
+                    local_io_bridge,
+                    "SPEAKER_VERIFICATION_ENABLED",
+                    True,
+                ),
+                patch.object(
+                    local_io_bridge,
+                    "SPEAKER_VERIFICATION_APPLY_TO",
+                    "local_mic",
+                ),
+            ):
+                worker = asyncio.create_task(bridge._barge_in_worker())
+                await bridge.barge_in_queue.join()
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            reasons = [
+                str(call.kwargs.get("reason") or "")
+                for call in bridge._emit_validation.call_args_list
+                if call.args and call.args[0] == "barge_in_rejected"
+            ]
+            return cancelled, reasons, bridge.priority_queue.qsize()
+
+        cancelled, reasons, priority_size = asyncio.run(runner())
+
+        self.assertEqual(cancelled, [])
+        self.assertEqual(reasons, ["speaker_verification_unverified"])
+        self.assertEqual(priority_size, 0)
 
     def test_playback_controller_keeps_one_owner_until_release(self):
         cancelled = []
@@ -205,7 +337,12 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             )
             bridge.active_turn_id = "turn-b"
             bridge.active_validation = None
-            bridge._verify_barge_in_speaker = AsyncMock(return_value=None)
+            bridge._verify_barge_in_speaker = AsyncMock(
+                return_value=SimpleNamespace(
+                    matched=True,
+                    to_dict=lambda: {"status": "verified", "score": 0.9},
+                )
+            )
             bridge._emit_validation = Mock()
             meta = self.strong_meta()
             meta["_bargeSource"] = {
@@ -255,7 +392,12 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 "attempt": 2,
                 "attemptId": "current-source-attempt",
             }
-            bridge._verify_barge_in_speaker = AsyncMock(return_value=None)
+            bridge._verify_barge_in_speaker = AsyncMock(
+                return_value=SimpleNamespace(
+                    matched=True,
+                    to_dict=lambda: {"status": "verified", "score": 0.9},
+                )
+            )
             bridge._emit_validation = Mock()
             meta = self.strong_meta()
             meta.update(

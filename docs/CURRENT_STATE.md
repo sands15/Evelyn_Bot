@@ -1601,5 +1601,20 @@ Source branch: `codex/dependency-config-hardening`, current Minecraft world-leas
 - 현재 실행 중인 Docker 서비스는 Bot API와 Control Page뿐이다. 무거운
   LLM/STT/TTS/Vision과 Discord/Minecraft, Windows Host Supervisor/Local
   Bridge는 이번 작업에서 시작하지 않았다.
+- 추가 Voice/Mindcraft P0 source 감사에서 required speaker verification의
+  미판정 fail-open, 실제 출력 형식 검증 없는 local `outputReady`, cached user에
+  기대던 Discord gateway readiness, background Mindcraft reconcile의
+  world-action lease 검증/효과 TOCTOU를 닫았다. 로컬 barge-in은 exact
+  `matched=true`만 승인하고, 출력은 선택/default 장치의 24 kHz mono `int16`
+  설정을 비가청 probe한 결과가 exact true여야 한다. Discord heartbeat는 live
+  `is_ready()`, not-closed와 `ws.open`을 모두 요구한다. Mindcraft reconcile은 guarded lease
+  read부터 stop/ensure-start effect까지 stable `world_action.lock`을 유지하며
+  endpoint가 이미 획득한 exact-path lock capability만 재사용한다.
+- 이 증분은 Voice 529개(skip 5), Mindcraft 18개, Minecraft 157개(skip 8), 저장소
+  전체 2,503개(skip 18)를 통과했다. Python `compileall`과 Control Page JavaScript
+  11개의 `node --check`도 통과했다. 실제 출력 스트림, 마이크, Discord gateway,
+  Minecraft runner, Docker 이미지/서비스는 시작하거나 교체하지 않았으므로
+  surface별 10턴·무음과 실제 owner handoff/effect 증거는 계속
+  [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에 남는다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

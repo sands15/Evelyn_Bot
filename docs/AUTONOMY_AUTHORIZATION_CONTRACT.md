@@ -149,6 +149,10 @@ commit까지 이 lock을 유지하고, successor owner는 predecessor token 폐�
 claim/status/secret epoch 게시 동안 같은 lock을 유지한다. 따라서 검증 직후 이전
 owner가 죽더라도 이미 검증된 proof가 새 epoch의 effect로 넘어갈 수 없다. lock
 busy·unavailable은 임의 재시도나 timestamp fallback 없이 503으로 거부한다.
+Mindcraft의 background reconcile도 lock 획득 뒤 guarded lease를 읽고 stop 또는
+ensure-start effect가 끝날 때까지 같은 capability를 유지한다. endpoint가 이미
+획득한 lock을 넘길 때는 acquired 상태와 exact canonical path를 다시 확인하며,
+busy·unavailable·위조 capability에서는 자동 시작하지 않는다.
 
 owner 초기화의 `process_started`, lease 발급, runner 시작 확인, goal 실행 전
 시도와 실행 후 확인 event는 각 JSONL 행을 flush하고 `fsync`한 뒤에만 성공으로
@@ -214,3 +218,7 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 Voyager 경량 import의 선택 `requests` 결합을 각각 수정했고, 전체 discover
 2,482개도 실패 없이 통과했다(skip 18). 이는 source-level 증거이며 실제
 Minecraft 연결이나 컨테이너 간 lifetime lock의 live 증거를 대신하지 않는다.
+후속 auto-reconcile TOCTOU 증분은 Mindcraft 18개와 Minecraft 157개(skip 8),
+저장소 전체 2,503개(skip 18)를 통과했다. shutdown handoff 중 이전 epoch의
+ensure-start 차단과 forged lock capability 거부를 합성 경합으로 검증했지만, 실제
+두 프로세스/컨테이너와 Minecraft world effect를 사용한 live 증거는 아니다.
