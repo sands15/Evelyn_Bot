@@ -2513,6 +2513,24 @@ async def minecraft_world_lease_status_handler(
     )
 
 
+def minecraft_world_lease_error_payload(
+    error: BaseException | str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": minecraft_world_lease_delegation_error_code(
+            error
+        ),
+    }
+    try:
+        lease_status = MINECRAFT_WORLD_LEASE_OWNER.status()
+    except Exception:
+        lease_status = None
+    if isinstance(lease_status, dict):
+        payload["leaseStatus"] = dict(lease_status)
+    return payload
+
+
 async def minecraft_world_lease_mutation_handler(
     request: web.Request,
 ) -> web.StreamResponse:
@@ -2540,10 +2558,9 @@ async def minecraft_world_lease_mutation_handler(
         payload = await request.json()
     except Exception:
         return json_response(
-            {
-                "ok": False,
-                "error": "minecraft_world_payload_invalid",
-            },
+            minecraft_world_lease_error_payload(
+                "minecraft_world_payload_invalid"
+            ),
             status=400,
         )
     action = clean_text(
@@ -2562,10 +2579,14 @@ async def minecraft_world_lease_mutation_handler(
             exc
         )
         return json_response(
-            {"ok": False, "error": error},
+            minecraft_world_lease_error_payload(error),
             status=(
                 503
-                if error == "minecraft_service_unavailable"
+                if error in {
+                    "minecraft_service_unavailable",
+                    "minecraft_world_lease_audit_unavailable",
+                    "minecraft_world_lease_status_write_failed",
+                }
                 else 409
             ),
         )

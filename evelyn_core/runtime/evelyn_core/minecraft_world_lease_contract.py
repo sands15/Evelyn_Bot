@@ -11,6 +11,12 @@ from typing import Any, Callable
 MINECRAFT_WORLD_LEASE_STATUS_SCHEMA = "minecraft_world_lease.status.v1"
 MINECRAFT_WORLD_LEASE_PROOF_SCHEMA = "minecraft_world_lease.proof.v1"
 MINECRAFT_WORLD_LEASE_SECRET_SCHEMA = "minecraft_world_lease.secret.v1"
+MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE = (
+    "minecraft_world_lease_audit_unavailable"
+)
+MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED = (
+    "minecraft_world_lease_status_write_failed"
+)
 DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC = 15.0
 
 
@@ -120,6 +126,10 @@ def validate_world_lease_status(
         return False, "minecraft_world_lease_status_missing"
     if status.get("schema") != MINECRAFT_WORLD_LEASE_STATUS_SCHEMA:
         return False, "minecraft_world_lease_status_invalid"
+    if status.get("auditReady") is not True:
+        return False, MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+    if status.get("statusReady") is not True:
+        return False, MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED
     if status.get("state") != "authorized" or status.get("active") is not True:
         return False, "minecraft_world_authorization_required"
     lease = status.get("lease")
@@ -202,6 +212,8 @@ def validate_world_lease_request(
 
 __all__ = [
     "DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC",
+    "MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE",
+    "MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED",
     "MINECRAFT_WORLD_LEASE_PROOF_SCHEMA",
     "MINECRAFT_WORLD_LEASE_SECRET_SCHEMA",
     "MINECRAFT_WORLD_LEASE_STATUS_SCHEMA",

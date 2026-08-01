@@ -1,7 +1,7 @@
 # Evelyn Autonomy Authorization And Outcome Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-08-01 KST
 
 이 문서는 이블린이 “허락된 세계에서 스스로 행동한다”는 목표를 현재
 런타임에서 어떻게 제한하고 검증하는지 정의한다. 기능 플래그, 저장된 상태,
@@ -124,6 +124,41 @@ Minecraft 접속은 위치 값이나 `active` 값만으로 성공하지 않는�
 Control Page와 Discord formatter도 위 outcome marker를 다시 검사하므로, 낮은
 계층이 불완전한 payload를 반환하더라도 성공 문구를 만들지 않는다.
 
+Minecraft world-action lease의 감사 내구성과 상태 publication readiness도
+실행 권한의 일부다.
+status/proof를 소비하는 모든 경계는 `auditReady`와 `statusReady`가 모두
+정확한 boolean `true`일 때만 승인된 lease로 인정한다. 필드 누락, `false`,
+문자열이나 숫자 같은 대체 값은 각각
+`minecraft_world_lease_audit_unavailable` 또는
+`minecraft_world_lease_status_write_failed`로 거부한다.
+
+owner 초기화의 `process_started`, lease 발급, runner 시작 확인, goal 실행 전
+시도와 실행 후 확인 event는 각 JSONL 행을 flush하고 `fsync`한 뒤에만 성공으로
+인정한다. 필요한 event를 내구 기록할 수 없으면 다음 계약을 적용한다.
+
+- 초기화, lease 발급, runner 시작과 goal 변경은 fail-closed한다.
+- 활성 lease와 process capability를 제거하고 공유 private capability artifact를
+  더 이상 권한 근거로 제공하지 않는다.
+- 이미 runner start나 goal effect가 발생한 뒤 확인 event를 잃은 경우에도
+  성공으로 반환하지 않고 runner 안전 정지를 시도한다.
+- lease 철회, stop, watchdog cleanup과 shutdown은 감사 저장소가 죽어도 안전을
+  위해 실행한다. 물리적 정지가 확인되어도 응답과 status에는 audit unavailable과
+  `manual_intervention_required`를 남겨 감사된 성공으로 오인하지 않는다.
+- public status artifact를 내구 교체하지 못하면 active lease와 delegation
+  capability를 제거하고, 이미 실행 중일 가능성이 있는 runtime을 cancellation에도
+  중단되지 않는 safety stop으로 정리한다. 결과는
+  `minecraft_world_lease_status_write_failed`와
+  `manual_intervention_required`이며 stale status 파일은 권한 근거가 아니다.
+
+Bot API의 내부 mutation endpoint는 인증을 먼저 검사한다. 인증되지 않은 401은
+고정 오류만 반환하고 `leaseStatus`나 lease metadata를 노출하지 않는다. 인증된
+remote consumer는 authoritative status의 두 readiness boolean과 active/lease
+형식을 다시 검증하며, status 누락·손상, 오류, transport 예외와 요청 취소 시
+기존 active cache를 즉시 inactive error 상태로 지운다.
+
+이 경계의 status와 journal에는 raw goal, transcript, Minecraft chat, action
+arguments, token과 임의 예외 원문을 저장하지 않는다.
+
 현재 Voyager 직접 모드의 승인 경계는 owner/admin의 명시적 접속·종료·목표
 명령이다. assistant engine grant의 TTL이 Voyager runner를 자동 중지시키는
 watchdog으로 아직 연결되어 있지는 않다. 따라서 이 계약의 시간 제한 grant를
@@ -148,5 +183,8 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 
 실제 Discord 메시지 전송, 장시간 grant 만료, Minecraft 연결·종료·목표 변경을
 한 세션에서 수행하는 live E2E는 별도 운영 증거가 필요하다. 이 검증이 끝나기
-전에는 자율행동 P0를 운영 완료로 판정하지 않는다. Voyager 지속 실행에도
-별도 world-action lease와 restart 시 fail-closed 정지 owner가 필요하다.
+전에는 자율행동 P0를 운영 완료로 판정하지 않는다. 현재 world-action lease의
+2026-08-01 durable-audit source 계약은 bundled Python에서 Minecraft 115개
+(skip 7), runtime 513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를
+통과했다. 다만 실제 Minecraft E2E 증거는 아니므로 운영 완료 근거로 사용하지
+않는다.

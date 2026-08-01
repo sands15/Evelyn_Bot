@@ -17,8 +17,10 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.minecraft_world_lease_contract import (  # noqa: E402
+    MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
     MINECRAFT_WORLD_LEASE_PROOF_SCHEMA,
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
+    MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
     build_world_lease_proof,
     load_guarded_world_lease,
@@ -42,6 +44,8 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
             "updatedAt": self.now,
             "processNonce": "process-1",
             "active": True,
+            "auditReady": True,
+            "statusReady": True,
             "lease": {
                 "leaseId": "lease-1",
                 "guildId": 7,
@@ -126,6 +130,58 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
             error,
             "minecraft_world_lease_heartbeat_stale",
         )
+
+    def test_missing_or_false_audit_readiness_fails_closed(self) -> None:
+        for audit_ready in (None, False, "true", 1):
+            status = dict(self.status)
+            if audit_ready is None:
+                status.pop("auditReady", None)
+            else:
+                status["auditReady"] = audit_ready
+            self.path.write_text(
+                json.dumps(status),
+                encoding="utf-8",
+            )
+
+            valid, error = validate_world_lease_request(
+                {"worldLease": self.proof()},
+                status_path=self.path,
+                secret_path=self.secret_path,
+                now=lambda: self.now,
+            )
+
+            with self.subTest(audit_ready=audit_ready):
+                self.assertFalse(valid)
+                self.assertEqual(
+                    error,
+                    MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+                )
+
+    def test_missing_or_false_status_readiness_fails_closed(self) -> None:
+        for status_ready in (None, False, "true", 1):
+            status = dict(self.status)
+            if status_ready is None:
+                status.pop("statusReady", None)
+            else:
+                status["statusReady"] = status_ready
+            self.path.write_text(
+                json.dumps(status),
+                encoding="utf-8",
+            )
+
+            valid, error = validate_world_lease_request(
+                {"worldLease": self.proof()},
+                status_path=self.path,
+                secret_path=self.secret_path,
+                now=lambda: self.now,
+            )
+
+            with self.subTest(status_ready=status_ready):
+                self.assertFalse(valid)
+                self.assertEqual(
+                    error,
+                    MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+                )
 
     def test_missing_or_wrong_secret_fails(self) -> None:
         self.secret_path.unlink()

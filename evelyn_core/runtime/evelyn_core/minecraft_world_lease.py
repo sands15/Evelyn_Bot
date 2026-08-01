@@ -20,7 +20,9 @@ from .minecraft_mode_composition import (
     minecraft_stop_confirmed,
 )
 from .minecraft_world_lease_contract import (
+    MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
+    MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
     build_world_lease_proof,
 )
@@ -60,6 +62,9 @@ _ALLOWED_REASONS = frozenset(
         "shutdown",
         "unauthorized_runtime",
         "watchdog_retry",
+        "audit_unavailable",
+        "status_write_failed",
+        "secret_unavailable",
     }
 )
 _ALLOWED_EVENTS = frozenset(
@@ -67,9 +72,12 @@ _ALLOWED_EVENTS = frozenset(
         "process_started",
         "lease_issued",
         "lease_revoked",
+        "runtime_start_verified",
         "runtime_stop_attempted",
         "runtime_stop_verified",
         "runtime_stop_failed",
+        "goal_attempted",
+        "goal_failed",
         "goal_verified",
     }
 )
@@ -79,6 +87,7 @@ _ALLOWED_OUTCOMES = frozenset(
         MINECRAFT_CONNECTED_OUTCOME,
         MINECRAFT_STOPPED_OUTCOME,
         "minecraft_goal_confirmed",
+        "minecraft_goal_failed",
         "minecraft_stop_failed",
         "minecraft_stop_retry_budget_exhausted",
     }
@@ -111,6 +120,21 @@ def _safe_guild_id(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return guild_id if guild_id >= 0 else None
+
+
+def _sync_directory_entry(directory: Path) -> None:
+    """Persist a newly-created audit file's directory entry on POSIX."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def minecraft_runtime_active(status: Any) -> bool:
@@ -239,6 +263,8 @@ class MinecraftWorldLeaseOwner:
         self.process_nonce = secrets.token_hex(8)
         self.authorization_token = secrets.token_urlsafe(32)
         self._secret_ready = False
+        self._audit_ready = False
+        self._status_ready = False
         self._owner_claim_owned = False
         self._lease: MinecraftWorldLease | None = None
         self._state = "not_initialized"
@@ -261,7 +287,7 @@ class MinecraftWorldLeaseOwner:
         reason: str = "",
         outcome: str = "",
         verified: bool | None = None,
-    ) -> None:
+    ) -> bool:
         timestamp = self.now()
         safe_event = _safe_identifier(event)
         safe_reason = _safe_identifier(reason)
@@ -316,6 +342,7 @@ class MinecraftWorldLeaseOwner:
                 timezone.utc,
             ).strftime("%Y%m%d")
             event_path = self.events_dir / f"{date_key}.jsonl"
+            event_file_existed = event_path.exists()
             with event_path.open("a", encoding="utf-8") as stream:
                 stream.write(
                     json.dumps(
@@ -325,9 +352,68 @@ class MinecraftWorldLeaseOwner:
                     )
                     + "\n"
                 )
+                stream.flush()
+                os.fsync(stream.fileno())
+            if not event_file_existed:
+                _sync_directory_entry(self.events_dir)
             self._last_event_at = timestamp
+            return True
         except OSError:
-            return
+            return False
+
+    def _withhold_delegation_capability(self) -> None:
+        self._lease = None
+        self._secret_ready = False
+        try:
+            self.secret_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            try:
+                atomic_json_write(
+                    self.secret_path,
+                    {
+                        "schema": MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
+                        "processNonce": secrets.token_hex(8),
+                        "authorizationToken": secrets.token_urlsafe(32),
+                        "issuedAt": self.now(),
+                    },
+                )
+            except OSError:
+                pass
+
+    def _mark_status_write_failed(self) -> None:
+        self._status_ready = False
+        self._withhold_delegation_capability()
+        self._state = "manual_intervention_required"
+        self._last_error_code = (
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED
+        )
+
+    def _mark_audit_unavailable(self) -> None:
+        self._audit_ready = False
+        self._withhold_delegation_capability()
+        self._state = "manual_intervention_required"
+        self._last_error_code = (
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+        )
+        self._write_status()
+
+    def _append_required_event(
+        self,
+        event: str,
+        **kwargs: Any,
+    ) -> bool:
+        if not self._status_ready:
+            self._mark_status_write_failed()
+            return False
+        if not self._audit_ready or not self._append_event(
+            event,
+            **kwargs,
+        ):
+            self._mark_audit_unavailable()
+            return False
+        return True
 
     def _prune_stop_attempts(self) -> None:
         threshold = self.monotonic() - STOP_RETRY_WINDOW_SEC
@@ -361,6 +447,8 @@ class MinecraftWorldLeaseOwner:
             "lastEventAt": self._last_event_at,
             "lastStopOutcome": self._last_stop_outcome,
             "lastErrorCode": self._last_error_code,
+            "auditReady": self._audit_ready,
+            "statusReady": self._status_ready,
             "stopAttemptCount": len(self._stop_attempts),
             "manualInterventionRequired": (
                 self._state == "manual_intervention_required"
@@ -382,19 +470,42 @@ class MinecraftWorldLeaseOwner:
                 "rawGoal": False,
                 "rawArguments": False,
                 "transcript": False,
+                "durableAuditRequired": True,
+                "eventFsync": True,
             },
         }
 
-    def _write_status(self) -> None:
+    def _write_status(self) -> bool:
         if not self._owner_claim_matches():
-            return
+            self._status_ready = False
+            return False
         try:
             atomic_json_write(
                 self.status_path,
                 self._status_payload(),
             )
         except OSError:
-            return
+            self._mark_status_write_failed()
+            return False
+        return True
+
+    def _boundary_error_code(self) -> str:
+        if not self._status_ready:
+            return MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED
+        if not self._audit_ready:
+            return MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+        if not self._secret_ready:
+            return "minecraft_world_lease_secret_unavailable"
+        return ""
+
+    def _boundary_stop_reason(self) -> str:
+        if not self._status_ready:
+            return "status_write_failed"
+        if not self._audit_ready:
+            return "audit_unavailable"
+        if not self._secret_ready:
+            return "secret_unavailable"
+        return "unauthorized_runtime"
 
     def _owner_claim_payload(self) -> dict[str, Any]:
         return {
@@ -555,7 +666,11 @@ class MinecraftWorldLeaseOwner:
             status,
             authorization_token=(
                 self.authorization_token
-                if self._secret_ready
+                if (
+                    self._secret_ready
+                    and self._audit_ready
+                    and self._status_ready
+                )
                 else ""
             ),
         )
@@ -567,6 +682,8 @@ class MinecraftWorldLeaseOwner:
             self.process_nonce = secrets.token_hex(8)
             self.authorization_token = secrets.token_urlsafe(32)
             self._secret_ready = False
+            self._audit_ready = False
+            self._status_ready = False
             self._owner_claim_owned = False
             self._lease = None
             self._state = "authorization_required"
@@ -588,17 +705,25 @@ class MinecraftWorldLeaseOwner:
                     "minecraft_world_lease_owner_conflict"
                 )
                 return self._status_payload()
+            # This optimistic value is committed into the first status
+            # artifact below.  A failed commit makes it sticky-false in
+            # _write_status(); secret readiness is an independent boundary.
+            self._status_ready = True
+            if not self._append_event(
+                "process_started",
+                reason="process_restart",
+            ):
+                self._mark_audit_unavailable()
+                return self._status_payload()
+            self._audit_ready = True
             try:
                 self._write_secret()
             except OSError:
+                self._withhold_delegation_capability()
                 self._state = "manual_intervention_required"
                 self._last_error_code = (
-                    "minecraft_world_lease_secret_write_failed"
+                    "minecraft_world_lease_secret_unavailable"
                 )
-            self._append_event(
-                "process_started",
-                reason="process_restart",
-            )
             self._write_status()
             return self._status_payload()
 
@@ -612,7 +737,11 @@ class MinecraftWorldLeaseOwner:
         with self._data_lock:
             return (
                 self.authorization_token
-                if self._secret_ready
+                if (
+                    self._secret_ready
+                    and self._audit_ready
+                    and self._status_ready
+                )
                 else ""
             )
 
@@ -624,6 +753,11 @@ class MinecraftWorldLeaseOwner:
         source: str,
         ttl_sec: float | None,
     ) -> MinecraftWorldLease:
+        boundary_error = self._boundary_error_code()
+        if boundary_error:
+            if boundary_error == MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE:
+                self._mark_audit_unavailable()
+            raise RuntimeError(boundary_error)
         resolved_guild_id = _safe_guild_id(guild_id)
         resolved_issuer = _safe_identifier(issuer_ref)
         resolved_source = _safe_identifier(source)
@@ -653,40 +787,63 @@ class MinecraftWorldLeaseOwner:
         )
         previous = self._lease
         if previous is not None:
-            self._append_event(
+            if not self._append_required_event(
                 "lease_revoked",
                 lease=previous,
                 reason="lease_replaced",
+            ):
+                raise RuntimeError(
+                    self._boundary_error_code()
+                    or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                )
+            self._lease = None
+        if not self._append_required_event(
+            "lease_issued",
+            lease=lease,
+            reason="explicit_connect",
+        ):
+            raise RuntimeError(
+                self._boundary_error_code()
+                or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
             )
         self._lease = lease
         self._state = "authorized"
         self._last_error_code = ""
-        self._append_event(
-            "lease_issued",
-            lease=lease,
-            reason="explicit_connect",
-        )
-        self._write_status()
+        if not self._write_status():
+            raise RuntimeError(self._boundary_error_code())
         return lease
 
-    def _revoke_lease(self, *, reason: str) -> None:
+    def _revoke_lease(self, *, reason: str) -> bool:
         lease = self._lease
         self._lease = None
+        audit_ok = self._audit_ready
         if lease is not None:
-            self._append_event(
-                "lease_revoked",
-                lease=lease,
-                reason=reason,
+            audit_ok = bool(
+                self._audit_ready
+                and self._append_event(
+                    "lease_revoked",
+                    lease=lease,
+                    reason=reason,
+                )
             )
-        if self._state != "manual_intervention_required":
+            if not audit_ok:
+                self._mark_audit_unavailable()
+        if audit_ok and self._state != "manual_intervention_required":
             self._state = "authorization_required"
-        self._write_status()
+        elif not audit_ok:
+            self._state = "manual_intervention_required"
+            self._last_error_code = (
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+            )
+        status_ok = self._write_status()
+        return audit_ok and status_ok
 
     async def _runtime_status(self) -> dict[str, Any]:
         try:
             status = await self.get_runtime_status()
         except Exception:
-            self._last_error_code = "minecraft_status_unavailable"
+            if not self._boundary_error_code():
+                self._last_error_code = "minecraft_status_unavailable"
             self._write_status()
             return {"_status_unavailable": True}
         return status if isinstance(status, dict) else {}
@@ -707,22 +864,33 @@ class MinecraftWorldLeaseOwner:
             self._last_stop_outcome = (
                 "minecraft_stop_retry_budget_exhausted"
             )
-            self._append_event(
-                "runtime_stop_failed",
-                guild_id=guild_id,
-                reason=reason,
-                outcome="minecraft_stop_retry_budget_exhausted",
-                verified=False,
+            event_written = bool(
+                self._audit_ready
+                and self._append_event(
+                    "runtime_stop_failed",
+                    guild_id=guild_id,
+                    reason=reason,
+                    outcome="minecraft_stop_retry_budget_exhausted",
+                    verified=False,
+                )
             )
+            if not event_written:
+                self._mark_audit_unavailable()
             self._write_status()
             return False
         self._stop_attempts.append(self.monotonic())
-        self._state = "revoking"
-        self._append_event(
-            "runtime_stop_attempted",
-            guild_id=guild_id,
-            reason=reason,
+        if self._audit_ready:
+            self._state = "revoking"
+        attempt_audited = bool(
+            self._audit_ready
+            and self._append_event(
+                "runtime_stop_attempted",
+                guild_id=guild_id,
+                reason=reason,
+            )
         )
+        if not attempt_audited:
+            self._mark_audit_unavailable()
         self._write_status()
         try:
             stopped = await self.disable_mode(guild_id)
@@ -742,31 +910,80 @@ class MinecraftWorldLeaseOwner:
                 and not minecraft_runtime_active(post_status)
             )
         if verified:
-            self._state = "authorization_required"
-            self._last_error_code = ""
             self._last_stop_outcome = MINECRAFT_STOPPED_OUTCOME
             self._stop_attempts.clear()
-            self._append_event(
-                "runtime_stop_verified",
-                guild_id=guild_id,
-                reason=reason,
-                outcome=MINECRAFT_STOPPED_OUTCOME,
-                verified=True,
+            outcome_audited = bool(
+                self._audit_ready
+                and self._append_event(
+                    "runtime_stop_verified",
+                    guild_id=guild_id,
+                    reason=reason,
+                    outcome=MINECRAFT_STOPPED_OUTCOME,
+                    verified=True,
+                )
             )
+            boundary_error = self._boundary_error_code()
+            if outcome_audited and not boundary_error:
+                self._state = "authorization_required"
+                self._last_error_code = ""
+            elif not self._status_ready:
+                self._mark_status_write_failed()
+            elif not self._audit_ready:
+                self._mark_audit_unavailable()
+            else:
+                self._state = "manual_intervention_required"
+                self._last_error_code = boundary_error
             self._write_status()
             return True
         self._state = "manual_intervention_required"
-        self._last_error_code = "minecraft_stop_unverified"
         self._last_stop_outcome = "minecraft_stop_failed"
-        self._append_event(
-            "runtime_stop_failed",
-            guild_id=guild_id,
-            reason=reason,
-            outcome="minecraft_stop_failed",
-            verified=False,
+        failure_audited = bool(
+            self._audit_ready
+            and self._append_event(
+                "runtime_stop_failed",
+                guild_id=guild_id,
+                reason=reason,
+                outcome="minecraft_stop_failed",
+                verified=False,
+            )
         )
+        boundary_error = self._boundary_error_code()
+        if failure_audited and not boundary_error:
+            self._last_error_code = "minecraft_stop_unverified"
+        elif not self._status_ready:
+            self._mark_status_write_failed()
+        elif not self._audit_ready:
+            self._mark_audit_unavailable()
+        else:
+            self._last_error_code = boundary_error
         self._write_status()
         return False
+
+    async def _shielded_stop_runtime(
+        self,
+        *,
+        guild_id: int,
+        reason: str,
+        force: bool = True,
+    ) -> bool:
+        stop_task = asyncio.create_task(
+            self._stop_runtime(
+                guild_id=guild_id,
+                reason=reason,
+                force=force,
+            )
+        )
+        cancellation_requested = False
+        while not stop_task.done():
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                continue
+        result = stop_task.result()
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+        return result
 
     async def reconcile_once(
         self,
@@ -779,7 +996,7 @@ class MinecraftWorldLeaseOwner:
             if lease is not None and lease.expires_at <= self.now():
                 guild_id = lease.guild_id
                 self._revoke_lease(reason="lease_expired")
-                stopped = await self._stop_runtime(
+                stopped = await self._shielded_stop_runtime(
                     guild_id=guild_id,
                     reason="lease_expired",
                     force=force_stop,
@@ -790,14 +1007,24 @@ class MinecraftWorldLeaseOwner:
                 }
             if lease is not None:
                 self._state = "authorized"
-                self._write_status()
+                if not self._write_status():
+                    stopped = await self._shielded_stop_runtime(
+                        guild_id=lease.guild_id,
+                        reason="status_write_failed",
+                        force=True,
+                    )
+                    return {
+                        "action": "stop_status_write_failed_runtime",
+                        "stopped": stopped,
+                        "error": self._boundary_error_code(),
+                    }
                 return {
                     "action": "lease_active",
                     "stopped": False,
                 }
             runtime_status = await self._runtime_status()
             if runtime_status.get("_status_unavailable"):
-                stopped = await self._stop_runtime(
+                stopped = await self._shielded_stop_runtime(
                     guild_id=0,
                     reason=reason,
                     force=force_stop,
@@ -815,7 +1042,7 @@ class MinecraftWorldLeaseOwner:
                     "action": "already_stopped",
                     "stopped": True,
                 }
-            stopped = await self._stop_runtime(
+            stopped = await self._shielded_stop_runtime(
                 guild_id=0,
                 reason=reason,
                 force=force_stop,
@@ -848,6 +1075,7 @@ class MinecraftWorldLeaseOwner:
         while True:
             try:
                 await self.sleep(self.watchdog_interval_sec)
+                force_safety_stop = False
                 with self._data_lock:
                     if not self._refresh_owner_claim():
                         return
@@ -855,20 +1083,28 @@ class MinecraftWorldLeaseOwner:
                     if (
                         lease is not None
                         and lease.expires_at > self.now()
+                        and self._audit_ready
                     ):
                         self._state = "authorized"
-                        self._write_status()
-                        continue
+                        if self._write_status():
+                            continue
+                        force_safety_stop = True
                     if (
                         lease is None
                         and not self._standby_probe_due()
                     ):
-                        self._write_status()
-                        continue
+                        if self._write_status():
+                            continue
+                        force_safety_stop = True
                     if lease is None:
                         self._defer_standby_probe()
                 await self.reconcile_once(
-                    reason="watchdog_retry",
+                    reason=(
+                        "status_write_failed"
+                        if force_safety_stop
+                        else "watchdog_retry"
+                    ),
+                    force_stop=force_safety_stop,
                 )
                 with self._data_lock:
                     if lease is not None and self._lease is None:
@@ -876,7 +1112,8 @@ class MinecraftWorldLeaseOwner:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._last_error_code = "minecraft_watchdog_failed"
+                if not self._boundary_error_code():
+                    self._last_error_code = "minecraft_watchdog_failed"
                 self._write_status()
                 self.log(
                     "[MINECRAFT LEASE] watchdog failure "
@@ -894,15 +1131,22 @@ class MinecraftWorldLeaseOwner:
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
-            if not self._secret_ready:
-                raise RuntimeError(
-                    "minecraft_world_lease_secret_unavailable"
+            boundary_error = self._boundary_error_code()
+            if boundary_error:
+                if boundary_error == MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE:
+                    self._mark_audit_unavailable()
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
                 )
+                raise RuntimeError(boundary_error)
+            requested_goal = str(goal or "").strip()
             current = self._lease
             if current is not None and current.expires_at <= self.now():
                 expired_guild_id = current.guild_id
                 self._revoke_lease(reason="lease_expired")
-                if not await self._stop_runtime(
+                if not await self._shielded_stop_runtime(
                     guild_id=expired_guild_id,
                     reason="lease_expired",
                     force=True,
@@ -923,7 +1167,7 @@ class MinecraftWorldLeaseOwner:
                     runtime_status.get("_status_unavailable")
                     or minecraft_runtime_active(runtime_status)
                 ):
-                    if not await self._stop_runtime(
+                    if not await self._shielded_stop_runtime(
                         guild_id=0,
                         reason="unauthorized_runtime",
                         force=True,
@@ -931,25 +1175,91 @@ class MinecraftWorldLeaseOwner:
                         raise RuntimeError(
                             "minecraft_stale_runtime_stop_unverified"
                         )
-            lease = self._issue_lease(
-                guild_id=guild_id,
-                issuer_ref=issuer_ref,
-                source=source,
-                ttl_sec=ttl_sec,
+            cleanup_guild_id = (
+                current.guild_id
+                if current is not None
+                else int(guild_id)
             )
+            try:
+                lease = self._issue_lease(
+                    guild_id=guild_id,
+                    issuer_ref=issuer_ref,
+                    source=source,
+                    ttl_sec=ttl_sec,
+                )
+            except RuntimeError as exc:
+                if str(exc) in {
+                    MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+                    MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+                }:
+                    await self._shielded_stop_runtime(
+                        guild_id=cleanup_guild_id,
+                        reason=self._boundary_stop_reason(),
+                        force=True,
+                    )
+                raise
+            if requested_goal and not self._append_required_event(
+                "goal_attempted",
+                lease=lease,
+                reason="explicit_goal",
+            ):
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
+                )
+                raise RuntimeError(self._boundary_error_code())
             try:
                 observed = await self.enable_mode(
                     guild_id,
-                    goal=goal,
+                    goal=requested_goal or None,
                     world_lease=self._lease_proof(lease),
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                if requested_goal:
+                    self._append_required_event(
+                        "goal_failed",
+                        lease=lease,
+                        reason="explicit_goal",
+                        outcome="minecraft_goal_failed",
+                        verified=False,
+                    )
                 self._revoke_lease(reason="connect_failed")
-                await self._stop_runtime(
+                await self._shielded_stop_runtime(
                     guild_id=guild_id,
                     reason="connect_failed",
                     force=True,
                 )
+                raise
+            except Exception:
+                goal_failure_audited = bool(
+                    not requested_goal
+                    or self._append_required_event(
+                        "goal_failed",
+                        lease=lease,
+                        reason="explicit_goal",
+                        outcome="minecraft_goal_failed",
+                        verified=False,
+                    )
+                )
+                revoke_audited = self._revoke_lease(
+                    reason="connect_failed"
+                )
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="connect_failed",
+                    force=True,
+                )
+                boundary_error = self._boundary_error_code()
+                if (
+                    not goal_failure_audited
+                    or not revoke_audited
+                    or boundary_error
+                ):
+                    raise RuntimeError(
+                        boundary_error
+                        or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                    ) from None
                 raise
             verified = bool(
                 isinstance(observed, dict)
@@ -959,17 +1269,114 @@ class MinecraftWorldLeaseOwner:
                 and minecraft_connection_confirmed(observed)
             )
             if not verified:
-                self._revoke_lease(reason="connect_failed")
-                await self._stop_runtime(
+                goal_failure_audited = bool(
+                    not requested_goal
+                    or self._append_required_event(
+                        "goal_failed",
+                        lease=lease,
+                        reason="explicit_goal",
+                        outcome="minecraft_goal_failed",
+                        verified=False,
+                    )
+                )
+                revoke_audited = self._revoke_lease(
+                    reason="connect_failed"
+                )
+                await self._shielded_stop_runtime(
                     guild_id=guild_id,
                     reason="connect_failed",
                     force=True,
                 )
+                boundary_error = self._boundary_error_code()
+                if (
+                    not goal_failure_audited
+                    or not revoke_audited
+                    or boundary_error
+                ):
+                    raise RuntimeError(
+                        boundary_error
+                        or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                    )
                 raise RuntimeError("minecraft_start_unverified")
+            if not self._append_required_event(
+                "runtime_start_verified",
+                lease=lease,
+                reason="explicit_connect",
+                outcome=MINECRAFT_CONNECTED_OUTCOME,
+                verified=True,
+            ):
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="audit_unavailable",
+                    force=True,
+                )
+                raise RuntimeError(
+                    self._boundary_error_code()
+                )
+            if requested_goal:
+                reported_goal = str(
+                    observed.get("goal")
+                    or observed.get("goal_override")
+                    or observed.get("objective_goal")
+                    or ""
+                ).strip()
+                if reported_goal != requested_goal:
+                    failure_audited = self._append_required_event(
+                        "goal_failed",
+                        lease=lease,
+                        reason="explicit_goal",
+                        outcome="minecraft_goal_failed",
+                        verified=False,
+                    )
+                    revoke_audited = self._revoke_lease(
+                        reason="connect_failed"
+                    )
+                    await self._shielded_stop_runtime(
+                        guild_id=guild_id,
+                        reason=(
+                            "audit_unavailable"
+                            if not self._audit_ready
+                            else "connect_failed"
+                        ),
+                        force=True,
+                    )
+                    if (
+                        not failure_audited
+                        or not revoke_audited
+                        or self._boundary_error_code()
+                    ):
+                        raise RuntimeError(
+                            self._boundary_error_code()
+                            or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                        )
+                    raise RuntimeError("minecraft_goal_unverified")
+                if not self._append_required_event(
+                    "goal_verified",
+                    lease=lease,
+                    reason="explicit_goal",
+                    outcome="minecraft_goal_confirmed",
+                    verified=True,
+                ):
+                    await self._shielded_stop_runtime(
+                        guild_id=guild_id,
+                        reason=(
+                            "audit_unavailable"
+                            if not self._audit_ready
+                            else "status_write_failed"
+                        ),
+                        force=True,
+                    )
+                    raise RuntimeError(self._boundary_error_code())
             result = dict(observed)
             result["worldLease"] = lease.public_dict()
             self._state = "authorized"
-            self._write_status()
+            if not self._write_status():
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="status_write_failed",
+                    force=True,
+                )
+                raise RuntimeError(self._boundary_error_code())
             return result
 
     async def disconnect(self, guild_id: int) -> dict[str, Any]:
@@ -984,14 +1391,24 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_lease_owner_mismatch"
                 )
-            stopped = await self._stop_runtime(
+            revoke_audited = self._revoke_lease(
+                reason="explicit_disconnect"
+            )
+            stopped = await self._shielded_stop_runtime(
                 guild_id=guild_id,
                 reason="explicit_disconnect",
                 force=True,
             )
-            self._revoke_lease(reason="explicit_disconnect")
+            boundary_error = self._boundary_error_code()
             if not stopped:
+                if boundary_error:
+                    raise RuntimeError(boundary_error)
                 raise RuntimeError("minecraft_stop_unverified")
+            if not revoke_audited or boundary_error:
+                raise RuntimeError(
+                    boundary_error
+                    or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                )
             return {
                 "running": False,
                 "connected": False,
@@ -1006,6 +1423,14 @@ class MinecraftWorldLeaseOwner:
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
+            boundary_error = self._boundary_error_code()
+            if boundary_error:
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
+                )
+                raise RuntimeError(boundary_error)
             lease = self._lease
             if (
                 lease is None
@@ -1015,29 +1440,214 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_authorization_required"
                 )
-            result = await self.set_goal_callback(
-                goal,
-                world_lease=self._lease_proof(lease),
+            requested_goal = str(goal or "").strip()
+            if not self._append_required_event(
+                "goal_attempted",
+                lease=lease,
+                reason="explicit_goal",
+            ):
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
+                )
+                raise RuntimeError(self._boundary_error_code())
+            try:
+                result = await self.set_goal_callback(
+                    requested_goal,
+                    world_lease=self._lease_proof(lease),
+                )
+            except asyncio.CancelledError:
+                self._append_required_event(
+                    "goal_failed",
+                    lease=lease,
+                    reason="explicit_goal",
+                    outcome="minecraft_goal_failed",
+                    verified=False,
+                )
+                self._revoke_lease(reason="explicit_goal")
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=(
+                        self._boundary_stop_reason()
+                        if self._boundary_error_code()
+                        else "explicit_goal"
+                    ),
+                    force=True,
+                )
+                raise
+            except Exception:
+                failure_audited = self._append_required_event(
+                    "goal_failed",
+                    lease=lease,
+                    reason="explicit_goal",
+                    outcome="minecraft_goal_failed",
+                    verified=False,
+                )
+                revoke_audited = self._revoke_lease(
+                    reason="explicit_goal"
+                )
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="audit_unavailable"
+                    if not self._audit_ready
+                    else "explicit_goal",
+                    force=True,
+                )
+                boundary_error = self._boundary_error_code()
+                if (
+                    not failure_audited
+                    or not revoke_audited
+                    or boundary_error
+                ):
+                    raise RuntimeError(
+                        boundary_error
+                        or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                    ) from None
+                raise
+            reported_goal = (
+                str(
+                    result.get("goal")
+                    or result.get("goal_override")
+                    or result.get("objective_goal")
+                    or ""
+                ).strip()
+                if isinstance(result, dict)
+                else ""
             )
             verified = bool(
                 isinstance(result, dict)
                 and result.get("outcome_verified") is True
                 and result.get("outcome_code")
                 == "minecraft_goal_confirmed"
+                and reported_goal == requested_goal
             )
             if not verified:
+                failure_audited = self._append_required_event(
+                    "goal_failed",
+                    lease=lease,
+                    reason="explicit_goal",
+                    outcome="minecraft_goal_failed",
+                    verified=False,
+                )
+                revoke_audited = self._revoke_lease(
+                    reason="explicit_goal"
+                )
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="audit_unavailable"
+                    if not self._audit_ready
+                    else "explicit_goal",
+                    force=True,
+                )
+                boundary_error = self._boundary_error_code()
+                if (
+                    not failure_audited
+                    or not revoke_audited
+                    or boundary_error
+                ):
+                    raise RuntimeError(
+                        boundary_error
+                        or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+                    )
                 raise RuntimeError("minecraft_goal_unverified")
-            self._append_event(
+            if not self._append_required_event(
                 "goal_verified",
                 lease=lease,
                 reason="explicit_goal",
                 outcome="minecraft_goal_confirmed",
                 verified=True,
-            )
-            self._write_status()
+            ):
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
+                )
+                raise RuntimeError(self._boundary_error_code())
+            if not self._write_status():
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason="status_write_failed",
+                    force=True,
+                )
+                raise RuntimeError(self._boundary_error_code())
             return result
 
+    async def _shutdown_runtime_cleanup(
+        self,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        async with self._operation_lock:
+            lease = self._lease
+            guild_id = lease.guild_id if lease is not None else 0
+            revoke_audited = self._revoke_lease(reason=reason)
+            try:
+                runtime_status = await self._runtime_status()
+            except asyncio.CancelledError:
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=reason,
+                    force=True,
+                )
+                raise
+            if (
+                not runtime_status.get("_status_unavailable")
+                and not minecraft_runtime_active(runtime_status)
+            ):
+                if (
+                    revoke_audited
+                    and self._audit_ready
+                    and self._status_ready
+                    and self._secret_ready
+                ):
+                    self._state = "authorization_required"
+                    self._last_error_code = ""
+                self._write_status()
+                result = {
+                    "stopped": True,
+                    "action": "already_stopped",
+                }
+                boundary_error = self._boundary_error_code()
+                if boundary_error:
+                    result["error"] = boundary_error
+                return result
+            stopped = await self._shielded_stop_runtime(
+                guild_id=guild_id,
+                reason=reason,
+                force=True,
+            )
+            result = {
+                "stopped": stopped,
+                "action": "shutdown_stop",
+            }
+            boundary_error = self._boundary_error_code()
+            if boundary_error:
+                result["error"] = boundary_error
+            return result
+
+    async def _shielded_shutdown_runtime_cleanup(
+        self,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        cleanup_task = asyncio.create_task(
+            self._shutdown_runtime_cleanup(reason=reason)
+        )
+        cancellation_requested = False
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                continue
+        result = cleanup_task.result()
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+        return result
+
     async def shutdown(self, *, reason: str = "shutdown") -> dict[str, Any]:
+        cancellation_requested = False
         try:
             task = self._watchdog_task
             self._watchdog_task = None
@@ -1046,37 +1656,25 @@ class MinecraftWorldLeaseOwner:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    current_task = asyncio.current_task()
+                    cancellation_requested = bool(
+                        current_task is not None
+                        and current_task.cancelling()
+                    )
             with self._data_lock:
                 if not self._owner_claim_matches():
+                    if cancellation_requested:
+                        raise asyncio.CancelledError()
                     return {
                         "stopped": False,
                         "action": "owner_conflict",
                     }
-            async with self._operation_lock:
-                lease = self._lease
-                guild_id = lease.guild_id if lease is not None else 0
-                self._revoke_lease(reason=reason)
-                runtime_status = await self._runtime_status()
-                if (
-                    not runtime_status.get("_status_unavailable")
-                    and not minecraft_runtime_active(runtime_status)
-                ):
-                    self._state = "authorization_required"
-                    self._write_status()
-                    return {
-                        "stopped": True,
-                        "action": "already_stopped",
-                    }
-                stopped = await self._stop_runtime(
-                    guild_id=guild_id,
-                    reason=reason,
-                    force=True,
-                )
-                return {
-                    "stopped": stopped,
-                    "action": "shutdown_stop",
-                }
+            result = await self._shielded_shutdown_runtime_cleanup(
+                reason=reason
+            )
+            if cancellation_requested:
+                raise asyncio.CancelledError()
+            return result
         finally:
             with self._data_lock:
                 self._release_owner_claim()

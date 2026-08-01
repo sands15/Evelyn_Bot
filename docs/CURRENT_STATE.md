@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-01 KST
-Source branch: `codex/dependency-config-hardening`, current memory-deletion integrity increment
+Source branch: `codex/dependency-config-hardening`, current Minecraft world-lease durable-audit/status fail-closed increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -30,6 +30,31 @@ Source branch: `codex/dependency-config-hardening`, current memory-deletion inte
     `finally`에서 반납한다. Bot API 컨테이너에는 외부 runtime 정리를 끝낼 수
     있는 30초 stop grace를 적용한다. 강제 종료의 15초 stale takeover와
     경쟁 owner fail-closed 규칙은 유지한다.
+- 현재 worktree의 Minecraft world-action lease source 계약은 감사 내구성을
+  실행 권한에 포함한다.
+  - status/proof consumer는 `auditReady`와 `statusReady`가 모두 정확한
+    boolean `true`일 때만 lease를 유효하게 인정한다. 누락·`false`·비-boolean
+    값은 각각 `minecraft_world_lease_audit_unavailable` 또는
+    `minecraft_world_lease_status_write_failed`다.
+  - event row는 append 뒤 flush와 `fsync`가 끝나야 기록 성공이다. POSIX에서
+    새 daily journal을 만들 때는 events directory entry sync도 성공해야 한다.
+    초기화, lease 발급, runner start와 goal mutation은 필요한 event를 내구
+    기록하지 못하면 fail-closed하고 active lease/process capability를 제거한다.
+  - stop, revoke, watchdog cleanup과 shutdown은 감사 저장소를 잃어도 안전을
+    위해 계속 실행한다. 다만 정지가 실제로 확인돼도 audit unavailable과
+    `manual_intervention_required`를 반환·보고하며 감사된 성공으로 바꾸지 않는다.
+  - public status artifact commit 실패도 lease/delegation capability를 제거하고
+    실행 중일 가능성이 있는 runtime을 force-stop한다. fixed 결과는
+    `minecraft_world_lease_status_write_failed`와
+    `manual_intervention_required`이며 stale status만으로 권한을 복구하지 않는다.
+  - 내부 mutation endpoint의 unauthenticated 401은 `leaseStatus`를 포함하지
+    않는다. remote delegate는 status 누락·손상, 오류, transport failure와
+    cancellation에서 기존 active cache를 즉시 inactive error로 지운다.
+  - status와 audit journal에는 raw goal, transcript, Minecraft chat, token과
+    임의 arguments를 저장하지 않는다.
+  - 최종 source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
+    513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제
+    Minecraft connect/goal/stop E2E는 아직 확인된 사실로 기록하지 않는다.
 - 음성 P0 검증 FSM과 로컬 재생 연속성 경계를 강화했다.
   - 현재 surface와 barge-in에 연결된 interrupt 단계만 이벤트를 받을 수 있다.
     지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.

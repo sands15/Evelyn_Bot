@@ -143,6 +143,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                         "source": "discord_command",
                     },
                 )
+                unauthorized_payload = await unauthorized.json()
                 authorized = await client.post(
                     "/internal/minecraft-world-lease/connect",
                     headers={
@@ -160,6 +161,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                 await client.close()
 
         self.assertEqual(unauthorized.status, 401)
+        self.assertNotIn("leaseStatus", unauthorized_payload)
         self.assertEqual(authorized.status, 200)
         self.assertTrue(authorized_payload["ok"])
         self.assertNotIn(
@@ -167,6 +169,150 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(authorized_payload),
         )
         self.assertEqual(len(owner.calls), 1)
+
+    async def test_minecraft_owner_mutation_error_returns_lease_status(
+        self,
+    ) -> None:
+        class Owner:
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": False,
+                    "statusReady": True,
+                    "lease": None,
+                    "lastErrorCode": (
+                        "minecraft_world_lease_audit_unavailable"
+                    ),
+                }
+
+            @staticmethod
+            async def connect(_guild_id, **_kwargs):
+                raise RuntimeError(
+                    "minecraft_world_lease_audit_unavailable"
+                )
+
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            Owner(),
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                payload = await response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "minecraft_world_lease_audit_unavailable",
+        )
+        self.assertEqual(
+            payload["leaseStatus"]["state"],
+            "manual_intervention_required",
+        )
+        self.assertFalse(payload["leaseStatus"]["active"])
+        self.assertNotIn("owner-secret", json.dumps(payload))
+
+    async def test_minecraft_owner_status_write_failure_returns_503(
+        self,
+    ) -> None:
+        class Owner:
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": True,
+                    "statusReady": False,
+                    "lease": None,
+                    "lastErrorCode": (
+                        "minecraft_world_lease_status_write_failed"
+                    ),
+                }
+
+            @staticmethod
+            async def connect(_guild_id, **_kwargs):
+                raise RuntimeError(
+                    "minecraft_world_lease_status_write_failed"
+                )
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            redacted = fast_api.minecraft_world_lease_error_payload(
+                RuntimeError("private C:\\path token=secret")
+            )
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                payload = await response.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(
+            redacted["error"],
+            "minecraft_world_lease_delegation_failed",
+        )
+        self.assertNotIn("private", json.dumps(redacted))
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "minecraft_world_lease_status_write_failed",
+        )
+        self.assertFalse(payload["leaseStatus"]["statusReady"])
 
     async def test_local_voice_stream_missing_token_has_no_turn_side_effects(
         self,

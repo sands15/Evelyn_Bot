@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -17,10 +18,15 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+import evelyn_core.minecraft_world_lease as lease_module  # noqa: E402
 from evelyn_core.minecraft_world_lease import (  # noqa: E402
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
     STOP_RETRY_LIMIT,
     MinecraftWorldLeaseOwner,
+)
+from evelyn_core.minecraft_world_lease_contract import (  # noqa: E402
+    MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+    MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
 )
 
 
@@ -55,7 +61,6 @@ class FakeMinecraftRuntime:
             "outcome_code": "minecraft_stopped",
         }
         self.goal_result: object = {
-            "goal": "diamond",
             "outcome_verified": True,
             "outcome_code": "minecraft_goal_confirmed",
         }
@@ -90,7 +95,10 @@ class FakeMinecraftRuntime:
         )
         if isinstance(self.enable_result, BaseException):
             raise self.enable_result
-        return dict(self.enable_result)
+        result = dict(self.enable_result)
+        if goal:
+            result.setdefault("goal", goal)
+        return result
 
     async def disable(self, guild_id: int) -> dict:
         self.calls.append(("disable", guild_id))
@@ -110,7 +118,7 @@ class FakeMinecraftRuntime:
         if isinstance(self.goal_result, BaseException):
             raise self.goal_result
         result = dict(self.goal_result)
-        result["goal"] = goal
+        result.setdefault("goal", goal)
         return result
 
 
@@ -150,6 +158,24 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
                 if line.strip()
             )
         return rows
+
+    def fail_status_writes(
+        self,
+        owner: MinecraftWorldLeaseOwner | None = None,
+    ):
+        target = owner or self.owner
+        original = lease_module.atomic_json_write
+
+        def write(path: Path, payload: dict) -> None:
+            if Path(path) == target.status_path:
+                raise OSError("status artifact unavailable")
+            original(path, payload)
+
+        return patch.object(
+            lease_module,
+            "atomic_json_write",
+            side_effect=write,
+        )
 
     async def connect(self, guild_id: int = 7) -> dict:
         return await self.owner.connect(
@@ -207,6 +233,207 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_payload["authorizationToken"],
             self.owner.authorization_token,
         )
+
+    def test_event_append_flushes_and_fsyncs_before_success(self) -> None:
+        with patch(
+            "evelyn_core.minecraft_world_lease.os.fsync"
+        ) as fsync:
+            written = self.owner._append_event(
+                "runtime_stop_attempted",
+                guild_id=7,
+                reason="explicit_disconnect",
+            )
+
+        self.assertTrue(written)
+        fsync.assert_called_once()
+
+    def test_new_event_file_requires_directory_entry_sync(self) -> None:
+        self.clock.value += 24 * 60 * 60
+
+        with patch(
+            "evelyn_core.minecraft_world_lease._sync_directory_entry"
+        ) as sync_directory:
+            written = self.owner._append_event(
+                "runtime_stop_attempted",
+                guild_id=7,
+                reason="explicit_disconnect",
+            )
+
+        self.assertTrue(written)
+        sync_directory.assert_called_once_with(self.owner.events_dir)
+
+    def test_directory_entry_sync_failure_is_not_audited_success(self) -> None:
+        self.clock.value += 24 * 60 * 60
+
+        with patch(
+            "evelyn_core.minecraft_world_lease._sync_directory_entry",
+            side_effect=OSError("directory sync failed"),
+        ):
+            written = self.owner._append_event(
+                "runtime_stop_attempted",
+                guild_id=7,
+                reason="explicit_disconnect",
+            )
+
+        self.assertFalse(written)
+
+    def test_initialization_audit_failure_withholds_capability(self) -> None:
+        blocked_events = self.root / "blocked-events"
+        blocked_events.write_text("not a directory", encoding="utf-8")
+        owner = MinecraftWorldLeaseOwner(
+            status_path=self.root / "audit-failure" / "status.json",
+            events_dir=blocked_events,
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+
+        status = owner.initialize()
+
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertFalse(status["auditReady"])
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+        self.assertEqual(owner.delegation_token(), "")
+        self.assertFalse(owner.secret_path.exists())
+
+    async def test_initialization_secret_failure_keeps_status_ready(
+        self,
+    ) -> None:
+        with patch.object(
+            self.owner,
+            "_write_secret",
+            side_effect=OSError("secret unavailable"),
+        ):
+            status = self.owner.initialize()
+
+        self.assertTrue(status["auditReady"])
+        self.assertTrue(status["statusReady"])
+        self.assertEqual(
+            status["lastErrorCode"],
+            "minecraft_world_lease_secret_unavailable",
+        )
+        self.assertEqual(self.owner.delegation_token(), "")
+        self.assertFalse(self.owner.secret_path.exists())
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_secret_unavailable",
+        ):
+            await self.connect()
+        self.assertFalse(any(call[0] == "enable" for call in self.runtime.calls))
+
+    def test_initialization_status_failure_withholds_capability(self) -> None:
+        owner = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status-failure" / "status.json",
+            events_dir=self.root / "status-failure" / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+
+        with self.fail_status_writes(owner):
+            status = owner.initialize()
+
+        self.assertTrue(status["auditReady"])
+        self.assertFalse(status["statusReady"])
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        )
+        self.assertEqual(owner.delegation_token(), "")
+        self.assertFalse(owner.secret_path.exists())
+
+    async def test_lease_audit_failure_blocks_connect_before_effect(
+        self,
+    ) -> None:
+        def append(event: str, **_kwargs) -> bool:
+            return event != "lease_issued"
+
+        with patch.object(self.owner, "_append_event", side_effect=append):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+            ):
+                await self.connect()
+
+        self.assertFalse(any(call[0] == "enable" for call in self.runtime.calls))
+        self.assertFalse(self.owner.status()["active"])
+        self.assertFalse(self.owner.status()["auditReady"])
+        self.assertEqual(
+            self.owner.status()["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_connect_post_effect_audit_failure_stops_and_is_unverified(
+        self,
+    ) -> None:
+        def append(event: str, **_kwargs) -> bool:
+            return event != "runtime_start_verified"
+
+        with patch.object(self.owner, "_append_event", side_effect=append):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+            ):
+                await self.connect()
+
+        self.assertTrue(any(call[0] == "enable" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertFalse(status["active"])
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+
+    async def test_connect_lost_boundary_stops_possible_active_runtime(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+        self.owner._mark_status_write_failed()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        ):
+            await self.connect()
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
+
+    async def test_connect_rejects_mismatched_initial_goal_echo(self) -> None:
+        self.runtime.enable_result = {
+            "connected": True,
+            "goal": "different goal",
+            "outcome_verified": True,
+            "outcome_code": "minecraft_connected",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_goal_unverified",
+        ):
+            await self.connect()
+
+        events = self.read_events()
+        self.assertTrue(any(row["event"] == "goal_attempted" for row in events))
+        self.assertTrue(any(row["event"] == "goal_failed" for row in events))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
 
     async def test_process_restart_does_not_restore_lease(self) -> None:
         await self.connect()
@@ -313,17 +540,135 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.owner.status()["ownerClaimOwned"])
         self.assertEqual(self.owner.delegation_token(), "")
 
+    async def test_shutdown_still_stops_when_audit_fails(self) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            {"running": True, "connected": True},
+            {"running": False, "connected": False},
+        ]
+
+        with patch.object(self.owner, "_append_event", return_value=False):
+            result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(
+            result["error"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+        self.assertFalse(status["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_shutdown_still_stops_and_surfaces_status_failure(
+        self,
+    ) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            {"running": True, "connected": True},
+            {"running": False, "connected": False},
+        ]
+
+        with self.fail_status_writes():
+            result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(
+            result["error"],
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        )
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertFalse(status["statusReady"])
+        self.assertFalse(status["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
     async def test_cancelled_shutdown_still_releases_claim_and_token(
         self,
     ) -> None:
+        await self.connect()
         self.owner._watchdog_task = None
-        self.runtime.statuses = [asyncio.CancelledError()]
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            asyncio.CancelledError(),
+            {"running": False, "connected": False},
+        ]
 
         with self.assertRaises(asyncio.CancelledError):
             await self.owner.shutdown()
 
+        self.assertIn(("disable", 7), self.runtime.calls)
         self.assertFalse(self.owner.owner_claim_path.exists())
         self.assertFalse(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_double_cancelled_shutdown_completes_safe_stop(self) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            {"running": True, "connected": True},
+            {"running": False, "connected": False},
+        ]
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+
+        async def blocking_disable(guild_id: int) -> dict:
+            self.runtime.calls.append(("disable", guild_id))
+            stop_started.set()
+            await allow_stop.wait()
+            stop_completed.set()
+            return dict(self.runtime.disable_result)
+
+        self.owner.disable_mode = blocking_disable
+        task = asyncio.create_task(self.owner.shutdown())
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        task.cancel()
+        task.cancel()
+        allow_stop.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertTrue(stop_completed.is_set())
+        self.assertFalse(self.owner.owner_claim_path.exists())
+        self.assertFalse(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_cancelled_shutdown_waiting_for_operation_lock_stops(self) -> None:
+        await self.connect()
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [
+            {"running": True, "connected": True},
+            {"running": False, "connected": False},
+        ]
+        await self.owner._operation_lock.acquire()
+        task = asyncio.create_task(self.owner.shutdown())
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+
+        self.assertFalse(task.done())
+        self.owner._operation_lock.release()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
+        self.assertFalse(self.owner.owner_claim_path.exists())
         self.assertEqual(self.owner.delegation_token(), "")
 
     def test_unwritable_claim_fails_closed_without_secret(
@@ -373,6 +718,27 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             self.owner.status()["lastStopOutcome"],
             "minecraft_stopped",
         )
+
+    async def test_active_lease_status_failure_forces_runtime_stop(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+
+        with self.fail_status_writes():
+            result = await self.owner.reconcile_once()
+
+        self.assertEqual(
+            result["action"],
+            "stop_status_write_failed_runtime",
+        )
+        self.assertEqual(
+            result["error"],
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        )
+        self.assertTrue(result["stopped"])
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
 
     async def test_watchdog_refreshes_claim_while_throttling_standby_probe(
         self,
@@ -456,6 +822,174 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(self.read_events())
         self.assertNotIn("private_goal_text", serialized)
 
+    async def test_goal_pre_effect_audit_failure_blocks_goal_and_stops(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+
+        def append(event: str, **_kwargs) -> bool:
+            return event != "goal_attempted"
+
+        with patch.object(self.owner, "_append_event", side_effect=append):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+            ):
+                await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertFalse(any(call[0] == "goal" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["auditReady"])
+
+    async def test_goal_post_effect_audit_failure_stops_and_is_unverified(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+
+        def append(event: str, **_kwargs) -> bool:
+            return event != "goal_verified"
+
+        with patch.object(self.owner, "_append_event", side_effect=append):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+            ):
+                await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertTrue(any(call[0] == "goal" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+
+    async def test_goal_unverified_outcome_is_audited_revoked_and_stopped(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+        self.runtime.goal_result = {
+            "goal": "diamond",
+            "outcome_verified": False,
+            "outcome_code": "minecraft_goal_confirmed",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_goal_unverified",
+        ):
+            await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertTrue(any(call[0] == "goal" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertFalse(status["active"])
+        self.assertTrue(status["auditReady"])
+        events = self.read_events()
+        self.assertTrue(any(row["event"] == "goal_attempted" for row in events))
+        self.assertTrue(any(row["event"] == "goal_failed" for row in events))
+        self.assertNotIn("private_goal_text", json.dumps(events))
+
+    async def test_goal_exception_is_audited_revoked_and_stopped(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+        self.runtime.goal_result = RuntimeError("private goal failure")
+
+        with self.assertRaisesRegex(RuntimeError, "private goal failure"):
+            await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertTrue(any(call[0] == "goal" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
+        events = self.read_events()
+        self.assertTrue(any(row["event"] == "goal_failed" for row in events))
+        serialized = json.dumps(events)
+        self.assertNotIn("private goal failure", serialized)
+        self.assertNotIn("private_goal_text", serialized)
+
+    async def test_goal_requires_exact_requested_goal_echo(self) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+        self.runtime.goal_result = {
+            "goal": "different goal",
+            "outcome_verified": True,
+            "outcome_code": "minecraft_goal_confirmed",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_goal_unverified",
+        ):
+            await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
+
+    async def test_goal_final_status_failure_stops_and_fails_closed(
+        self,
+    ) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+
+        with self.fail_status_writes():
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+            ):
+                await self.owner.set_goal(7, "private_goal_text")
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertFalse(status["active"])
+        self.assertFalse(status["statusReady"])
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+        )
+
+    async def test_cancelled_goal_completes_shielded_safe_stop(self) -> None:
+        await self.connect()
+        self.runtime.calls.clear()
+        goal_started = asyncio.Event()
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+
+        async def blocking_goal(*_args, **_kwargs) -> dict:
+            goal_started.set()
+            await asyncio.Future()
+            return {}
+
+        async def blocking_disable(guild_id: int) -> dict:
+            self.runtime.calls.append(("disable", guild_id))
+            stop_started.set()
+            await allow_stop.wait()
+            stop_completed.set()
+            return dict(self.runtime.disable_result)
+
+        self.owner.set_goal_callback = blocking_goal
+        self.owner.disable_mode = blocking_disable
+        task = asyncio.create_task(
+            self.owner.set_goal(7, "private_goal_text")
+        )
+        await asyncio.wait_for(goal_started.wait(), timeout=1.0)
+        task.cancel()
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        task.cancel()
+        allow_stop.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertTrue(stop_completed.is_set())
+        self.assertFalse(self.owner.status()["active"])
+
     async def test_disconnect_rejects_other_guild_owner(self) -> None:
         await self.connect(guild_id=7)
 
@@ -466,6 +1000,72 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             await self.owner.disconnect(8)
 
         self.assertTrue(self.owner.status()["active"])
+
+    async def test_disconnect_still_stops_when_audit_fails(self) -> None:
+        await self.connect(guild_id=7)
+        self.runtime.calls.clear()
+
+        with patch.object(self.owner, "_append_event", return_value=False):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+            ):
+                await self.owner.disconnect(7)
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertFalse(status["active"])
+        self.assertFalse(status["auditReady"])
+        self.assertEqual(status["state"], "manual_intervention_required")
+        self.assertEqual(
+            status["lastErrorCode"],
+            MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
+        )
+
+    async def test_disconnect_surfaces_status_failure_after_safe_stop(
+        self,
+    ) -> None:
+        await self.connect(guild_id=7)
+        self.runtime.calls.clear()
+
+        with self.fail_status_writes():
+            with self.assertRaisesRegex(
+                RuntimeError,
+                MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+            ):
+                await self.owner.disconnect(7)
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        status = self.owner.status()
+        self.assertFalse(status["active"])
+        self.assertFalse(status["statusReady"])
+
+    async def test_double_cancelled_disconnect_completes_safe_stop(self) -> None:
+        await self.connect(guild_id=7)
+        self.runtime.calls.clear()
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+
+        async def blocking_disable(guild_id: int) -> dict:
+            self.runtime.calls.append(("disable", guild_id))
+            stop_started.set()
+            await allow_stop.wait()
+            stop_completed.set()
+            return dict(self.runtime.disable_result)
+
+        self.owner.disable_mode = blocking_disable
+        task = asyncio.create_task(self.owner.disconnect(7))
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        task.cancel()
+        task.cancel()
+        allow_stop.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertTrue(stop_completed.is_set())
+        self.assertFalse(self.owner.status()["active"])
 
     async def test_connect_cannot_replace_other_guild_owner(self) -> None:
         await self.connect(guild_id=7)
@@ -496,6 +1096,50 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(self.owner.status()["active"])
         self.assertIn(("disable", 7), self.runtime.calls)
+        events = self.read_events()
+        self.assertEqual(
+            sum(row["event"] == "goal_attempted" for row in events),
+            1,
+        )
+        self.assertEqual(
+            sum(row["event"] == "goal_failed" for row in events),
+            1,
+        )
+
+    async def test_cancelled_connect_completes_shielded_safe_stop(self) -> None:
+        enable_started = asyncio.Event()
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+
+        async def blocking_enable(*_args, **_kwargs) -> dict:
+            enable_started.set()
+            await asyncio.Future()
+            return {}
+
+        async def blocking_disable(guild_id: int) -> dict:
+            self.runtime.calls.append(("disable", guild_id))
+            stop_started.set()
+            await allow_stop.wait()
+            stop_completed.set()
+            return dict(self.runtime.disable_result)
+
+        self.owner.enable_mode = blocking_enable
+        self.owner.disable_mode = blocking_disable
+        task = asyncio.create_task(self.connect())
+        await asyncio.wait_for(enable_started.wait(), timeout=1.0)
+        task.cancel()
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        task.cancel()
+        allow_stop.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertTrue(stop_completed.is_set())
+        self.assertFalse(self.owner.status()["active"])
+        events = self.read_events()
+        self.assertTrue(any(row["event"] == "goal_failed" for row in events))
 
     async def test_status_failure_does_not_assume_runtime_stopped(
         self,

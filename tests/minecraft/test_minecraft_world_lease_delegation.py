@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from urllib import error as urllib_error
 
 
 REPO_ROOT = next(
@@ -30,17 +34,32 @@ from evelyn_core.minecraft_world_lease_remote import (  # noqa: E402
 )
 
 
+def active_lease_status() -> dict:
+    now = time.time()
+    return {
+        "schema": "minecraft_world_lease.status.v1",
+        "state": "authorized",
+        "updatedAt": now,
+        "processNonce": "process-1",
+        "active": True,
+        "auditReady": True,
+        "statusReady": True,
+        "lease": {
+            "leaseId": "lease-1",
+            "guildId": 7,
+            "source": "discord_command",
+            "issuedAt": now,
+            "expiresAt": now + 60.0,
+        },
+    }
+
+
 class FakeOwner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
     def status(self) -> dict:
-        return {
-            "schema": "minecraft_world_lease.status.v1",
-            "state": "authorized",
-            "active": True,
-            "lease": {"guildId": 7},
-        }
+        return active_lease_status()
 
     async def connect(self, guild_id: int, **kwargs) -> dict:
         self.calls.append(("connect", (guild_id, kwargs)))
@@ -178,6 +197,8 @@ class MinecraftWorldLeaseRemoteTests(
                         "schema": "minecraft_world_lease.status.v1",
                         "state": "authorization_required",
                         "active": False,
+                        "auditReady": True,
+                        "statusReady": True,
                         "lease": None,
                     },
                 }
@@ -187,12 +208,7 @@ class MinecraftWorldLeaseRemoteTests(
                     "connected": path.endswith("/connect"),
                     "outcome_verified": True,
                 },
-                "leaseStatus": {
-                    "schema": "minecraft_world_lease.status.v1",
-                    "state": "authorized",
-                    "active": True,
-                    "lease": {"guildId": 7},
-                },
+                "leaseStatus": active_lease_status(),
             }
 
         self.remote = MinecraftWorldLeaseRemote(
@@ -243,6 +259,276 @@ class MinecraftWorldLeaseRemoteTests(
         )
         self.assertTrue(self.remote.status()["delegated"])
 
+    async def test_mutation_error_ingests_authoritative_status_before_raising(
+        self,
+    ) -> None:
+        async def rejected(*_args):
+            return {
+                "ok": False,
+                "error": "minecraft_world_lease_audit_unavailable",
+                "leaseStatus": {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": False,
+                    "statusReady": True,
+                    "lease": None,
+                    "lastErrorCode": (
+                        "minecraft_world_lease_audit_unavailable"
+                    ),
+                },
+            }
+
+        self.remote.request = rejected
+        self.remote._status = {
+            **active_lease_status(),
+            "delegated": True,
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_audit_unavailable",
+        ):
+            await self.remote.disconnect(7)
+
+        status = self.remote.status()
+        self.assertEqual(
+            status["state"],
+            "manual_intervention_required",
+        )
+        self.assertFalse(status["active"])
+        self.assertFalse(status["auditReady"])
+        self.assertIsNone(status["lease"])
+
+    async def test_error_without_valid_status_clears_cached_authorization(
+        self,
+    ) -> None:
+        audit_not_ready = active_lease_status()
+        audit_not_ready["auditReady"] = False
+        missing_status_ready = active_lease_status()
+        missing_status_ready.pop("statusReady")
+        status_not_ready = active_lease_status()
+        status_not_ready["statusReady"] = False
+        status_ready_not_boolean = active_lease_status()
+        status_ready_not_boolean["statusReady"] = "true"
+        missing_lease_id = active_lease_status()
+        missing_lease_id["lease"] = {
+            **missing_lease_id["lease"],
+            "leaseId": "",
+        }
+        missing_process_nonce = active_lease_status()
+        missing_process_nonce["processNonce"] = ""
+        invalid_guild = active_lease_status()
+        invalid_guild["lease"] = {
+            **invalid_guild["lease"],
+            "guildId": -1,
+        }
+        expired = active_lease_status()
+        expired["lease"] = {
+            **expired["lease"],
+            "expiresAt": time.time() - 1.0,
+        }
+        stale = active_lease_status()
+        stale["updatedAt"] = time.time() - 60.0
+        invalid_statuses = (
+            None,
+            {},
+            audit_not_ready,
+            missing_status_ready,
+            status_not_ready,
+            status_ready_not_boolean,
+            missing_lease_id,
+            missing_process_nonce,
+            invalid_guild,
+            expired,
+            stale,
+        )
+        for invalid_status in invalid_statuses:
+            with self.subTest(lease_status=invalid_status):
+                async def rejected(*_args):
+                    return {
+                        "ok": False,
+                        "error": "private C:\\path token=secret",
+                        "leaseStatus": invalid_status,
+                    }
+
+                self.remote.request = rejected
+                self.remote._status = {
+                    **active_lease_status(),
+                    "delegated": True,
+                }
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minecraft_world_lease_delegation_failed",
+                ):
+                    await self.remote.disconnect(7)
+
+                status = self.remote.status()
+                self.assertEqual(status["state"], "remote_error")
+                self.assertFalse(status["active"])
+                self.assertIsNone(status["lease"])
+                self.assertEqual(
+                    status["lastErrorCode"],
+                    "minecraft_world_lease_delegation_failed",
+                )
+
+    async def test_inactive_status_preserves_boundary_booleans(
+        self,
+    ) -> None:
+        async def rejected(*_args):
+            return {
+                "ok": False,
+                "error": "minecraft_world_lease_status_write_failed",
+                "leaseStatus": {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": True,
+                    "statusReady": False,
+                    "lease": {"guildId": 7},
+                },
+            }
+
+        self.remote.request = rejected
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_status_write_failed",
+        ):
+            await self.remote.disconnect(7)
+
+        status = self.remote.status()
+        self.assertFalse(status["active"])
+        self.assertTrue(status["auditReady"])
+        self.assertFalse(status["statusReady"])
+        self.assertIsNone(status["lease"])
+
+    async def test_unauthorized_error_clears_cached_authorization(
+        self,
+    ) -> None:
+        async def unauthorized(*_args):
+            return {
+                "ok": False,
+                "error": (
+                    "minecraft_world_lease_delegation_unauthorized"
+                ),
+            }
+
+        self.remote.request = unauthorized
+        self.remote._status = {
+            **active_lease_status(),
+            "delegated": True,
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_delegation_unauthorized",
+        ):
+            await self.remote.disconnect(7)
+
+        status = self.remote.status()
+        self.assertEqual(status["state"], "remote_error")
+        self.assertFalse(status["active"])
+        self.assertIsNone(status["lease"])
+
+    async def test_http_error_body_status_is_ingested_before_raise(
+        self,
+    ) -> None:
+        body = json.dumps(
+            {
+                "ok": False,
+                "error": "minecraft_world_lease_audit_unavailable",
+                "leaseStatus": {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "manual_intervention_required",
+                    "active": False,
+                    "auditReady": False,
+                    "statusReady": True,
+                    "lease": None,
+                },
+            }
+        ).encode("utf-8")
+        http_error = urllib_error.HTTPError(
+            "http://bot-api:8798/internal/minecraft-world-lease/disconnect",
+            409,
+            "Conflict",
+            None,
+            io.BytesIO(body),
+        )
+        remote = MinecraftWorldLeaseRemote(
+            base_url="http://bot-api:8798",
+            secret_path=self.secret_path,
+        )
+        remote.initialize()
+        remote._status = {
+            **active_lease_status(),
+            "delegated": True,
+        }
+
+        with patch(
+            "evelyn_core.minecraft_world_lease_remote.urllib_request.urlopen",
+            side_effect=http_error,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "minecraft_world_lease_audit_unavailable",
+            ):
+                await remote.disconnect(7)
+
+        status = remote.status()
+        self.assertEqual(
+            status["state"],
+            "manual_intervention_required",
+        )
+        self.assertFalse(status["active"])
+        self.assertFalse(status["auditReady"])
+
+    async def test_success_without_typed_result_clears_authorization(
+        self,
+    ) -> None:
+        operations = (
+            (
+                "connect",
+                None,
+                lambda: self.remote.connect(
+                    7,
+                    issuer_ref="discord_user:1",
+                    source="discord_command",
+                ),
+            ),
+            (
+                "disconnect",
+                [],
+                lambda: self.remote.disconnect(7),
+            ),
+            (
+                "goal",
+                "invalid",
+                lambda: self.remote.set_goal(7, "diamond"),
+            ),
+        )
+        for action, invalid_result, operation in operations:
+            with self.subTest(action=action):
+                async def incomplete(*_args):
+                    return {
+                        "ok": True,
+                        "result": invalid_result,
+                        "leaseStatus": active_lease_status(),
+                    }
+
+                self.remote.request = incomplete
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minecraft_world_lease_response_invalid",
+                ):
+                    await operation()
+
+                status = self.remote.status()
+                self.assertEqual(status["state"], "remote_error")
+                self.assertFalse(status["active"])
+                self.assertIsNone(status["lease"])
+
     async def test_missing_secret_blocks_mutation(self) -> None:
         self.secret_path.unlink()
 
@@ -253,6 +539,8 @@ class MinecraftWorldLeaseRemoteTests(
             await self.remote.disconnect(7)
 
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.remote.status()["state"], "remote_error")
+        self.assertFalse(self.remote.status()["active"])
 
     async def test_remote_shutdown_never_revokes_central_lease(
         self,

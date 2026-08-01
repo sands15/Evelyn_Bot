@@ -10,9 +10,12 @@ from urllib import request as urllib_request
 
 from .minecraft_world_lease_contract import (
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
+    MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
+    validate_world_lease_status,
 )
 from .minecraft_world_lease_delegation import (
     MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER,
+    minecraft_world_lease_delegation_error_code,
 )
 
 
@@ -20,6 +23,21 @@ RemoteRequest = Callable[
     [str, str, dict[str, Any] | None, dict[str, str]],
     Awaitable[dict[str, Any]],
 ]
+
+
+_REMOTE_DELEGATION_ERROR = "minecraft_world_lease_delegation_failed"
+_SENSITIVE_STATUS_KEYS = frozenset(
+    {
+        "authorizationToken",
+        "issuerRef",
+        "goal",
+        "rawArguments",
+        "rawGoal",
+        "secret",
+        "token",
+        "transcript",
+    }
+)
 
 
 class MinecraftWorldLeaseRemote:
@@ -58,6 +76,8 @@ class MinecraftWorldLeaseRemote:
             "schema": "minecraft_world_lease.status.v1",
             "state": "remote_not_initialized",
             "active": False,
+            "auditReady": False,
+            "statusReady": False,
             "lease": None,
             "updatedAt": time.time(),
             "delegated": True,
@@ -68,6 +88,8 @@ class MinecraftWorldLeaseRemote:
             "schema": "minecraft_world_lease.status.v1",
             "state": "remote_initializing",
             "active": False,
+            "auditReady": False,
+            "statusReady": False,
             "lease": None,
             "updatedAt": time.time(),
             "delegated": True,
@@ -76,6 +98,64 @@ class MinecraftWorldLeaseRemote:
 
     def status(self) -> dict[str, Any]:
         return dict(self._status)
+
+    def _inactive_error_status(self) -> dict[str, Any]:
+        return {
+            "schema": MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
+            "state": "remote_error",
+            "active": False,
+            "auditReady": False,
+            "statusReady": False,
+            "lease": None,
+            "updatedAt": time.time(),
+            "delegated": True,
+            "lastErrorCode": _REMOTE_DELEGATION_ERROR,
+        }
+
+    def _ingest_lease_status(self, value: Any) -> bool:
+        if (
+            not isinstance(value, dict)
+            or value.get("schema")
+            != MINECRAFT_WORLD_LEASE_STATUS_SCHEMA
+            or not isinstance(value.get("state"), str)
+            or not str(value.get("state") or "").strip()
+            or not isinstance(value.get("active"), bool)
+            or not isinstance(value.get("auditReady"), bool)
+            or not isinstance(value.get("statusReady"), bool)
+        ):
+            return False
+        active = value.get("active") is True
+        lease = value.get("lease")
+        if active and (
+            value.get("state") != "authorized"
+            or value.get("auditReady") is not True
+            or value.get("statusReady") is not True
+            or not isinstance(lease, dict)
+        ):
+            return False
+        if active:
+            valid, _ = validate_world_lease_status(value)
+            if not valid:
+                return False
+        safe_status = {
+            key: item
+            for key, item in value.items()
+            if key not in _SENSITIVE_STATUS_KEYS
+        }
+        if active:
+            safe_status["lease"] = {
+                key: item
+                for key, item in lease.items()
+                if key not in _SENSITIVE_STATUS_KEYS
+            }
+        else:
+            safe_status["lease"] = None
+        safe_status["delegated"] = True
+        self._status = safe_status
+        return True
+
+    def _clear_stale_authorization(self) -> None:
+        self._status = self._inactive_error_status()
 
     def _authorization_token(self) -> str:
         try:
@@ -156,7 +236,14 @@ class MinecraftWorldLeaseRemote:
                     ).get("error")
                     or f"http_{exc.code}"
                 )
-                raise RuntimeError(code) from exc
+                response = (
+                    dict(error_payload)
+                    if isinstance(error_payload, dict)
+                    else {}
+                )
+                response["ok"] = False
+                response["error"] = code
+                return response
             except (OSError, urllib_error.URLError) as exc:
                 raise RuntimeError(
                     "minecraft_world_lease_owner_unavailable"
@@ -186,28 +273,45 @@ class MinecraftWorldLeaseRemote:
         mutation: bool = False,
     ) -> dict[str, Any]:
         headers: dict[str, str] = {}
-        if mutation:
-            headers[
-                MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER
-            ] = self._authorization_token()
-        response = await self.request(
-            method,
-            path,
-            payload,
-            headers,
-        )
-        lease_status = response.get("leaseStatus")
-        if isinstance(lease_status, dict):
-            self._status = {
-                **lease_status,
-                "delegated": True,
-            }
-        if response.get("ok") is False:
+        try:
+            if mutation:
+                headers[
+                    MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER
+                ] = self._authorization_token()
+            response = await self.request(
+                method,
+                path,
+                payload,
+                headers,
+            )
+        except asyncio.CancelledError:
+            self._clear_stale_authorization()
+            raise
+        except Exception:
+            self._clear_stale_authorization()
+            raise
+        if not isinstance(response, dict):
+            self._clear_stale_authorization()
             raise RuntimeError(
-                str(
-                    response.get("error")
-                    or "minecraft_world_lease_delegation_failed"
+                "minecraft_world_lease_response_invalid"
+            )
+        lease_status = response.get("leaseStatus")
+        status_ingested = self._ingest_lease_status(lease_status)
+        if response.get("ok") is False:
+            if not status_ingested:
+                self._clear_stale_authorization()
+            raise RuntimeError(
+                minecraft_world_lease_delegation_error_code(
+                    str(
+                        response.get("error")
+                        or _REMOTE_DELEGATION_ERROR
+                    )
                 )
+            )
+        if not status_ingested:
+            self._clear_stale_authorization()
+            raise RuntimeError(
+                "minecraft_world_lease_response_invalid"
             )
         return response
 
@@ -222,6 +326,8 @@ class MinecraftWorldLeaseRemote:
                 "schema": "minecraft_world_lease.status.v1",
                 "state": "remote_unavailable",
                 "active": False,
+                "auditReady": False,
+                "statusReady": False,
                 "lease": None,
                 "updatedAt": time.time(),
                 "delegated": True,
@@ -272,6 +378,7 @@ class MinecraftWorldLeaseRemote:
         )
         result = response.get("result")
         if not isinstance(result, dict):
+            self._clear_stale_authorization()
             raise RuntimeError(
                 "minecraft_world_lease_response_invalid"
             )
@@ -286,6 +393,7 @@ class MinecraftWorldLeaseRemote:
         )
         result = response.get("result")
         if not isinstance(result, dict):
+            self._clear_stale_authorization()
             raise RuntimeError(
                 "minecraft_world_lease_response_invalid"
             )
@@ -307,6 +415,7 @@ class MinecraftWorldLeaseRemote:
         )
         result = response.get("result")
         if not isinstance(result, dict):
+            self._clear_stale_authorization()
             raise RuntimeError(
                 "minecraft_world_lease_response_invalid"
             )

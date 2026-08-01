@@ -10,7 +10,11 @@ Mindcraft HTTP liveness와 실제 Minecraft 자율행동 readiness는 이제 별
 계약으로 판정한다. world lease, runner, fresh telemetry, Minecraft 연결,
 gated goal manager의 명령 게이트·explicit postcondition task contract,
 active autonomy 중 하나라도 없으면 `voyagerReady=false`다. 누락·모순된
-Mindcraft 계약도 fail-closed하며 고정 blocker만 공개한다.
+Mindcraft 계약도 fail-closed하며 고정 blocker만 공개한다. world lease
+consumer는 `auditReady`와 `statusReady`가 모두 정확한 boolean `true`가
+아니면 각각 `minecraft_world_lease_audit_unavailable` 또는
+`minecraft_world_lease_status_write_failed`로 거부해야 하며, 감사 내구성이나
+상태 publication 증거가 없는 lease를 functional readiness 근거로 사용할 수 없다.
 
 합성·이미지 내부 검증은 통과했지만 실제 Minecraft world에는 접속하지 않았다.
 따라서 lease 승인부터 runner 연결, 실제 task effect, 연결 단절과 재시작까지
@@ -56,6 +60,25 @@ proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단
 공유 claim을 통한 경쟁 owner 차단, Discord 인증 위임, split Fast Control의
 승인 경로도 구현했다. Local I/O Bridge와 legacy auto-start 우회는 차단했다.
 
+2026-08-01 worktree의 추가 source 계약은 world lease event 행을 append 뒤
+flush+`fsync`하며 POSIX의 새 daily file은 parent directory entry까지 sync한다.
+모든 consumer가 exact `auditReady=true`와
+`statusReady=true`를 요구한다. init, lease issue, runtime start와 goal
+mutation은 audit loss에서 fail-closed하며 lease/process capability를 제거한다.
+status artifact commit 실패도 같은 capability를 제거하고, 실행 중일 가능성이
+있는 runtime을 force-stop한 뒤 `minecraft_world_lease_status_write_failed`와
+`manual_intervention_required`를 보고한다. stop/revoke/watchdog/shutdown은
+안전을 위해 계속 실행하지만 감사된 성공으로 바꾸지 않는다.
+
+내부 delegation 401은 unauthenticated caller에게 `leaseStatus`를 반환하지
+않는다. remote는 authoritative status 누락·손상, 오류, transport failure와
+cancellation에서 stale active cache를 지운다. 이 경계는 raw goal,
+transcript, Minecraft chat과 token을 저장하지 않는다.
+
+최종 source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
+513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제 Minecraft
+connect/goal/stop live E2E는 계속 미검증이다.
+
 계획된 Bot API 교체의 claim handoff도 실제 컨테이너에서 검증했다. shutdown
 취소를 포함한 모든 cleanup 경로가 `finally`에서 claim을 반납하고 30초 stop
 grace를 사용한다. 실제 SIGTERM은 4.2초 안에 claim을 제거했으며 다음
@@ -84,6 +107,21 @@ main signature를 조회하는 테스트 2개만 환경 오류였다.
 일반 사용자의 명령 경계, grant 만료·재시작·연결 실패, 각 성공 action의
 `verified=true`와 exact `evidenceCode`, 실제 world effect를 한 흐름에서
 대조한다.
+
+## P1 — Minecraft owner claim takeover 원자성
+
+현재 owner claim은 fresh owner의 순차 경쟁과 15초 stale takeover를
+fail-closed하지만, claim 확인과 atomic replacement를 하나의 OS-held lock으로
+묶지는 않는다. 극단적인 interleaving에서 stale owner가 기존 nonce를 확인한 뒤
+멈춘 사이 replacement owner가 claim을 인수하고, stale owner가 뒤늦게 refresh
+replace를 수행하면 새 claim/status를 다시 덮을 수 있다. 현재 순차 takeover
+회귀는 이 TOCTOU를 재현하지 않는다.
+
+다음 조치: owner process lifetime 동안 유지되는 OS file lock 또는 generation
+CAS를 claim/status commit 경계에 도입하고, 두 owner의 read/unlink/create/replace를
+의도적으로 교차시키는 deterministic multi-process 회귀를 추가한다. 이 작업 전에는
+15초 stale guard를 adversarial scheduling까지 포함한 완전한 mutual exclusion
+증거로 해석하지 않는다.
 
 ## P1 — Conversation Continuity live Discord·원격 CI 검증 대기
 
