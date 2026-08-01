@@ -1130,6 +1130,7 @@ class MinecraftWorldLeaseOwner:
         guild_id: int,
         reason: str,
         force: bool = False,
+        lease: MinecraftWorldLease | None = None,
     ) -> bool:
         self._prune_stop_attempts()
         if not force and len(self._stop_attempts) >= STOP_RETRY_LIMIT:
@@ -1144,6 +1145,7 @@ class MinecraftWorldLeaseOwner:
                 self._audit_ready
                 and self._append_event(
                     "runtime_stop_failed",
+                    lease=lease,
                     guild_id=guild_id,
                     reason=reason,
                     outcome="minecraft_stop_retry_budget_exhausted",
@@ -1161,6 +1163,7 @@ class MinecraftWorldLeaseOwner:
             self._audit_ready
             and self._append_event(
                 "runtime_stop_attempted",
+                lease=lease,
                 guild_id=guild_id,
                 reason=reason,
             )
@@ -1192,6 +1195,7 @@ class MinecraftWorldLeaseOwner:
                 self._audit_ready
                 and self._append_event(
                     "runtime_stop_verified",
+                    lease=lease,
                     guild_id=guild_id,
                     reason=reason,
                     outcome=MINECRAFT_STOPPED_OUTCOME,
@@ -1217,6 +1221,7 @@ class MinecraftWorldLeaseOwner:
             self._audit_ready
             and self._append_event(
                 "runtime_stop_failed",
+                lease=lease,
                 guild_id=guild_id,
                 reason=reason,
                 outcome="minecraft_stop_failed",
@@ -1241,12 +1246,14 @@ class MinecraftWorldLeaseOwner:
         guild_id: int,
         reason: str,
         force: bool = True,
+        lease: MinecraftWorldLease | None = None,
     ) -> bool:
         stop_task = asyncio.create_task(
             self._stop_runtime(
                 guild_id=guild_id,
                 reason=reason,
                 force=force,
+                lease=lease,
             )
         )
         cancellation_requested = False
@@ -1276,6 +1283,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="lease_expired",
                     force=force_stop,
+                    lease=lease,
                 )
                 return {
                     "action": "stop_expired_runtime",
@@ -1288,6 +1296,7 @@ class MinecraftWorldLeaseOwner:
                         guild_id=lease.guild_id,
                         reason="status_write_failed",
                         force=True,
+                        lease=lease,
                     )
                     return {
                         "action": "stop_status_write_failed_runtime",
@@ -1310,6 +1319,22 @@ class MinecraftWorldLeaseOwner:
                     "stopped": stopped,
                 }
             if not minecraft_runtime_active(runtime_status):
+                if self._last_stop_outcome != MINECRAFT_STOPPED_OUTCOME:
+                    if not self._append_required_event(
+                        "runtime_stop_verified",
+                        guild_id=0,
+                        reason=reason,
+                        outcome=MINECRAFT_STOPPED_OUTCOME,
+                        verified=True,
+                    ):
+                        self._write_status()
+                        return {
+                            "action": "already_stopped",
+                            "stopped": True,
+                            "error": self._boundary_error_code(),
+                        }
+                    self._last_stop_outcome = MINECRAFT_STOPPED_OUTCOME
+                    self._stop_attempts.clear()
                 if self._state != "manual_intervention_required":
                     self._state = "authorization_required"
                     self._last_error_code = ""
@@ -1432,6 +1457,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=self._boundary_stop_reason(),
                     force=True,
+                    lease=self._lease,
                 )
                 raise RuntimeError(boundary_error)
             requested_goal = str(goal or "").strip()
@@ -1443,6 +1469,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=expired_guild_id,
                     reason="lease_expired",
                     force=True,
+                    lease=current,
                 ):
                     raise RuntimeError(
                         "minecraft_stale_runtime_stop_unverified"
@@ -1489,6 +1516,7 @@ class MinecraftWorldLeaseOwner:
                         guild_id=cleanup_guild_id,
                         reason=self._boundary_stop_reason(),
                         force=True,
+                        lease=self._lease,
                     )
                 raise
             if requested_goal and not self._append_required_event(
@@ -1500,6 +1528,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=self._boundary_stop_reason(),
                     force=True,
+                    lease=self._lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
             try:
@@ -1522,6 +1551,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="connect_failed",
                     force=True,
+                    lease=lease,
                 )
                 raise
             except Exception:
@@ -1542,6 +1572,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="connect_failed",
                     force=True,
+                    lease=lease,
                 )
                 boundary_error = self._boundary_error_code()
                 if (
@@ -1579,6 +1610,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="connect_failed",
                     force=True,
+                    lease=lease,
                 )
                 boundary_error = self._boundary_error_code()
                 if (
@@ -1602,6 +1634,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="audit_unavailable",
                     force=True,
+                    lease=lease,
                 )
                 raise RuntimeError(
                     self._boundary_error_code()
@@ -1632,6 +1665,7 @@ class MinecraftWorldLeaseOwner:
                             else "connect_failed"
                         ),
                         force=True,
+                        lease=lease,
                     )
                     if (
                         not failure_audited
@@ -1658,6 +1692,7 @@ class MinecraftWorldLeaseOwner:
                             else "status_write_failed"
                         ),
                         force=True,
+                        lease=lease,
                     )
                     raise RuntimeError(self._boundary_error_code())
             result = dict(observed)
@@ -1668,6 +1703,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="status_write_failed",
                     force=True,
+                    lease=lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
             return result
@@ -1691,6 +1727,7 @@ class MinecraftWorldLeaseOwner:
                 guild_id=guild_id,
                 reason="explicit_disconnect",
                 force=True,
+                lease=lease,
             )
             boundary_error = self._boundary_error_code()
             if not stopped:
@@ -1722,6 +1759,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=self._boundary_stop_reason(),
                     force=True,
+                    lease=self._lease,
                 )
                 raise RuntimeError(boundary_error)
             lease = self._lease
@@ -1743,6 +1781,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=self._boundary_stop_reason(),
                     force=True,
+                    lease=lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
             try:
@@ -1767,6 +1806,7 @@ class MinecraftWorldLeaseOwner:
                         else "explicit_goal"
                     ),
                     force=True,
+                    lease=lease,
                 )
                 raise
             except Exception:
@@ -1786,6 +1826,7 @@ class MinecraftWorldLeaseOwner:
                     if not self._audit_ready
                     else "explicit_goal",
                     force=True,
+                    lease=lease,
                 )
                 boundary_error = self._boundary_error_code()
                 if (
@@ -1832,6 +1873,7 @@ class MinecraftWorldLeaseOwner:
                     if not self._audit_ready
                     else "explicit_goal",
                     force=True,
+                    lease=lease,
                 )
                 boundary_error = self._boundary_error_code()
                 if (
@@ -1855,6 +1897,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=self._boundary_stop_reason(),
                     force=True,
+                    lease=lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
             if not self._write_status():
@@ -1862,6 +1905,7 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason="status_write_failed",
                     force=True,
+                    lease=lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
             return result
@@ -1882,14 +1926,28 @@ class MinecraftWorldLeaseOwner:
                     guild_id=guild_id,
                     reason=reason,
                     force=True,
+                    lease=lease,
                 )
                 raise
             if (
                 not runtime_status.get("_status_unavailable")
                 and not minecraft_runtime_active(runtime_status)
             ):
+                stop_audited = True
+                if lease is not None:
+                    stop_audited = self._append_required_event(
+                        "runtime_stop_verified",
+                        lease=lease,
+                        reason=reason,
+                        outcome=MINECRAFT_STOPPED_OUTCOME,
+                        verified=True,
+                    )
+                    if stop_audited:
+                        self._last_stop_outcome = MINECRAFT_STOPPED_OUTCOME
+                        self._stop_attempts.clear()
                 if (
                     revoke_audited
+                    and stop_audited
                     and self._audit_ready
                     and self._status_ready
                     and self._secret_ready
@@ -1909,6 +1967,7 @@ class MinecraftWorldLeaseOwner:
                 guild_id=guild_id,
                 reason=reason,
                 force=True,
+                lease=lease,
             )
             result = {
                 "stopped": stopped,

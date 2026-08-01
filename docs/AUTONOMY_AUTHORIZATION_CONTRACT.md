@@ -186,6 +186,47 @@ arguments, token과 임의 예외 원문을 저장하지 않는다.
 watchdog으로 아직 연결되어 있지는 않다. 따라서 이 계약의 시간 제한 grant를
 Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 
+## Control Page `autonomy-p0.v1` 관찰 검증
+
+Control Page의 자율행동 검증기는 승인 또는 effect 실행기가 아니다. `start`는
+`dryRun=true`인 요청만 받아 content-free preflight 세션을 만들고, `confirm`은
+사용자가 수동 관찰 경계를 이해했다는 사실만 기록한다. 검증기는 Discord 명령,
+grant 발급·철회, runtime repair, 서비스 시작, world lease 변경, Minecraft goal
+또는 요청 큐 write를 호출하지 않는다. 실제 변경은 사용자가 기존 owner/admin
+경계에서 별도로 실행하고, 검증기는 그 뒤 생성된 durable status와 JSONL 증거만
+관찰한다.
+
+세션은 `runtime_artifacts/autonomy_validation/` 아래에서 30분 동안 복구되며,
+단계별 최대 시도는 3회다. 보고서와 투영 event에는 고정 step/action/evidence/error
+code, boolean readiness, 시도 횟수와 시간만 남긴다. guild/user/issuer, grant·lease
+ID, process nonce, goal, Discord message/chat, transcript, action argument, 좌표,
+inventory와 raw exception은 저장하지 않는다. 보고서와 event는 30일 또는 최근
+20개까지만 보존한다.
+
+`assistant:*` 트랙은 동일 grant와 동일한 실행별 `actionRunId`에서 실행 전과
+실행 후의 `action_authorized` 두 건이 source journal 순서대로 먼저 발생하고,
+그 뒤 `action_outcome`이 성공 status,
+`verified=true`, `authorizationCurrent=true`와 action별 exact `evidenceCode`를
+모두 만족할 때만 통과한다. 실행 전 승인, 실행 후 grant 재검사, outcome은 같은
+`actionRunId`를 공유하므로 서로 다른 두 실행의 증거를 합칠 수 없다. Minecraft
+cleanup도 `lease_revoked`와 `runtime_stop_verified`가 동일 lease에 속할 때만
+인정한다. producer가 재시작된 경우에는 non-restoration policy, 새 process epoch,
+inactive authority와 새 epoch의 verified global stop을 함께 요구한다. 단계 retry도
+별도 `step_retry_started` 감사 event가 durable하게 기록되지 않으면 실패한다.
+최신 JSONL의 미종결 행은 2초의 동시-write grace 안에서만 보류하고 그 이후에는
+손상으로 판정한다. Minecraft 트랙에서
+`goal_verified`는 goal echo 증거일 뿐 world effect가 아니며, readiness `ready`도
+실행 준비 증거일 뿐이다. 따라서 gated readiness와 별도의 trusted explicit
+postcondition 투영이 모두 없으면 효과 단계는 통과하지 않는다.
+
+현재 production의 `RoutedAutonomyExecutor`에는 Minecraft executor가 등록되지
+않았고 Discord `자율시작` grant도 assistant scope만 발급한다. durable trusted
+Minecraft postcondition observer도 아직 validation 세션에 연결되지 않았다.
+검증기는 이를 `minecraft_autonomy_route_unwired`와
+`minecraft_postcondition_observer_unavailable`로 차단한다. 그러므로 현 단계의
+두 트랙 관찰 결과를 “승인된 Minecraft 자율행동 단일 E2E 통과”로 합쳐 주장하면
+안 된다.
+
 ## 검증 범위와 남은 증거
 
 단위·composition 테스트는 다음을 검증한다.

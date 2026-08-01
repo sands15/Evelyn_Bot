@@ -153,6 +153,47 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
         self.assertEqual(expired["code"], "authorization_required")
         self.assertEqual(self.manager.status()["activeGrantCount"], 0)
 
+    def test_authorization_and_outcome_share_explicit_action_run_id(
+        self,
+    ) -> None:
+        grant = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )["grant"]
+        action_run_id = "action-run-123"
+
+        decision = self.manager.authorize(
+            7,
+            "assistant:idle",
+            action_run_id=action_run_id,
+        )
+        self.manager.record_outcome(
+            7,
+            "assistant:idle",
+            {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+                "_authorization_grant_id": grant["grantId"],
+                "_action_run_id": action_run_id,
+            },
+        )
+
+        relevant = [
+            row
+            for row in self.read_events()
+            if row["event"] in {"action_authorized", "action_outcome"}
+        ]
+        self.assertEqual(decision["actionRunId"], action_run_id)
+        self.assertEqual(len(relevant), 2)
+        self.assertEqual(
+            {row["actionRunId"] for row in relevant},
+            {action_run_id},
+        )
+        self.assertTrue(relevant[-1]["verified"])
+
     def test_grant_rejects_unknown_authorization_source(self) -> None:
         result = self.manager.grant(
             guild_id=7,
@@ -451,6 +492,49 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unverified["reason"], "outcome_unverified")
         self.assertEqual(plan.cursor, 1)
         self.assertEqual(verified["status"], "ok")
+
+    async def test_each_execution_correlates_both_checks_and_outcome(
+        self,
+    ) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        engine = self.engine(DummyExecutor())
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+
+        for _ in range(2):
+            plan = AutonomyPlan(
+                goal_kind="idle",
+                summary="wait",
+                steps=[{"domain": "assistant", "action": "idle"}],
+            )
+            result = await engine.execute_next_step(plan)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(plan.cursor, 1)
+
+        rows = self.read_events()
+        outcomes = [
+            row for row in rows if row["event"] == "action_outcome"
+        ]
+        authorized = [
+            row for row in rows if row["event"] == "action_authorized"
+        ]
+        run_ids = [row["actionRunId"] for row in outcomes]
+
+        self.assertEqual(len(outcomes), 2)
+        self.assertTrue(all(run_ids))
+        self.assertEqual(len(set(run_ids)), 2)
+        for action_run_id in run_ids:
+            matching_checks = [
+                row
+                for row in authorized
+                if row["actionRunId"] == action_run_id
+            ]
+            self.assertEqual(len(matching_checks), 2)
 
     async def test_skip_reason_without_evidence_does_not_advance(
         self,

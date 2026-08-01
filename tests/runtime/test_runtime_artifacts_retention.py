@@ -32,6 +32,33 @@ def write_file(path: Path, text: str, *, mtime: float) -> None:
 
 
 class RuntimeArtifactsRetentionTests(unittest.TestCase):
+    def test_autonomy_validation_artifacts_have_bounded_retention(
+        self,
+    ) -> None:
+        rules = {
+            row.name: row
+            for row in DEFAULT_RETENTION_RULES
+            if row.name.startswith("autonomy_validation_")
+        }
+
+        reports = rules["autonomy_validation_reports"]
+        self.assertEqual(
+            reports.patterns,
+            ("autonomy_validation/reports/*.json",),
+        )
+        self.assertEqual(reports.max_age_days, 30)
+        self.assertEqual(reports.max_total_bytes, 20 * 1024 * 1024)
+        self.assertEqual(reports.preserve_newest, 20)
+
+        events = rules["autonomy_validation_events"]
+        self.assertEqual(
+            events.patterns,
+            ("autonomy_validation/events/*.jsonl",),
+        )
+        self.assertEqual(events.max_age_days, 30)
+        self.assertEqual(events.max_total_bytes, 50 * 1024 * 1024)
+        self.assertEqual(events.preserve_newest, 20)
+
     def test_autonomy_authorization_journal_has_bounded_retention(
         self,
     ) -> None:

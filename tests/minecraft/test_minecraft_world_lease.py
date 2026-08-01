@@ -979,6 +979,30 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             "authorization_required",
         )
 
+    async def test_already_stopped_shutdown_audits_original_lease(self) -> None:
+        connected = await self.connect()
+        lease_id = connected["worldLease"]["leaseId"]
+        self.owner._watchdog_task = None
+        self.runtime.calls.clear()
+        self.runtime.statuses = [{"running": False, "connected": False}]
+
+        result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertNotIn(("disable", 7), self.runtime.calls)
+        correlated = [
+            row
+            for row in self.read_events()
+            if row["leaseId"] == lease_id
+            and row["event"]
+            in {"lease_revoked", "runtime_stop_verified"}
+        ]
+        self.assertEqual(
+            [row["event"] for row in correlated],
+            ["lease_revoked", "runtime_stop_verified"],
+        )
+        self.assertTrue(correlated[-1]["verified"])
+
     async def test_shutdown_waits_for_admitted_world_effect_boundary(
         self,
     ) -> None:
@@ -1712,6 +1736,22 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(disable_index, enable_index)
 
+    async def test_reconcile_audits_inactive_runtime_once_per_epoch(self) -> None:
+        first = await self.owner.reconcile_once(reason="process_restart")
+        second = await self.owner.reconcile_once(reason="watchdog_retry")
+
+        self.assertEqual(first["action"], "already_stopped")
+        self.assertEqual(second["action"], "already_stopped")
+        stops = [
+            row
+            for row in self.read_events()
+            if row["event"] == "runtime_stop_verified"
+            and row["leaseId"] == ""
+        ]
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0]["guildId"], 0)
+        self.assertTrue(stops[0]["verified"])
+
     async def test_expired_lease_stops_runtime(self) -> None:
         await self.connect()
         self.runtime.calls.clear()
@@ -1923,6 +1963,27 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             await self.owner.disconnect(8)
 
         self.assertTrue(self.owner.status()["active"])
+
+    async def test_disconnect_stop_audit_keeps_revoked_lease_id(self) -> None:
+        connected = await self.connect(guild_id=7)
+        lease_id = connected["worldLease"]["leaseId"]
+
+        stopped = await self.owner.disconnect(7)
+
+        self.assertTrue(stopped["outcome_verified"])
+        events = self.read_events()
+        correlated = [
+            row
+            for row in events
+            if row["event"]
+            in {
+                "lease_revoked",
+                "runtime_stop_attempted",
+                "runtime_stop_verified",
+            }
+        ]
+        self.assertEqual(len(correlated), 3)
+        self.assertEqual({row["leaseId"] for row in correlated}, {lease_id})
 
     async def test_disconnect_still_stops_when_audit_fails(self) -> None:
         await self.connect(guild_id=7)

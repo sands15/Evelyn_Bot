@@ -6,6 +6,7 @@
   <title>E.V.E.L.Y.N</title>
   <link rel="icon" type="image/png" href="./assets/evelyn-logo-light-mark.png">
   <link rel="stylesheet" href="./assets/evelyn-voice-validation.css?v=20260729-voice-p0-1">
+  <link rel="stylesheet" href="./assets/evelyn-validation-wizard.css?v=20260801-autonomy-p0-1">
   <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <link rel="stylesheet" href="./assets/evelyn-runtime-errors.css?v=20260731-continuity-commit-1">
   <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-3">
@@ -2222,6 +2223,21 @@
           <button id="voiceValidationStartButton" type="button">검증 시작</button>
         </div>
         <div id="voiceValidationMount" aria-live="polite"></div>
+      </section>
+
+      <section id="autonomyValidationPanel" class="validation-wizard-panel" aria-labelledby="autonomyValidationTitle">
+        <div class="validation-wizard-head">
+          <div>
+            <strong id="autonomyValidationTitle">자율행동 P0 검증</strong>
+            <span>읽기 전용 preflight · 자동 승인·명령·월드 행동 없음</span>
+          </div>
+          <button id="autonomyValidationStartButton" type="button">Dry preflight</button>
+        </div>
+        <label class="validation-wizard-guild" for="autonomyValidationGuildId">
+          <span>Discord guild ID</span>
+          <input id="autonomyValidationGuildId" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="20" autocomplete="off" placeholder="검증할 서버 ID">
+        </label>
+        <div id="autonomyValidationMount" aria-live="polite"></div>
       </section>
 
       <section class="ui-action-panel" aria-label="화면 행동 승인">
@@ -6036,6 +6052,7 @@
     refreshState();
   </script>
   <script src="./assets/evelyn-voice-validation.js?v=20260729-voice-p0-1"></script>
+  <script src="./assets/evelyn-autonomy-validation.js?v=20260801-autonomy-p0-1"></script>
   <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
   <script src="./assets/evelyn-runtime-errors.js?v=20260731-continuity-commit-1"></script>
   <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-3"></script>

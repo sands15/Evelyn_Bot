@@ -13,6 +13,10 @@ from urllib.parse import quote
 
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
 
+from .autonomy_validation import (
+    SUITE_ID as AUTONOMY_VALIDATION_SUITE_ID,
+    get_autonomy_validation_manager,
+)
 from .config import MEMORY_ROOT
 from .control_page_memory_http import (
     CONTROL_PAGE_MEMORY_BOUNDARY_HEADER,
@@ -1615,6 +1619,220 @@ async def voice_validation_abort_handler(request: web.Request) -> web.StreamResp
     return json_response(result, status=200 if result.get("ok") else 409)
 
 
+async def _strict_autonomy_validation_payload(
+    request: web.Request,
+    *,
+    allowed_fields: frozenset[str],
+) -> tuple[dict[str, Any] | None, web.Response | None]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return None, json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if not isinstance(payload, dict):
+        return None, json_response(
+            {"ok": False, "error": "json_object_required"},
+            status=400,
+        )
+    if not set(payload).issubset(allowed_fields):
+        return None, json_response(
+            {"ok": False, "error": "invalid_request_fields"},
+            status=400,
+        )
+    return payload, None
+
+
+def _autonomy_validation_id(value: Any, *, max_length: int) -> str | None:
+    if type(value) is not str:
+        return None
+    if not value or value != value.strip() or len(value) > max_length:
+        return None
+    return value
+
+
+def _autonomy_validation_attempt(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _autonomy_validation_guild_id(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 < value <= (2**64 - 1) else None
+    if (
+        isinstance(value, str)
+        and 1 <= len(value) <= 20
+        and value[0] in "123456789"
+        and value.isascii()
+        and value.isdecimal()
+    ):
+        parsed = int(value)
+        return parsed if parsed <= (2**64 - 1) else None
+    return None
+
+
+async def autonomy_validation_handler(_: web.Request) -> web.StreamResponse:
+    session = get_autonomy_validation_manager().snapshot()
+    return json_response({"ok": True, "session": session})
+
+
+async def autonomy_validation_start_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _strict_autonomy_validation_payload(
+        request,
+        allowed_fields=frozenset({"suite", "guildId", "dryRun"}),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    if payload.get("dryRun") is False:
+        return json_response(
+            {
+                "ok": False,
+                "error": "autonomy_execution_not_enabled",
+                "dryRun": True,
+                "dryRunOnly": True,
+            },
+            status=409,
+        )
+    if payload.get("dryRun") is not True:
+        return json_response(
+            {"ok": False, "error": "dry_run_required"},
+            status=400,
+        )
+    if payload.get("suite") != AUTONOMY_VALIDATION_SUITE_ID:
+        return json_response(
+            {"ok": False, "error": "unsupported_suite"},
+            status=400,
+        )
+    guild_id = _autonomy_validation_guild_id(payload.get("guildId"))
+    if guild_id is None:
+        return json_response(
+            {"ok": False, "error": "guild_id_positive_required"},
+            status=400,
+        )
+    result = get_autonomy_validation_manager().start(
+        suite=AUTONOMY_VALIDATION_SUITE_ID,
+        guild_id=guild_id,
+        dry_run=True,
+    )
+    return json_response(result, status=201 if result.get("ok") else 409)
+
+
+async def autonomy_validation_confirm_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _strict_autonomy_validation_payload(
+        request,
+        allowed_fields=frozenset(
+            {"sessionId", "stepId", "attempt", "userConfirmed"}
+        ),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    session_id = _autonomy_validation_id(
+        payload.get("sessionId"),
+        max_length=128,
+    )
+    if session_id is None:
+        return json_response(
+            {"ok": False, "error": "session_id_required"},
+            status=400,
+        )
+    step_id = _autonomy_validation_id(payload.get("stepId"), max_length=128)
+    if step_id is None:
+        return json_response(
+            {"ok": False, "error": "step_id_required"},
+            status=400,
+        )
+    attempt = _autonomy_validation_attempt(payload.get("attempt"))
+    if attempt is None:
+        return json_response(
+            {"ok": False, "error": "attempt_positive_required"},
+            status=400,
+        )
+    if payload.get("userConfirmed") is not True:
+        return json_response(
+            {"ok": False, "error": "user_confirmation_required"},
+            status=400,
+        )
+    result = get_autonomy_validation_manager().confirm(
+        session_id=session_id,
+        step_id=step_id,
+        attempt=attempt,
+        acknowledged=True,
+    )
+    return json_response(result, status=200 if result.get("ok") else 409)
+
+
+async def autonomy_validation_retry_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _strict_autonomy_validation_payload(
+        request,
+        allowed_fields=frozenset({"sessionId", "stepId", "attempt"}),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    session_id = _autonomy_validation_id(
+        payload.get("sessionId"),
+        max_length=128,
+    )
+    if session_id is None:
+        return json_response(
+            {"ok": False, "error": "session_id_required"},
+            status=400,
+        )
+    step_id = _autonomy_validation_id(payload.get("stepId"), max_length=128)
+    if step_id is None:
+        return json_response(
+            {"ok": False, "error": "step_id_required"},
+            status=400,
+        )
+    attempt = _autonomy_validation_attempt(payload.get("attempt"))
+    if attempt is None:
+        return json_response(
+            {"ok": False, "error": "attempt_positive_required"},
+            status=400,
+        )
+    result = get_autonomy_validation_manager().retry(
+        session_id=session_id,
+        step_id=step_id,
+        attempt=attempt,
+    )
+    return json_response(result, status=200 if result.get("ok") else 409)
+
+
+async def autonomy_validation_abort_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _strict_autonomy_validation_payload(
+        request,
+        allowed_fields=frozenset({"sessionId"}),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    session_id = _autonomy_validation_id(
+        payload.get("sessionId"),
+        max_length=128,
+    )
+    if session_id is None:
+        return json_response(
+            {"ok": False, "error": "session_id_required"},
+            status=400,
+        )
+    result = get_autonomy_validation_manager().abort(session_id=session_id)
+    return json_response(result, status=200 if result.get("ok") else 409)
+
+
 async def ui_action_status_handler(
     request: web.Request,
 ) -> web.StreamResponse:
@@ -2413,6 +2631,26 @@ def create_app() -> web.Application:
     app.router.add_post("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
     app.router.add_post("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
     app.router.add_get(
+        "/api/control-page/autonomy-validation",
+        autonomy_validation_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/autonomy-validation/start",
+        autonomy_validation_start_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/autonomy-validation/confirm",
+        autonomy_validation_confirm_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/autonomy-validation/retry",
+        autonomy_validation_retry_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/autonomy-validation/abort",
+        autonomy_validation_abort_handler,
+    )
+    app.router.add_get(
         "/api/control-page/ui-action",
         ui_action_status_handler,
     )
@@ -2614,6 +2852,22 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
     app.router.add_options("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
     app.router.add_options("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
+    app.router.add_options(
+        "/api/control-page/autonomy-validation/start",
+        autonomy_validation_start_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/autonomy-validation/confirm",
+        autonomy_validation_confirm_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/autonomy-validation/retry",
+        autonomy_validation_retry_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/autonomy-validation/abort",
+        autonomy_validation_abort_handler,
+    )
     app.router.add_options(
         "/api/control-page/ui-action/targets",
         ui_action_targets_handler,

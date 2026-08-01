@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
+import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
@@ -132,7 +134,7 @@ class AutonomyEngine:
         notify: Callable[[str], Awaitable[None]] | None = None,
         poll_interval_sec: float = 4.0,
         get_authorized_actions: Callable[[int], list[str]] | None = None,
-        authorize_action: Callable[[int, str], dict[str, Any]] | None = None,
+        authorize_action: Callable[..., dict[str, Any]] | None = None,
         record_action_outcome: Callable[
             [int, str, dict[str, Any]],
             None,
@@ -785,6 +787,8 @@ class AutonomyEngine:
     def action_authorization_decision(
         self,
         step: dict[str, Any],
+        *,
+        action_run_id: str = "",
     ) -> dict[str, Any]:
         domain = clean_text(str(step.get("domain", "assistant"))) or "assistant"
         action = clean_text(str(step.get("action", "")))
@@ -806,7 +810,10 @@ class AutonomyEngine:
                 "code": "authorization_required",
                 "action": token,
             }
-        decision = self.authorize_action(self.guild_id, token)
+        decision = self._call_authorize_action(
+            token,
+            action_run_id=action_run_id,
+        )
         if not isinstance(decision, dict):
             return {
                 "allowed": False,
@@ -815,18 +822,44 @@ class AutonomyEngine:
             }
         return decision
 
+    def _call_authorize_action(
+        self,
+        action_key: str,
+        *,
+        action_run_id: str = "",
+    ) -> dict[str, Any]:
+        if self.authorize_action is None:
+            return {}
+        if not action_run_id:
+            return self.authorize_action(self.guild_id, action_key)
+        try:
+            inspect.signature(self.authorize_action).bind(
+                self.guild_id,
+                action_key,
+                action_run_id=action_run_id,
+            )
+        except (TypeError, ValueError):
+            return self.authorize_action(self.guild_id, action_key)
+        return self.authorize_action(
+            self.guild_id,
+            action_key,
+            action_run_id=action_run_id,
+        )
+
     def _record_action_result(
         self,
         action_key: str,
         result: dict[str, Any],
         *,
         authorization_grant_id: str = "",
+        action_run_id: str = "",
     ) -> dict[str, Any]:
         if self.record_action_outcome is not None and action_key:
             audit_result = dict(result)
             audit_result["_authorization_grant_id"] = (
                 authorization_grant_id
             )
+            audit_result["_action_run_id"] = action_run_id
             self.record_action_outcome(
                 self.guild_id,
                 action_key,
@@ -838,10 +871,15 @@ class AutonomyEngine:
         self,
         action_key: str,
         grant_id: str,
+        *,
+        action_run_id: str = "",
     ) -> tuple[bool, str]:
         if not self.authorize_action or not grant_id:
             return False, "authorization_required"
-        decision = self.authorize_action(self.guild_id, action_key)
+        decision = self._call_authorize_action(
+            action_key,
+            action_run_id=action_run_id,
+        )
         if not isinstance(decision, dict) or not decision.get("allowed"):
             return False, str(
                 (decision or {}).get("code")
@@ -858,7 +896,11 @@ class AutonomyEngine:
             return {"status": "done", "reason": "plan_complete"}
         step = plan.steps[plan.cursor]
         action_key = self._action_key(step)
-        authorization = self.action_authorization_decision(step)
+        action_run_id = secrets.token_hex(12)
+        authorization = self.action_authorization_decision(
+            step,
+            action_run_id=action_run_id,
+        )
         authorization_grant_id = str(
             authorization.get("grantId") or ""
         )
@@ -877,6 +919,7 @@ class AutonomyEngine:
                     "step": step,
                     "verified": False,
                 },
+                action_run_id=action_run_id,
             )
         if action_key and self._blocked_counts.get(action_key, 0) >= 2:
             return self._record_action_result(
@@ -890,6 +933,7 @@ class AutonomyEngine:
                     "verified": False,
                 },
                 authorization_grant_id=authorization_grant_id,
+                action_run_id=action_run_id,
             )
         try:
             result = await self.executor.execute_step(step)
@@ -910,6 +954,7 @@ class AutonomyEngine:
                     ),
                 },
                 authorization_grant_id=authorization_grant_id,
+                action_run_id=action_run_id,
             )
         if isinstance(result, dict):
             result.setdefault("step", step)
@@ -924,6 +969,7 @@ class AutonomyEngine:
                 ) = self._authorization_remains_current(
                     action_key,
                     authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
                 if not authorization_current:
                     self.state.enabled = False
@@ -941,6 +987,7 @@ class AutonomyEngine:
                         authorization_grant_id=(
                             authorization_grant_id
                         ),
+                        action_run_id=action_run_id,
                     )
             if step.get("action") == "refresh_cognitive_state":
                 self.state.last_router_refresh_result = dict(result)
@@ -963,6 +1010,7 @@ class AutonomyEngine:
                         "evidence_code": "inventory_absence_verified",
                     },
                     authorization_grant_id=authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
             if (
                 verified_outcome
@@ -983,6 +1031,7 @@ class AutonomyEngine:
                         "evidence_code": "hazard_absence_verified",
                     },
                     authorization_grant_id=authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
             if (
                 verified_outcome
@@ -1003,6 +1052,7 @@ class AutonomyEngine:
                         "evidence_code": "hostile_absence_verified",
                     },
                     authorization_grant_id=authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
             if (
                 verified_outcome
@@ -1027,6 +1077,7 @@ class AutonomyEngine:
                         "evidence_code": "target_absence_verified",
                     },
                     authorization_grant_id=authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
             if (
                 verified_outcome
@@ -1052,6 +1103,7 @@ class AutonomyEngine:
                         "evidence_code": "food_absence_verified",
                     },
                     authorization_grant_id=authorization_grant_id,
+                    action_run_id=action_run_id,
                 )
             if result.get("status") in {"ok", "done", "completed"}:
                 if not verified_outcome:
@@ -1067,6 +1119,7 @@ class AutonomyEngine:
                         authorization_grant_id=(
                             authorization_grant_id
                         ),
+                        action_run_id=action_run_id,
                     )
                 plan.cursor += 1
                 plan.updated_at = time.time()
@@ -1074,6 +1127,7 @@ class AutonomyEngine:
                 action_key,
                 result,
                 authorization_grant_id=authorization_grant_id,
+                action_run_id=action_run_id,
             )
         return self._record_action_result(
             action_key,
@@ -1084,4 +1138,5 @@ class AutonomyEngine:
                 "verified": False,
             },
             authorization_grant_id=authorization_grant_id,
+            action_run_id=action_run_id,
         )

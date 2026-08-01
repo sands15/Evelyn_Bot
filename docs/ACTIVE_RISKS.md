@@ -33,6 +33,27 @@ Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조하고, 밀
 
 ## P0 — 승인된 자율행동 live E2E 검증 대기
 
+2026-08-01 source 감사에서 production 연결 공백을 추가로 확인했다.
+`RoutedAutonomyExecutor`의 executor map이 비어 있고 Discord `자율시작`은 현재
+`assistant:*` scope만 승인한다. 따라서 assistant grant/outcome과 명시적 Minecraft
+world lease는 각각 검증할 수 있지만, 승인된 `minecraft:*` action이 같은
+AutonomyEngine plan에서 실제 world postcondition까지 이어졌다고 증명할 수 없다.
+또한 `goal_verified`는 goal echo이고 readiness `ready`는 준비 상태이므로 어느
+것도 실제 effect 증거가 아니다. trusted content-free postcondition observer가
+연결되기 전에는 이 항목을 통과로 판정하지 않는다.
+
+Control Page에는 이 공백을 숨기지 않는 `autonomy-p0.v1` dry observer를 추가했다.
+이 검증기는 grant/connect/goal/stop 또는 service/queue mutation을 직접
+실행하지 않고 기존 durable artifact만 관찰하며, 위 연결 공백을 고정 blocker로
+보고한다. 실제 live 검증은 연결 배선과 postcondition observer를 먼저 완성한 뒤
+사용자가 별도 승인 세션에서 실행해야 한다.
+
+assistant 실행 전 승인·사후 재검사·outcome에는 실행별 `actionRunId`를 추가했고,
+Minecraft stop audit에는 원래 lease ID를 보존한다. observer는 각각 같은 실행과
+같은 lease의 증거만 결합하므로 교차 실행 또는 교차 lease 증거를 성공으로
+오인하지 않는다. producer restart cleanup은 새 process epoch와 non-restoration,
+inactive authority 및 verified global stop을 함께 요구한다.
+
 현재 프로세스에만 유효한 guild별 grant, 1시간 TTL, exact action scope,
 restart 비복구, 변경성 Discord 명령 권한 검사와 미검증 결과의 plan 진행
 차단은 구현되어 있다. action별 exact evidence allowlist, 실행 뒤 동일 grant

@@ -1690,5 +1690,27 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   config와 Python/PowerShell 구문 검사도 통과했다. 실행 중인 오래된 Bot API와
   Control Page는 교체하지 않았고 실제 마이크, 스피커, Discord, Minecraft와
   사용자 runtime artifact를 시작하거나 변경하지 않았다.
+- 자율행동 P0에는 별도 content-free dry observer를 추가했다.
+  - `autonomy-p0.v1`은 Control Page에서 session 상태와 고정 blocker를 보여주되,
+    Discord 명령, grant/lease, runtime repair, 서비스, Minecraft goal/effect 또는
+    host request queue를 실행하지 않는다.
+  - assistant 트랙은 같은 grant와 실행별 `actionRunId`의 pre-authorize,
+    post-execution recheck 두 건 및 그 뒤의 exact typed outcome만 journal 순서대로
+    인정한다. Minecraft cleanup도 revoke와 verified stop이 같은 lease에 속해야
+    하며, process rollover는 non-restoration과 새 epoch의 global stop을 함께
+    증명해야 한다.
+    Minecraft의 `goal_verified`와 readiness만으로는 world effect를 인정하지 않고
+    trusted explicit postcondition 증거를 별도로 요구한다.
+  - source 감사에서 production `RoutedAutonomyExecutor`의 executor map이 비어 있고
+    현재 Discord grant가 assistant scope만 포함한다는 연결 공백을 확인했다.
+    postcondition observer도 validation에 연결되지 않았으므로 이를 고정 blocker로
+    공개하며, 승인된 Minecraft 단일 E2E 완료를 주장하지 않는다.
+  - 최종 회귀는 runtime 583개(skip 4), Minecraft 160개(skip 7), UI 171개(skip 8),
+    변경 집중 132개를 통과했다. core discovery 656개에는 기능 assertion 실패가
+    없었고 Bot API 검증 이미지에 없는 `git`·Pillow·Discord 의존 4건은 Windows
+    bundled runtime과 Discord 이미지에서 실제 9개 테스트로 모두 통과했다.
+    `compileall`, 새 JavaScript `node --check`, `pip check`, Compose config와
+    `git diff --check`도 통과했다. 실행 중 컨테이너와 실제 Discord·Minecraft,
+    사용자 grant/lease/runtime artifact는 시작하거나 교체하지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

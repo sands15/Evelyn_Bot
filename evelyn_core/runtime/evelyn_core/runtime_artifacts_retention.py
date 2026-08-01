@@ -77,6 +77,8 @@ DEFAULT_RETENTION_RULES: tuple[RetentionRule, ...] = (
     RetentionRule("turn_trace", ("turn_trace/*.jsonl",), max_age_days=30, max_total_bytes=100 * 1024 * 1024, preserve_newest=7),
     RetentionRule("voice_validation_reports", ("voice_validation/reports/*.json",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=20),
     RetentionRule("voice_validation_events", ("voice_validation/events/*.jsonl",), max_age_days=30, max_total_bytes=50 * 1024 * 1024, preserve_newest=20),
+    RetentionRule("autonomy_validation_reports", ("autonomy_validation/reports/*.json",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=20),
+    RetentionRule("autonomy_validation_events", ("autonomy_validation/events/*.jsonl",), max_age_days=30, max_total_bytes=50 * 1024 * 1024, preserve_newest=20),
     RetentionRule("benchmarks", ("benchmarks/*.jsonl",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=3),
     RetentionRule("memory_writebehind", ("memory/*.jsonl",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=3),
     RetentionRule(

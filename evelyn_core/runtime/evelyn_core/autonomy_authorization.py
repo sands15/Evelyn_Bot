@@ -204,6 +204,7 @@ class AutonomyAuthorizationManager:
         verified: bool | None = None,
         evidence_code: str = "",
         authorization_current: bool | None = None,
+        action_run_id: str = "",
     ) -> bool:
         timestamp = self.now()
         record: dict[str, Any] = {
@@ -239,6 +240,7 @@ class AutonomyAuthorizationManager:
             "verified": verified,
             "evidenceCode": _safe_identifier(evidence_code),
             "authorizationCurrent": authorization_current,
+            "actionRunId": _safe_identifier(action_run_id),
         }
         try:
             self.events_dir.mkdir(parents=True, exist_ok=True)
@@ -493,9 +495,16 @@ class AutonomyAuthorizationManager:
             grant = self._grants.get(resolved_guild_id)
             return list(grant.scopes) if grant is not None else []
 
-    def authorize(self, guild_id: int, action: str) -> dict[str, Any]:
+    def authorize(
+        self,
+        guild_id: int,
+        action: str,
+        *,
+        action_run_id: str = "",
+    ) -> dict[str, Any]:
         resolved_guild_id = _safe_guild_id(guild_id)
         resolved_action = str(action or "").strip()
+        resolved_action_run_id = _safe_identifier(action_run_id)
         with self._lock:
             if not self._prune_expired():
                 self._decision_count += 1
@@ -513,6 +522,7 @@ class AutonomyAuthorizationManager:
                     ),
                     "grantId": "",
                     "expiresAt": None,
+                    "actionRunId": resolved_action_run_id,
                 }
             grant = (
                 self._grants.get(resolved_guild_id)
@@ -544,6 +554,7 @@ class AutonomyAuthorizationManager:
                     if allowed
                     else "action_denied"
                 ),
+                action_run_id=resolved_action_run_id,
             ):
                 if allowed:
                     self._denied_count += 1
@@ -560,6 +571,7 @@ class AutonomyAuthorizationManager:
                     ),
                     "grantId": "",
                     "expiresAt": None,
+                    "actionRunId": resolved_action_run_id,
                 }
             self._write_status()
             return {
@@ -574,6 +586,7 @@ class AutonomyAuthorizationManager:
                 ),
                 "grantId": grant.grant_id if grant is not None else "",
                 "expiresAt": grant.expires_at if grant is not None else None,
+                "actionRunId": resolved_action_run_id,
             }
 
     def record_outcome(
@@ -599,6 +612,9 @@ class AutonomyAuthorizationManager:
             )
             authorization_grant_id = _safe_identifier(
                 result.get("_authorization_grant_id")
+            )
+            action_run_id = _safe_identifier(
+                result.get("_action_run_id")
             )
             authorization_current = bool(
                 grant is not None
@@ -644,6 +660,7 @@ class AutonomyAuthorizationManager:
                 verified=verified,
                 evidence_code=str(result.get("evidence_code") or ""),
                 authorization_current=authorization_current,
+                action_run_id=action_run_id,
             ):
                 self._fail_closed_for_audit()
                 return
