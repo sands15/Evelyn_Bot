@@ -1,10 +1,25 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-08-01
+Last reviewed: 2026-08-02
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
 implemented behavior.
+
+## Project Navigation And Working Memory
+
+- `docs/00_EVELYN_HOME.md`
+  - 공식 Obsidian Vault의 탐색 시작점. 현재 사실을 복제하지 않고 권위 문서로
+    연결한다.
+- `docs/01_NOW.md`
+  - Codex가 작업 시작 시 읽는 80줄 이하의 현재 초점·차단점 snapshot.
+- `docs/02_DECISIONS.md`
+  - 오래 유지할 제품·아키텍처·운영 결정과 근거.
+- `docs/worklog/YYYY-MM-DD.md`
+  - 의미 있는 구현 checkpoint, 검증 결과와 다음 행동의 날짜별 기록.
+- `docs/99_PROJECT_INBOX.md`
+  - 아직 검토되지 않은 아이디어와 질문. 검토 전에는 현재 구현이나 확정 요구로
+    취급하지 않는다.
 
 ## Current Runtime References
 
@@ -45,7 +60,7 @@ implemented behavior.
 - `docs/LOCAL_VOICE_ADMISSION_CONTRACT.md`
   - 로컬 STT가 대화·도구·side effect로 들어가기 전의 정확한 선행 호출어,
     45초 follow-up, 고영향 fresh-wake, validation 한정 예외, 10초 일회성
-    capability와 browser source-spoof 차단·privacy 계약.
+    capability, durable ingress 원자성, browser source-spoof 차단·privacy 계약.
 
 - `docs/VOICE_CAPTURE_CONSENT.md`
   - Control Page 로컬 검증의 시간 제한 마이크 캡처 동의와 철회 계약. 캡처
