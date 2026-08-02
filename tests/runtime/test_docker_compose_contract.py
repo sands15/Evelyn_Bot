@@ -356,6 +356,16 @@ class DockerComposeContractTests(unittest.TestCase):
             check_script,
         )
 
+    def test_runtime_checker_uses_public_state_for_local_bridge(self) -> None:
+        check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("$controlState.voice.localBridge", check_script)
+        self.assertIn("$bridge.stale -ne $true", check_script)
+        self.assertNotIn(
+            'Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8798/api/local-bridge/status"',
+            check_script,
+        )
+
     def test_host_specific_compose_paths_are_configurable(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 

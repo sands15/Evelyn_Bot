@@ -248,17 +248,22 @@ if ($IncludeDiscordBot) {
 
 if ($IncludeLocalBridge) {
     Write-Section "Windows Local I/O Bridge"
-    try {
-        $bridge = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8798/api/local-bridge/status" -TimeoutSec $TimeoutSec
-        if ($bridge.ok -eq $true -and $bridge.localBridge.enabled -eq $true -and $bridge.localBridge.ready -eq $true) {
-            Add-Ok "Windows local I/O bridge is attached and ready"
-        }
-        else {
-            Add-Failure "Windows local I/O bridge is not ready"
-        }
+    $bridge = if ($controlState -and $controlState.voice) {
+        $controlState.voice.localBridge
     }
-    catch {
-        Add-Failure "Windows local I/O bridge status is not available ($($_.Exception.Message))"
+    else {
+        $null
+    }
+    if (
+        $bridge -and
+        $bridge.enabled -eq $true -and
+        $bridge.ready -eq $true -and
+        $bridge.stale -ne $true
+    ) {
+        Add-Ok "Windows local I/O bridge is attached and ready"
+    }
+    else {
+        Add-Failure "Windows local I/O bridge is not ready in the public Control Page state"
     }
 }
 
