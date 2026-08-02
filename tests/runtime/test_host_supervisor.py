@@ -22,6 +22,7 @@ from evelyn_core.host_supervisor import (  # noqa: E402
     LOCAL_BRIDGE_RESTART_EXIT_CODE,
     VOICE_CAPTURE_STOP_SCHEMA,
 )
+import evelyn_core.host_supervisor as host_supervisor_module  # noqa: E402
 from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
 from evelyn_core.voice_capture_consent import (  # noqa: E402
     BRIDGE_STATUS_AUTH_SCOPE,
@@ -586,6 +587,31 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.supervisor.bridge_status_instance_id, "")
         self.assertEqual(self.supervisor.bridge_status_seq_high_water, 0)
+
+    @unittest.skipUnless(os.name == "nt", "Windows venv launcher contract")
+    def test_windows_bridge_command_directly_owns_base_python(self):
+        runtime_root = Path(self.temp_dir.name) / "host-runtime"
+        base_python = runtime_root / "base-python.exe"
+        venv_python = runtime_root / "Scripts" / "python.exe"
+        site_packages = runtime_root / "Lib" / "site-packages"
+        base_python.parent.mkdir(parents=True, exist_ok=True)
+        base_python.touch()
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.touch()
+        site_packages.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(host_supervisor_module.sys, "executable", str(venv_python)),
+            patch.object(host_supervisor_module.sys, "_base_executable", str(base_python)),
+            patch.object(host_supervisor_module.sys, "prefix", str(runtime_root)),
+        ):
+            command = self.supervisor._bridge_command()
+
+        self.assertEqual(command[0], str(base_python))
+        self.assertEqual(command[1], "-c")
+        self.assertIn("site.addsitedir", command[2])
+        self.assertIn("runpy.run_module('evelyn_core.local_io_bridge'", command[2])
+        self.assertEqual(command[-2:], ["--project-root", str(self.supervisor.project_root)])
 
     def test_capture_stop_evidence_bounds_untrusted_status_file(self):
         self.supervisor.child = FakeProcess()

@@ -476,10 +476,34 @@ class HostSupervisor:
         return {"ok": True, "status": "reconciled"}
 
     def _bridge_command(self) -> list[str]:
+        executable = sys.executable
+        bootstrap: list[str] = ["-m", "evelyn_core.local_io_bridge"]
+        if os.name == "nt":
+            base_executable = Path(
+                str(getattr(sys, "_base_executable", "") or "")
+            )
+            venv_site_packages = Path(sys.prefix) / "Lib" / "site-packages"
+            if base_executable.resolve() != Path(sys.executable).resolve():
+                if not base_executable.is_file() or not venv_site_packages.is_dir():
+                    raise RuntimeError("host_supervisor_bridge_runtime_unavailable")
+                site_packages = str(venv_site_packages)
+                bootstrap_code = "\n".join(
+                    (
+                        "import runpy, site, sys",
+                        f"_site = {site_packages!r}",
+                        "site.addsitedir(_site)",
+                        "if _site in sys.path:",
+                        "    sys.path.remove(_site)",
+                        "sys.path.insert(0, _site)",
+                        "sys.argv = ['evelyn_core.local_io_bridge', *sys.argv[1:]]",
+                        "runpy.run_module('evelyn_core.local_io_bridge', run_name='__main__')",
+                    )
+                )
+                executable = str(base_executable)
+                bootstrap = ["-c", bootstrap_code]
         return [
-            sys.executable,
-            "-m",
-            "evelyn_core.local_io_bridge",
+            executable,
+            *bootstrap,
             "--project-root",
             str(self.project_root),
         ]
