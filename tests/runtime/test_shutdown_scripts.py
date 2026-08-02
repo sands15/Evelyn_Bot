@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import unittest
 from pathlib import Path
 
@@ -301,6 +302,18 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "$env:EVELYN_INTERNAL_CONTROL_TOKEN = New-SecureRuntimeToken",
             script,
         )
+        self.assertNotIn(
+            "$env:EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN = New-SecureRuntimeToken",
+            script,
+        )
+        self.assertIn(
+            "$voiceCaptureHostAuthToken = New-SecureRuntimeToken",
+            script,
+        )
+        self.assertNotIn(
+            "$previousVoiceCaptureHostAuthToken.Trim()",
+            script,
+        )
         self.assertLess(
             script.index(
                 "[Environment]::SetEnvironmentVariable(\n"
@@ -317,20 +330,38 @@ class ShutdownScriptContractTests(unittest.TestCase):
             ),
             script.index("Initialize-EvelynSourceRevision"),
         )
+        self.assertLess(
+            script.index(
+                "[Environment]::SetEnvironmentVariable(\n"
+                "    'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',\n"
+                "    $null,"
+            ),
+            script.index("Initialize-EvelynSourceRevision"),
+        )
         self.assertIn("-Value $localBridgeStatusAuthToken", docker_helper)
         self.assertIn("-Value $internalControlToken", docker_helper)
+        self.assertIn("-Value $voiceCaptureHostAuthToken", docker_helper)
         self.assertIn("Invoke-DockerCommandWithRuntimeChannelTokens", script)
         self.assertIn("-Value $localBridgeStatusAuthToken", supervisor)
         self.assertIn("-Name 'EVELYN_INTERNAL_CONTROL_TOKEN'", supervisor)
+        self.assertIn(
+            "-Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN'",
+            supervisor,
+        )
         self.assertIn("-Value $null", supervisor)
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", browser)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", browser)
+        self.assertNotIn("EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN", browser)
         self.assertLess(
             main.index("-Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN'"),
             main.index("Assert-TtsProfileReady"),
         )
         self.assertLess(
             main.index("-Name 'EVELYN_INTERNAL_CONTROL_TOKEN'"),
+            main.index("Assert-TtsProfileReady"),
+        )
+        self.assertLess(
+            main.index("-Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN'"),
             main.index("Assert-TtsProfileReady"),
         )
         self.assertLess(main.index("Open-ControlPage"), main.index("} finally {"))
@@ -440,6 +471,42 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
         self.assertIn("stop_evelyn_local.ps1", server)
         self.assertNotIn('"stop_evelyn_stack.ps1"', server)
+
+    def test_control_page_child_processes_scrub_voice_capture_auth(self) -> None:
+        server = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py"
+        tree = ast.parse(server.read_text(encoding="utf-8"))
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        for name in (
+            "schedule_local_stack_shutdown",
+            "schedule_local_stack_restart",
+            "open_path_with_system",
+            "open_url_with_system",
+        ):
+            with self.subTest(function=name):
+                calls = [
+                    node
+                    for node in ast.walk(functions[name])
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "subprocess"
+                    and node.func.attr == "Popen"
+                ]
+                self.assertTrue(calls)
+                for call in calls:
+                    environment = next(
+                        (keyword.value for keyword in call.keywords if keyword.arg == "env"),
+                        None,
+                    )
+                    self.assertEqual(
+                        ast.unparse(environment) if environment is not None else None,
+                        "voice_capture_auth_scrubbed_environment()",
+                    )
 
     def test_control_page_shutdown_chat_proxies_before_container_fallback(self) -> None:
         server = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py").read_text(encoding="utf-8")

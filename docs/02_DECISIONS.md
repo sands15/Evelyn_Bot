@@ -55,3 +55,18 @@ type: decision-log
 - 영향: 보안, 데이터 보존, 명시된 계약, 신뢰 경계 검증과 이를 고정하는 테스트는
   감소 대상으로 보지 않는다. 기준안이 없는 기존 작업은 수치를 꾸며내지 않고
   `산정 불가`로 표시한다.
+
+## 2026-08-02 — Host capture 증거는 세대·목적 제한 HMAC으로 인증
+
+- 상태: 승인
+- 결정: 공유 artifact를 지나는 capture owner lease, Bridge status와 Supervisor stop
+  evidence는 서로 다른 HMAC domain을 사용한다. 키는 공식 launcher 세대마다 새로
+  만들고 Control Page, Host Supervisor, Local Bridge에만 전달한다.
+- 이유: 공유 폴더의 read/write 권한만으로 캡처 권한이나 physical OFF 증거를 위조할
+  수 없어야 하며, raw owner/lease 값이나 음성 데이터를 저장할 필요도 없어야 한다.
+- 근거: [[VOICE_CAPTURE_CONSENT]],
+  `evelyn_core/runtime/evelyn_core/voice_capture_consent.py`,
+  `tests/runtime/test_host_supervisor.py`
+- 영향: artifact는 content-free digest와 인증 tag만 보존한다. 키 누락·오류,
+  cross-scope replay, stale·replacement와 status rollback은 fail-closed하며 일반
+  자식 프로세스에는 키를 상속하지 않는다.

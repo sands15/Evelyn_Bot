@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import secrets
@@ -32,9 +33,17 @@ from .process_identity import (
     process_birth_identity,
     terminate_process_identity,
 )
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import atomic_json_write, read_bounded_json
 from .runtime_error_observability import RuntimeErrorCounter
 from .storage_retention_report import StorageRetentionReporter
+from .voice_capture_consent import (
+    BRIDGE_STATUS_AUTH_SCOPE,
+    SUPERVISOR_STOP_AUTH_SCOPE,
+    VOICE_CAPTURE_AUTH_ENV,
+    resolve_voice_capture_auth_token,
+    sign_voice_capture_artifact,
+    voice_capture_artifact_is_authentic,
+)
 from .voice_validation import active_validation_context, emit_voice_validation_event
 from .windows_process_job import KillOnCloseProcessOwner
 
@@ -52,6 +61,8 @@ BRIDGE_PROCESS_IDENTITY_SCHEMA = (
     "host_supervisor.local-bridge-process-identity.v1"
 )
 BRIDGE_STATUS_FRESH_SEC = 3.0
+BRIDGE_STATUS_MAX_BYTES = 131072
+VOICE_CAPTURE_STOP_SCHEMA = "host_supervisor.voice-capture-stop.v1"
 
 
 class HostSupervisor:
@@ -69,6 +80,7 @@ class HostSupervisor:
         process_owner: Any | None = None,
         bridge_lock_probe: Callable[[], bool] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        voice_capture_auth_token: str | None = None,
     ) -> None:
         self.project_root = Path(project_root or get_repo_root()).resolve()
         self.artifacts_root = Path(
@@ -87,6 +99,9 @@ class HostSupervisor:
         self.run_command = run_command
         self.now = now
         self.sleep = sleep
+        self.voice_capture_auth_token = resolve_voice_capture_auth_token(
+            voice_capture_auth_token
+        )
         self.birth_identity_reader = birth_identity_reader
         self.exact_process_terminator = exact_process_terminator
         self.bridge_lock_probe = bridge_lock_probe
@@ -95,6 +110,8 @@ class HostSupervisor:
         self.child_started_at: float | None = None
         self.child_exit_code: int | None = None
         self.child_birth_identity = ""
+        self.bridge_status_instance_id = ""
+        self.bridge_status_seq_high_water = 0
         self.bridge_identity_state = "unknown"
         self._startup_reconciled = False
         self.restart_history: deque[float] = deque()
@@ -221,7 +238,10 @@ class HostSupervisor:
 
     def _bridge_status_is_fresh(self) -> bool:
         try:
-            payload = json.loads(self.bridge_status_path.read_text(encoding="utf-8"))
+            payload = read_bounded_json(
+                self.bridge_status_path,
+                maximum_bytes=BRIDGE_STATUS_MAX_BYTES,
+            )
             heartbeat_at = float(payload.get("heartbeatAt"))
         except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
             return False
@@ -230,6 +250,143 @@ class HostSupervisor:
             payload.get("schema") == "local_io_bridge.status.v1"
             and 0.0 <= age <= BRIDGE_STATUS_FRESH_SEC
         )
+
+    def _voice_capture_stop_evidence(self) -> dict[str, Any]:
+        result = {
+            "schema": VOICE_CAPTURE_STOP_SCHEMA,
+            "state": "unverified",
+            "reason": "local_bridge_status_unverified",
+            "observedAt": None,
+            "statusSeq": 0,
+            "micEnabled": None,
+            "captureStopped": None,
+            "contentFree": True,
+        }
+
+        def signed_result() -> dict[str, Any]:
+            return sign_voice_capture_artifact(
+                result,
+                auth_scope=SUPERVISOR_STOP_AUTH_SCOPE,
+                auth_token=self.voice_capture_auth_token,
+            )
+
+        child = self.child
+        if child is None or child.poll() is not None:
+            return signed_result()
+        try:
+            if self.bridge_status_path.is_symlink():
+                return signed_result()
+            payload = read_bounded_json(
+                self.bridge_status_path,
+                maximum_bytes=BRIDGE_STATUS_MAX_BYTES,
+            )
+            if not isinstance(payload, dict):
+                return signed_result()
+            heartbeat_at = payload.get("heartbeatAt")
+            status_seq = payload.get("statusSeq")
+            pid = payload.get("pid")
+            bridge_instance_id = payload.get("bridgeInstanceId")
+            watchdog = payload.get("voiceCaptureWatchdog")
+            mic = payload.get("mic")
+            if (
+                payload.get("schema") != "local_io_bridge.status.v1"
+                or not voice_capture_artifact_is_authentic(
+                    payload,
+                    auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
+                    auth_token=self.voice_capture_auth_token,
+                )
+                or isinstance(heartbeat_at, bool)
+                or not isinstance(heartbeat_at, (int, float))
+                or not math.isfinite(float(heartbeat_at))
+                or not 0.0 <= self.now() - float(heartbeat_at) <= BRIDGE_STATUS_FRESH_SEC
+                or self.child_started_at is None
+                or float(heartbeat_at) < float(self.child_started_at)
+                or isinstance(status_seq, bool)
+                or not isinstance(status_seq, int)
+                or status_seq <= 0
+                or (
+                    self.bridge_status_instance_id
+                    and bridge_instance_id != self.bridge_status_instance_id
+                )
+                or status_seq < self.bridge_status_seq_high_water
+                or isinstance(pid, bool)
+                or not isinstance(pid, int)
+                or pid != int(child.pid)
+                or not isinstance(bridge_instance_id, str)
+                or len(bridge_instance_id) != 32
+                or not all(
+                    character in "0123456789abcdef"
+                    for character in bridge_instance_id
+                )
+                or type(payload.get("micEnabled")) is not bool
+                or type(payload.get("micCaptureStopped")) is not bool
+                or not isinstance(watchdog, dict)
+                or set(watchdog) != {
+                    "schema", "state", "reason", "checkedAt",
+                    "captureStopped", "stoppedAt", "contentFree",
+                }
+                or watchdog.get("schema") != "voice.capture-consent.watchdog-status.v1"
+                or watchdog.get("state") not in {"authorized", "blocked", "stop_failed"}
+                or not isinstance(watchdog.get("reason"), str)
+                or (watchdog["state"] == "authorized") is not (watchdog["reason"] == "")
+                or not isinstance(watchdog.get("checkedAt"), (int, float))
+                or isinstance(watchdog.get("checkedAt"), bool)
+                or not math.isfinite(float(watchdog["checkedAt"]))
+                or float(watchdog["checkedAt"]) > float(heartbeat_at)
+                or type(watchdog.get("captureStopped")) is not bool
+                or watchdog["captureStopped"] is not payload["micCaptureStopped"]
+                or watchdog.get("contentFree") is not True
+                or (
+                    watchdog.get("stoppedAt") is not None
+                    and (
+                        isinstance(watchdog["stoppedAt"], bool)
+                        or not isinstance(watchdog["stoppedAt"], (int, float))
+                        or not math.isfinite(float(watchdog["stoppedAt"]))
+                    )
+                )
+                or not isinstance(mic, dict)
+            ):
+                return signed_result()
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+            return signed_result()
+        if not self.bridge_status_instance_id:
+            self.bridge_status_instance_id = bridge_instance_id
+        self.bridge_status_seq_high_water = max(
+            self.bridge_status_seq_high_water,
+            status_seq,
+        )
+        result.update(
+            observedAt=float(heartbeat_at),
+            statusSeq=status_seq,
+            micEnabled=payload["micEnabled"],
+            captureStopped=payload["micCaptureStopped"],
+        )
+        stopped_at = watchdog.get("stoppedAt")
+        physical_off = (
+            payload["micEnabled"] is False
+            and payload["micCaptureStopped"] is True
+            and mic.get("enabled") is False
+            and mic.get("captureReady") is False
+            and mic.get("captureActive") is False
+            and mic.get("captureStopped") is True
+        )
+        stopped = (
+            watchdog["state"] == "blocked"
+            and stopped_at is not None
+            and float(watchdog["checkedAt"]) <= float(stopped_at) <= float(heartbeat_at)
+            and physical_off
+        )
+        if stopped:
+            result.update(state="verified", reason="voice_capture_watchdog_stop")
+        elif watchdog["state"] == "authorized" or (
+            watchdog["state"] == "blocked"
+            and stopped_at is None
+            and physical_off
+        ):
+            result.update(state="not_required", reason="")
+        else:
+            result["reason"] = "voice_capture_stop_unverified"
+        return signed_result()
 
     def _manual_failure(self, error: str) -> dict[str, Any]:
         self.manual_intervention_required = True
@@ -329,7 +486,10 @@ class HostSupervisor:
 
     def _bridge_environment(self) -> dict[str, str]:
         env = self._credential_scoped_environment(
-            allowed_credentials={"LOCAL_BRIDGE_STATUS_AUTH_TOKEN"}
+            allowed_credentials={
+                "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
+                VOICE_CAPTURE_AUTH_ENV,
+            }
         )
         runtime_root = self.project_root / "evelyn_core" / "runtime"
         existing_python_path = str(env.get("PYTHONPATH") or "").strip()
@@ -502,6 +662,8 @@ class HostSupervisor:
         self.child = child
         self.child_birth_identity = birth_identity
         self.child_started_at = self.now()
+        self.bridge_status_instance_id = ""
+        self.bridge_status_seq_high_water = 0
         self.child_exit_code = None
         self.manual_intervention_required = False
         self.last_error = ""
@@ -870,6 +1032,7 @@ class HostSupervisor:
                     child_running and self.child_birth_identity
                 ),
                 "processIdentityState": self.bridge_identity_state,
+                "voiceCaptureStop": self._voice_capture_stop_evidence(),
             },
             "lastAction": dict(self.last_action),
             "allowedActions": sorted(ALLOWED_HOST_ACTIONS),

@@ -86,6 +86,7 @@ from .voice_capture_consent import (
     VALIDATION_BINDING_SCHEMA as VOICE_CAPTURE_VALIDATION_BINDING_SCHEMA,
     attach_voice_capture_consent,
     get_voice_capture_consent_manager,
+    voice_capture_auth_scrubbed_environment,
 )
 from .voice_validation import (
     SUITE_ID,
@@ -900,6 +901,7 @@ def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
                 str(max(0, int(delay_ms))),
             ],
             cwd=str(PROJECT_ROOT),
+            env=voice_capture_auth_scrubbed_environment(),
             close_fds=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -938,6 +940,7 @@ def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
                 restart_script,
             ],
             cwd=str(PROJECT_ROOT),
+            env=voice_capture_auth_scrubbed_environment(),
             close_fds=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1428,6 +1431,13 @@ async def _revoke_voice_capture_consent_locked(
                 "controlRequired": True,
                 "consent": manager.status(),
             }
+    try:
+        await asyncio.to_thread(manager.publish_host_lease)
+    except Exception as exc:
+        print(
+            "[CONTROL PAGE] voice_consent_host_lease_write_failed "
+            f"reason={reason} errorType={type(exc).__name__}"
+        )
     if not pending.get("controlRequired"):
         return {"ok": True, "consent": manager.status(), "controlApplied": False}
 
@@ -1566,6 +1576,8 @@ async def _reconcile_voice_capture_consent(
 
 
 async def _voice_capture_consent_context(app: web.Application):
+    manager = get_voice_capture_consent_manager()
+
     async def monitor() -> None:
         while True:
             try:
@@ -1589,7 +1601,24 @@ async def _voice_capture_consent_context(app: web.Application):
                     )
             await asyncio.sleep(VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC)
 
+    async def heartbeat() -> None:
+        while True:
+            try:
+                if manager.status().get("captureMayBeActive"):
+                    await asyncio.to_thread(manager.publish_host_lease)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await _force_voice_capture_recovery(
+                        app,
+                        reason="consent_host_lease_write_failed",
+                        error=f"consent_host_lease_{type(exc).__name__}",
+                    )
+            await asyncio.sleep(VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC)
+
     try:
+        await asyncio.to_thread(manager.publish_host_lease)
         await _reconcile_voice_capture_consent(app)
     except Exception as exc:
         try:
@@ -1605,24 +1634,20 @@ async def _voice_capture_consent_context(app: web.Application):
                 "[CONTROL PAGE] voice_consent_startup_recovery_failed "
                 f"errorType={type(recovery_exc).__name__}"
             )
-    task = asyncio.create_task(monitor(), name="voice-capture-consent-monitor")
+    tasks = (
+        asyncio.create_task(monitor(), name="voice-capture-consent-monitor"),
+        asyncio.create_task(heartbeat(), name="voice-capture-consent-heartbeat"),
+    )
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        except Exception as exc:
-            print(
-                "[CONTROL PAGE] voice_consent_monitor_join_failed "
-                f"errorType={type(exc).__name__}"
-            )
-        finally:
-            await _revoke_voice_capture_consent(
-                app,
-                reason="control_page_shutdown",
-            )
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await _revoke_voice_capture_consent(
+            app,
+            reason="control_page_shutdown",
+        )
 
 
 async def voice_capture_consent_handler(request: web.Request) -> web.StreamResponse:
@@ -1715,6 +1740,27 @@ async def voice_capture_consent_apply_handler(
         if not started.get("ok"):
             return json_response(started, status=409)
         lease_id = str(started.get("leaseId") or "")
+        try:
+            await asyncio.to_thread(manager.publish_host_lease)
+        except Exception as exc:
+            print(
+                "[CONTROL PAGE] voice_consent_enable_lease_write_failed "
+                f"errorType={type(exc).__name__}"
+            )
+            cleanup = await _force_voice_capture_recovery_locked(
+                request.app,
+                reason="consent_host_lease_write_failed",
+                error="voice_capture_consent_heartbeat_write_failed",
+            )
+            return json_response(
+                {
+                    "ok": False,
+                    "error": "voice_capture_consent_heartbeat_write_failed",
+                    "consent": manager.status(),
+                    "cleanup": cleanup,
+                },
+                status=503,
+            )
         bridge: dict[str, Any] = {}
         phase = "mic_enable"
         try:
@@ -2508,18 +2554,34 @@ async def shutdown_handler(_: web.Request) -> web.StreamResponse:
 
 def open_path_with_system(path: Path) -> None:
     if os.name == "nt":
-        os.startfile(str(path))  # type: ignore[attr-defined]
+        subprocess.Popen(
+            ["explorer.exe", str(path)],
+            env=voice_capture_auth_scrubbed_environment(),
+        )
         return
     opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(
+        [opener, str(path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=voice_capture_auth_scrubbed_environment(),
+    )
 
 
 def open_url_with_system(url: str) -> None:
     if os.name == "nt":
-        os.startfile(url)  # type: ignore[attr-defined]
+        subprocess.Popen(
+            ["explorer.exe", url],
+            env=voice_capture_auth_scrubbed_environment(),
+        )
         return
     opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(
+        [opener, url],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=voice_capture_auth_scrubbed_environment(),
+    )
 
 
 def open_memory_vault_payload() -> dict[str, Any]:

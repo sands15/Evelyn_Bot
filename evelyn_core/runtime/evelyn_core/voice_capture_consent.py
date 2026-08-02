@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import math
+import os
 import secrets
 import threading
 import time
@@ -11,16 +14,25 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .paths import get_runtime_artifacts_root
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import atomic_json_write, read_bounded_json
 
 
 CONSENT_SCHEMA = "voice.capture-consent.v1"
 PREVIEW_SCHEMA = "voice.capture-consent.preview.v1"
 VALIDATION_BINDING_SCHEMA = "voice.capture-consent.validation-binding.v1"
+HOST_LEASE_SCHEMA = "voice.capture-consent.host-lease.v1"
+WATCHDOG_STATUS_SCHEMA = "voice.capture-consent.watchdog-status.v1"
+VOICE_CAPTURE_AUTH_ALGORITHM = "hmac-sha256"
+VOICE_CAPTURE_AUTH_ENV = "EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN"
+HOST_LEASE_AUTH_SCOPE = "host_lease"
+BRIDGE_STATUS_AUTH_SCOPE = "bridge_status"
+SUPERVISOR_STOP_AUTH_SCOPE = "supervisor_stop"
 SCOPE = "voice_validation_local"
 PREVIEW_TTL_SEC = 120.0
 ARMED_TTL_SEC = 300.0
 ACTIVE_TTL_SEC = 1800.0
+HOST_LEASE_STALE_SEC = 4.0
+HOST_LEASE_MAX_BYTES = 4096
 ACTIVE_STATES = frozenset({"enabling", "active", "revoking"})
 TERMINAL_VALIDATION_STATES = frozenset({"passed", "failed", "aborted"})
 LOAD_STATES = frozenset({"verified", "missing", "untrusted"})
@@ -45,6 +57,25 @@ _STATE_KEYS = frozenset(
         "revokedAt",
     }
 )
+_HOST_LEASE_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "state",
+        "ownerDigest",
+        "leaseDigest",
+        "expiresAt",
+        "heartbeatAt",
+        "contentFree",
+        "authAlgorithm",
+        "authTag",
+    }
+)
+_AUTH_DOMAINS = {
+    HOST_LEASE_AUTH_SCOPE: b"evelyn.voice-capture.host-lease.v1\n",
+    BRIDGE_STATUS_AUTH_SCOPE: b"evelyn.voice-capture.bridge-status.v1\n",
+    SUPERVISOR_STOP_AUTH_SCOPE: b"evelyn.voice-capture.supervisor-stop.v1\n",
+}
 LoadState = Literal["verified", "missing", "untrusted"]
 
 
@@ -64,6 +95,162 @@ def _bounded_string(value: Any, *, maximum: int, allow_empty: bool) -> str | Non
     if not value and not allow_empty:
         return None
     return value
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else ""
+
+
+def _hex_digest(value: Any, *, allow_empty: bool) -> str | None:
+    if value == "" and allow_empty:
+        return ""
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    return value if all(character in "0123456789abcdef" for character in value) else None
+
+
+def resolve_voice_capture_auth_token(value: str | None = None) -> str:
+    return str(
+        os.getenv(VOICE_CAPTURE_AUTH_ENV, "") if value is None else value
+    ).strip()
+
+
+def voice_capture_auth_scrubbed_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.pop(VOICE_CAPTURE_AUTH_ENV, None)
+    return environment
+
+
+def sign_voice_capture_artifact(
+    payload: dict[str, Any],
+    *,
+    auth_scope: str,
+    auth_token: str | None = None,
+) -> dict[str, Any]:
+    unsigned = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"authAlgorithm", "authTag"}
+    }
+    signed = {**unsigned, "authAlgorithm": VOICE_CAPTURE_AUTH_ALGORITHM}
+    token = resolve_voice_capture_auth_token(auth_token).encode("utf-8")
+    domain = _AUTH_DOMAINS.get(auth_scope)
+    if domain is None:
+        raise ValueError("voice_capture_auth_scope_invalid")
+    if not 32 <= len(token) <= 512:
+        signed["authTag"] = ""
+        return signed
+    digest = hmac.new(token, digestmod=hashlib.sha256)
+    digest.update(domain)
+    digest.update(
+        json.dumps(
+            signed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    signed["authTag"] = digest.hexdigest()
+    return signed
+
+
+def voice_capture_artifact_is_authentic(
+    payload: dict[str, Any],
+    *,
+    auth_scope: str,
+    auth_token: str | None = None,
+) -> bool:
+    supplied = _hex_digest(payload.get("authTag"), allow_empty=False)
+    expected = sign_voice_capture_artifact(
+        payload,
+        auth_scope=auth_scope,
+        auth_token=auth_token,
+    )
+    return bool(
+        payload.get("authAlgorithm") == VOICE_CAPTURE_AUTH_ALGORITHM
+        and supplied
+        and hmac.compare_digest(supplied, str(expected.get("authTag") or ""))
+    )
+
+
+def inspect_voice_capture_host_lease(
+    path: Path,
+    *,
+    now: Callable[[], float] = time.time,
+    stale_after_sec: float = HOST_LEASE_STALE_SEC,
+    auth_token: str | None = None,
+) -> dict[str, Any]:
+    def blocked(
+        reason: str,
+        *,
+        checked_at: float | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "authorized": False,
+            "reason": reason,
+            "ownerDigest": "",
+            "leaseDigest": "",
+            "heartbeatAt": None,
+            "expiresAt": None,
+            "checkedAt": float(now()) if checked_at is None else checked_at,
+        }
+
+    try:
+        if Path(path).is_symlink():
+            return blocked("voice_capture_consent_heartbeat_untrusted")
+        payload = read_bounded_json(
+            Path(path),
+            maximum_bytes=HOST_LEASE_MAX_BYTES,
+        )
+    except FileNotFoundError:
+        return blocked("voice_capture_consent_heartbeat_missing")
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        return blocked("voice_capture_consent_heartbeat_untrusted")
+    if not isinstance(payload, dict) or set(payload) != _HOST_LEASE_KEYS:
+        return blocked("voice_capture_consent_heartbeat_untrusted")
+    state = payload.get("state")
+    owner_digest = _hex_digest(payload.get("ownerDigest"), allow_empty=False)
+    lease_digest = _hex_digest(payload.get("leaseDigest"), allow_empty=True)
+    heartbeat_at = _finite_timestamp(payload.get("heartbeatAt"))
+    expires_at = _finite_timestamp(payload.get("expiresAt"))
+    if (
+        payload.get("schema") != HOST_LEASE_SCHEMA
+        or payload.get("scope") != SCOPE
+        or state not in _CONSENT_STATES
+        or owner_digest is None
+        or lease_digest is None
+        or heartbeat_at is None
+        or payload.get("contentFree") is not True
+        or (state == "inactive" and (lease_digest or payload.get("expiresAt") is not None))
+        or (state != "inactive" and (not lease_digest or expires_at is None))
+    ):
+        return blocked("voice_capture_consent_heartbeat_untrusted")
+    if not voice_capture_artifact_is_authentic(
+        payload,
+        auth_scope=HOST_LEASE_AUTH_SCOPE,
+        auth_token=auth_token,
+    ):
+        return blocked("voice_capture_consent_heartbeat_untrusted")
+    if state not in {"enabling", "active"}:
+        return blocked(f"voice_capture_consent_{state}")
+    checked_at = float(now())
+    age = checked_at - heartbeat_at
+    if age < 0.0 or age > max(0.1, float(stale_after_sec)):
+        return blocked(
+            "voice_capture_consent_heartbeat_stale",
+            checked_at=checked_at,
+        )
+    if checked_at >= expires_at:
+        return blocked("voice_capture_consent_expired", checked_at=checked_at)
+    return {
+        "authorized": True,
+        "reason": "",
+        "ownerDigest": owner_digest,
+        "leaseDigest": lease_digest,
+        "heartbeatAt": heartbeat_at,
+        "expiresAt": expires_at,
+        "checkedAt": checked_at,
+    }
 
 
 def _validated_validation_binding(value: Any) -> dict[str, Any] | None:
@@ -248,14 +435,19 @@ class VoiceCaptureConsentManager:
         preview_ttl_sec: float = PREVIEW_TTL_SEC,
         armed_ttl_sec: float = ARMED_TTL_SEC,
         active_ttl_sec: float = ACTIVE_TTL_SEC,
+        auth_token: str | None = None,
     ) -> None:
         base = Path(root or get_runtime_artifacts_root())
         self.state_path = base / "voice_capture_consent" / "state.json"
+        self.host_lease_path = (
+            base / "voice_capture_consent" / "owner_heartbeat.json"
+        )
         self.now = now
         self.owner_nonce = str(owner_nonce or secrets.token_urlsafe(18))
         self.preview_ttl_sec = max(1.0, float(preview_ttl_sec))
         self.armed_ttl_sec = max(1.0, float(armed_ttl_sec))
         self.active_ttl_sec = max(1.0, float(active_ttl_sec))
+        self.auth_token = resolve_voice_capture_auth_token(auth_token)
         self._lock = threading.RLock()
         self._previews: dict[str, dict[str, Any]] = {}
         load_state, loaded = _load_state_file(self.state_path)
@@ -350,6 +542,25 @@ class VoiceCaptureConsentManager:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return self._public()
+
+    def publish_host_lease(self) -> dict[str, Any]:
+        """Publish the current content-free owner lease for the Windows host."""
+        with self._lock:
+            state = self._state
+            payload = sign_voice_capture_artifact({
+                "schema": HOST_LEASE_SCHEMA,
+                "scope": SCOPE,
+                "state": state["state"],
+                "ownerDigest": _digest(str(state["ownerNonce"])),
+                "leaseDigest": _digest(str(state["leaseId"])),
+                "expiresAt": state["expiresAt"],
+                "heartbeatAt": self.now(),
+                "contentFree": True,
+            }, auth_scope=HOST_LEASE_AUTH_SCOPE, auth_token=self.auth_token)
+            if not payload["authTag"]:
+                raise RuntimeError("voice_capture_auth_token_unavailable")
+            atomic_json_write(self.host_lease_path, payload)
+            return payload
 
     def _invalidate_previews_locked(self, *, except_token: str = "") -> None:
         """Make every older user-confirmation capability permanently unusable."""
@@ -753,9 +964,23 @@ __all__ = [
     "ACTIVE_TTL_SEC",
     "ARMED_TTL_SEC",
     "CONSENT_SCHEMA",
+    "BRIDGE_STATUS_AUTH_SCOPE",
+    "HOST_LEASE_SCHEMA",
+    "HOST_LEASE_AUTH_SCOPE",
+    "HOST_LEASE_MAX_BYTES",
+    "HOST_LEASE_STALE_SEC",
     "PREVIEW_SCHEMA",
     "SCOPE",
+    "SUPERVISOR_STOP_AUTH_SCOPE",
+    "VOICE_CAPTURE_AUTH_ALGORITHM",
+    "VOICE_CAPTURE_AUTH_ENV",
+    "WATCHDOG_STATUS_SCHEMA",
     "VoiceCaptureConsentManager",
     "attach_voice_capture_consent",
     "get_voice_capture_consent_manager",
+    "inspect_voice_capture_host_lease",
+    "resolve_voice_capture_auth_token",
+    "sign_voice_capture_artifact",
+    "voice_capture_auth_scrubbed_environment",
+    "voice_capture_artifact_is_authentic",
 ]

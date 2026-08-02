@@ -24,6 +24,7 @@ from evelyn_core.runtime_repair import (  # noqa: E402
     runtime_repair_capabilities,
 )
 from evelyn_core.runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest  # noqa: E402
+from evelyn_core.voice_capture_consent import VOICE_CAPTURE_AUTH_ENV  # noqa: E402
 
 
 def fake_probe(states: dict[str, str]):
@@ -49,6 +50,18 @@ class RuntimeRepairTests(unittest.TestCase):
     def health(self, states: dict[str, str]) -> dict[str, Any]:
         manifest = load_service_manifest(force=True)
         return asyncio.run(collect_runtime_health(manifest=manifest, probe_runner=fake_probe(states)))
+
+    def test_visible_process_scrubs_voice_capture_auth_only(self) -> None:
+        with patch.dict(
+            runtime_repair_module.os.environ,
+            {VOICE_CAPTURE_AUTH_ENV: "secret", "EVELYN_KEEP_ME": "kept"},
+            clear=True,
+        ), patch.object(runtime_repair_module.subprocess, "Popen") as popen:
+            popen.return_value.pid = 42
+            result = runtime_repair_module.start_visible_process(["powershell.exe"], "C:\\Evelyn")
+
+        self.assertEqual(result, {"pid": 42})
+        self.assertEqual(popen.call_args.kwargs["env"], {"EVELYN_KEEP_ME": "kept"})
 
     def test_capabilities_include_allowed_services_only(self) -> None:
         manifest = load_service_manifest(force=True)

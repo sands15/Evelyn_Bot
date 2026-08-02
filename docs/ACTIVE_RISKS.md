@@ -450,7 +450,7 @@ Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/stat
 `/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
 readiness와 복구 preview가 배포 전과 같은지 확인한다.
 
-## P0 — Control Page hard-crash 뒤 host-side 캡처 watchdog 부재
+## P0 — 동시 Control Page capture owner 배제 부재
 
 2026-08-02 source에서 이전의 손상 상태 fail-open은 닫혔다. consent load는
 `verified | missing | untrusted`를 구분하고, 누락·손상·symlink·invalid UTF-8·
@@ -470,15 +470,22 @@ mutation I/O 예외는 고정 503과 즉시 recovery/OFF로 닫힌다. Superviso
 Docker 복구는 `--no-deps`이고, Bridge와 그 자식은 목적 밖 credential을 상속하지
 않는다. 전체 재시작 credential 연속성은 Supervisor-owned exit-code handoff가 맡는다.
 
-남은 P0는 Control Page가 정상 cleanup 없이 강제 종료되고 재기동되지 않는 경우다.
-현재 active consent의 만료는 Control Page monitor가 집행하므로, Host Supervisor나
-Bridge가 lease 만료·Control Page heartbeat 상실을 독립적으로 보고 exact capture
-stop을 수행하는 watchdog은 없다. 또한 동시에 뜬 Control Page owner를 배제하는
-process-lifetime OS lock 또는 durable generation CAS가 없다. 다음 source P0는
-content-free consent lease projection을 Host 경계에 전달하고, stale/expired owner에서
-Bridge가 스스로 capture를 멈춘 뒤 Supervisor가 exact stop evidence를 게시하게 하는
-것이다. mic 활성 뒤 health 수집 전체 deadline 부재로 consent lock이 오래 점유될 수
-있는 문제는 P1 starvation hardening으로 남긴다. 실제 마이크는 켜지 않았다.
+2026-08-02 current source는 hard-crash 경계를 추가로 닫았다. Control Page가 1초마다
+목적 제한 HMAC으로 서명된 content-free owner/lease projection을 게시하고, Bridge는
+각 0.25초 status tick과 ON 전·후에 4초 freshness와 원래 digest binding을 검사한다.
+누락·손상·symlink·stale·expired·replacement에서는 입력을 폐기하고 exact capture
+stop을 수행한다. stop 실패는 Bridge를 종료 코드 76으로 끝내 OS handle을 회수한다.
+Supervisor는 현재 child PID/시작 시각, 서명된 전체 status, 고정 instance,
+`statusSeq` high-water와 nested/top-level physical OFF가 모두 맞을 때만 stop evidence를
+`verified`로 게시한다. 비신뢰 owner heartbeat는 4 KiB, Bridge status는 128 KiB로
+제한된다. source 회귀는 runtime 686개(skip 4), voice 574개(skip 5)가 통과했고 실제
+마이크는 켜지 않았다.
+
+남은 P0는 동시에 뜬 둘 이상의 Control Page가 각각 유효한 owner lease를 발급할 수
+있다는 점이다. process-lifetime OS lock 또는 durable generation CAS로 단일 owner를
+보장하고, loser가 기존 owner의 mic 상태를 바꾸지 못하는 cross-process 회귀가
+필요하다. mic 활성 뒤 health 수집 전체 deadline 부재는 P1 starvation hardening으로
+남긴다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
@@ -925,6 +932,19 @@ window activation, keyboard/text 입력, 일반 rollback이 없다. Control Page
 설정, WinUI의 stable Button corpus를 먼저 측정한다. no-op 또는 쉽게 되돌릴 수
 있는 동작부터 target identity와 세 postcondition을 확인하고, 실제 focus
 handoff와 복구 절차가 검증되기 전에는 범위를 넓히지 않는다.
+
+## P2 — Host capture stop evidence 소비자 검증 부재
+
+Supervisor는 exact physical OFF를 확인한 content-free stop evidence에도 별도 HMAC
+scope를 적용하지만 현재 downstream consumer는 서명을 다시 검증하지 않는다. 또한
+startup ambiguity를 판단하는 freshness probe는 서명 검증 전 단계라 공유 artifact
+writer가 fresh-looking status를 써서 Bridge 시작을 거부시키는 availability 공격은
+가능하다. 두 경우 모두 Local Bridge의 캡처 lease 검증이나 물리 stop을 우회하거나
+`verified` 증거를 위조할 수는 없다.
+
+다음 조치: stop evidence를 권위 판단에 사용하는 consumer가 생길 때 같은 scope의
+exact verifier와 replay binding을 함께 추가한다. startup probe는 안전한 시작 거부를
+유지하되 서명 검증을 재사용해 불필요한 수동 개입만 줄인다.
 
 ## P2 — `main.py` 선언형 wiring 밀도
 

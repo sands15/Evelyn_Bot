@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .paths import get_runtime_artifacts_root
 from .host_supervisor_client import ALLOWED_HOST_ACTIONS, HostSupervisorClient
 from .runtime_services import RUNTIME_ROOT, ServiceManifest, ServiceSpec, get_service, load_service_manifest
+from .voice_capture_consent import voice_capture_auth_scrubbed_environment
 
 
 PROJECT_ROOT = RUNTIME_ROOT.parents[1]
@@ -560,6 +561,7 @@ def start_visible_process(command: list[str], cwd: str) -> dict[str, Any]:
         cwd=cwd,
         close_fds=True,
         creationflags=creationflags,
+        env=voice_capture_auth_scrubbed_environment(),
     )
     return {"pid": process.pid}
 

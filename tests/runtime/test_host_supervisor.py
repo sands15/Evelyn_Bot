@@ -17,10 +17,19 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.host_supervisor import (  # noqa: E402
     BRIDGE_PROCESS_IDENTITY_SCHEMA,
+    BRIDGE_STATUS_MAX_BYTES,
     HostSupervisor,
     LOCAL_BRIDGE_RESTART_EXIT_CODE,
+    VOICE_CAPTURE_STOP_SCHEMA,
 )
 from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
+from evelyn_core.voice_capture_consent import (  # noqa: E402
+    BRIDGE_STATUS_AUTH_SCOPE,
+    SUPERVISOR_STOP_AUTH_SCOPE,
+    VOICE_CAPTURE_AUTH_ENV,
+    sign_voice_capture_artifact,
+    voice_capture_artifact_is_authentic,
+)
 from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
 
 
@@ -107,6 +116,9 @@ class HostSupervisorTests(unittest.TestCase):
             "windows:123456" if os.name == "nt" else "linux:123456"
         )
         self.process_owner = FakeProcessOwner()
+        self.voice_capture_auth_token = (
+            "voice-capture-test-auth-token-0123456789"
+        )
 
         def run(command, **kwargs):
             self.commands.append((command, kwargs))
@@ -123,6 +135,7 @@ class HostSupervisorTests(unittest.TestCase):
             exact_process_terminator=lambda _pid, _birth: True,
             process_owner=self.process_owner,
             bridge_lock_probe=lambda: True,
+            voice_capture_auth_token=self.voice_capture_auth_token,
         )
 
     def request(self, **overrides):
@@ -180,6 +193,7 @@ class HostSupervisorTests(unittest.TestCase):
         credentials = {
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            VOICE_CAPTURE_AUTH_ENV: self.voice_capture_auth_token,
             "DISCORD_BOT_TOKEN": "discord-secret",
             "OPENAI_API_KEY": "model-secret",
         }
@@ -196,12 +210,17 @@ class HostSupervisorTests(unittest.TestCase):
             bridge_env["LOCAL_BRIDGE_STATUS_AUTH_TOKEN"],
             "reporter-secret",
         )
+        self.assertEqual(
+            bridge_env[VOICE_CAPTURE_AUTH_ENV],
+            self.voice_capture_auth_token,
+        )
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", bridge_env)
         self.assertNotIn("DISCORD_BOT_TOKEN", bridge_env)
         self.assertNotIn("OPENAI_API_KEY", bridge_env)
         self.assertEqual(discord_env["DISCORD_BOT_TOKEN"], "discord-secret")
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", discord_env)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", discord_env)
+        self.assertNotIn(VOICE_CAPTURE_AUTH_ENV, discord_env)
         self.assertNotIn("OPENAI_API_KEY", discord_env)
         self.assertEqual(
             tts_env["DISCORD_BOT_TOKEN"],
@@ -310,6 +329,7 @@ class HostSupervisorTests(unittest.TestCase):
         credentials = {
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            VOICE_CAPTURE_AUTH_ENV: self.voice_capture_auth_token,
             "DISCORD_BOT_TOKEN": "discord-secret",
             "EVELYN_CODEX_CREDENTIALS_DIR": "C:\\secure-codex",
             "OPENAI_API_KEY": "model-secret",
@@ -329,6 +349,7 @@ class HostSupervisorTests(unittest.TestCase):
         )
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", environment)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", environment)
+        self.assertNotIn(VOICE_CAPTURE_AUTH_ENV, environment)
         self.assertNotIn("OPENAI_API_KEY", environment)
         self.assertIn(str(stop_script), command[-1])
         self.assertIn(str(start_script), command[-1])
@@ -385,6 +406,198 @@ class HostSupervisorTests(unittest.TestCase):
 
         self.assertTrue(payload["storageRetention"]["dryRun"])
         self.assertFalse(payload["storageRetention"]["automaticDeletion"])
+
+    def bridge_watchdog_status(self) -> dict:
+        return self.sign_bridge_status({
+            "schema": "local_io_bridge.status.v1",
+            "statusSeq": 7,
+            "heartbeatAt": self.clock(),
+            "pid": FakeProcess.pid,
+            "bridgeInstanceId": "a" * 32,
+            "micEnabled": False,
+            "micCaptureStopped": True,
+            "mic": {
+                "enabled": False,
+                "captureReady": False,
+                "captureActive": False,
+                "captureStopped": True,
+            },
+            "voiceCaptureWatchdog": {
+                "schema": "voice.capture-consent.watchdog-status.v1",
+                "state": "blocked",
+                "reason": "voice_capture_consent_heartbeat_stale",
+                "checkedAt": self.clock() - 0.1,
+                "captureStopped": True,
+                "stoppedAt": self.clock() - 0.05,
+                "contentFree": True,
+            },
+        })
+
+    def sign_bridge_status(self, payload: dict) -> dict:
+        return sign_voice_capture_artifact(
+            payload,
+            auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
+            auth_token=self.voice_capture_auth_token,
+        )
+
+    def write_bridge_watchdog_status(self, payload: dict) -> None:
+        self.supervisor.child = FakeProcess()
+        self.supervisor.child_started_at = self.clock() - 1
+        self.supervisor.bridge_status_path.parent.mkdir(parents=True, exist_ok=True)
+        self.supervisor.bridge_status_path.write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+    def test_status_publishes_only_child_bound_exact_capture_stop_evidence(self):
+        self.write_bridge_watchdog_status(self.bridge_watchdog_status())
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+        serialized = json.dumps(evidence)
+
+        self.assertEqual(evidence["schema"], VOICE_CAPTURE_STOP_SCHEMA)
+        self.assertEqual(evidence["state"], "verified")
+        self.assertTrue(evidence["captureStopped"])
+        self.assertFalse(evidence["micEnabled"])
+        self.assertTrue(
+            voice_capture_artifact_is_authentic(
+                evidence,
+                auth_scope=SUPERVISOR_STOP_AUTH_SCOPE,
+                auth_token=self.voice_capture_auth_token,
+            )
+        )
+        self.assertNotIn("owner", serialized.lower())
+        self.assertNotIn("lease", serialized.lower())
+        self.assertNotIn(self.voice_capture_auth_token, serialized)
+
+    def test_capture_stop_evidence_rejects_stale_or_contradictory_bridge_status(self):
+        base = self.bridge_watchdog_status()
+        cases = {
+            "stale": {**base, "heartbeatAt": self.clock() - 4},
+            "wrong_pid": {**base, "pid": 9999},
+            "top_level_on": {**base, "micEnabled": True},
+            "nested_ready": {
+                **base,
+                "mic": {**base["mic"], "captureReady": True},
+            },
+            "prior_child_generation": {
+                **base,
+                "heartbeatAt": self.clock() - 2,
+            },
+            "malformed_stopped_at": {
+                **base,
+                "voiceCaptureWatchdog": {
+                    **base["voiceCaptureWatchdog"],
+                    "stoppedAt": "not-a-time",
+                },
+            },
+            "stop_failed": {
+                **base,
+                "voiceCaptureWatchdog": {
+                    **base["voiceCaptureWatchdog"],
+                    "state": "stop_failed",
+                    "stoppedAt": None,
+                },
+            },
+        }
+        for name, payload in cases.items():
+            with self.subTest(case=name):
+                self.write_bridge_watchdog_status(
+                    self.sign_bridge_status(payload)
+                )
+                evidence = self.supervisor.status()["localBridge"][
+                    "voiceCaptureStop"
+                ]
+                self.assertEqual(evidence["state"], "unverified")
+
+    def test_capture_stop_not_required_still_requires_exact_physical_off(self):
+        base = self.bridge_watchdog_status()
+        payload = {
+            **base,
+            "mic": {**base["mic"], "captureActive": True},
+            "voiceCaptureWatchdog": {
+                **base["voiceCaptureWatchdog"],
+                "stoppedAt": None,
+            },
+        }
+        self.write_bridge_watchdog_status(self.sign_bridge_status(payload))
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+
+        self.assertEqual(evidence["state"], "unverified")
+
+    def test_capture_stop_evidence_rejects_signed_status_tampering(self):
+        payload = {**self.bridge_watchdog_status(), "statusSeq": 8}
+        self.write_bridge_watchdog_status(payload)
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+
+        self.assertEqual(evidence["state"], "unverified")
+
+    def test_capture_stop_evidence_rejects_signed_sequence_replay(self):
+        replay = self.bridge_watchdog_status()
+        current = self.sign_bridge_status({**replay, "statusSeq": 8})
+        self.write_bridge_watchdog_status(current)
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+        self.assertEqual(evidence["state"], "verified")
+        self.assertEqual(self.supervisor.bridge_status_seq_high_water, 8)
+
+        self.supervisor.bridge_status_path.write_text(
+            json.dumps(replay),
+            encoding="utf-8",
+        )
+        replayed = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+
+        self.assertEqual(replayed["state"], "unverified")
+        self.assertEqual(self.supervisor.bridge_status_seq_high_water, 8)
+
+    def test_capture_stop_evidence_rejects_new_signed_instance_for_same_child(self):
+        current = self.bridge_watchdog_status()
+        self.write_bridge_watchdog_status(current)
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+        self.assertEqual(evidence["state"], "verified")
+        self.assertEqual(self.supervisor.bridge_status_instance_id, "a" * 32)
+
+        replacement = self.sign_bridge_status(
+            {
+                **current,
+                "statusSeq": 8,
+                "bridgeInstanceId": "b" * 32,
+            }
+        )
+        self.supervisor.bridge_status_path.write_text(
+            json.dumps(replacement),
+            encoding="utf-8",
+        )
+        replaced = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+
+        self.assertEqual(replaced["state"], "unverified")
+        self.assertEqual(self.supervisor.bridge_status_instance_id, "a" * 32)
+
+    def test_successful_bridge_start_resets_status_instance_and_sequence(self):
+        self.supervisor.bridge_status_instance_id = "a" * 32
+        self.supervisor.bridge_status_seq_high_water = 8
+        self.supervisor.popen = lambda *_args, **_kwargs: FakeProcess()
+
+        result = self.supervisor.start_bridge()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.supervisor.bridge_status_instance_id, "")
+        self.assertEqual(self.supervisor.bridge_status_seq_high_water, 0)
+
+    def test_capture_stop_evidence_bounds_untrusted_status_file(self):
+        self.supervisor.child = FakeProcess()
+        self.supervisor.child_started_at = self.clock() - 1
+        self.supervisor.bridge_status_path.parent.mkdir(parents=True, exist_ok=True)
+        self.supervisor.bridge_status_path.write_bytes(
+            b"{" + b" " * BRIDGE_STATUS_MAX_BYTES
+        )
+
+        evidence = self.supervisor.status()["localBridge"]["voiceCaptureStop"]
+
+        self.assertEqual(evidence["state"], "unverified")
 
     def test_failed_host_action_updates_error_counter_without_command_text(self):
         self.supervisor.run_command = lambda *_args, **_kwargs: SimpleNamespace(

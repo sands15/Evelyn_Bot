@@ -8,6 +8,10 @@ $previousInternalControlToken = [Environment]::GetEnvironmentVariable(
     'EVELYN_INTERNAL_CONTROL_TOKEN',
     [EnvironmentVariableTarget]::Process
 )
+$previousVoiceCaptureHostAuthToken = [Environment]::GetEnvironmentVariable(
+    'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
 try {
 # Strip inherited channel credentials before even the source-revision Git
 # probes can create a child. Narrow helpers below reintroduce only the exact
@@ -19,6 +23,11 @@ try {
 )
 [Environment]::SetEnvironmentVariable(
     'EVELYN_INTERNAL_CONTROL_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+[Environment]::SetEnvironmentVariable(
+    'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
     $null,
     [EnvironmentVariableTarget]::Process
 )
@@ -86,6 +95,7 @@ $internalControlToken = if (
 } else {
     New-SecureRuntimeToken
 }
+$voiceCaptureHostAuthToken = New-SecureRuntimeToken
 
 if (Test-Path $stopMarker) {
     Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
@@ -411,6 +421,10 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
         'EVELYN_INTERNAL_CONTROL_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
+    $previousVoiceCapture = [Environment]::GetEnvironmentVariable(
+        'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
     try {
         Set-ProcessEnvironmentVariable `
             -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
@@ -418,6 +432,9 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
         Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $internalControlToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+            -Value $voiceCaptureHostAuthToken
         Invoke-DockerCommand -Arguments $Arguments
     } finally {
         Set-ProcessEnvironmentVariable `
@@ -426,6 +443,9 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
         Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $previousInternal
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+            -Value $previousVoiceCapture
     }
 }
 
@@ -600,6 +620,10 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
         'EVELYN_INTERNAL_CONTROL_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
+    $previousVoiceCapture = [Environment]::GetEnvironmentVariable(
+        'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
     try {
         Set-ProcessEnvironmentVariable `
             -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
@@ -607,6 +631,9 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
         Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $null
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+            -Value $voiceCaptureHostAuthToken
         Start-PowerShellWindow `
             -Title 'Evelyn Host Supervisor' `
             -Script $pythonCommand `
@@ -618,6 +645,9 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
         Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $previousInternal
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+            -Value $previousVoiceCapture
     }
     Wait-HostSupervisorReady -MinimumHeartbeat $launchStartedAt
 }
@@ -651,6 +681,9 @@ try {
     Set-ProcessEnvironmentVariable `
         -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
         -Value $null
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+        -Value $null
 
     Assert-TtsProfileReady
     Stop-PreviousHostSupervisorGeneration
@@ -680,6 +713,9 @@ try {
     Set-ProcessEnvironmentVariable `
         -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
         -Value $previousInternalControlToken
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+        -Value $previousVoiceCaptureHostAuthToken
 }
 } finally {
     # This outer boundary also covers failures before helper functions or the
@@ -692,6 +728,11 @@ try {
     [Environment]::SetEnvironmentVariable(
         'EVELYN_INTERNAL_CONTROL_TOKEN',
         $previousInternalControlToken,
+        [EnvironmentVariableTarget]::Process
+    )
+    [Environment]::SetEnvironmentVariable(
+        'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+        $previousVoiceCaptureHostAuthToken,
         [EnvironmentVariableTarget]::Process
     )
 }

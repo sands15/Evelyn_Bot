@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +16,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core import local_io_bridge  # noqa: E402
 from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
+from evelyn_core.voice_capture_consent import (  # noqa: E402
+    BRIDGE_STATUS_AUTH_SCOPE,
+    voice_capture_artifact_is_authentic,
+)
 
 
 class _Response:
@@ -66,7 +71,56 @@ class _SoundDevice:
 
 
 class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_status_reports_cannot_overwrite_newer_sequence(self) -> None:
+        bridge = LocalIoBridge()
+        bridge.session = _Session()  # type: ignore[assignment]
+        release_first = asyncio.Event()
+        write_order: list[int] = []
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_voice_capture_watchdog",
+                new=AsyncMock(),
+            ),
+            patch.object(bridge, "_refresh_output_readiness"),
+            patch.object(bridge, "_output_devices_snapshot", return_value=[]),
+            patch("evelyn_core.local_io_bridge.atomic_json_write") as write_status,
+            patch("evelyn_core.local_io_bridge.emit_silence_liveness_event"),
+        ):
+            async def controlled_to_thread(function, *args, **kwargs):
+                if function is write_status:
+                    sequence = args[1]["statusSeq"]
+                    if sequence == 1:
+                        await release_first.wait()
+                    write_order.append(sequence)
+                    return None
+                return function(*args, **kwargs)
+
+            with patch.object(
+                local_io_bridge.asyncio,
+                "to_thread",
+                side_effect=controlled_to_thread,
+            ):
+                first = asyncio.create_task(bridge._post_status())
+                await asyncio.sleep(0)
+                second = asyncio.create_task(bridge._post_status())
+                await asyncio.sleep(0)
+                first.cancel()
+                await asyncio.sleep(0)
+                release_first.set()
+                results = await asyncio.gather(
+                    first,
+                    second,
+                    return_exceptions=True,
+                )
+
+        self.assertEqual(write_order, [1, 2])
+        self.assertEqual(bridge.status_seq, 2)
+        self.assertIsInstance(results[0], asyncio.CancelledError)
+
     async def test_successful_write_clears_transient_heartbeat_error(self) -> None:
+        auth_token = "voice-capture-test-auth-token-0123456789"
         with tempfile.TemporaryDirectory() as temp_dir:
             status_path = Path(temp_dir) / "local_bridge" / "status.json"
             bridge = LocalIoBridge()
@@ -83,6 +137,11 @@ class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                     status_path,
                 ),
                 patch.object(local_io_bridge, "sd", _SoundDevice()),
+                patch.object(
+                    local_io_bridge,
+                    "VOICE_CAPTURE_HOST_AUTH_TOKEN",
+                    auth_token,
+                ),
                 patch.object(bridge, "_output_devices_snapshot", return_value=[]),
             ):
                 await bridge._post_status()
@@ -92,8 +151,34 @@ class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge.last_error, "")
             self.assertEqual(payload["errorCount"], 1)
             self.assertEqual(payload["lastErrorCode"], "heartbeat_write_failed")
+            self.assertTrue(
+                voice_capture_artifact_is_authentic(
+                    payload,
+                    auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
+                    auth_token=auth_token,
+                )
+            )
+            self.assertNotIn(auth_token, json.dumps(payload))
+            watchdog = payload["voiceCaptureWatchdog"]
+            self.assertEqual(
+                set(watchdog),
+                {
+                    "schema",
+                    "state",
+                    "reason",
+                    "checkedAt",
+                    "captureStopped",
+                    "stoppedAt",
+                    "contentFree",
+                },
+            )
+            self.assertEqual(watchdog["state"], "blocked")
+            self.assertTrue(watchdog["captureStopped"])
+            self.assertTrue(watchdog["contentFree"])
             self.assertNotIn("private", json.dumps(payload))
             self.assertNotIn("token", json.dumps(payload))
+            self.assertNotIn("ownerDigest", json.dumps(watchdog))
+            self.assertNotIn("leaseDigest", json.dumps(watchdog))
 
     async def test_status_projects_selected_output_format_without_opening_stream(self) -> None:
         sound_device = _SoundDevice()

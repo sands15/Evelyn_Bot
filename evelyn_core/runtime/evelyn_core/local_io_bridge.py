@@ -92,6 +92,14 @@ from .voice_validation import (
     emit_voice_validation_event,
     validation_attempt_binding_is_current,
 )
+from .voice_capture_consent import (
+    BRIDGE_STATUS_AUTH_SCOPE,
+    VOICE_CAPTURE_AUTH_ENV,
+    WATCHDOG_STATUS_SCHEMA,
+    inspect_voice_capture_host_lease,
+    resolve_voice_capture_auth_token,
+    sign_voice_capture_artifact,
+)
 
 try:
     import sounddevice as sd
@@ -105,6 +113,7 @@ LOCAL_BRIDGE_STATUS_AUTH_TOKEN = os.getenv(
     "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
     "",
 ).strip()
+VOICE_CAPTURE_HOST_AUTH_TOKEN = resolve_voice_capture_auth_token()
 _CREDENTIAL_ENV_PATTERN = re.compile(
     r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
     re.IGNORECASE,
@@ -122,6 +131,7 @@ LOCAL_BRIDGE_MIN_TEXT_CHARS = max(1, int(os.getenv("LOCAL_BRIDGE_MIN_TEXT_CHARS"
 LOCAL_BRIDGE_STATUS_INTERVAL_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_STATUS_INTERVAL_SEC", "0.25")))
 LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN = os.getenv("LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_SHUTDOWN_EXIT_DELAY_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_SHUTDOWN_EXIT_DELAY_SEC", "1.5")))
+VOICE_CAPTURE_FAIL_SAFE_EXIT_CODE = 76
 LOCAL_BRIDGE_TTS_WARMUP_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_TTS_WARMUP_TEXT = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TEXT", "\uc751.")
 LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = max(0.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC", "0.5")))
@@ -161,6 +171,11 @@ LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC = max(
 LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
 LOCAL_BRIDGE_INSTANCE_LOCK_PATH = (
     get_runtime_artifacts_root() / "local_bridge" / "instance.lock"
+)
+VOICE_CAPTURE_HOST_LEASE_PATH = (
+    get_runtime_artifacts_root()
+    / "voice_capture_consent"
+    / "owner_heartbeat.json"
 )
 LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
 
@@ -253,7 +268,15 @@ class LocalIoBridge:
         self.mic_control_error = ""
         self.mic_capture_stopped = not self.mic_enabled
         self.mic_control_lock = asyncio.Lock()
+        self.status_lock = asyncio.Lock()
         self.mic_control_tasks: set[asyncio.Task[Any]] = set()
+        self.voice_capture_consent_binding: tuple[str, str] | None = None
+        self.voice_capture_watchdog_state = "blocked"
+        self.voice_capture_watchdog_reason = (
+            "voice_capture_consent_heartbeat_missing"
+        )
+        self.voice_capture_watchdog_checked_at = time.time()
+        self.voice_capture_watchdog_last_stopped_at: float | None = None
         self.ready = False
         self.status_seq = 0
         self.speaking = False
@@ -530,12 +553,119 @@ class LocalIoBridge:
         self.service = None
         self.mic_capture_stopped = True
 
-    async def _stop_mic(self) -> None:
-        await self._stop_mic_service(reason="mic_disabled")
+    async def _stop_mic(self, *, reason: str = "mic_disabled") -> None:
+        await self._stop_mic_service(reason=reason)
         self.mic_enabled = False
+        self.voice_capture_consent_binding = None
         self.ready = True
         self.last_error = ""
         print("[LOCAL BRIDGE] mic_ready=false mic_disabled=true", flush=True)
+
+    def _capture_may_be_active(self) -> bool:
+        return self.mic_enabled or self.service is not None or not self.mic_capture_stopped
+
+    def _inspect_voice_capture_host_lease(self) -> dict[str, Any]:
+        return inspect_voice_capture_host_lease(
+            VOICE_CAPTURE_HOST_LEASE_PATH,
+            auth_token=VOICE_CAPTURE_HOST_AUTH_TOKEN,
+        )
+
+    def _voice_capture_lease_rejection(
+        self,
+        lease: dict[str, Any],
+        *,
+        expected_binding: tuple[str, str] | None = None,
+        require_pinned: bool = False,
+    ) -> str:
+        if lease.get("authorized") is not True:
+            return str(lease.get("reason") or "voice_capture_consent_heartbeat_untrusted")
+        observed = (
+            str(lease.get("ownerDigest") or ""),
+            str(lease.get("leaseDigest") or ""),
+        )
+        expected = expected_binding or self.voice_capture_consent_binding
+        return (
+            "voice_capture_consent_lease_replaced"
+            if (require_pinned and expected is None)
+            or (expected is not None and observed != expected)
+            else ""
+        )
+
+    def _record_voice_capture_watchdog(
+        self,
+        lease: dict[str, Any],
+        *,
+        reason: str,
+        state: str | None = None,
+        stopped: bool = False,
+    ) -> None:
+        self.voice_capture_watchdog_state = state or ("blocked" if reason else "authorized")
+        self.voice_capture_watchdog_reason = reason
+        self.voice_capture_watchdog_checked_at = float(lease.get("checkedAt") or time.time())
+        if not reason:
+            self.voice_capture_watchdog_last_stopped_at = None
+        if stopped:
+            self.voice_capture_watchdog_checked_at = time.time()
+            self.voice_capture_watchdog_last_stopped_at = (
+                self.voice_capture_watchdog_checked_at
+            )
+
+    def _voice_capture_watchdog_status(self) -> dict[str, Any]:
+        return {
+            "schema": WATCHDOG_STATUS_SCHEMA,
+            "state": self.voice_capture_watchdog_state,
+            "reason": self.voice_capture_watchdog_reason,
+            "checkedAt": self.voice_capture_watchdog_checked_at,
+            "captureStopped": self.mic_capture_stopped,
+            "stoppedAt": self.voice_capture_watchdog_last_stopped_at,
+            "contentFree": True,
+        }
+
+    async def _stop_mic_for_watchdog(
+        self,
+        lease: dict[str, Any],
+        reason: str,
+    ) -> None:
+        self.mic_control_desired_enabled = False
+        try:
+            await self._stop_mic(reason=reason)
+        except Exception as exc:
+            self._record_voice_capture_watchdog(
+                lease,
+                reason=reason,
+                state="stop_failed",
+            )
+            self.mic_control_state = "failed"
+            self.mic_control_error = "voice_capture_watchdog_stop_failed"
+            self.ready = False
+            self.last_error = "voice_capture_watchdog_stop_failed"
+            self.runtime_errors.record("voice_capture_watchdog_stop_failed", exc)
+            self._schedule_watchdog_fail_safe_exit()
+            return
+        self._record_voice_capture_watchdog(lease, reason=reason, stopped=True)
+        self.mic_control_state = "failed"
+        self.mic_control_error = reason
+        self.last_error = reason
+
+    async def _enforce_voice_capture_watchdog(self) -> None:
+        lease = await asyncio.to_thread(self._inspect_voice_capture_host_lease)
+        reason = self._voice_capture_lease_rejection(
+            lease,
+            require_pinned=self._capture_may_be_active(),
+        )
+        self._record_voice_capture_watchdog(lease, reason=reason)
+        if not reason or not self._capture_may_be_active():
+            return
+        async with self.mic_control_lock:
+            lease = await asyncio.to_thread(self._inspect_voice_capture_host_lease)
+            reason = self._voice_capture_lease_rejection(
+                lease,
+                require_pinned=self._capture_may_be_active(),
+            )
+            self._record_voice_capture_watchdog(lease, reason=reason)
+            if not reason or not self._capture_may_be_active():
+                return
+            await self._stop_mic_for_watchdog(lease, reason)
 
     async def _apply_mic_control_request(
         self,
@@ -554,6 +684,18 @@ class LocalIoBridge:
                 if enabled:
                     if self.restart_started or self.shutdown_started:
                         raise RuntimeError("local_bridge_lifecycle_stopping")
+                    lease = await asyncio.to_thread(
+                        self._inspect_voice_capture_host_lease
+                    )
+                    reason = self._voice_capture_lease_rejection(lease)
+                    if reason:
+                        if self._capture_may_be_active():
+                            await self._stop_mic_for_watchdog(lease, reason)
+                        raise RuntimeError(reason)
+                    binding = (
+                        str(lease["ownerDigest"]),
+                        str(lease["leaseDigest"]),
+                    )
                     self.mic_enabled = True
                     await self._start_mic()
                     if self.restart_started or self.shutdown_started:
@@ -565,6 +707,18 @@ class LocalIoBridge:
                         or self.mic_capture_stopped
                     ):
                         raise RuntimeError("local_mic_start_unverified")
+                    current = await asyncio.to_thread(
+                        self._inspect_voice_capture_host_lease
+                    )
+                    reason = self._voice_capture_lease_rejection(
+                        current,
+                        expected_binding=binding,
+                    )
+                    if reason:
+                        await self._stop_mic_for_watchdog(current, reason)
+                        raise RuntimeError(reason)
+                    self.voice_capture_consent_binding = binding
+                    self._record_voice_capture_watchdog(current, reason="")
                 else:
                     await self._stop_mic()
                     if (
@@ -2452,6 +2606,14 @@ class LocalIoBridge:
         return played_bytes
 
     async def _post_status(self, extra: dict[str, Any] | None = None) -> None:
+        async with self.status_lock:
+            await self._post_status_serialized(extra)
+
+    async def _post_status_serialized(
+        self,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        await self._enforce_voice_capture_watchdog()
         if self.session is None:
             return
         self.status_seq += 1
@@ -2556,6 +2718,7 @@ class LocalIoBridge:
             "lastLatency": dict(self.last_latency),
             "lastTtsPlayback": dict(self.last_tts_playback),
             "voiceAdmission": self._voice_admission_public_status(),
+            "voiceCaptureWatchdog": self._voice_capture_watchdog_status(),
             "ttsWarmup": {
                 "enabled": LOCAL_BRIDGE_TTS_ENABLED and LOCAL_BRIDGE_TTS_WARMUP_ENABLED,
                 "done": self.tts_warmup_done,
@@ -2584,12 +2747,25 @@ class LocalIoBridge:
         }
         if extra:
             payload.update(extra)
+        payload = sign_voice_capture_artifact(
+            payload,
+            auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
+            auth_token=VOICE_CAPTURE_HOST_AUTH_TOKEN,
+        )
         try:
-            await asyncio.to_thread(
-                atomic_json_write,
-                LOCAL_BRIDGE_STATUS_PATH,
-                payload,
+            write_task = asyncio.create_task(
+                asyncio.to_thread(
+                    atomic_json_write,
+                    LOCAL_BRIDGE_STATUS_PATH,
+                    payload,
+                )
             )
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await write_task
+                raise
         except Exception as exc:
             self.runtime_errors.record("heartbeat_write_failed", exc)
             self.last_error = f"heartbeat_write_failed: {type(exc).__name__}"
@@ -2758,6 +2934,14 @@ class LocalIoBridge:
                 LOCAL_BRIDGE_RESTART_EXIT_CODE if self.restart_started else 0
             )
         loop.create_task(self._exit_after_shutdown_delay())
+
+    @staticmethod
+    def _schedule_watchdog_fail_safe_exit() -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            os._exit(VOICE_CAPTURE_FAIL_SAFE_EXIT_CODE)
+        loop.call_soon(os._exit, VOICE_CAPTURE_FAIL_SAFE_EXIT_CODE)
 
     async def _exit_after_shutdown_delay(self) -> None:
         await asyncio.sleep(LOCAL_BRIDGE_SHUTDOWN_EXIT_DELAY_SEC)

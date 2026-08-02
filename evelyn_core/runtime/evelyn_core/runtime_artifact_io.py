@@ -192,6 +192,17 @@ def atomic_json_write(
             pass
 
 
+def read_bounded_json(path: Path, *, maximum_bytes: int) -> Any:
+    """Read one JSON artifact without allowing an untrusted file to stall."""
+
+    limit = max(1, int(maximum_bytes))
+    with Path(path).open("rb") as handle:
+        raw = handle.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("artifact_too_large")
+    return json.loads(raw)
+
+
 def atomic_text_write(
     path: Path,
     text: str,

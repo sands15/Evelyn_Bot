@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
@@ -15,9 +16,18 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core import voice_capture_consent as consent_module  # noqa: E402
 from evelyn_core.voice_capture_consent import (  # noqa: E402
+    BRIDGE_STATUS_AUTH_SCOPE,
     CONSENT_SCHEMA,
+    HOST_LEASE_AUTH_SCOPE,
+    HOST_LEASE_MAX_BYTES,
+    HOST_LEASE_SCHEMA,
+    VOICE_CAPTURE_AUTH_ENV,
     VoiceCaptureConsentManager,
     attach_voice_capture_consent,
+    inspect_voice_capture_host_lease,
+    sign_voice_capture_artifact,
+    voice_capture_auth_scrubbed_environment,
+    voice_capture_artifact_is_authentic,
 )
 
 
@@ -31,6 +41,13 @@ class Clock:
 
 class VoiceCaptureConsentTests(unittest.TestCase):
     def setUp(self):
+        self.auth_token = "voice-capture-test-auth-token-0123456789"
+        auth_patch = patch.dict(
+            consent_module.os.environ,
+            {VOICE_CAPTURE_AUTH_ENV: self.auth_token},
+        )
+        auth_patch.start()
+        self.addCleanup(auth_patch.stop)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.clock = Clock()
@@ -151,6 +168,16 @@ class VoiceCaptureConsentTests(unittest.TestCase):
         )
         self.assertTrue(completed["ok"])
         return completed["consent"]
+
+    def test_auth_environment_scrub_removes_only_voice_capture_key(self):
+        with patch.dict(
+            consent_module.os.environ,
+            {VOICE_CAPTURE_AUTH_ENV: "secret", "EVELYN_KEEP_ME": "kept"},
+            clear=True,
+        ):
+            environment = voice_capture_auth_scrubbed_environment()
+
+        self.assertEqual(environment, {"EVELYN_KEEP_ME": "kept"})
 
     def test_preview_is_short_lived_and_one_time(self):
         preview = self.manager.preview()
@@ -594,6 +621,172 @@ class VoiceCaptureConsentTests(unittest.TestCase):
         self.assertNotIn("transcript", serialized)
         self.assertNotIn("prompt", serialized)
         self.assertNotIn("text", serialized)
+
+    def test_host_lease_heartbeat_is_content_free_and_never_extends_expiry(self):
+        consent = self.activate()
+        first = self.manager.publish_host_lease()
+        self.clock.value += 1
+        second = self.manager.publish_host_lease()
+        serialized = json.dumps(second, ensure_ascii=False).lower()
+
+        self.assertEqual(second["schema"], HOST_LEASE_SCHEMA)
+        self.assertEqual(second["expiresAt"], consent["expiresAt"])
+        self.assertGreater(second["heartbeatAt"], first["heartbeatAt"])
+        self.assertRegex(second["ownerDigest"], r"^[0-9a-f]{64}$")
+        self.assertRegex(second["leaseDigest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(second["authAlgorithm"], "hmac-sha256")
+        self.assertRegex(second["authTag"], r"^[0-9a-f]{64}$")
+        self.assertNotIn(self.manager.owner_nonce, serialized)
+        self.assertNotIn(str(consent["leaseId"]), serialized)
+        self.assertNotIn(self.auth_token.lower(), serialized)
+        for forbidden in ("audio", "transcript", "prompt", "text"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_host_lease_inspection_fails_closed_for_untrusted_or_stale_files(self):
+        self.activate()
+        valid = self.manager.publish_host_lease()
+        path = self.manager.host_lease_path
+
+        self.assertTrue(
+            inspect_voice_capture_host_lease(path, now=self.clock)["authorized"]
+        )
+        self.assertFalse(
+            voice_capture_artifact_is_authentic(
+                valid,
+                auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
+                auth_token=self.auth_token,
+            )
+        )
+        self.assertEqual(
+            inspect_voice_capture_host_lease(
+                path,
+                now=self.clock,
+                auth_token="wrong-voice-capture-auth-token-012345",
+            )["reason"],
+            "voice_capture_consent_heartbeat_untrusted",
+        )
+
+        path.write_text(
+            json.dumps({**valid, "heartbeatAt": self.clock() - 1}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            inspect_voice_capture_host_lease(path, now=self.clock)["reason"],
+            "voice_capture_consent_heartbeat_untrusted",
+        )
+
+        cases = {
+            "wrong_schema": {**valid, "schema": "voice.capture-consent.host-lease.v0"},
+            "extra_key": {**valid, "private": "canary"},
+            "future": {**valid, "heartbeatAt": self.clock() + 1},
+            "stale": {**valid, "heartbeatAt": self.clock() - 5},
+            "expired": {**valid, "expiresAt": self.clock()},
+            "nonfinite": {**valid, "heartbeatAt": float("nan")},
+            "inactive": {
+                **valid,
+                "state": "inactive",
+                "leaseDigest": "",
+                "expiresAt": None,
+            },
+            "revoking": {**valid, "state": "revoking"},
+        }
+        for name, payload in cases.items():
+            with self.subTest(case=name):
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                result = inspect_voice_capture_host_lease(path, now=self.clock)
+                self.assertFalse(result["authorized"])
+                self.assertTrue(result["reason"].startswith("voice_capture_consent_"))
+
+        path.write_text("{", encoding="utf-8")
+        self.assertFalse(
+            inspect_voice_capture_host_lease(path, now=self.clock)["authorized"]
+        )
+        path.unlink()
+        self.assertEqual(
+            inspect_voice_capture_host_lease(path, now=self.clock)["reason"],
+            "voice_capture_consent_heartbeat_missing",
+        )
+
+    def test_host_lease_uses_time_sampled_after_atomic_read(self):
+        self.activate()
+        refreshed = self.manager.publish_host_lease()
+        path = self.manager.host_lease_path
+
+        def replace_during_read(_path: Path, mode: str):
+            self.assertEqual(mode, "rb")
+            self.clock.value += 1
+            return io.BytesIO(json.dumps(
+                sign_voice_capture_artifact(
+                    {**refreshed, "heartbeatAt": self.clock()},
+                    auth_scope=HOST_LEASE_AUTH_SCOPE,
+                    auth_token=self.auth_token,
+                ),
+            ).encode("utf-8"))
+
+        with patch.object(
+            Path,
+            "open",
+            autospec=True,
+            side_effect=replace_during_read,
+        ):
+            result = inspect_voice_capture_host_lease(path, now=self.clock)
+
+        self.assertTrue(result["authorized"], result)
+        self.assertEqual(result["heartbeatAt"], result["checkedAt"])
+
+    def test_host_lease_reader_rejects_oversized_untrusted_artifact(self):
+        path = self.manager.host_lease_path
+        payload = self.manager.publish_host_lease()
+        payload["authTag"] = "a" * HOST_LEASE_MAX_BYTES
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = inspect_voice_capture_host_lease(path, now=self.clock)
+
+        self.assertFalse(result["authorized"])
+        self.assertEqual(
+            result["reason"],
+            "voice_capture_consent_heartbeat_untrusted",
+        )
+
+    def test_host_lease_publish_requires_purpose_scoped_auth_token(self):
+        self.manager.auth_token = ""
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "voice_capture_auth_token_unavailable",
+        ):
+            self.manager.publish_host_lease()
+
+    def test_host_lease_symlink_is_untrusted(self):
+        self.activate()
+        payload = self.manager.publish_host_lease()
+        path = self.manager.host_lease_path
+        target = path.with_name("outside.json")
+        target.write_text(json.dumps(payload), encoding="utf-8")
+        path.unlink()
+        try:
+            path.symlink_to(target)
+            result = inspect_voice_capture_host_lease(path, now=self.clock)
+        except OSError:
+            path.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+            original_is_symlink = Path.is_symlink
+
+            def report_test_path_as_symlink(candidate: Path) -> bool:
+                return Path(candidate) == path or original_is_symlink(candidate)
+
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=report_test_path_as_symlink,
+            ):
+                result = inspect_voice_capture_host_lease(path, now=self.clock)
+
+        self.assertFalse(result["authorized"])
+        self.assertEqual(
+            result["reason"],
+            "voice_capture_consent_heartbeat_untrusted",
+        )
 
     def test_capability_requires_consent_and_offers_explicit_action(self):
         capabilities = {

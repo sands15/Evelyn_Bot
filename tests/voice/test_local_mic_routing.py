@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import numpy as np
 
@@ -84,7 +84,29 @@ def mic_control_response(
     }
 
 
+def fresh_host_lease(*, owner: str = "a" * 64, lease: str = "b" * 64) -> dict:
+    return {
+        "authorized": True,
+        "reason": "",
+        "ownerDigest": owner,
+        "leaseDigest": lease,
+        "heartbeatAt": time.time(),
+        "expiresAt": time.time() + 60,
+        "checkedAt": time.time(),
+    }
+
+
 class LocalMicRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        lease_patch = patch.object(
+            LocalIoBridge,
+            "_inspect_voice_capture_host_lease",
+            autospec=True,
+            side_effect=lambda _bridge: fresh_host_lease(),
+        )
+        lease_patch.start()
+        self.addCleanup(lease_patch.stop)
+
     def test_bridge_never_boots_capture_from_ambient_configuration(self):
         bridge = LocalIoBridge()
 
@@ -95,6 +117,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         credentials = {
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            "EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN": "capture-secret",
             "DISCORD_BOT_TOKEN": "discord-secret",
             "OPENAI_API_KEY": "model-secret",
         }
@@ -110,6 +133,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         )
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", minecraft_env)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", minecraft_env)
+        self.assertNotIn("EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN", minecraft_env)
         self.assertNotIn("OPENAI_API_KEY", minecraft_env)
 
     def test_parse_user_id_set_ignores_invalid_tokens(self) -> None:
@@ -1078,6 +1102,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("function New-SecureRuntimeToken", script)
         self.assertIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", script)
         self.assertIn("EVELYN_INTERNAL_CONTROL_TOKEN", script)
+        self.assertIn("EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN", script)
         self.assertIn(
             "Remove-Item Env:EVELYN_INTERNAL_CONTROL_TOKEN",
             script,
@@ -1097,6 +1122,12 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(
             compose_environment_keys.count("EVELYN_INTERNAL_CONTROL_TOKEN"),
             2,
+        )
+        self.assertEqual(
+            compose_environment_keys.count(
+                "EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN"
+            ),
+            1,
         )
         self.assertLess(
             script.index("Remove-Item Env:EVELYN_INTERNAL_CONTROL_TOKEN"),
@@ -1237,6 +1268,143 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("omnivoice_num_step=OMNIVOICE_NUM_STEP", main_py)
         self.assertIn("await deps.speak_answer_local(", voice_delivery_runtime)
         self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', voice_delivery_runtime)
+
+
+class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def blocked(reason: str = "voice_capture_consent_heartbeat_stale") -> dict:
+        return {
+            "authorized": False,
+            "reason": reason,
+            "ownerDigest": "",
+            "leaseDigest": "",
+            "heartbeatAt": None,
+            "expiresAt": None,
+            "checkedAt": time.time(),
+        }
+
+    @staticmethod
+    def active_bridge(*, stop_fails: bool = False) -> tuple[LocalIoBridge, object]:
+        class Service:
+            capture_ready = True
+            capture_stopped = False
+
+            def stop(self) -> bool:
+                if stop_fails:
+                    raise RuntimeError("private stop failure")
+                self.capture_ready = False
+                self.capture_stopped = True
+                return True
+
+        bridge = LocalIoBridge()
+        service = Service()
+        bridge.service = service  # type: ignore[assignment]
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
+        bridge.voice_capture_consent_binding = ("a" * 64, "b" * 64)
+        return bridge, service
+
+    async def test_stale_owner_stops_capture_and_discards_all_pending_audio(self):
+        bridge, service = self.active_bridge()
+        bridge.queue.put_nowait((b"normal", {}))
+        bridge.priority_queue.put_nowait((b"priority", {}))
+        bridge.barge_in_queue.put_nowait((b"barge", {}))
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            return_value=self.blocked()
+        )
+
+        await bridge._enforce_voice_capture_watchdog()
+
+        self.assertFalse(bridge.mic_enabled)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertIsNone(bridge.service)
+        self.assertTrue(service.capture_stopped)  # type: ignore[attr-defined]
+        self.assertEqual(bridge.discarded_pending_mic_segment_count, 3)
+        self.assertEqual(bridge.voice_capture_watchdog_state, "blocked")
+        self.assertIsNotNone(bridge.voice_capture_watchdog_last_stopped_at)
+        self.assertEqual(
+            bridge.voice_capture_watchdog_last_stopped_at,
+            bridge.voice_capture_watchdog_checked_at,
+        )
+
+    async def test_stop_failure_never_publishes_false_capture_stopped(self):
+        bridge, service = self.active_bridge(stop_fails=True)
+        bridge._schedule_watchdog_fail_safe_exit = Mock()  # type: ignore[method-assign]
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            return_value=self.blocked()
+        )
+
+        await bridge._enforce_voice_capture_watchdog()
+
+        self.assertTrue(bridge.mic_enabled)
+        self.assertIs(bridge.service, service)
+        self.assertFalse(bridge.mic_capture_stopped)
+        self.assertEqual(bridge.voice_capture_watchdog_state, "stop_failed")
+        self.assertEqual(
+            bridge.mic_control_error,
+            "voice_capture_watchdog_stop_failed",
+        )
+        self.assertIsNone(bridge.voice_capture_watchdog_last_stopped_at)
+        bridge._schedule_watchdog_fail_safe_exit.assert_called_once_with()  # type: ignore[union-attr]
+
+    async def test_stop_failure_fail_safe_forces_process_exit(self):
+        with patch.object(local_io_bridge.os, "_exit") as exit_process:
+            LocalIoBridge._schedule_watchdog_fail_safe_exit()
+            await asyncio.sleep(0)
+
+        exit_process.assert_called_once_with(
+            local_io_bridge.VOICE_CAPTURE_FAIL_SAFE_EXIT_CODE
+        )
+
+    async def test_on_is_rejected_before_capture_when_owner_heartbeat_is_missing(self):
+        bridge = LocalIoBridge()
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            return_value=self.blocked("voice_capture_consent_heartbeat_missing")
+        )
+        bridge._start_mic = AsyncMock()  # type: ignore[method-assign]
+
+        await bridge._apply_mic_control_request(
+            revision=41,
+            enabled=True,
+            action_id=f"{41:032x}",
+        )
+
+        bridge._start_mic.assert_not_awaited()  # type: ignore[union-attr]
+        self.assertFalse(bridge.mic_enabled)
+        self.assertEqual(bridge.mic_control_state, "failed")
+
+    async def test_heartbeat_expiring_during_start_is_stopped_before_success(self):
+        bridge = LocalIoBridge()
+        service = SimpleNamespace(capture_ready=True, capture_stopped=False)
+
+        def stop() -> bool:
+            service.capture_ready = False
+            service.capture_stopped = True
+            return True
+
+        service.stop = stop
+
+        async def start() -> None:
+            bridge.service = service  # type: ignore[assignment]
+            bridge.ready = True
+            bridge.mic_capture_stopped = False
+
+        bridge._start_mic = AsyncMock(side_effect=start)  # type: ignore[method-assign]
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            side_effect=[fresh_host_lease(), self.blocked()]
+        )
+
+        await bridge._apply_mic_control_request(
+            revision=42,
+            enabled=True,
+            action_id=f"{42:032x}",
+        )
+
+        self.assertFalse(bridge.mic_enabled)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertIsNone(bridge.service)
+        self.assertEqual(bridge.mic_control_state, "failed")
+        self.assertIsNotNone(bridge.voice_capture_watchdog_last_stopped_at)
 
 
 if __name__ == "__main__":

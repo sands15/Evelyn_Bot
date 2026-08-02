@@ -11,13 +11,14 @@
   상태로 시작한다. 인증된 동의 제어가 유일한 ON 권한이다.
 - 브라우저가 직접 Bot API의 마이크 제어 endpoint를 호출할 수 없다.
 - Control Page의 모든 동의 변경 API는 기존 Origin/Host/CSRF 검사를 거친다.
-- Control Page→Bot API 제어와 Local Bridge→Bot API 상태 보고는 서로 다른
-  process-scoped bearer를 사용한다. 공식 launcher가 매 실행 세대에 두 값을
-  만들고, Bridge/Supervisor 트리에는 상태 보고 bearer만 전달한다. 값 자체는
-  문서·상태·로그에 저장하지 않는다.
-- Bridge heartbeat는 exact schema, 32자리 instance/action ID, 단조 `statusSeq`,
-  유한 시각과 캡처 상태 불변식을 통과해야만 freshness를 갱신한다. 부분·손상·
-  중복·역전·이전 instance 보고는 권위 상태를 바꾸지 않는다.
+- Control Page→Bot API 제어, Local Bridge→Bot API 상태 보고, Control Page↔Windows
+  Host의 캡처 lease 증명은 서로 다른 process-scoped credential을 사용한다. 마지막
+  HMAC 키는 launcher 세대마다 항상 새로 만들고 Control Page, Supervisor, Bridge에만
+  전달한다. 값 자체는 문서·artifact·상태·로그에 저장하지 않는다.
+- Bridge heartbeat는 전체 payload의 목적 제한 HMAC, exact schema, 32자리
+  instance/action ID, 단조 `statusSeq`, 유한 시각과 캡처 상태 불변식을 통과해야만
+  freshness와 Supervisor의 stop evidence를 갱신한다. 부분·손상·중복·역전·이전
+  instance 보고는 권위 상태를 바꾸지 않는다.
 - preview token은 메모리에만 존재하며 120초 뒤 만료되고 한 번만 사용할 수 있다.
   새 preview는 이전 것을 모두 무효화하며, 발급 당시의 정확한 validation session/
   state/local-surface binding이 apply 시점에도 같아야 한다.
@@ -87,18 +88,38 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
   갱신하지 않는다.
 - launcher 재실행은 이전 Supervisor generation을 정상 종료한 뒤 새 bearer를
   상속한 단일 Supervisor/Bridge generation만 시작한다.
-- launcher는 bearer를 전역 자식 환경에 두지 않는다. Docker `up` 생성 순간에만
-  두 채널을 주입하고 Supervisor 생성 순간에는 reporter만 주입한 뒤 즉시 제거한다.
-  따라서 host Python preflight와 Control Page를 여는 브라우저는 bearer를 상속하지
-  않는다.
+- launcher는 credential을 전역 자식 환경에 두지 않는다. Docker `up` 생성 순간에는
+  서비스별 Compose allowlist에 필요한 채널만, Supervisor 생성 순간에는 reporter와
+  캡처 HMAC 키만 주입한 뒤 즉시 제거한다. Control Page가 여는 종료·재시작 helper,
+  브라우저와 경로 opener도 캡처 HMAC 키를 제거한 환경을 사용한다.
 - Supervisor의 개별 Docker 복구는 항상 `--no-deps`로 대상 서비스만 시작한다.
   Discord 복구에만 실제 Discord token을 전달하고 LLM/STT/TTS 복구에는 비밀이 아닌
   `local-only-disabled` 자리값을 사용하므로 Bot API/Control Page를 빈 내부 token으로
   재생성하지 않는다.
 - Local Bridge는 reporter 외 credential을 받지 않고 Minecraft·shutdown 자식에는
-  credential을 전달하지 않는다. 전체 재시작은 Bridge의 전용 종료 코드를 받은
-  Supervisor가 소유하며, 짧은 handoff에 Discord token과 명시적 Codex credentials
-  경로만 전달한다. 새 launcher는 reporter/internal channel token을 새로 만든다.
+  credential을 전달하지 않는다. 단, Host lease 검증과 status 서명에 필요한 캡처
+  HMAC 키만 Bridge 프로세스에 추가로 허용한다. 전체 재시작은 Bridge의 전용 종료
+  코드를 받은 Supervisor가 소유하며, 짧은 handoff에 Discord token과 명시적 Codex
+  credentials 경로만 전달한다. 새 launcher는 새 캡처 HMAC 세대를 만든다.
+
+## Control Page hard-crash watchdog
+
+- Control Page는 startup과 상태 전환 때, 캡처가 가능할 때는 1초마다
+  `owner_heartbeat.json`을 갱신한다. 파일은 state, owner/lease의 SHA-256 digest,
+  만료·heartbeat 시각과 HMAC만 가진 content-free projection이며 최대 4 KiB다.
+- Local Bridge는 각 status tick과 마이크 ON 전·후에 strict schema, 목적 제한 HMAC,
+  4초 freshness, 원래 owner/lease digest binding을 검사한다. 누락·손상·symlink·
+  stale·expired·replacement는 모두 캡처 권한 부재다.
+- 권한을 잃으면 Bridge는 새 입력을 받지 않고 admission 상태를 폐기한 뒤 exact mic
+  stop을 수행한다. stop 자체가 실패하면 종료 코드 76으로 Bridge 프로세스를 즉시
+  끝내 OS가 캡처 handle을 회수하게 한다.
+- Supervisor는 현재 자식 PID와 시작 시각, 서명된 전체 Bridge status, 고정된
+  `bridgeInstanceId`, 관측한 `statusSeq` high-water, watchdog 시각과 nested/top-level
+  physical OFF를 모두 확인한 경우에만 stop을 `verified`로 게시한다. status 입력은
+  최대 128 KiB로 제한한다.
+- 검증 세션 밖의 비정상 종료는 기존 10분당 3회 예산으로 disabled-default Bridge를
+  복구한다. 검증 중 종료는 같은 attempt를 자동 재개하지 않고 validation 오류와
+  `manual_intervention_required`로 남긴다.
 
 ## 캡처 동의와 발화 admission의 분리
 
@@ -118,18 +139,19 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 
 이 경계의 합성 테스트와 공개 브라우저 source-spoof 차단은 구현됐지만 실제
 마이크·스피커 10턴과 silence의 live E2E는 아직 사용자 청취 확인과 함께
-검증하지 않았다. current-source 회귀는 runtime 667개(skip 4), voice 568개
-(skip 5), `test_local*.py` 182개가 통과했다.
+검증하지 않았다. hard-crash watchdog 반영 뒤 current-source 회귀는 runtime
+686개(skip 4), voice 574개(skip 5)가 통과했다.
 
 ## 아직 남은 안전 경계
 
-- Control Page 프로세스가 정상 cleanup 없이 강제 종료되고 다시 시작되지 않으면
-  Host/Bridge가 consent 만료를 독립적으로 집행하는 watchdog은 아직 없다.
 - 동시에 뜬 둘 이상의 Control Page owner를 process-lifetime OS lock 또는 durable
   generation CAS로 배제하지 않는다.
 - apply는 mic 활성 뒤 runtime health 수집을 기다리는 동안 consent lock을 잡는다.
   수집 전체 deadline 부재는 드문 lock starvation 위험이다.
+- Supervisor가 게시하는 signed stop evidence는 아직 별도 downstream verifier가
+  없으며 진단 계약으로만 쓰인다. startup ambiguity의 freshness probe도 HMAC을
+  검증하지 않아 공유 폴더 writer가 시작을 거부시키는 availability 공격은 가능하지만
+  캡처 권한이나 physical stop 증거를 만들 수는 없다.
 
-따라서 이번 변경은 정상 종료·재시작·취소·손상 상태·요청 역전의 source P0를
-닫지만, hard-crash watchdog과 다중 owner 배제 및 실제 장치 E2E까지 완료됐다는
-뜻은 아니다.
+따라서 source 수준 hard-crash capture P0는 닫혔지만, 다중 owner 배제와 실제 장치
+E2E까지 완료됐다는 뜻은 아니다.

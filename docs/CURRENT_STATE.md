@@ -1715,9 +1715,10 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   runtime 667개(skip 4), voice 전체 568개(skip 5), `test_local*.py` 182개가 통과했고
   Python/Node/PowerShell 구문, standalone Compose config와 clean bundle
   `pip check`도 통과했다.
-  launcher bearer는 Docker `up` 생성 순간에만 두 채널을, Supervisor 생성 순간에는
-  reporter 채널만 자식 환경에 넣고 즉시 제거하므로 host preflight와 브라우저가
-  제어 credential을 상속하지 않는다.
+  launcher credential은 Docker `up` 생성 순간에 서비스별 reporter/internal/capture
+  채널을, Supervisor 생성 순간에는 reporter와 capture 채널만 자식 환경에 넣고 즉시
+  제거한다. capture HMAC 키는 매 launcher 세대 새로 만들며 host preflight,
+  Control Page의 helper/opener와 브라우저는 이를 상속하지 않는다.
   preview는 최신 1개와 발급 당시 validation 세대에 묶이고, unbound 동의는 canonical
   idle에서만 유지된다. idle ON 뒤 Discord-only 세션, bound identity/state 유실과
   confirm/retry/abort의 모호한 I/O 예외는 모두 즉시 exact OFF로 전환한다.
@@ -1725,8 +1726,20 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   Local Bridge 하위 프로세스는 credential을 받지 않으며, 전체 재시작은 exit 75를
   받은 Supervisor가 필요한 Discord/Codex 설정만 짧은 handoff에 전달한다.
   이는 source/mock 증거이며 실제 마이크·스피커·Discord는 실행하지 않았다.
-  Control Page hard-crash 때 Host/Bridge가 lease 만료를 독립 집행하는 watchdog과
   다중 Control Page owner OS lock/generation CAS는 아직 없다.
+- 2026-08-02 current source의 hard-crash watchdog은 Control Page가 1초마다 게시하는
+  목적 제한 HMAC의 content-free owner/lease projection을 Local Bridge가 각 0.25초
+  status tick과 ON 전·후에 검사한다. 4초 stale, expiry, owner/lease replacement,
+  누락·손상·symlink에서는 새 입력과 admission을 폐기하고 exact capture stop을
+  수행한다. stop 실패는 exit 76으로 프로세스를 끝내 OS handle을 회수한다.
+  Supervisor stop evidence는 현재 child PID/시작 시각, 서명된 전체 status, 고정
+  instance, `statusSeq` high-water, watchdog 시각과 nested/top-level physical OFF를
+  모두 요구한다. owner heartbeat는 4 KiB, Bridge status는 128 KiB로 제한된다.
+  검증 밖의 Bridge exit는 기존 예산 안에서 disabled-default로 복구하고 검증 중 exit는
+  자동 재개하지 않는다. focused runtime 152개와 voice 51개, runtime 전체 686개
+  (skip 4), voice 전체 574개(skip 5), 전체 discover 2932개(skip 20)가 통과했다.
+  Compose config, Python/JavaScript/PowerShell 구문, `pip check`도 통과했지만 실행 중
+  서비스를 교체하거나 실제 마이크·스피커·Discord를 시작하지 않았다.
 - 2026-08-02 current source에는 LLM·tool·외부 전달 전에 stable source delivery를
   기록하는 `conversation.ingress-recovery.v1` journal/head owner가 추가됐다.
   Fast Control은 browser `requestId`와 Local Bridge의 canonical

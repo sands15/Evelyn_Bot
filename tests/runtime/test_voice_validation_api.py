@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -63,6 +64,7 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         self.consent_manager = VoiceCaptureConsentManager(
             root=Path(self.temp_dir.name),
             owner_nonce="test-control-page",
+            auth_token="voice-capture-test-auth-token-0123456789",
         )
         recovery = self.consent_manager.begin_revoke(reason="test_setup")
         self.assertTrue(recovery["controlRequired"], recovery)
@@ -1406,6 +1408,36 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             [True, False],
         )
 
+    async def test_host_lease_publish_failure_blocks_mic_on_and_forces_off(self):
+        preview = self.consent_manager.preview()
+
+        class _Request:
+            app = self.client.server.app
+
+            async def json(self):
+                return {"confirmToken": preview["confirmToken"]}
+
+        with patch.object(
+            self.consent_manager,
+            "publish_host_lease",
+            side_effect=OSError("private heartbeat write failure"),
+        ):
+            response = await control_page_server.voice_capture_consent_apply_handler(
+                _Request()
+            )
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_heartbeat_write_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
 
 class VoiceCaptureMicTransportTests(unittest.IsolatedAsyncioTestCase):
     internal_token = "transport-test-internal-token-1234567890"
@@ -1563,6 +1595,7 @@ class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
         recovery_retried = asyncio.Event()
         reconcile_calls = 0
         recovery_calls = 0
+        manager = Mock(publish_host_lease=Mock(return_value={}))
 
         async def reconcile(_app, **_kwargs):
             nonlocal reconcile_calls
@@ -1584,6 +1617,11 @@ class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
                 control_page_server,
                 "_reconcile_voice_capture_consent",
                 side_effect=reconcile,
+            ),
+            patch.object(
+                control_page_server,
+                "get_voice_capture_consent_manager",
+                return_value=manager,
             ),
             patch.object(
                 control_page_server,
@@ -1617,6 +1655,7 @@ class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
         }
         monitor_ran = asyncio.Event()
         reconcile_calls = 0
+        manager = Mock(publish_host_lease=Mock(return_value={}))
 
         async def reconcile(_app, **_kwargs):
             nonlocal reconcile_calls
@@ -1631,6 +1670,11 @@ class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
                 control_page_server,
                 "_reconcile_voice_capture_consent",
                 side_effect=reconcile,
+            ),
+            patch.object(
+                control_page_server,
+                "get_voice_capture_consent_manager",
+                return_value=manager,
             ),
             patch.object(
                 control_page_server,
@@ -1656,6 +1700,62 @@ class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
                 await context.aclose()
 
         self.assertGreaterEqual(reconcile_calls, 2)
+
+    async def test_owner_heartbeat_continues_while_consent_lock_is_held(self):
+        lock = asyncio.Lock()
+        app = {control_page_server.VOICE_CAPTURE_CONSENT_LOCK_KEY: lock}
+        heartbeat_published = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        publish_calls = 0
+
+        def publish_host_lease():
+            nonlocal publish_calls
+            publish_calls += 1
+            if publish_calls >= 2:
+                loop.call_soon_threadsafe(heartbeat_published.set)
+            return {}
+
+        manager = Mock(
+            status=Mock(return_value={"captureMayBeActive": True}),
+            publish_host_lease=Mock(side_effect=publish_host_lease),
+        )
+
+        async def reconcile(_app, **_kwargs):
+            async with lock:
+                return {"ok": True}
+
+        with (
+            patch.object(
+                control_page_server,
+                "get_voice_capture_consent_manager",
+                return_value=manager,
+            ),
+            patch.object(
+                control_page_server,
+                "_reconcile_voice_capture_consent",
+                side_effect=reconcile,
+            ),
+            patch.object(
+                control_page_server,
+                "_revoke_voice_capture_consent",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                control_page_server,
+                "VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC",
+                0.005,
+            ),
+        ):
+            context = control_page_server._voice_capture_consent_context(app)
+            await anext(context)
+            await lock.acquire()
+            try:
+                await asyncio.wait_for(heartbeat_published.wait(), timeout=1.0)
+            finally:
+                lock.release()
+                await context.aclose()
+
+        self.assertGreaterEqual(manager.publish_host_lease.call_count, 2)
 
 
 if __name__ == "__main__":

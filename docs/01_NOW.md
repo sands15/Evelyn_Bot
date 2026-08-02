@@ -18,8 +18,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
-- Control Page hard-crash 뒤 Host/Bridge가 capture lease 만료를 독립 집행하는
-  watchdog과 다중 owner 배제
+- 동시 Control Page capture owner를 배제하는 OS lock 또는 durable generation CAS
 - admission token 발급 뒤 Bot 재시작과 validation attempt cross-process lease
 - 로컬 및 Discord 음성의 실제 장치 E2E 검증
 - 실제 Minecraft 승인 행동과 결과 증거 검증
@@ -35,9 +34,12 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   Discord-only 시작과 mutation I/O 예외도 즉시 exact OFF로 닫힌다.
 - Supervisor 복구는 의존 서비스를 재생성하지 않고, Bridge·Docker·재시작 자식은
   목적별 최소 credential만 받는다. 전체 재시작은 Supervisor가 소유한다.
-- 관련 source 회귀는 runtime 667개(skip 4), voice 전체 568개(skip 5),
-  `test_local*.py` 182개가 통과했다. 실제 마이크·스피커·Discord live 검증은
-  수행하지 않았다.
+- Control Page hard-crash 뒤에도 서명된 content-free lease가 4초 stale이면 Bridge가
+  독립적으로 캡처를 멈춘다. stop 실패는 Bridge exit 76으로 OS handle을 회수하고,
+  Supervisor는 현재 자식·instance·sequence·physical OFF를 모두 확인한다.
+- 관련 source 회귀는 runtime 686개(skip 4), voice 전체 574개(skip 5), 전체 discover
+  2932개(skip 20)가 통과했다. 실제 마이크·스피커·Discord live 검증은 수행하지
+  않았다.
 
 ## 작업 원칙
 
