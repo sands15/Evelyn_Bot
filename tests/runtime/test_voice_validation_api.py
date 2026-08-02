@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -96,11 +99,17 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             "request_local_bridge_mic_control",
             new=self.mic_control,
         )
+        self.artifacts_patch = patch.object(
+            control_page_server,
+            "get_runtime_artifacts_root",
+            return_value=Path(self.temp_dir.name),
+        )
         self.manager_patch.start()
         self.consent_manager_patch.start()
         self.health_mock = self.health_patch.start()
         self.raw_health_mock = self.raw_health_patch.start()
         self.mic_patch.start()
+        self.artifacts_patch.start()
         self.client = TestClient(TestServer(control_page_server.create_app()))
         await self.client.start_server()
         self.origin = str(self.client.make_url("/")).rstrip("/")
@@ -112,6 +121,7 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.close()
+        self.artifacts_patch.stop()
         self.mic_patch.stop()
         self.raw_health_patch.stop()
         self.health_patch.stop()
@@ -1585,6 +1595,426 @@ class VoiceCaptureMicTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "mic_enable_fence_unavailable")
         self.assertEqual([call["method"] for call in calls], ["GET"])
         self.assertEqual(calls[0]["internalToken"], self.internal_token)
+
+
+class VoiceCaptureOwnerContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_busy_or_unavailable_owner_aborts_before_consent(self):
+        for error, expected in (
+            (
+                control_page_server.MinecraftOwnerLockBusy(
+                    "minecraft_owner_lock_busy"
+                ),
+                "voice_capture_owner_conflict",
+            ),
+            (
+                control_page_server.MinecraftOwnerLockUnavailable(
+                    "minecraft_owner_lock_unavailable"
+                ),
+                "voice_capture_owner_lock_unavailable",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    artifact_root = Path(temp_dir)
+                    consent_root = artifact_root / "voice_capture_consent"
+                    consent_root.mkdir(parents=True)
+                    state_path = consent_root / "state.json"
+                    heartbeat_path = consent_root / "heartbeat.json"
+                    state_path.write_bytes(b"state-sentinel")
+                    heartbeat_path.write_bytes(b"heartbeat-sentinel")
+
+                    consent_entered = False
+                    owner_lock = Mock()
+                    owner_lock.acquire.side_effect = error
+                    manager_getter = Mock()
+                    mic_control = AsyncMock()
+
+                    async def forbidden_consent(_app):
+                        nonlocal consent_entered
+                        consent_entered = True
+                        yield
+
+                    with (
+                        patch.object(
+                            control_page_server,
+                            "get_runtime_artifacts_root",
+                            return_value=artifact_root,
+                        ),
+                        patch.object(
+                            control_page_server,
+                            "MinecraftOwnerLock",
+                            return_value=owner_lock,
+                        ),
+                        patch.object(
+                            control_page_server,
+                            "_voice_capture_consent_context",
+                            new=forbidden_consent,
+                        ),
+                        patch.object(
+                            control_page_server,
+                            "get_voice_capture_consent_manager",
+                            new=manager_getter,
+                        ),
+                        patch.object(
+                            control_page_server,
+                            "request_local_bridge_mic_control",
+                            new=mic_control,
+                        ),
+                    ):
+                        runner = web.AppRunner(
+                            control_page_server.create_app()
+                        )
+                        try:
+                            with self.assertRaises(RuntimeError) as raised:
+                                await runner.setup()
+                        finally:
+                            await runner.cleanup()
+
+                    self.assertEqual(str(raised.exception), expected)
+                    self.assertFalse(consent_entered)
+                    manager_getter.assert_not_called()
+                    mic_control.assert_not_awaited()
+                    owner_lock.release.assert_not_called()
+                    self.assertEqual(
+                        state_path.read_bytes(),
+                        b"state-sentinel",
+                    )
+                    self.assertEqual(
+                        heartbeat_path.read_bytes(),
+                        b"heartbeat-sentinel",
+                    )
+
+    async def test_owner_lock_wraps_consent_cleanup_and_releases_for_successor(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            lock_path = (
+                artifact_root
+                / "voice_capture_consent"
+                / "owner_claim.lock"
+            )
+            events: list[str] = []
+
+            async def observed_consent(_app):
+                events.append("consent_started")
+                try:
+                    yield
+                finally:
+                    events.append("consent_cleanup_started")
+                    contender = control_page_server.MinecraftOwnerLock(
+                        lock_path
+                    )
+                    with self.assertRaises(
+                        control_page_server.MinecraftOwnerLockBusy
+                    ):
+                        contender.acquire()
+                    events.append("owner_still_held")
+
+            configured = control_page_server.create_app()
+            self.assertIs(
+                configured.cleanup_ctx[0],
+                control_page_server._voice_capture_owner_context,
+            )
+            self.assertIs(
+                configured.cleanup_ctx[1],
+                control_page_server._voice_capture_consent_context,
+            )
+
+            app = web.Application()
+            app.cleanup_ctx.append(
+                control_page_server._voice_capture_owner_context
+            )
+            app.cleanup_ctx.append(observed_consent)
+            runner = web.AppRunner(app)
+            with patch.object(
+                control_page_server,
+                "get_runtime_artifacts_root",
+                return_value=artifact_root,
+            ):
+                await runner.setup()
+                self.assertEqual(events, ["consent_started"])
+                await runner.cleanup()
+
+            self.assertEqual(
+                events,
+                [
+                    "consent_started",
+                    "consent_cleanup_started",
+                    "owner_still_held",
+                ],
+            )
+            successor = control_page_server.MinecraftOwnerLock(lock_path)
+            successor.acquire()
+            self.assertTrue(successor.acquired)
+            successor.release()
+
+    async def test_process_crash_releases_owner_without_loser_side_effects(
+        self,
+    ):
+        worker_code = """
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+from evelyn_core import control_page_server
+
+control_page_server.get_runtime_artifacts_root = lambda: Path(sys.argv[1])
+
+async def main():
+    context = control_page_server._voice_capture_owner_context({})
+    await anext(context)
+    print("READY", flush=True)
+    sys.stdin.readline()
+    os._exit(78)
+
+asyncio.run(main())
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            consent_root = artifact_root / "voice_capture_consent"
+            consent_root.mkdir(parents=True)
+            state_path = consent_root / "state.json"
+            heartbeat_path = consent_root / "heartbeat.json"
+            state_path.write_bytes(b"state-sentinel")
+            heartbeat_path.write_bytes(b"heartbeat-sentinel")
+            environment = os.environ.copy()
+            python_path = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part
+                for part in (str(RUNTIME_ROOT), python_path)
+                if part
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", worker_code, str(artifact_root)],
+                cwd=str(REPO_ROOT),
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertIsNotNone(process.stdout)
+                ready = await asyncio.wait_for(
+                    asyncio.to_thread(process.stdout.readline),
+                    timeout=10.0,
+                )
+                if ready.strip() != "READY":
+                    process.kill()
+                    stdout, stderr = process.communicate(timeout=10)
+                    self.fail(
+                        "owner worker did not become ready: "
+                        f"stdout={ready + stdout!r} stderr={stderr!r}"
+                    )
+
+                with patch.object(
+                    control_page_server,
+                    "get_runtime_artifacts_root",
+                    return_value=artifact_root,
+                ):
+                    loser = (
+                        control_page_server._voice_capture_owner_context({})
+                    )
+                    with self.assertRaises(RuntimeError) as raised:
+                        await anext(loser)
+                    self.assertEqual(
+                        str(raised.exception),
+                        "voice_capture_owner_conflict",
+                    )
+                    self.assertEqual(
+                        state_path.read_bytes(),
+                        b"state-sentinel",
+                    )
+                    self.assertEqual(
+                        heartbeat_path.read_bytes(),
+                        b"heartbeat-sentinel",
+                    )
+
+                    self.assertIsNotNone(process.stdin)
+                    process.stdin.write("\n")
+                    process.stdin.flush()
+                    return_code = await asyncio.to_thread(
+                        process.wait,
+                        timeout=10,
+                    )
+                    self.assertEqual(return_code, 78)
+
+                    successor = (
+                        control_page_server._voice_capture_owner_context({})
+                    )
+                    await anext(successor)
+                    await successor.aclose()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                for stream in (
+                    process.stdin,
+                    process.stdout,
+                    process.stderr,
+                ):
+                    if stream is not None:
+                        stream.close()
+
+    async def test_cancelled_lease_publish_waits_for_worker_completion(self):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def publish_host_lease():
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("publish worker was not released")
+            finished.set()
+            return {"ok": True}
+
+        manager = Mock(publish_host_lease=publish_host_lease)
+        publishing = asyncio.create_task(
+            control_page_server._publish_voice_capture_host_lease(manager)
+        )
+        try:
+            self.assertTrue(
+                await asyncio.to_thread(started.wait, 2),
+                "publish worker did not start",
+            )
+            publishing.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(publishing.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await publishing
+            self.assertTrue(finished.is_set())
+        finally:
+            release.set()
+            if not publishing.done():
+                publishing.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await publishing
+
+    async def test_cancelled_cleanup_holds_owner_until_drain_and_revoke(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            lock_path = (
+                artifact_root
+                / "voice_capture_consent"
+                / "owner_claim.lock"
+            )
+            publish_started = threading.Event()
+            publish_release = threading.Event()
+            shutdown_started = asyncio.Event()
+            revoked = asyncio.Event()
+            publish_calls = 0
+
+            def publish_host_lease():
+                nonlocal publish_calls
+                publish_calls += 1
+                if publish_calls == 1:
+                    return {"ok": True}
+                publish_started.set()
+                if not publish_release.wait(timeout=5):
+                    raise TimeoutError("heartbeat publisher was not released")
+                return {"ok": True}
+
+            manager = Mock(
+                status=Mock(return_value={"captureMayBeActive": True}),
+                publish_host_lease=Mock(side_effect=publish_host_lease),
+            )
+
+            async def revoke(_app, *, reason):
+                self.assertEqual(reason, "control_page_shutdown")
+                revoked.set()
+                return {"ok": True}
+
+            original_shutdown = (
+                control_page_server._shutdown_voice_capture_consent
+            )
+
+            async def observed_shutdown(app, tasks):
+                shutdown_started.set()
+                await original_shutdown(app, tasks)
+
+            app = web.Application()
+            app[control_page_server.VOICE_CAPTURE_CONSENT_LOCK_KEY] = (
+                asyncio.Lock()
+            )
+            app.cleanup_ctx.append(
+                control_page_server._voice_capture_owner_context
+            )
+            app.cleanup_ctx.append(
+                control_page_server._voice_capture_consent_context
+            )
+            runner = web.AppRunner(app)
+            cleanup: asyncio.Task[None] | None = None
+            try:
+                with (
+                    patch.object(
+                        control_page_server,
+                        "get_runtime_artifacts_root",
+                        return_value=artifact_root,
+                    ),
+                    patch.object(
+                        control_page_server,
+                        "get_voice_capture_consent_manager",
+                        return_value=manager,
+                    ),
+                    patch.object(
+                        control_page_server,
+                        "_reconcile_voice_capture_consent",
+                        new=AsyncMock(return_value={"ok": True}),
+                    ),
+                    patch.object(
+                        control_page_server,
+                        "_revoke_voice_capture_consent",
+                        new=revoke,
+                    ),
+                    patch.object(
+                        control_page_server,
+                        "_shutdown_voice_capture_consent",
+                        new=observed_shutdown,
+                    ),
+                ):
+                    await runner.setup()
+                    self.assertTrue(
+                        await asyncio.to_thread(publish_started.wait, 2),
+                        "heartbeat publisher did not start",
+                    )
+                    cleanup = asyncio.create_task(runner.cleanup())
+                    await asyncio.wait_for(
+                        shutdown_started.wait(),
+                        timeout=2.0,
+                    )
+                    cleanup.cancel()
+                    await asyncio.sleep(0)
+
+                    self.assertFalse(cleanup.done())
+                    self.assertFalse(revoked.is_set())
+                    contender = control_page_server.MinecraftOwnerLock(
+                        lock_path
+                    )
+                    with self.assertRaises(
+                        control_page_server.MinecraftOwnerLockBusy
+                    ):
+                        contender.acquire()
+
+                    publish_release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await cleanup
+                    self.assertTrue(revoked.is_set())
+
+                successor = control_page_server.MinecraftOwnerLock(lock_path)
+                successor.acquire()
+                self.assertTrue(successor.acquired)
+                successor.release()
+            finally:
+                publish_release.set()
+                if cleanup is not None and not cleanup.done():
+                    cleanup.cancel()
+                    try:
+                        await cleanup
+                    except asyncio.CancelledError:
+                        pass
 
 
 class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):

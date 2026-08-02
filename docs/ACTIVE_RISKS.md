@@ -450,7 +450,7 @@ Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/stat
 `/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
 readiness와 복구 preview가 배포 전과 같은지 확인한다.
 
-## P0 — 동시 Control Page capture owner 배제 부재
+## P0 source 완료 — Control Page capture owner 배포·live 경합 미검증
 
 2026-08-02 source에서 이전의 손상 상태 fail-open은 닫혔다. consent load는
 `verified | missing | untrusted`를 구분하고, 누락·손상·symlink·invalid UTF-8·
@@ -478,14 +478,22 @@ stop을 수행한다. stop 실패는 Bridge를 종료 코드 76으로 끝내 OS 
 Supervisor는 현재 child PID/시작 시각, 서명된 전체 status, 고정 instance,
 `statusSeq` high-water와 nested/top-level physical OFF가 모두 맞을 때만 stop evidence를
 `verified`로 게시한다. 비신뢰 owner heartbeat는 4 KiB, Bridge status는 128 KiB로
-제한된다. source 회귀는 runtime 686개(skip 4), voice 574개(skip 5)가 통과했고 실제
-마이크는 켜지 않았다.
+제한된다. 실제 마이크는 켜지 않았다.
 
-남은 P0는 동시에 뜬 둘 이상의 Control Page가 각각 유효한 owner lease를 발급할 수
-있다는 점이다. process-lifetime OS lock 또는 durable generation CAS로 단일 owner를
-보장하고, loser가 기존 owner의 mic 상태를 바꾸지 못하는 cross-process 회귀가
-필요하다. mic 활성 뒤 health 수집 전체 deadline 부재는 P1 starvation hardening으로
-남긴다.
+current source는 stable `voice_capture_consent/owner_claim.lock`에 Windows byte-range
+lock 또는 POSIX `flock`을 process lifetime 동안 유지한다. 이 경계는 manager 생성과
+상태 읽기보다 먼저 실행된다. busy/unavailable loser는 content-free 고정 오류로
+startup을 중단하고 기존 owner의 state, heartbeat, revoke, mic ON/OFF를 수행하지
+않는다. 정상 종료와 cleanup 취소에서도 monitor/heartbeat writer drain과 exact OFF
+철회가 끝나기 전에는 lock을 풀지 않는다. hard-crash에서는 커널이 lock을 회수하고
+successor가 기존 active lease를 복구하지 않은 채 startup recovery를 수행한다.
+
+실제 별도 Python 프로세스 경합·`os._exit(78)`·successor 인수와 aiohttp cleanup 취소
+중 contender 배제 회귀를 포함한 owner/인접 90개(skip 1), voice 전체 574개(skip 5)가
+통과했다. 따라서 source의 동시 owner P0는 닫혔다. 실행 중 Control Page 이미지는
+교체하지 않았고, Docker bind mount의 container 간 경합이나 Windows native와 Linux
+container를 섞은 lock coherence는 live 증거가 없다. mic 활성 뒤 health 수집 전체
+deadline 부재도 P1 starvation hardening으로 남긴다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
@@ -664,6 +672,14 @@ hot-context에서 fail-closed quarantine한다. 새 프로세스도 같은 상�
 상위 source가 quarantine이면 multi-source note는 안전하게 격리된 채로 남아
 자동 회상에 사용되지 않는다. 재합성 대기가 남으면 일반 900초 유지보수와
 분리된 60초 retry gate를 기록해 다음 비실시간 유지보수 기회에 다시 시도한다.
+
+2026-08-02 전체 회귀에서 content-free derivation revocation을 canonical rewrite한
+직후 raw source ID와 ledger ID의 정렬 순서 차이 때문에 의미가 같은 state를 한 번
+더 쓰며 `updatedAt`만 바뀌는 기존 비결정성을 확인했다. 삭제·quarantine 판정이나
+private data 제거는 바뀌지 않지만 불필요한 durable write와 hot-context invalidation,
+초 경계 테스트 flake를 만든다. 격리 반복에서도 재현됐고 전체 재실행은 통과했다.
+이번 음성 P0에서는 기억 동작이나 assertion을 약화시키지 않았다. 다음 기억 작업에서
+비교 전 raw ID list를 canonical 정렬하고 exact-byte assertion을 그대로 유지한다.
 
 Control Page의 근거 감사는 legacy/과거 semantic note의 exact source ref와
 evidence hash만 대조한다. 본문 유사도나 LLM 추측은 사용하지 않으며 교차 검증,

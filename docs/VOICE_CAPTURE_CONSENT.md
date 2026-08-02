@@ -9,6 +9,11 @@
 
 - Local I/O Bridge는 환경의 `LOCAL_MIC_ENABLED` 값과 무관하게 실제 캡처를 끈
   상태로 시작한다. 인증된 동의 제어가 유일한 ON 권한이다.
+- Control Page는 동의 manager를 만들거나 상태를 읽기 전에 stable
+  `owner_claim.lock`의 process-lifetime OS lock을 nonblocking으로 획득한다.
+  이미 owner가 있거나 lock 경계를 만들 수 없으면 각각 고정 오류
+  `voice_capture_owner_conflict`, `voice_capture_owner_lock_unavailable`로 기동을
+  중단하고 동의 상태·heartbeat·마이크를 변경하지 않는다.
 - 브라우저가 직접 Bot API의 마이크 제어 endpoint를 호출할 수 없다.
 - Control Page의 모든 동의 변경 API는 기존 Origin/Host/CSRF 검사를 거친다.
 - Control Page→Bot API 제어, Local Bridge→Bot API 상태 보고, Control Page↔Windows
@@ -63,6 +68,12 @@ blocker가 없으면 같은 세션으로 `running` 전환된다.
 - 짧은 오류 코드와 철회 이유
 
 원문 음성, 오디오 경로, 사용자 발화, prompt, STT transcript는 저장하지 않는다.
+같은 디렉터리의 `owner_claim.lock`은 OS 잠금용 stable 1-byte regular file이며
+삭제하거나 atomic replace하지 않는다. owner ID, credential, transcript나 음성은
+담지 않는다. Windows에서는 byte-range lock, POSIX에서는 `flock`을 사용하고 lock
+backend·stable inode·regular-file 검증이 불가능하면 fail-closed한다. runtime artifact
+retention은 규칙의 범위나 파일 나이와 무관하게 `owner_claim.lock`을 정리 후보에서
+제외한다.
 상태 파일은 누적 로그가 아니라 단일 최신 상태이며, ON 요청 전에 `enabling`,
 OFF 요청 전에 `revoking`을 먼저 기록해 재시작 시 fail-closed 복구할 수 있게
 한다. durable writer는 replace 전 temporary file을 `fsync`하고, Windows에서는
@@ -104,6 +115,11 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 
 ## Control Page hard-crash watchdog
 
+- owner lock cleanup context는 동의 context보다 먼저 시작되고 나중에 끝난다.
+  정상 종료나 cleanup 취소에서는 monitor/heartbeat의 실제 writer를 모두 drain하고
+  exact OFF 철회와 durable 상태 전환을 시도한 뒤에만 lock을 반납한다. 프로세스
+  hard-crash에서는 커널이 lock을 회수하며 successor가 기존 active lease를 복구하지
+  않고 기존 startup recovery 계약으로 OFF부터 수행한다.
 - Control Page는 startup과 상태 전환 때, 캡처가 가능할 때는 1초마다
   `owner_heartbeat.json`을 갱신한다. 파일은 state, owner/lease의 SHA-256 digest,
   만료·heartbeat 시각과 HMAC만 가진 content-free projection이며 최대 4 KiB다.
@@ -140,18 +156,19 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 이 경계의 합성 테스트와 공개 브라우저 source-spoof 차단은 구현됐지만 실제
 마이크·스피커 10턴과 silence의 live E2E는 아직 사용자 청취 확인과 함께
 검증하지 않았다. hard-crash watchdog 반영 뒤 current-source 회귀는 runtime
-686개(skip 4), voice 574개(skip 5)가 통과했다.
+692개(skip 4), voice 574개(skip 5), 전체 2938개(skip 20)가 통과했다.
 
-## 아직 남은 안전 경계
+## 아직 남은 검증·강화 경계
 
-- 동시에 뜬 둘 이상의 Control Page owner를 process-lifetime OS lock 또는 durable
-  generation CAS로 배제하지 않는다.
 - apply는 mic 활성 뒤 runtime health 수집을 기다리는 동안 consent lock을 잡는다.
   수집 전체 deadline 부재는 드문 lock starvation 위험이다.
 - Supervisor가 게시하는 signed stop evidence는 아직 별도 downstream verifier가
   없으며 진단 계약으로만 쓰인다. startup ambiguity의 freshness probe도 HMAC을
   검증하지 않아 공유 폴더 writer가 시작을 거부시키는 availability 공격은 가능하지만
   캡처 권한이나 physical stop 증거를 만들 수는 없다.
+- source 회귀는 현재 Windows 프로세스 간 owner 경합과 crash 회수를 검증했다.
+  실행 중 서비스 교체와 실제 Docker bind mount의 container 간 경합, Windows native
+  Control Page와 Linux container를 섞은 lock coherence는 live 검증하지 않았다.
 
-따라서 source 수준 hard-crash capture P0는 닫혔지만, 다중 owner 배제와 실제 장치
-E2E까지 완료됐다는 뜻은 아니다.
+따라서 source 수준 hard-crash와 다중 owner capture P0는 닫혔지만, 배포된 프로세스
+경합과 실제 장치 E2E까지 완료됐다는 뜻은 아니다.

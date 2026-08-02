@@ -59,6 +59,12 @@ from .memory_vault import (
     preview_memory_vault_user_note_deletion,
     update_memory_vault_user_note,
 )
+from .minecraft_owner_lock import (
+    MinecraftOwnerLock,
+    MinecraftOwnerLockBusy,
+    MinecraftOwnerLockUnavailable,
+)
+from .paths import get_runtime_artifacts_root
 from .public_error_contract import public_error_code, public_failure_message
 from .runtime_health import (
     apply_runtime_health_overrides,
@@ -1401,6 +1407,40 @@ def _voice_capture_mic_disabled_ack(control: Any) -> bool:
     return _voice_capture_mic_control_ack(control, enabled=False)
 
 
+async def _await_voice_capture_task(task: asyncio.Task[Any]) -> Any:
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = exc
+    if cancellation is not None:
+        with contextlib.suppress(Exception):
+            task.result()
+        raise cancellation
+    return task.result()
+
+
+async def _publish_voice_capture_host_lease(manager: Any) -> dict[str, Any]:
+    task = asyncio.create_task(asyncio.to_thread(manager.publish_host_lease))
+    return await _await_voice_capture_task(task)
+
+
+async def _shutdown_voice_capture_consent(
+    app: web.Application,
+    tasks: tuple[asyncio.Task[Any], ...],
+) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await _revoke_voice_capture_consent(
+        app,
+        reason="control_page_shutdown",
+    )
+
+
 async def _revoke_voice_capture_consent_locked(
     app: web.Application,
     *,
@@ -1432,7 +1472,7 @@ async def _revoke_voice_capture_consent_locked(
                 "consent": manager.status(),
             }
     try:
-        await asyncio.to_thread(manager.publish_host_lease)
+        await _publish_voice_capture_host_lease(manager)
     except Exception as exc:
         print(
             "[CONTROL PAGE] voice_consent_host_lease_write_failed "
@@ -1605,7 +1645,7 @@ async def _voice_capture_consent_context(app: web.Application):
         while True:
             try:
                 if manager.status().get("captureMayBeActive"):
-                    await asyncio.to_thread(manager.publish_host_lease)
+                    await _publish_voice_capture_host_lease(manager)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1618,7 +1658,7 @@ async def _voice_capture_consent_context(app: web.Application):
             await asyncio.sleep(VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC)
 
     try:
-        await asyncio.to_thread(manager.publish_host_lease)
+        await _publish_voice_capture_host_lease(manager)
         await _reconcile_voice_capture_consent(app)
     except Exception as exc:
         try:
@@ -1641,13 +1681,32 @@ async def _voice_capture_consent_context(app: web.Application):
     try:
         yield
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await _revoke_voice_capture_consent(
-            app,
-            reason="control_page_shutdown",
+        cleanup_task = asyncio.create_task(
+            _shutdown_voice_capture_consent(
+                app,
+                tasks,
+            ),
+            name="voice-capture-consent-shutdown-cleanup",
         )
+        await _await_voice_capture_task(cleanup_task)
+
+
+async def _voice_capture_owner_context(_: web.Application):
+    owner_lock = MinecraftOwnerLock(
+        get_runtime_artifacts_root()
+        / "voice_capture_consent"
+        / "owner_claim.lock"
+    )
+    try:
+        owner_lock.acquire()
+    except MinecraftOwnerLockBusy:
+        raise RuntimeError("voice_capture_owner_conflict") from None
+    except MinecraftOwnerLockUnavailable:
+        raise RuntimeError("voice_capture_owner_lock_unavailable") from None
+    try:
+        yield
+    finally:
+        owner_lock.release()
 
 
 async def voice_capture_consent_handler(request: web.Request) -> web.StreamResponse:
@@ -1741,7 +1800,7 @@ async def voice_capture_consent_apply_handler(
             return json_response(started, status=409)
         lease_id = str(started.get("leaseId") or "")
         try:
-            await asyncio.to_thread(manager.publish_host_lease)
+            await _publish_voice_capture_host_lease(manager)
         except Exception as exc:
             print(
                 "[CONTROL PAGE] voice_consent_enable_lease_write_failed "
@@ -1850,12 +1909,7 @@ async def voice_capture_consent_apply_handler(
                 name="voice-capture-consent-cancel-cleanup",
             )
             try:
-                while not cleanup_task.done():
-                    try:
-                        await asyncio.shield(cleanup_task)
-                    except asyncio.CancelledError:
-                        continue
-                cleanup_task.result()
+                await _await_voice_capture_task(cleanup_task)
             except Exception as cleanup_exc:
                 print(
                     "[CONTROL PAGE] voice_consent_cancel_cleanup_failed "
@@ -3223,6 +3277,7 @@ def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
     app = web.Application(middlewares=[control_page_cors_middleware])
     app[VOICE_CAPTURE_CONSENT_LOCK_KEY] = asyncio.Lock()
     if manage_voice_capture_consent:
+        app.cleanup_ctx.append(_voice_capture_owner_context)
         app.cleanup_ctx.append(_voice_capture_consent_context)
     app.router.add_get("/", index_handler)
     app.router.add_get("/health", health_handler)

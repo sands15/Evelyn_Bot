@@ -18,7 +18,6 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
-- 동시 Control Page capture owner를 배제하는 OS lock 또는 durable generation CAS
 - admission token 발급 뒤 Bot 재시작과 validation attempt cross-process lease
 - 로컬 및 Discord 음성의 실제 장치 E2E 검증
 - 실제 Minecraft 승인 행동과 결과 증거 검증
@@ -26,6 +25,11 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
+- Control Page capture owner는 stable `owner_claim.lock`의 process-lifetime OS
+  lock으로 하나만 허용한다. loser는 동의 상태·heartbeat·마이크를 건드리지 않고
+  기동을 중단하며, 정상 종료와 취소 중에도 writer drain과 OFF 철회가 끝난 뒤에만
+  잠금을 반납한다. retention도 lock을 정리 후보에서 영구 제외한다. 실제 별도
+  프로세스 crash와 후속 인수 회귀를 통과했다.
 - Local Voice의 `consume -> durable ingress claim` crash-loss 창은 typed transaction과
   실제 claim 직후 강제 종료·재시작 회귀로 닫았다.
 - 손상·누락된 capture consent, OFF supersession, 취소 뒤 늦은 ON, heartbeat 위조·
@@ -37,8 +41,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Control Page hard-crash 뒤에도 서명된 content-free lease가 4초 stale이면 Bridge가
   독립적으로 캡처를 멈춘다. stop 실패는 Bridge exit 76으로 OS handle을 회수하고,
   Supervisor는 현재 자식·instance·sequence·physical OFF를 모두 확인한다.
-- 관련 source 회귀는 runtime 686개(skip 4), voice 전체 574개(skip 5), 전체 discover
-  2932개(skip 20)가 통과했다. 실제 마이크·스피커·Discord live 검증은 수행하지
+- 관련 source 회귀는 runtime 692개(skip 4), voice 전체 574개(skip 5), 전체 discover
+  2938개(skip 20)가 통과했다. 실제 마이크·스피커·Discord live 검증은 수행하지
   않았다.
 
 ## 작업 원칙
@@ -48,7 +52,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Discord, 마이크, Minecraft, Docker 등 live 동작은 사용자 승인 범위에서만 수행한다.
 - private transcript, token, 음성, screenshot, runtime artifact를 문서에 저장하지 않는다.
 - 코딩은 `ponytail full`을 기본으로 하되 안전·보존·명시 계약과 검증은 줄이지
-  않고, 작업 종료 때 측정 가능한 감소율을 보고한다.
+  않는다. 종료 때 별도 감소율·절감 수치 보고는 요구하지 않는다.
 
 ## 자세한 근거
 

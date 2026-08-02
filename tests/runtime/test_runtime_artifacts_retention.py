@@ -182,6 +182,31 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
 
         self.assertEqual([item.relative_path for item in plan.candidates], ["voyager/death_events.jsonl"])
 
+    def test_owner_claim_lock_is_never_selected(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_file(
+                root / "voice_capture_consent" / "owner_claim.lock",
+                "\0",
+                mtime=now - 100 * 86400,
+            )
+
+            plan = build_cleanup_plan(
+                root,
+                rules=(
+                    RetentionRule(
+                        "voice_capture_consent",
+                        ("voice_capture_consent/*",),
+                        max_age_days=1,
+                        preserve_newest=0,
+                    ),
+                ),
+                now=now,
+            )
+
+        self.assertEqual(plan.candidates, [])
+
     def test_dry_run_does_not_delete_files(self) -> None:
         now = 1_000_000.0
         with TemporaryDirectory() as tmp:

@@ -12,6 +12,7 @@ from typing import Any
 ACTIVE_ARTIFACT_NAMES = frozenset(
     {
         "last_request.json",
+        "owner_claim.lock",
         "voice_last_channel.json",
         "upstream_bridge_status.json",
         "voyager_goal_state.json",

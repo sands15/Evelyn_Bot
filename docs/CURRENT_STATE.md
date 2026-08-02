@@ -1726,7 +1726,15 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   Local Bridge 하위 프로세스는 credential을 받지 않으며, 전체 재시작은 exit 75를
   받은 Supervisor가 필요한 Discord/Codex 설정만 짧은 handoff에 전달한다.
   이는 source/mock 증거이며 실제 마이크·스피커·Discord는 실행하지 않았다.
-  다중 Control Page owner OS lock/generation CAS는 아직 없다.
+  current source에서는 Control Page가 manager 생성·상태 읽기 전에 stable
+  `voice_capture_consent/owner_claim.lock`의 process-lifetime OS lock을 획득한다.
+  busy/unavailable loser는 고정 오류로 startup을 중단하며 state, heartbeat, mic
+  control을 수행하지 않는다. aiohttp cleanup 역순과 cancellation-draining shutdown
+  task가 monitor/heartbeat writer 종료와 exact OFF 철회 뒤에만 lock을 반납한다.
+  runtime artifact retention은 어떤 matching rule에서도 `owner_claim.lock`을 삭제
+  후보로 만들지 않는다.
+  실제 별도 프로세스 경합과 `os._exit(78)` crash 뒤 successor 인수, cleanup 취소 중
+  contender 배제까지 검증했다.
 - 2026-08-02 current source의 hard-crash watchdog은 Control Page가 1초마다 게시하는
   목적 제한 HMAC의 content-free owner/lease projection을 Local Bridge가 각 0.25초
   status tick과 ON 전·후에 검사한다. 4초 stale, expiry, owner/lease replacement,
@@ -1736,8 +1744,9 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   instance, `statusSeq` high-water, watchdog 시각과 nested/top-level physical OFF를
   모두 요구한다. owner heartbeat는 4 KiB, Bridge status는 128 KiB로 제한된다.
   검증 밖의 Bridge exit는 기존 예산 안에서 disabled-default로 복구하고 검증 중 exit는
-  자동 재개하지 않는다. focused runtime 152개와 voice 51개, runtime 전체 686개
-  (skip 4), voice 전체 574개(skip 5), 전체 discover 2932개(skip 20)가 통과했다.
+  자동 재개하지 않는다. focused runtime 152개와 voice 51개, owner/인접 회귀
+  90개(skip 1), runtime 전체 692개(skip 4), voice 전체 574개(skip 5), 전체
+  discover 2938개(skip 20)가 통과했다.
   Compose config, Python/JavaScript/PowerShell 구문, `pip check`도 통과했지만 실행 중
   서비스를 교체하거나 실제 마이크·스피커·Discord를 시작하지 않았다.
 - 2026-08-02 current source에는 LLM·tool·외부 전달 전에 stable source delivery를
