@@ -213,6 +213,20 @@ class MindcraftActionGatewayTests(unittest.TestCase):
         action_lock.acquire()
         return action_lock
 
+    def recover_quarantined_action(self, request: dict) -> None:
+        """Release a deliberately quarantined OS lock after assertions.
+
+        The gateway must retain the world-action lock while its child still
+        reports alive.  Windows consequently cannot remove the temporary lock
+        file until the test simulates that child stopping and retries the
+        exact cancellation path.
+        """
+
+        if self.gateway.admitted_world_action_lock() is None:
+            return
+        self.runtime.survive_stop = False
+        self.gateway.cancel(request)
+
     def write_candidate(self, value: object, *, exact_path: bool = True) -> None:
         payload = (
             {
@@ -683,6 +697,7 @@ class MindcraftActionGatewayTests(unittest.TestCase):
             action_lock=action_lock,
             preflight_status=ready_status(),
         )
+        self.addCleanup(self.recover_quarantined_action, request)
         self.runtime.survive_stop = True
 
         with self.assertRaisesRegex(
@@ -718,6 +733,7 @@ class MindcraftActionGatewayTests(unittest.TestCase):
             action_lock=action_lock,
             preflight_status=ready_status(),
         )
+        self.addCleanup(self.recover_quarantined_action, request)
         self.runtime.survive_stop = True
 
         with self.assertRaisesRegex(

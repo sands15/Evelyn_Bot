@@ -1713,10 +1713,14 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
 - current ingress 검증은 core journal 20개, Discord owner 묶음 129개, Fast
   continuity/stream/proxy/UI 묶음 89개와 기존 Fast API 63개, bootstrap generation에
   맞춘 Fast Action 28개를 통과했다. memory 263개와 Supervisor/single-instance 58개,
-  `compileall`과 `git diff --check`도 통과했다. `.venv-host` 전체 discover는 2,829개
-  중 20개 skip과 별도 Minecraft world-action lock 정리 오류 2개만 남겼다. 현재
-  실행 서비스 교체, 실제 Discord redelivery/network timeout, 마이크·스피커 live
-  E2E는 수행하지 않았다.
+  `compileall`과 `git diff --check`도 통과했다. 2026-08-02 `.venv-host`에서 CI와
+  같은 `unittest discover -s tests -t . -p "test_*.py"` 범위는 `Ran 2830`,
+  `OK (skipped=20)`이었다. 이전 Windows world-action lock 정리 오류 2개는 살아
+  있는 자식을 검증하기 위해 잠금을 의도적으로 보존한 테스트가 임시 폴더 정리 전에
+  정상 회수 경로를 실행하지 않던 harness 문제였다. 테스트 cleanup은 자식 종료를
+  모사한 뒤 exact cancel로 잠금을 반납하므로, child-alive 동안의 fail-closed fence는
+  그대로 유지된다. 현재 실행 서비스 교체, 실제 Discord redelivery/network timeout,
+  마이크·스피커 live E2E는 수행하지 않았다.
 - 자율행동 P0에는 별도 content-free dry observer를 추가했다.
   - `autonomy-p0.v1`은 Control Page에서 session 상태와 고정 blocker를 보여주되,
     Discord 명령, grant/lease, runtime repair, 서비스, Minecraft goal/effect 또는

@@ -475,10 +475,11 @@ admission manager에는 token consume과 durable ingress claim을 한 transactio
 묶는 typed API가 아직 없다. 따라서 `consume -> claim` 사이 process crash는
 발화를 소비한 뒤 journal에 남기지 못할 수 있으며, 이 원자화 전까지 local voice
 crash-loss P0는 미폐쇄다. 실제 Discord reconnect/timeout/redelivery와 local 음성
-E2E도 현재 source로 실행하지 않았다. 전체 Windows discover에 남은 두 오류는
-별도 Mindcraft world-action 테스트가 살아 있는 OS lock handle을 temp cleanup 전에
-닫지 못하는 문제이며 이번 ingress 경로의 기능 실패는 아니지만 전체 green 기준에는
-여전히 포함된다.
+E2E도 현재 source로 실행하지 않았다. 이전 전체 Windows discover의 Mindcraft
+world-action 오류 2개는 child-alive quarantine 검증 뒤 test cleanup이 exact cancel
+회수 경로를 실행하도록 고쳐 닫았다. 2026-08-02 CI-equivalent discover 결과는
+`Ran 2830`, `OK (skipped=20)`이었다. 이는 source 회귀 증거이며 실제 Minecraft
+동작 검증을 대신하지 않는다.
 
 그러나 CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크
 입력부터 STT, 대화, TTS, 로컬 재생까지 계획된 surface별 10턴과 무음 구간을
