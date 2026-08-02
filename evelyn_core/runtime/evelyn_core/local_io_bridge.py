@@ -5,6 +5,7 @@ import asyncio
 import base64
 import contextlib
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,6 @@ from .config import (
     LOCAL_MIC_CONTINUE_THRESHOLD,
     LOCAL_MIC_DEVICE,
     LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
-    LOCAL_MIC_ENABLED,
     LOCAL_MIC_MAX_SEGMENT_SEC,
     LOCAL_MIC_MIN_VOICED_MS,
     LOCAL_MIC_PREROLL_MS,
@@ -58,6 +58,7 @@ from .config import (
     SPEAKER_VERIFICATION_MODEL,
     SPEAKER_VERIFICATION_THRESHOLD,
 )
+from .host_supervisor_client import LOCAL_BRIDGE_RESTART_EXIT_CODE
 from .fast_action_runtime import detect_minecraft_runtime_command
 from .host_vision_bridge import HostVisionBridge
 from .host_ui_action_bridge import HostUiActionBridge
@@ -99,6 +100,15 @@ except Exception:  # pragma: no cover - host audio dependency
 
 
 BOT_API_BASE = os.getenv("LOCAL_BRIDGE_BOT_API_BASE", "http://127.0.0.1:8798").rstrip("/")
+LOCAL_BRIDGE_STATUS_AUTH_HEADER = "X-Evelyn-Local-Bridge-Token"
+LOCAL_BRIDGE_STATUS_AUTH_TOKEN = os.getenv(
+    "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
+    "",
+).strip()
+_CREDENTIAL_ENV_PATTERN = re.compile(
+    r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
+    re.IGNORECASE,
+)
 STT_SERVICE_URL = os.getenv("STT_SERVICE_URL", "http://127.0.0.1:8892").rstrip("/")
 OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880").rstrip("/")
 LOCAL_TTS_OUTPUT_DEVICE = os.getenv("LOCAL_TTS_OUTPUT_DEVICE") or os.getenv("LOCAL_AUDIO_OUTPUT_DEVICE")
@@ -131,7 +141,6 @@ LOCAL_OUTPUT_DEVICE_UNAVAILABLE = "local_output_device_unavailable"
 LOCAL_OUTPUT_FORMAT_UNSUPPORTED = "local_output_format_unsupported"
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
 STOP_SCRIPT = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
-START_LOCAL_BAT = PROJECT_ROOT / "evelyn_core" / "start_local.bat"
 START_VOYAGER_BAT = PROJECT_ROOT / "evelyn_core" / "start_voyager.bat"
 MINECRAFT_SERVICE_BASE = os.getenv(
     "LOCAL_BRIDGE_MINECRAFT_SERVICE_BASE",
@@ -232,12 +241,21 @@ class LocalIoBridge:
         self.barge_in_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=4)
         self.session: aiohttp.ClientSession | None = None
         self.service: LocalMicCaptureService | None = None
-        self.mic_enabled = bool(LOCAL_MIC_ENABLED)
+        # Capture is never activated from ambient process configuration. The
+        # authenticated consent control path is the sole ON authority.
+        self.mic_enabled = False
         self.mic_control_request_revision = 0
         self.mic_control_pending_revision = 0
+        self.mic_control_action_id = ""
+        self.mic_control_pending_action_id = ""
+        self.mic_control_state = "idle"
+        self.mic_control_desired_enabled = self.mic_enabled
+        self.mic_control_error = ""
+        self.mic_capture_stopped = not self.mic_enabled
         self.mic_control_lock = asyncio.Lock()
         self.mic_control_tasks: set[asyncio.Task[Any]] = set()
         self.ready = False
+        self.status_seq = 0
         self.speaking = False
         self.mic_input_suppressed_until = 0.0
         self.suppressed_mic_segment_count = 0
@@ -386,20 +404,29 @@ class LocalIoBridge:
 
     async def _start_mic(self) -> None:
         if not self.mic_enabled:
-            self.service = None
+            await self._stop_mic_service(reason="mic_disabled")
+            self.mic_capture_stopped = True
             self.ready = True
             self.last_error = ""
             print("[LOCAL BRIDGE] mic_disabled=true", flush=True)
             return
         if self.service is not None and self.service.capture_ready:
+            self.mic_capture_stopped = False
             self.ready = True
             self.last_error = ""
             return
+        if self.service is not None:
+            # A timed-out start may still own a live capture thread. Never
+            # overwrite that reference: retire and verify it before retrying.
+            await self._stop_mic_service(reason="mic_restart")
 
         loop = asyncio.get_running_loop()
+        capture_service_epoch = self.admission_epoch
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-            captured_admission_epoch = self.admission_epoch
+            # Bind every callback to the service generation that captured it.
+            # A final flush racing with OFF/restart must stay stale.
+            captured_admission_epoch = capture_service_epoch
             with self._barge_source_lock:
                 barge_source = (
                     dict(self._barge_source_snapshot)
@@ -488,36 +515,87 @@ class LocalIoBridge:
         )
         started = await asyncio.to_thread(self.service.start)
         self.ready = bool(started and self.service.capture_ready)
+        self.mic_capture_stopped = bool(self.service.capture_stopped)
         self.last_error = "" if self.ready else (self.service.last_error or "local_mic_not_ready")
         print(f"[LOCAL BRIDGE] mic_ready={self.ready} device={LOCAL_MIC_DEVICE or 'default'} error={self.last_error or 'none'}", flush=True)
 
-    async def _stop_mic(self) -> None:
-        self.mic_enabled = False
-        self._invalidate_local_voice_admission("mic_disabled")
+    async def _stop_mic_service(self, *, reason: str) -> None:
+        self._invalidate_local_voice_admission(reason)
         service = self.service
-        self.service = None
         self._discard_pending_mic_segments()
         if service is not None:
-            await asyncio.to_thread(service.stop)
+            stopped = await asyncio.to_thread(service.stop)
+            if stopped is not True or not service.capture_stopped:
+                raise RuntimeError("local_mic_stop_unverified")
+        self.service = None
+        self.mic_capture_stopped = True
+
+    async def _stop_mic(self) -> None:
+        await self._stop_mic_service(reason="mic_disabled")
+        self.mic_enabled = False
         self.ready = True
         self.last_error = ""
         print("[LOCAL BRIDGE] mic_ready=false mic_disabled=true", flush=True)
 
-    async def _apply_mic_control_request(self, *, revision: int, enabled: bool) -> None:
+    async def _apply_mic_control_request(
+        self,
+        *,
+        revision: int,
+        enabled: bool,
+        action_id: str,
+    ) -> None:
         async with self.mic_control_lock:
             if revision <= self.mic_control_request_revision:
                 return
+            self.mic_control_state = "applying"
+            self.mic_control_desired_enabled = enabled
+            self.mic_control_error = ""
             try:
                 if enabled:
+                    if self.restart_started or self.shutdown_started:
+                        raise RuntimeError("local_bridge_lifecycle_stopping")
                     self.mic_enabled = True
                     await self._start_mic()
+                    if self.restart_started or self.shutdown_started:
+                        await self._stop_mic()
+                        raise RuntimeError("local_bridge_lifecycle_stopping")
+                    if (
+                        self.service is None
+                        or not self.service.capture_ready
+                        or self.mic_capture_stopped
+                    ):
+                        raise RuntimeError("local_mic_start_unverified")
                 else:
                     await self._stop_mic()
+                    if (
+                        self.mic_enabled
+                        or self.service is not None
+                        or not self.mic_capture_stopped
+                    ):
+                        raise RuntimeError("local_mic_stop_unverified")
+                self.mic_control_state = "applied"
+                self.mic_control_error = ""
+            except asyncio.CancelledError:
+                self.mic_control_state = "failed"
+                self.mic_control_error = "mic_control_cancelled"
+                self.ready = False
+                raise
             except Exception as exc:
-                self.ready = False if enabled else True
+                self.mic_control_state = "failed"
+                self.mic_control_error = "mic_control_failed"
+                self.ready = False
+                if not enabled:
+                    self.mic_capture_stopped = bool(
+                        self.service is None
+                        or self.service.capture_stopped
+                    )
                 self.last_error = f"mic_control_failed: {exc!r}"
             finally:
                 self.mic_control_request_revision = revision
+                self.mic_control_action_id = action_id
+                if self.mic_control_pending_action_id == action_id:
+                    self.mic_control_pending_revision = 0
+                    self.mic_control_pending_action_id = ""
             print(
                 "[LOCAL BRIDGE] mic_control_applied "
                 f"enabled={self.mic_enabled} ready={self.ready} revision={revision} "
@@ -529,9 +607,17 @@ class LocalIoBridge:
         request = data.get("micControlRequest") if isinstance(data, dict) else None
         if not isinstance(request, dict) or not isinstance(request.get("enabled"), bool):
             return
-        try:
-            revision = int(request.get("revision") or 0)
-        except (TypeError, ValueError):
+        action_id = str(request.get("actionId") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", action_id):
+            return
+        target_digest = str(request.get("bridgeInstanceDigest") or "")
+        expected_digest = hashlib.sha256(
+            self.bridge_instance_id.encode("utf-8")
+        ).hexdigest()
+        if target_digest != expected_digest:
+            return
+        revision = request.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool):
             return
         if revision <= max(self.mic_control_request_revision, self.mic_control_pending_revision):
             return
@@ -540,8 +626,13 @@ class LocalIoBridge:
         except RuntimeError:
             return
         self.mic_control_pending_revision = revision
+        self.mic_control_pending_action_id = action_id
         task = loop.create_task(
-            self._apply_mic_control_request(revision=revision, enabled=bool(request["enabled"])),
+            self._apply_mic_control_request(
+                revision=revision,
+                enabled=bool(request["enabled"]),
+                action_id=action_id,
+            ),
             name=f"local-mic-control-{revision}",
         )
         self.mic_control_tasks.add(task)
@@ -570,8 +661,8 @@ class LocalIoBridge:
         return all([await self._http_health_ready(url) for url in checks])
 
     def _minecraft_launcher_environment(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env.setdefault("DISCORD_BOT_TOKEN", "local-only-disabled")
+        env = self._credential_scoped_child_environment()
+        env["DISCORD_BOT_TOKEN"] = "local-only-disabled"
         secret_home = (
             get_runtime_artifacts_root()
             / "secrets"
@@ -580,6 +671,14 @@ class LocalIoBridge:
         if (secret_home / "auth.json").is_file():
             env.setdefault("EVELYN_CODEX_CREDENTIALS_DIR", str(secret_home))
         return env
+
+    @staticmethod
+    def _credential_scoped_child_environment() -> dict[str, str]:
+        return {
+            name: value
+            for name, value in os.environ.items()
+            if not _CREDENTIAL_ENV_PATTERN.search(name)
+        }
 
     async def _launch_minecraft_stack(self) -> dict[str, Any]:
         if await self._minecraft_stack_ready():
@@ -2355,15 +2454,28 @@ class LocalIoBridge:
     async def _post_status(self, extra: dict[str, Any] | None = None) -> None:
         if self.session is None:
             return
+        self.status_seq += 1
+        status_seq = self.status_seq
         self._refresh_output_readiness()
         mic_stats: dict[str, Any] = {"enabled": self.mic_enabled}
         if self.service is not None:
+            self.mic_capture_stopped = bool(self.service.capture_stopped)
+            if self.mic_enabled and not self.service.capture_ready:
+                self.ready = False
+                if self.mic_control_state == "applied":
+                    self.mic_control_state = "failed"
+                    self.mic_control_error = "mic_capture_lost"
+                if not self.last_error:
+                    self.last_error = str(
+                        self.service.last_error or "local_mic_capture_lost"
+                    )
             last_input_at = self.service.last_input_at
             suppress_remaining_sec = max(0.0, self.mic_input_suppressed_until - time.monotonic())
             mic_stats = {
                 "enabled": True,
                 "captureReady": self.service.capture_ready,
                 "captureActive": bool(getattr(self.service, "_capture_active", False)),
+                "captureStopped": self.service.capture_stopped,
                 "inputBlockCount": self.service.input_block_count,
                 "lastInputAgeSec": round(time.time() - last_input_at, 2) if last_input_at else None,
                 "lastInputLevel": round(float(self.service.last_input_level), 6),
@@ -2383,8 +2495,17 @@ class LocalIoBridge:
                 "suppressedSegmentCount": self.suppressed_mic_segment_count,
                 "discardedPendingSegmentCount": self.discarded_pending_mic_segment_count,
             }
+        else:
+            mic_stats.update(
+                {
+                    "captureReady": False,
+                    "captureActive": False,
+                    "captureStopped": self.mic_capture_stopped,
+                }
+            )
         payload: dict[str, Any] = {
             "schema": "local_io_bridge.status.v1",
+            "statusSeq": status_seq,
             "heartbeatAt": time.time(),
             "pid": os.getpid(),
             "bridgeInstanceId": self.bridge_instance_id,
@@ -2392,6 +2513,13 @@ class LocalIoBridge:
             "ready": self.ready,
             "micEnabled": self.mic_enabled,
             "micControlRevision": self.mic_control_request_revision,
+            "micControlActionId": self.mic_control_action_id,
+            "micControlPendingRevision": self.mic_control_pending_revision,
+            "micControlPendingActionId": self.mic_control_pending_action_id,
+            "micControlState": self.mic_control_state,
+            "micControlDesiredEnabled": self.mic_control_desired_enabled,
+            "micControlError": self.mic_control_error,
+            "micCaptureStopped": self.mic_capture_stopped,
             "minecraftCommandRevision": self.minecraft_command_request_revision,
             "minecraftCommandState": self.minecraft_command_state,
             "minecraftCommandError": self.minecraft_command_error,
@@ -2481,26 +2609,47 @@ class LocalIoBridge:
         except Exception as exc:
             self.runtime_errors.record("silence_liveness_emit_failed", exc)
         try:
-            async with self.session.post(f"{BOT_API_BASE}/api/local-bridge/status", json=payload, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+            async with self.session.post(
+                f"{BOT_API_BASE}/api/local-bridge/status",
+                json=payload,
+                headers={
+                    LOCAL_BRIDGE_STATUS_AUTH_HEADER: (
+                        LOCAL_BRIDGE_STATUS_AUTH_TOKEN
+                    )
+                },
+                timeout=aiohttp.ClientTimeout(total=2),
+            ) as resp:
                 data = await resp.json(content_type=None)
                 self._handle_control_response(data)
         except Exception:
             pass
 
     def _handle_control_response(self, data: dict[str, Any]) -> None:
+        if self.restart_started or self.shutdown_started:
+            return
         self._apply_voice_admission_status(data)
-        self._handle_mic_control_request(data)
-        self._handle_output_device_request(data)
-        self._handle_minecraft_command_request(data)
 
         restart = data.get("restart") if isinstance(data, dict) else None
-        if isinstance(restart, dict) and restart.get("requested") and not self.restart_started:
+        if isinstance(restart, dict) and restart.get("requested"):
             self._invalidate_local_voice_admission("restart_requested")
             self.restart_started = True
             self.last_error = "restart_requested"
             self._start_restart_script()
             self._schedule_bridge_exit()
             return
+
+        shutdown = data.get("shutdown") if isinstance(data, dict) else None
+        if isinstance(shutdown, dict) and shutdown.get("requested"):
+            self._invalidate_local_voice_admission("shutdown_requested")
+            self.shutdown_started = True
+            self.last_error = "shutdown_requested"
+            self._start_shutdown_script()
+            self._schedule_bridge_exit()
+            return
+
+        self._handle_mic_control_request(data)
+        self._handle_output_device_request(data)
+        self._handle_minecraft_command_request(data)
 
         speak_requests = data.get("speakRequests") if isinstance(data, dict) else None
         if isinstance(speak_requests, list):
@@ -2519,15 +2668,6 @@ class LocalIoBridge:
                     with contextlib.suppress(Exception):
                         self.speak_request_queue.put_nowait({**request, "text": text})
             self._ensure_speak_worker()
-
-        shutdown = data.get("shutdown") if isinstance(data, dict) else None
-        if not isinstance(shutdown, dict) or not shutdown.get("requested") or self.shutdown_started:
-            return
-        self._invalidate_local_voice_admission("shutdown_requested")
-        self.shutdown_started = True
-        self.last_error = "shutdown_requested"
-        self._start_shutdown_script()
-        self._schedule_bridge_exit()
 
     def _handle_output_device_request(self, data: dict[str, Any]) -> None:
         request = data.get("outputDeviceRequest") if isinstance(data, dict) else None
@@ -2614,7 +2754,9 @@ class LocalIoBridge:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            os._exit(0)
+            os._exit(
+                LOCAL_BRIDGE_RESTART_EXIT_CODE if self.restart_started else 0
+            )
         loop.create_task(self._exit_after_shutdown_delay())
 
     async def _exit_after_shutdown_delay(self) -> None:
@@ -2624,8 +2766,12 @@ class LocalIoBridge:
                 await asyncio.to_thread(self.service.stop)
             except Exception:
                 pass
-        print("[LOCAL BRIDGE] exiting after shutdown request", flush=True)
-        os._exit(0)
+        exit_code = LOCAL_BRIDGE_RESTART_EXIT_CODE if self.restart_started else 0
+        print(
+            f"[LOCAL BRIDGE] exiting after lifecycle request code={exit_code}",
+            flush=True,
+        )
+        os._exit(exit_code)
 
     def _start_shutdown_script(self) -> None:
         if not STOP_SCRIPT.exists():
@@ -2646,6 +2792,7 @@ class LocalIoBridge:
                     "200",
                 ],
                 cwd=str(PROJECT_ROOT),
+                env=self._credential_scoped_child_environment(),
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
             print(f"[LOCAL BRIDGE] shutdown script started: {STOP_SCRIPT}", flush=True)
@@ -2655,39 +2802,7 @@ class LocalIoBridge:
             print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
 
     def _start_restart_script(self) -> None:
-        if not STOP_SCRIPT.exists():
-            self.last_error = f"restart stop helper not found: {STOP_SCRIPT}"
-            print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
-            return
-        if not START_LOCAL_BAT.exists():
-            self.last_error = f"restart start helper not found: {START_LOCAL_BAT}"
-            print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
-            return
-        try:
-            restart_script = (
-                "$ErrorActionPreference = 'Continue'; "
-                f"& '{STOP_SCRIPT}' -DelayMs 200; "
-                "Start-Sleep -Seconds 2; "
-                f"& '{START_LOCAL_BAT}' --background"
-            )
-            subprocess.Popen(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    restart_script,
-                ],
-                cwd=str(PROJECT_ROOT),
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            )
-            print(f"[LOCAL BRIDGE] restart script started: {START_LOCAL_BAT}", flush=True)
-        except Exception as exc:
-            self.runtime_errors.record("restart_start_failed", exc)
-            self.last_error = f"restart start failed: {exc!r}"
-            print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
+        print("[LOCAL BRIDGE] restart delegated to Host Supervisor", flush=True)
 
 
 def parse_args() -> argparse.Namespace:

@@ -62,6 +62,8 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
                 return AdmissionResponse()
 
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
         session = AdmissionSession()
         bridge.session = session  # type: ignore[assignment]
         bridge._post_status = AsyncMock()  # type: ignore[method-assign]
@@ -91,6 +93,8 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chat_payload_contains_only_the_frozen_admission_capability(self) -> None:
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
         bridge.active_turn_id = "turn-admitted"
         grant = {
             "bridgeInstanceId": bridge.bridge_instance_id,
@@ -133,6 +137,8 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mic_off_during_stt_cannot_issue_a_new_epoch_token(self) -> None:
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
         captured_epoch = bridge.admission_epoch
         stt_started = asyncio.Event()
         release_stt = asyncio.Event()
@@ -162,7 +168,7 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             )
-            await stt_started.wait()
+            await asyncio.wait_for(stt_started.wait(), timeout=1.0)
             await bridge._stop_mic()
             release_stt.set()
             await turn
@@ -177,6 +183,8 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
         captured_epoch = bridge.admission_epoch
         verification_started = asyncio.Event()
         release_verification = asyncio.Event()
@@ -204,7 +212,7 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         worker = asyncio.create_task(bridge._barge_in_worker())
         try:
-            await verification_started.wait()
+            await asyncio.wait_for(verification_started.wait(), timeout=1.0)
             await bridge._stop_mic()
             release_verification.set()
             await asyncio.wait_for(bridge.barge_in_queue.join(), timeout=1.0)

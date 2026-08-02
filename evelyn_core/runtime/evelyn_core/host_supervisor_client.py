@@ -13,6 +13,7 @@ from .paths import get_runtime_artifacts_root
 SUPERVISOR_STATUS_SCHEMA = "host_supervisor.status.v1"
 SUPERVISOR_REQUEST_SCHEMA = "host_supervisor.request.v1"
 SUPERVISOR_RESPONSE_SCHEMA = "host_supervisor.response.v1"
+LOCAL_BRIDGE_RESTART_EXIT_CODE = 75
 ALLOWED_HOST_ACTIONS = frozenset(
     {
         "restart_local_bridge",

@@ -59,6 +59,13 @@ def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
     return admission
 
 
+def make_active_voice_bridge() -> LocalIoBridge:
+    bridge = LocalIoBridge()
+    bridge.mic_enabled = True
+    bridge.mic_capture_stopped = False
+    return bridge
+
+
 class LocalBridgeBargeInTests(unittest.TestCase):
     def strong_meta(self):
         return {
@@ -191,7 +198,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_worker_fails_closed_when_required_verifier_is_unavailable(self):
         async def runner() -> tuple[list[str], list[str], int]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             cancelled: list[str] = []
             self.assertTrue(
                 bridge.playback_controller.claim(
@@ -319,7 +326,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_worker_rejects_delayed_a_segment_without_cancelling_b(self):
         async def runner() -> tuple[list[str], list[str], int]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             cancelled: list[str] = []
             self.assertTrue(
                 bridge.playback_controller.claim(
@@ -377,7 +384,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_worker_rejects_rotated_validation_attempt_before_cancelling(self):
         async def runner() -> tuple[list[str], list[str], int]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             cancelled: list[str] = []
             self.assertTrue(
                 bridge.playback_controller.claim(
@@ -448,6 +455,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             def __init__(self, *, on_segment, **_kwargs) -> None:
                 self.on_segment = on_segment
                 self.capture_ready = True
+                self.capture_stopped = False
                 self.last_error = ""
                 type(self).instance = self
 
@@ -455,8 +463,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 return True
 
         async def runner() -> dict:
-            bridge = LocalIoBridge()
-            bridge.mic_enabled = True
+            bridge = make_active_voice_bridge()
             interrupt_context = {
                 "current": {
                     "sessionId": "validation-a",
@@ -552,7 +559,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_stream_failure_after_playback_started_never_falls_back_to_duplicate_audio(self):
         async def runner() -> tuple[LocalIoBridge, list[str]]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="hello")
 
@@ -592,7 +599,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_stream_failure_after_bot_dispatch_never_falls_back_without_pcm(self):
         async def runner() -> tuple[LocalIoBridge, list[str]]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="hello")
 
@@ -631,7 +638,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_stream_failure_before_bot_dispatch_falls_back_exactly_once(self):
         async def runner() -> LocalIoBridge:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="hello")
 
@@ -670,7 +677,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_unbound_segment_captured_before_validation_is_dropped_before_stt(self):
         async def runner() -> LocalIoBridge:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="must not be transcribed")
             bridge._emit_validation = Mock()
@@ -741,7 +748,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 return b"\x01\x02"
 
         async def runner() -> LocalIoBridge:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             response = SimpleNamespace(content=OneChunkContent())
             with patch.object(local_io_bridge, "sd", FakeSoundDevice()):
                 with self.assertRaisesRegex(RuntimeError, "validation_attempt_stale"):
@@ -776,7 +783,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
     def test_segment_status_omits_private_validation_attempt_binding(self):
         async def runner() -> tuple[dict, dict]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge._post_status = AsyncMock()
             bridge._transcribe = AsyncMock(return_value="")
             bridge._emit_validation = Mock()
@@ -822,7 +829,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 self.closed = True
 
         async def runner() -> tuple[bool, bool, int, bool]:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             self.assertTrue(bridge.playback_controller.claim("turn-a", lambda: None))
             cleanup_started = asyncio.Event()
             allow_receiver_exit = asyncio.Event()
@@ -977,7 +984,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 def post(self, *_args, **_kwargs):
                     return FakeResponse()
 
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             session = FakeSession()
             sound_device = FakeSoundDevice()
             bridge.session = session
@@ -1080,7 +1087,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 return b"\x01\x02"
 
         async def runner() -> LocalIoBridge:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             response = SimpleNamespace(content=OneChunkContent())
             with patch.object(local_io_bridge, "sd", FakeSoundDevice()):
                 with self.assertRaisesRegex(RuntimeError, "partial output"):
@@ -1129,7 +1136,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 return b"\x01\x02"
 
         async def runner() -> LocalIoBridge:
-            bridge = LocalIoBridge()
+            bridge = make_active_voice_bridge()
             bridge.active_validation = {
                 "sessionId": "validation-1",
                 "stepId": "01-wake",

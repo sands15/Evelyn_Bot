@@ -216,6 +216,19 @@ class LocalMicCaptureService:
     def capture_ready(self) -> bool:
         return self._capture_ready
 
+    @property
+    def thread_alive(self) -> bool:
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
+
+    @property
+    def capture_stopped(self) -> bool:
+        return bool(
+            not self.thread_alive
+            and not self._capture_ready
+            and not self._capture_active
+        )
+
     def start(self, *, timeout_sec: float = 3.0) -> bool:
         if sd is None:
             self.last_error = "sounddevice import failed"
@@ -230,12 +243,20 @@ class LocalMicCaptureService:
         self._ready_event.wait(timeout=max(0.2, float(timeout_sec)))
         return self.capture_ready
 
-    def stop(self, *, join_timeout_sec: float = 2.0) -> None:
+    def stop(self, *, join_timeout_sec: float = 2.0) -> bool:
         self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=max(0.2, float(join_timeout_sec)))
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.2, float(join_timeout_sec)))
+        if thread is not None and thread.is_alive():
+            self.last_error = "local_mic_stop_timeout"
+            raise RuntimeError("local_mic_stop_timeout")
         self._thread = None
         self._capture_ready = False
+        if not self.capture_stopped:
+            self.last_error = "local_mic_stop_unverified"
+            raise RuntimeError("local_mic_stop_unverified")
+        return True
 
     def _run(self) -> None:
         sample_rates = [self.sample_rate]
@@ -244,12 +265,16 @@ class LocalMicCaptureService:
             sample_rates.append(default_sample_rate)
         last_exc: Exception | None = None
         for sample_rate in sample_rates:
+            if self._stop_event.is_set():
+                break
             self.sample_rate = max(8000, int(sample_rate))
             self.block_samples = max(1, int(round(self.sample_rate * (self.block_ms / 1000.0))))
             self._min_voiced_samples = max(1, int(round(self.sample_rate * (self.min_voiced_ms / 1000.0))))
             self._max_segment_samples = max(self.sample_rate, int(round(self.sample_rate * self.max_segment_sec)))
             if self._run_stream_once():
                 return
+            if self._stop_event.is_set():
+                break
             if self.last_error:
                 last_exc = RuntimeError(self.last_error)
         if last_exc is not None:

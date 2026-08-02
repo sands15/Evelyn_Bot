@@ -1703,6 +1703,30 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   Supervisor child PID와 Bridge heartbeat PID의 일치, ownership ready와 birth
   기록을 요구한다. focused 139개와 실제 Windows Job close child test를 통과했지만
   현재 실행 서비스 교체와 실제 음성 E2E는 수행하지 않았다.
+- 2026-08-02의 로컬 capture-consent 경계는 상태 load를
+  `verified | missing | untrusted`로 나누고, 신뢰할 수 없는 상태를 exact OFF ACK
+  이전에 `inactive`로 취급하지 않는다. durable `enabling/revoking` fence,
+  revision+일회성 action ID+Bridge digest+physical capture 상태 ACK, 독립된
+  reporter/internal-control bearer, 단조 `statusSeq`와 instance generation,
+  OFF가 증가시키는 ON enable fence를 함께 사용한다. 취소·terminal validation·
+  malformed upstream·손상 state·Control Page 재시작은 같은 consent lock과 recovery
+  경로로 OFF를 재시도한다. Local Bridge는 ambient `LOCAL_MIC_ENABLED`로 캡처를
+  시작하지 않고 일반 `/mic on`도 동의 경로를 우회하지 못한다. focused 159개와
+  runtime 667개(skip 4), voice 전체 568개(skip 5), `test_local*.py` 182개가 통과했고
+  Python/Node/PowerShell 구문, standalone Compose config와 clean bundle
+  `pip check`도 통과했다.
+  launcher bearer는 Docker `up` 생성 순간에만 두 채널을, Supervisor 생성 순간에는
+  reporter 채널만 자식 환경에 넣고 즉시 제거하므로 host preflight와 브라우저가
+  제어 credential을 상속하지 않는다.
+  preview는 최신 1개와 발급 당시 validation 세대에 묶이고, unbound 동의는 canonical
+  idle에서만 유지된다. idle ON 뒤 Discord-only 세션, bound identity/state 유실과
+  confirm/retry/abort의 모호한 I/O 예외는 모두 즉시 exact OFF로 전환한다.
+  Supervisor의 Docker 복구는 `--no-deps`와 credential-scoped 환경을 사용한다.
+  Local Bridge 하위 프로세스는 credential을 받지 않으며, 전체 재시작은 exit 75를
+  받은 Supervisor가 필요한 Discord/Codex 설정만 짧은 handoff에 전달한다.
+  이는 source/mock 증거이며 실제 마이크·스피커·Discord는 실행하지 않았다.
+  Control Page hard-crash 때 Host/Bridge가 lease 만료를 독립 집행하는 watchdog과
+  다중 Control Page owner OS lock/generation CAS는 아직 없다.
 - 2026-08-02 current source에는 LLM·tool·외부 전달 전에 stable source delivery를
   기록하는 `conversation.ingress-recovery.v1` journal/head owner가 추가됐다.
   Fast Control은 browser `requestId`와 Local Bridge의 canonical

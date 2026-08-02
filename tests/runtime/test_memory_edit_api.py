@@ -34,7 +34,11 @@ class MemoryEditApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.memory_root_patch.start()
         self.client = TestClient(
-            TestServer(control_page_server.create_app())
+            TestServer(
+                control_page_server.create_app(
+                    manage_voice_capture_consent=False
+                )
+            )
         )
         await self.client.start_server()
         self.origin = str(self.client.make_url("/")).rstrip("/")

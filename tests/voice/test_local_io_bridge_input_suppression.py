@@ -50,6 +50,8 @@ def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
 class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
     def test_speaking_input_is_not_discarded_but_post_playback_cooldown_is(self) -> None:
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
 
         self.assertFalse(bridge._mic_input_is_suppressed())
         bridge.speaking = True
@@ -77,6 +79,8 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_already_queued_segment_survives_post_playback_cooldown(self) -> None:
         bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
         bridge.mic_input_suppressed_until = time.monotonic() + 0.7
         bridge._post_status = AsyncMock()  # type: ignore[method-assign]
         bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]

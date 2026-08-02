@@ -254,9 +254,15 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("ref_audio.wav", script)
         self.assertIn("meta.json", script)
         self.assertIn("$metadata.ref_text", script)
-        self.assertIn("Assert-TtsProfileReady\nStart-DockerCore", script)
+        profile_check = script.rindex("Assert-TtsProfileReady")
+        supervisor_rotation = script.rindex(
+            "Stop-PreviousHostSupervisorGeneration"
+        )
+        docker_start = script.rindex("Start-DockerCore")
+        self.assertLess(profile_check, supervisor_rotation)
+        self.assertLess(supervisor_rotation, docker_start)
         self.assertLess(
-            script.index("Assert-TtsProfileReady\nStart-DockerCore"),
+            profile_check,
             script.index("Wait-Port -HostName '127.0.0.1' -Port 9820"),
         )
 
@@ -268,8 +274,66 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("$env:DISCORD_BOT_TOKEN = 'local-only-disabled'", script)
         self.assertLess(
             script.index("$env:EVELYN_HOST_PROJECT_ROOT = $projectRoot"),
-            script.index("Assert-TtsProfileReady\nStart-DockerCore"),
+            script.rindex("Start-DockerCore"),
         )
+
+    def test_local_launcher_scopes_runtime_channel_tokens_to_authorized_children(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        docker_helper = script[
+            script.index("function Invoke-DockerCommandWithRuntimeChannelTokens") :
+            script.index("function Test-DockerContainerRunning")
+        ]
+        supervisor = script[
+            script.index("function Start-HostSupervisor") :
+            script.index("function Open-ControlPage")
+        ]
+        browser = script[
+            script.index("function Open-ControlPage") :
+            script.index("try {", script.index("function Open-ControlPage"))
+        ]
+        main = script[script.rindex("try {") :]
+
+        self.assertNotIn(
+            "$env:LOCAL_BRIDGE_STATUS_AUTH_TOKEN = New-SecureRuntimeToken",
+            script,
+        )
+        self.assertNotIn(
+            "$env:EVELYN_INTERNAL_CONTROL_TOKEN = New-SecureRuntimeToken",
+            script,
+        )
+        self.assertLess(
+            script.index(
+                "[Environment]::SetEnvironmentVariable(\n"
+                "    'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',\n"
+                "    $null,"
+            ),
+            script.index("Initialize-EvelynSourceRevision"),
+        )
+        self.assertLess(
+            script.index(
+                "[Environment]::SetEnvironmentVariable(\n"
+                "    'EVELYN_INTERNAL_CONTROL_TOKEN',\n"
+                "    $null,"
+            ),
+            script.index("Initialize-EvelynSourceRevision"),
+        )
+        self.assertIn("-Value $localBridgeStatusAuthToken", docker_helper)
+        self.assertIn("-Value $internalControlToken", docker_helper)
+        self.assertIn("Invoke-DockerCommandWithRuntimeChannelTokens", script)
+        self.assertIn("-Value $localBridgeStatusAuthToken", supervisor)
+        self.assertIn("-Name 'EVELYN_INTERNAL_CONTROL_TOKEN'", supervisor)
+        self.assertIn("-Value $null", supervisor)
+        self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", browser)
+        self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", browser)
+        self.assertLess(
+            main.index("-Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN'"),
+            main.index("Assert-TtsProfileReady"),
+        )
+        self.assertLess(
+            main.index("-Name 'EVELYN_INTERNAL_CONTROL_TOKEN'"),
+            main.index("Assert-TtsProfileReady"),
+        )
+        self.assertLess(main.index("Open-ControlPage"), main.index("} finally {"))
 
     def test_local_launcher_uses_path_safe_allowlisted_image_builder(self) -> None:
         launcher = self.read_script("start_local_background.ps1")

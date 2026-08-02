@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from contextvars import ContextVar
+import hmac
+import hashlib
 import json
+import math
 import os
 import random
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -275,6 +279,28 @@ FAST_CONTROL_CONTINUITY_ENABLED = (
     in {"1", "true", "yes", "on"}
 )
 LOCAL_BRIDGE_STALE_AFTER_SEC = max(3.0, float(os.getenv("LOCAL_BRIDGE_STALE_AFTER_SEC", "8.0")))
+LOCAL_BRIDGE_STATUS_AUTH_HEADER = "X-Evelyn-Local-Bridge-Token"
+LOCAL_BRIDGE_STATUS_AUTH_TOKEN = os.getenv(
+    "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
+    "",
+).strip()
+EVELYN_INTERNAL_CONTROL_HEADER = "X-Evelyn-Internal-Control-Token"
+EVELYN_INTERNAL_CONTROL_TOKEN = os.getenv(
+    "EVELYN_INTERNAL_CONTROL_TOKEN",
+    "",
+).strip()
+LOCAL_BRIDGE_AUTH_TOKEN_MIN_LENGTH = 32
+LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC = max(
+    5.0,
+    float(os.getenv("LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC", "30")),
+)
+LOCAL_BRIDGE_STATUS_MAX_BYTES = max(
+    4096,
+    int(os.getenv("LOCAL_BRIDGE_STATUS_MAX_BYTES", "131072")),
+)
+LOCAL_BRIDGE_MIC_ENABLE_FENCE_SCHEMA = (
+    "local_io_bridge.mic-enable-fence.v1"
+)
 FAST_MAIN_LLM_SYSTEM_PROMPT = "\n".join(
     (
         build_evelyn_system_prompt(),
@@ -379,9 +405,18 @@ def save_local_audio_device_state(state: dict[str, Any]) -> None:
 LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST: dict[str, Any] = load_local_audio_device_state()
 LOCAL_BRIDGE_MIC_CONTROL_REQUEST: dict[str, Any] = {
     "revision": 0,
+    "actionId": "",
     "enabled": None,
     "requestedAt": None,
     "source": "",
+    "purpose": "",
+    "bridgeInstanceDigest": "",
+}
+LOCAL_BRIDGE_MIC_CONTROL_ACK_SCHEMA = "local_io_bridge.mic-control-ack.v1"
+LOCAL_BRIDGE_MIC_ENABLE_FENCE: dict[str, Any] = {
+    "schema": LOCAL_BRIDGE_MIC_ENABLE_FENCE_SCHEMA,
+    "epoch": secrets.token_hex(16),
+    "disableGeneration": 0,
 }
 LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST: dict[str, Any] = {
     "revision": 0,
@@ -1614,6 +1649,15 @@ def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
         if raw_error
         else ""
     )
+    raw_mic_control_error = clean_text(snapshot.get("micControlError"))
+    snapshot["micControlError"] = (
+        public_error_code(
+            raw_mic_control_error,
+            fallback="mic_control_failed",
+        )
+        if raw_mic_control_error
+        else ""
+    )
     mic = dict(snapshot.get("mic") or {})
     raw_mic_error = clean_text(mic.get("lastError"))
     if raw_mic_error:
@@ -1640,6 +1684,343 @@ def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
         clean_text(snapshot.get("lastError")) or "local_bridge_stale"
     )
     return snapshot
+
+
+def _configured_control_token(value: Any) -> str:
+    token = str(value or "").strip()
+    if len(token) < LOCAL_BRIDGE_AUTH_TOKEN_MIN_LENGTH:
+        return ""
+    return token
+
+
+def _request_has_control_token(
+    request: web.Request,
+    *,
+    header: str,
+    expected: Any,
+    unauthorized_error: str = "local_bridge_status_unauthorized",
+) -> tuple[bool, str, int]:
+    configured = _configured_control_token(expected)
+    if not configured:
+        return False, "local_bridge_auth_unconfigured", 503
+    provided = str(request.headers.get(header) or "")
+    if not hmac.compare_digest(provided, configured):
+        return False, unauthorized_error, 403
+    return True, "", 200
+
+
+def _strict_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _strict_positive_int(value: Any) -> int | None:
+    parsed = _strict_nonnegative_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def _bounded_status_text(value: Any, *, limit: int = 512) -> str | None:
+    if not isinstance(value, str) or len(value) > limit:
+        return None
+    return value
+
+
+def _mic_action_id(value: Any, *, allow_empty: bool = False) -> str | None:
+    if value == "" and allow_empty:
+        return ""
+    if not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{32}", value) is None:
+        return None
+    return value
+
+
+_LOCAL_BRIDGE_STATUS_PASSTHROUGH_FIELDS = frozenset(
+    {
+        "activePlaybackOwner",
+        "botApiBase",
+        "device",
+        "errorCount",
+        "errorCounters",
+        "hostUiAction",
+        "hostVision",
+        "inputStreamingTts",
+        "lastError",
+        "lastErrorAt",
+        "lastErrorCode",
+        "lastErrorType",
+        "lastLatency",
+        "lastTtsPlayback",
+        "minecraftCommandError",
+        "minecraftCommandResult",
+        "minecraftCommandRevision",
+        "minecraftCommandState",
+        "mode",
+        "outputDevice",
+        "outputDevices",
+        "outputErrorCode",
+        "outputFormat",
+        "outputReady",
+        "playCount",
+        "playbackCancelRequested",
+        "segmentCount",
+        "speaking",
+        "sttUrl",
+        "streamingTts",
+        "transcriptCount",
+        "ttsUrl",
+        "ttsWarmup",
+        "voiceAdmission",
+    }
+)
+
+
+def _normalize_local_bridge_status(
+    payload: Any,
+    *,
+    now: float,
+) -> dict[str, Any] | None:
+    """Validate the authoritative heartbeat and return an allowlisted copy."""
+    if not isinstance(payload, dict):
+        return None
+    required = {
+        "schema",
+        "statusSeq",
+        "heartbeatAt",
+        "pid",
+        "bridgeInstanceId",
+        "startedAt",
+        "enabled",
+        "ready",
+        "micEnabled",
+        "micControlRevision",
+        "micControlActionId",
+        "micControlPendingRevision",
+        "micControlPendingActionId",
+        "micControlState",
+        "micControlDesiredEnabled",
+        "micControlError",
+        "micCaptureStopped",
+        "mic",
+    }
+    if not required.issubset(payload):
+        return None
+    if payload.get("schema") != "local_io_bridge.status.v1":
+        return None
+    status_seq = _strict_positive_int(payload.get("statusSeq"))
+    heartbeat_at = _finite_number(payload.get("heartbeatAt"))
+    started_at = _finite_number(payload.get("startedAt"))
+    pid = _strict_positive_int(payload.get("pid"))
+    bridge_instance_id = _mic_action_id(payload.get("bridgeInstanceId"))
+    if (
+        status_seq is None
+        or heartbeat_at is None
+        or started_at is None
+        or started_at <= 0
+        or pid is None
+        or bridge_instance_id is None
+        or abs(now - heartbeat_at) > LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC
+        or started_at > heartbeat_at + LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC
+    ):
+        return None
+    boolean_fields = (
+        "enabled",
+        "ready",
+        "micEnabled",
+        "micControlDesiredEnabled",
+        "micCaptureStopped",
+    )
+    if any(type(payload.get(field)) is not bool for field in boolean_fields):
+        return None
+    if payload.get("enabled") is not True:
+        return None
+    revision = _strict_nonnegative_int(payload.get("micControlRevision"))
+    pending_revision = _strict_nonnegative_int(
+        payload.get("micControlPendingRevision")
+    )
+    if revision is None or pending_revision is None:
+        return None
+    action_id = _mic_action_id(
+        payload.get("micControlActionId"),
+        allow_empty=revision == 0,
+    )
+    pending_action_id = _mic_action_id(
+        payload.get("micControlPendingActionId"),
+        allow_empty=pending_revision == 0,
+    )
+    if (
+        action_id is None
+        or pending_action_id is None
+        or (revision == 0 and action_id != "")
+        or (pending_revision == 0 and pending_action_id != "")
+        or (pending_revision > 0 and pending_revision <= revision)
+    ):
+        return None
+    control_state = _bounded_status_text(
+        payload.get("micControlState"),
+        limit=16,
+    )
+    if control_state not in {"idle", "applying", "applied", "failed"}:
+        return None
+    control_error = _bounded_status_text(
+        payload.get("micControlError"),
+        limit=80,
+    )
+    if control_error is None or (
+        control_error
+        and re.fullmatch(r"[a-z0-9_.-]{1,80}", control_error) is None
+    ):
+        return None
+    mic = payload.get("mic")
+    if not isinstance(mic, dict):
+        return None
+    mic_required = {
+        "enabled",
+        "captureReady",
+        "captureActive",
+        "captureStopped",
+    }
+    if not mic_required.issubset(mic) or any(
+        type(mic.get(field)) is not bool for field in mic_required
+    ):
+        return None
+    if (
+        mic.get("enabled") is not payload.get("micEnabled")
+        or mic.get("captureStopped") is not payload.get("micCaptureStopped")
+        or (
+            payload.get("micEnabled") is False
+            and (
+                mic.get("captureReady") is not False
+                or mic.get("captureActive") is not False
+                or mic.get("captureStopped") is not True
+            )
+        )
+        or (
+            mic.get("captureStopped") is True
+            and (
+                mic.get("captureReady") is not False
+                or mic.get("captureActive") is not False
+            )
+        )
+    ):
+        return None
+
+    # Preserve known operational evidence only. Unknown fields never become
+    # authoritative merely because a reporter included them.
+    normalized = {
+        key: value
+        for key, value in payload.items()
+        if key in _LOCAL_BRIDGE_STATUS_PASSTHROUGH_FIELDS
+    }
+    mic_allowlist = {
+        "captureActive",
+        "captureReady",
+        "captureStopped",
+        "continueThreshold",
+        "discardedPendingSegmentCount",
+        "enabled",
+        "envNoiseFilterEnabled",
+        "inputBlockCount",
+        "lastInputAgeSec",
+        "lastInputLevel",
+        "lastInputStatus",
+        "lastRejectedReason",
+        "lastSegmentFilter",
+        "maxInputLevel",
+        "minVoicedMs",
+        "rejectedSegmentCount",
+        "startThreshold",
+        "suppressedSegmentCount",
+        "ttsInputSuppressRemainingMs",
+        "ttsInputSuppressed",
+        "vadFilterEnabled",
+        "waveformFilterEnabled",
+    }
+    normalized_mic = {
+        key: value for key, value in mic.items() if key in mic_allowlist
+    }
+    normalized.update(
+        {
+            "schema": "local_io_bridge.status.v1",
+            "statusSeq": status_seq,
+            "heartbeatAt": heartbeat_at,
+            "pid": pid,
+            "bridgeInstanceId": bridge_instance_id,
+            "startedAt": started_at,
+            "enabled": True,
+            "ready": payload["ready"],
+            "micEnabled": payload["micEnabled"],
+            "micControlRevision": revision,
+            "micControlActionId": action_id,
+            "micControlPendingRevision": pending_revision,
+            "micControlPendingActionId": pending_action_id,
+            "micControlState": control_state,
+            "micControlDesiredEnabled": payload[
+                "micControlDesiredEnabled"
+            ],
+            "micControlError": control_error,
+            "micCaptureStopped": payload["micCaptureStopped"],
+            "mic": normalized_mic,
+        }
+    )
+    return normalized
+
+
+def _local_bridge_status_order_is_valid(
+    candidate: dict[str, Any],
+) -> bool:
+    current_instance = clean_text(LOCAL_BRIDGE_STATUS.get("bridgeInstanceId"))
+    if not current_instance:
+        return True
+    candidate_instance = clean_text(candidate.get("bridgeInstanceId"))
+    if candidate_instance == current_instance:
+        return bool(
+            candidate.get("pid") == LOCAL_BRIDGE_STATUS.get("pid")
+            and candidate.get("startedAt") == LOCAL_BRIDGE_STATUS.get("startedAt")
+            and int(candidate.get("statusSeq") or 0)
+            > int(LOCAL_BRIDGE_STATUS.get("statusSeq") or 0)
+        )
+    # A new process generation must be provably newer. Staleness alone is not
+    # sufficient because a delayed heartbeat from a retired process can arrive.
+    current_started_at = _finite_number(LOCAL_BRIDGE_STATUS.get("startedAt"))
+    candidate_started_at = _finite_number(candidate.get("startedAt"))
+    return bool(
+        current_started_at is not None
+        and candidate_started_at is not None
+        and candidate_started_at > current_started_at
+    )
+
+
+def local_bridge_mic_enable_fence_snapshot() -> dict[str, Any]:
+    return dict(LOCAL_BRIDGE_MIC_ENABLE_FENCE)
+
+
+def _mic_enable_fence_is_well_formed(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "epoch",
+        "disableGeneration",
+    }:
+        return False
+    generation = _strict_nonnegative_int(value.get("disableGeneration"))
+    return bool(
+        value.get("schema") == LOCAL_BRIDGE_MIC_ENABLE_FENCE_SCHEMA
+        and _mic_action_id(value.get("epoch")) is not None
+        and generation is not None
+    )
+
+
+def _mic_enable_fence_matches(value: Any) -> bool:
+    return bool(
+        _mic_enable_fence_is_well_formed(value)
+        and value == LOCAL_BRIDGE_MIC_ENABLE_FENCE
+    )
 
 
 def queue_local_bridge_speech(text: str, *, source: str = "control_page") -> dict[str, Any] | None:
@@ -1706,20 +2087,156 @@ def set_local_bridge_output_device(output_device: str, *, source: str = "control
     return dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
 
 
-def request_local_bridge_mic_control(enabled: bool, *, source: str = "control_page") -> dict[str, Any]:
+def _local_bridge_instance_digest(value: Any) -> str:
+    bridge_instance_id = clean_text(value)
+    if not bridge_instance_id:
+        return ""
+    return hashlib.sha256(bridge_instance_id.encode("utf-8")).hexdigest()
+
+
+def request_local_bridge_mic_control(
+    enabled: bool,
+    *,
+    source: str = "control_page",
+    purpose: str = "",
+    enable_fence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if enabled:
+        if clean_text(purpose) != "voice_capture_consent":
+            raise PermissionError("mic_enable_not_authorized")
+        if not _mic_enable_fence_is_well_formed(enable_fence):
+            raise PermissionError("mic_enable_not_authorized")
+        if not _mic_enable_fence_matches(enable_fence):
+            raise PermissionError("mic_enable_fence_stale")
+    else:
+        LOCAL_BRIDGE_MIC_ENABLE_FENCE["disableGeneration"] = (
+            int(LOCAL_BRIDGE_MIC_ENABLE_FENCE["disableGeneration"]) + 1
+        )
     if not enabled:
         LOCAL_VOICE_ADMISSION.reset("mic_disabled")
     current_revision = int(LOCAL_BRIDGE_MIC_CONTROL_REQUEST.get("revision") or 0)
-    revision = max(current_revision + 1, int(time.time() * 1000))
+    observed_revision = _strict_nonnegative_int(
+        LOCAL_BRIDGE_STATUS.get("micControlRevision")
+    )
+    revision = max(current_revision, observed_revision or 0) + 1
+    bridge_instance_digest = _local_bridge_instance_digest(
+        LOCAL_BRIDGE_STATUS.get("bridgeInstanceId")
+    )
     LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
         {
             "revision": revision,
+            "actionId": secrets.token_hex(16),
             "enabled": bool(enabled),
             "requestedAt": time.time(),
             "source": clean_text(source) or "control_page",
+            "purpose": clean_text(purpose) if enabled else "",
+            "bridgeInstanceDigest": bridge_instance_digest,
         }
     )
     return dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
+
+
+def _local_bridge_mic_control_observation(
+    request: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """Return pending/failed/applied with an exact, content-free receipt."""
+    snapshot = local_bridge_status_snapshot()
+    revision = request.get("revision")
+    action_id = request.get("actionId")
+    observed_revision = snapshot.get("micControlRevision")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or not isinstance(observed_revision, int)
+        or isinstance(observed_revision, bool)
+    ):
+        return "failed", snapshot, None
+    desired_enabled = request.get("enabled")
+    target_digest = clean_text(request.get("bridgeInstanceDigest"))
+    current_digest = _local_bridge_instance_digest(
+        LOCAL_BRIDGE_STATUS.get("bridgeInstanceId")
+    )
+    if (
+        revision <= 0
+        or _mic_action_id(action_id) is None
+        or not isinstance(desired_enabled, bool)
+        or len(target_digest) != 64
+        or any(char not in "0123456789abcdef" for char in target_digest)
+        or current_digest != target_digest
+    ):
+        return "failed", snapshot, None
+    current_request = LOCAL_BRIDGE_MIC_CONTROL_REQUEST
+    if any(
+        (
+            current_request.get("revision") != revision,
+            current_request.get("actionId") != action_id,
+            current_request.get("enabled") is not desired_enabled,
+            clean_text(current_request.get("bridgeInstanceDigest"))
+            != target_digest,
+        )
+    ):
+        return "failed", snapshot, None
+    if observed_revision > revision:
+        return "failed", snapshot, None
+    if observed_revision < revision:
+        return "pending", snapshot, None
+    if snapshot.get("micControlActionId") != action_id:
+        return "failed", snapshot, None
+
+    control_state = clean_text(snapshot.get("micControlState")).lower()
+    control_error = clean_text(snapshot.get("micControlError"))
+    if control_state == "failed":
+        return "failed", snapshot, None
+    if control_state != "applied":
+        return "pending", snapshot, None
+    if (
+        snapshot.get("micControlDesiredEnabled") is not desired_enabled
+        or control_error
+        or snapshot.get("stale") is not False
+        or snapshot.get("enabled") is not True
+    ):
+        return "failed", snapshot, None
+
+    mic = snapshot.get("mic")
+    if not isinstance(mic, dict):
+        return "failed", snapshot, None
+    if desired_enabled:
+        capture_stopped = False
+        verified = (
+            snapshot.get("micEnabled") is True
+            and snapshot.get("ready") is True
+            and snapshot.get("micCaptureStopped") is False
+            and mic.get("enabled") is True
+            and mic.get("captureReady") is True
+            and mic.get("captureStopped") is False
+        )
+    else:
+        capture_stopped = True
+        verified = (
+            snapshot.get("micEnabled") is False
+            and snapshot.get("micCaptureStopped") is True
+            and mic.get("enabled") is False
+            and mic.get("captureReady") is False
+            and mic.get("captureActive") is False
+            and mic.get("captureStopped") is True
+        )
+    if not verified:
+        return "failed", snapshot, None
+
+    return (
+        "applied",
+        snapshot,
+        {
+            "schema": LOCAL_BRIDGE_MIC_CONTROL_ACK_SCHEMA,
+            "actionId": action_id,
+            "requestRevision": revision,
+            "observedRevision": observed_revision,
+            "enabled": desired_enabled,
+            "bridgeInstanceDigest": target_digest,
+            "state": "applied",
+            "captureStopped": capture_stopped,
+        },
+    )
 
 
 async def wait_for_local_bridge_mic_control(
@@ -1727,14 +2244,45 @@ async def wait_for_local_bridge_mic_control(
     *,
     timeout_sec: float = 4.0,
 ) -> dict[str, Any]:
-    revision = int(request.get("revision") or 0)
-    desired_enabled = bool(request.get("enabled"))
+    if not clean_text(request.get("bridgeInstanceDigest")):
+        return {
+            "applied": False,
+            "request": dict(request),
+            "localBridge": local_bridge_status_snapshot(),
+            "error": "mic_control_bridge_unavailable",
+        }
     deadline = time.monotonic() + max(0.1, float(timeout_sec))
     while time.monotonic() < deadline:
-        snapshot = local_bridge_status_snapshot()
-        applied_revision = int(snapshot.get("micControlRevision") or 0)
-        if applied_revision >= revision and bool(snapshot.get("micEnabled")) == desired_enabled:
-            return {"applied": True, "request": dict(request), "localBridge": snapshot}
+        state, snapshot, ack = _local_bridge_mic_control_observation(request)
+        if state == "applied" and ack is not None:
+            return {
+                "applied": True,
+                "request": dict(request),
+                "ack": ack,
+                "localBridge": snapshot,
+            }
+        if state == "failed":
+            current = LOCAL_BRIDGE_MIC_CONTROL_REQUEST
+            superseded = any(
+                (
+                    current.get("revision") != request.get("revision"),
+                    current.get("actionId") != request.get("actionId"),
+                    current.get("enabled") is not request.get("enabled"),
+                    snapshot.get("micControlRevision", 0)
+                    > request.get("revision", 0),
+                )
+            )
+            return {
+                "applied": False,
+                "request": dict(request),
+                "localBridge": snapshot,
+                "error": (
+                    "mic_control_superseded"
+                    if superseded
+                    else clean_text(snapshot.get("micControlError"))
+                    or "mic_control_ack_invalid"
+                ),
+            }
         await asyncio.sleep(0.05)
     return {
         "applied": False,
@@ -1745,7 +2293,12 @@ async def wait_for_local_bridge_mic_control(
 
 
 async def execute_local_bridge_mic_control(enabled: bool, *, source: str) -> str:
-    request = request_local_bridge_mic_control(enabled, source=source)
+    if enabled:
+        return (
+            "마이크 입력은 음성 검증 화면에서 청취 동의를 확인한 뒤에만 "
+            "켤 수 있어."
+        )
+    request = request_local_bridge_mic_control(False, source=source)
     result = await wait_for_local_bridge_mic_control(request)
     snapshot = dict(result.get("localBridge") or {})
     if not result.get("applied"):
@@ -4998,32 +5551,75 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 async def local_bridge_status_handler(request: web.Request) -> web.StreamResponse:
     speak_requests: list[dict[str, Any]] = []
     if request.method == "POST":
+        authorized, error, status = _request_has_control_token(
+            request,
+            header=LOCAL_BRIDGE_STATUS_AUTH_HEADER,
+            expected=LOCAL_BRIDGE_STATUS_AUTH_TOKEN,
+        )
+        if not authorized:
+            return json_response({"ok": False, "error": error}, status=status)
+        if (
+            request.content_length is not None
+            and request.content_length > LOCAL_BRIDGE_STATUS_MAX_BYTES
+        ):
+            return json_response(
+                {"ok": False, "error": "invalid_local_bridge_status"},
+                status=413,
+            )
         try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict):
-            bridge_instance_id = payload.get("bridgeInstanceId")
-            if bridge_instance_id:
-                LOCAL_VOICE_ADMISSION.observe_bridge_instance(
-                    bridge_instance_id
-                )
-            mic = payload.get("mic")
-            if payload.get("micEnabled") is False or (
-                isinstance(mic, dict) and mic.get("enabled") is False
-            ):
-                LOCAL_VOICE_ADMISSION.reset("mic_disabled")
-            LOCAL_BRIDGE_STATUS.update(payload)
-            try:
-                minecraft_revision = int(payload.get("minecraftCommandRevision") or 0)
-            except (TypeError, ValueError):
-                minecraft_revision = 0
-            minecraft_state = clean_text(payload.get("minecraftCommandState")).lower()
-            if minecraft_revision and minecraft_state in {"ready", "failed"}:
-                clear_local_bridge_minecraft_command_request(minecraft_revision)
-        LOCAL_BRIDGE_STATUS["enabled"] = True
-        LOCAL_BRIDGE_STATUS["updatedAt"] = time.time()
+            raw_payload = await request.read()
+            if len(raw_payload) > LOCAL_BRIDGE_STATUS_MAX_BYTES:
+                raise ValueError("status_payload_too_large")
+            payload = json.loads(raw_payload.decode("utf-8"))
+        except (UnicodeError, ValueError, TypeError, RecursionError):
+            return json_response(
+                {"ok": False, "error": "invalid_local_bridge_status"},
+                status=400,
+            )
+        accepted_at = time.time()
+        normalized = _normalize_local_bridge_status(
+            payload,
+            now=accepted_at,
+        )
+        if normalized is None:
+            return json_response(
+                {"ok": False, "error": "invalid_local_bridge_status"},
+                status=400,
+            )
+        if not _local_bridge_status_order_is_valid(normalized):
+            return json_response(
+                {
+                    "ok": False,
+                    "error": "local_bridge_status_out_of_order",
+                },
+                status=409,
+            )
+        # Replace the complete authoritative snapshot. A partial or delayed
+        # report can never inherit fields/freshness from a previous heartbeat.
+        LOCAL_BRIDGE_STATUS.clear()
+        LOCAL_BRIDGE_STATUS.update(normalized)
+        LOCAL_BRIDGE_STATUS["updatedAt"] = accepted_at
+        bridge_instance_id = normalized["bridgeInstanceId"]
+        LOCAL_VOICE_ADMISSION.observe_bridge_instance(bridge_instance_id)
+        if normalized["micEnabled"] is False:
+            LOCAL_VOICE_ADMISSION.reset("mic_disabled")
+        minecraft_revision = _strict_nonnegative_int(
+            normalized.get("minecraftCommandRevision")
+        ) or 0
+        minecraft_state = clean_text(
+            normalized.get("minecraftCommandState")
+        ).lower()
+        if minecraft_revision and minecraft_state in {"ready", "failed"}:
+            clear_local_bridge_minecraft_command_request(minecraft_revision)
         speak_requests = drain_local_bridge_speak_requests()
+    else:
+        authorized, error, status = _request_has_control_token(
+            request,
+            header=EVELYN_INTERNAL_CONTROL_HEADER,
+            expected=EVELYN_INTERNAL_CONTROL_TOKEN,
+        )
+        if not authorized:
+            return json_response({"ok": False, "error": error}, status=status)
     return json_response(
         {
             "ok": True,
@@ -5042,33 +5638,76 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
 
 
 async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
+    authorized, auth_error, auth_status = _request_has_control_token(
+        request,
+        header=EVELYN_INTERNAL_CONTROL_HEADER,
+        expected=EVELYN_INTERNAL_CONTROL_TOKEN,
+        unauthorized_error="mic_control_unauthorized",
+    )
+    if not authorized:
+        return json_response(
+            {"ok": False, "error": auth_error},
+            status=auth_status,
+        )
     if request.method == "GET":
         return json_response(
             {
                 "ok": True,
                 "request": dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST),
                 "localBridge": local_bridge_status_snapshot(),
+                "enableFence": local_bridge_mic_enable_fence_snapshot(),
             }
         )
     try:
         payload = await request.json()
     except Exception:
         return json_response({"ok": False, "error": "invalid_json"}, status=400)
-    value = (payload or {}).get("enabled")
+    if not isinstance(payload, dict):
+        return json_response(
+            {"ok": False, "error": "json_object_required"},
+            status=400,
+        )
+    if not set(payload).issubset(
+        {"enabled", "source", "purpose", "enableFence"}
+    ):
+        return json_response(
+            {"ok": False, "error": "invalid_mic_control_fields"},
+            status=400,
+        )
+    value = payload.get("enabled")
     if not isinstance(value, bool):
-        action = clean_text((payload or {}).get("action")).lower()
-        if action in {"on", "enable", "start"}:
-            value = True
-        elif action in {"off", "disable", "stop"}:
-            value = False
-        else:
-            return json_response({"ok": False, "error": "missing_mic_enabled"}, status=400)
+        return json_response(
+            {"ok": False, "error": "missing_mic_enabled"},
+            status=400,
+        )
     if value is False:
         LOCAL_VOICE_ADMISSION.reset("mic_disabled")
-    request_state = request_local_bridge_mic_control(
-        value,
-        source=clean_text((payload or {}).get("source")) or "control_page",
-    )
+    purpose = clean_text(payload.get("purpose"))
+    source = clean_text(payload.get("source")) or "control_page"
+    if len(source) > 128:
+        return json_response(
+            {"ok": False, "error": "invalid_mic_control_source"},
+            status=400,
+        )
+    try:
+        request_state = request_local_bridge_mic_control(
+            value,
+            source=source,
+            purpose=purpose,
+            enable_fence=(
+                payload.get("enableFence")
+                if isinstance(payload.get("enableFence"), dict)
+                else None
+            ),
+        )
+    except PermissionError as exc:
+        error = clean_text(exc) or "mic_enable_not_authorized"
+        return json_response(
+            {"ok": False, "applied": False, "error": error},
+            status=(
+                409 if error == "mic_enable_fence_stale" else 403
+            ),
+        )
     result = await wait_for_local_bridge_mic_control(request_state)
     return json_response(
         {"ok": bool(result.get("applied")), **result},

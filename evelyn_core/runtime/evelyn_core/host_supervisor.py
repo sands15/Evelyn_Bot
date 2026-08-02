@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .host_supervisor_client import (
     ALLOWED_HOST_ACTIONS,
+    LOCAL_BRIDGE_RESTART_EXIT_CODE,
     SUPERVISOR_REQUEST_SCHEMA,
     SUPERVISOR_RESPONSE_SCHEMA,
     SUPERVISOR_STATUS_SCHEMA,
@@ -43,6 +44,10 @@ AUTO_RESTART_LIMIT = 3
 AUTO_RESTART_WINDOW_SEC = 10 * 60
 HEARTBEAT_INTERVAL_SEC = 1.0
 _REQUEST_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,96}$")
+_CREDENTIAL_ENV_PATTERN = re.compile(
+    r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
+    re.IGNORECASE,
+)
 BRIDGE_PROCESS_IDENTITY_SCHEMA = (
     "host_supervisor.local-bridge-process-identity.v1"
 )
@@ -323,7 +328,9 @@ class HostSupervisor:
         ]
 
     def _bridge_environment(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env = self._credential_scoped_environment(
+            allowed_credentials={"LOCAL_BRIDGE_STATUS_AUTH_TOKEN"}
+        )
         runtime_root = self.project_root / "evelyn_core" / "runtime"
         existing_python_path = str(env.get("PYTHONPATH") or "").strip()
         env["PYTHONPATH"] = (
@@ -339,6 +346,18 @@ class HostSupervisor:
         env.setdefault("STT_SERVICE_URL", "http://127.0.0.1:8892")
         env.setdefault("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880")
         return env
+
+    @staticmethod
+    def _credential_scoped_environment(
+        *,
+        allowed_credentials: set[str] | None = None,
+    ) -> dict[str, str]:
+        allowed = {name.upper() for name in (allowed_credentials or set())}
+        return {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in allowed or not _CREDENTIAL_ENV_PATTERN.search(name)
+        }
 
     def start_bridge(self, *, automatic: bool = False) -> dict[str, Any]:
         if self.child is not None:
@@ -609,8 +628,66 @@ class HostSupervisor:
             profile,
             "up",
             "-d",
+            "--no-deps",
             service,
         ]
+
+    def _docker_action_environment(self, action_id: str) -> dict[str, str]:
+        allowed = {"DISCORD_BOT_TOKEN"} if action_id == "start_discord_bot" else set()
+        env = self._credential_scoped_environment(allowed_credentials=allowed)
+        if action_id != "start_discord_bot":
+            env["DISCORD_BOT_TOKEN"] = "local-only-disabled"
+        return env
+
+    def _restart_handoff_environment(self) -> dict[str, str]:
+        return self._credential_scoped_environment(
+            allowed_credentials={
+                "DISCORD_BOT_TOKEN",
+                "EVELYN_CODEX_CREDENTIALS_DIR",
+            }
+        )
+
+    def _start_restart_handoff(self) -> dict[str, Any]:
+        stop_script = (
+            self.project_root
+            / "evelyn_core"
+            / "runtime"
+            / "launchers"
+            / "stop_evelyn_local.ps1"
+        )
+        start_script = self.project_root / "evelyn_core" / "start_local.bat"
+        if not stop_script.is_file() or not start_script.is_file():
+            return {"ok": False, "error": "local_restart_launcher_unavailable"}
+        stop_literal = str(stop_script).replace("'", "''")
+        start_literal = str(start_script).replace("'", "''")
+        restart_script = (
+            "$ErrorActionPreference = 'Continue'; "
+            f"& '{stop_literal}' -DelayMs 200; "
+            "Start-Sleep -Seconds 2; "
+            f"& '{start_literal}' --background"
+        )
+        try:
+            self.popen(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    restart_script,
+                ],
+                cwd=str(self.project_root),
+                env=self._restart_handoff_environment(),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                ),
+            )
+        except Exception as exc:
+            self.runtime_errors.record("local_restart_handoff_failed", exc)
+            return {"ok": False, "error": "local_restart_handoff_failed"}
+        return {"ok": True, "status": "restart_handoff_started"}
 
     def _execute_action(self, action_id: str) -> dict[str, Any]:
         if action_id == "restart_local_bridge":
@@ -626,6 +703,7 @@ class HostSupervisor:
                 text=True,
                 timeout=120,
                 check=False,
+                env=self._docker_action_environment(action_id),
             )
         except Exception as exc:
             self.runtime_errors.record("host_action_launch_failed", exc)
@@ -837,6 +915,22 @@ class HostSupervisor:
             self.runtime_errors.record(self.last_error)
             return
         if self._stopping:
+            return
+        if self.child_exit_code == LOCAL_BRIDGE_RESTART_EXIT_CODE:
+            result = self._start_restart_handoff()
+            self.last_action = {
+                "actionId": "restart_evelyn_local",
+                "at": self.now(),
+                "ok": bool(result.get("ok")),
+                "error": result.get("error"),
+            }
+            if result.get("ok"):
+                self._stopping = True
+            else:
+                self.manual_intervention_required = True
+                self.last_error = str(
+                    result.get("error") or "local_restart_handoff_failed"
+                )
             return
         self.runtime_errors.record("local_bridge_unexpected_exit")
         validation_context = active_validation_context(

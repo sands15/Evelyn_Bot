@@ -1,5 +1,28 @@
 $ErrorActionPreference = 'Stop'
 
+$previousLocalBridgeStatusAuthToken = [Environment]::GetEnvironmentVariable(
+    'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
+$previousInternalControlToken = [Environment]::GetEnvironmentVariable(
+    'EVELYN_INTERNAL_CONTROL_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
+try {
+# Strip inherited channel credentials before even the source-revision Git
+# probes can create a child. Narrow helpers below reintroduce only the exact
+# credential required by an authorized child at process-creation time.
+[Environment]::SetEnvironmentVariable(
+    'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+[Environment]::SetEnvironmentVariable(
+    'EVELYN_INTERNAL_CONTROL_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+
 $projectRoot = if ($env:EVELYN_PROJECT_ROOT) { Resolve-Path $env:EVELYN_PROJECT_ROOT } else { Resolve-Path (Join-Path $PSScriptRoot '..\..\..') }
 $projectRoot = [string]$projectRoot
 $sourceRevisionHelper = Join-Path $PSScriptRoot 'source_revision.ps1'
@@ -18,6 +41,7 @@ $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
 $logDir = Join-Path $projectRoot 'runtime_artifacts\logs\background_start'
 $supervisorLog = Join-Path $logDir 'Host-Supervisor.log'
 $supervisorStatus = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\status.json'
+$supervisorStopRequest = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\stop.request'
 $localBridgeStatus = Join-Path $projectRoot 'runtime_artifacts\local_bridge\status.json'
 $dockerImageBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
 $minecraftOwnerClaim = Join-Path $projectRoot 'runtime_artifacts\minecraft_world_lease\owner_claim.json'
@@ -33,6 +57,34 @@ $env:EVELYN_HOST_PROJECT_ROOT = $projectRoot
 $env:EVELYN_OMNIVOICE_PROFILES_DIR = $ttsProfilesRoot
 if ([string]::IsNullOrWhiteSpace($env:DISCORD_BOT_TOKEN)) {
     $env:DISCORD_BOT_TOKEN = 'local-only-disabled'
+}
+
+function New-SecureRuntimeToken {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+$localBridgeStatusAuthToken = if (
+    -not [string]::IsNullOrWhiteSpace($previousLocalBridgeStatusAuthToken) -and
+    $previousLocalBridgeStatusAuthToken.Trim().Length -ge 32
+) {
+    $previousLocalBridgeStatusAuthToken.Trim()
+} else {
+    New-SecureRuntimeToken
+}
+$internalControlToken = if (
+    -not [string]::IsNullOrWhiteSpace($previousInternalControlToken) -and
+    $previousInternalControlToken.Trim().Length -ge 32
+) {
+    $previousInternalControlToken.Trim()
+} else {
+    New-SecureRuntimeToken
 }
 
 if (Test-Path $stopMarker) {
@@ -336,6 +388,47 @@ function Invoke-DockerCommand {
     }
 }
 
+function Set-ProcessEnvironmentVariable {
+    param(
+        [string]$Name,
+        [AllowNull()][string]$Value
+    )
+    [Environment]::SetEnvironmentVariable(
+        $Name,
+        $Value,
+        [EnvironmentVariableTarget]::Process
+    )
+}
+
+function Invoke-DockerCommandWithRuntimeChannelTokens {
+    param([string[]]$Arguments)
+
+    $previousReporter = [Environment]::GetEnvironmentVariable(
+        'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousInternal = [Environment]::GetEnvironmentVariable(
+        'EVELYN_INTERNAL_CONTROL_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    try {
+        Set-ProcessEnvironmentVariable `
+            -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+            -Value $localBridgeStatusAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+            -Value $internalControlToken
+        Invoke-DockerCommand -Arguments $Arguments
+    } finally {
+        Set-ProcessEnvironmentVariable `
+            -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+            -Value $previousReporter
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+            -Value $previousInternal
+    }
+}
+
 function Test-DockerContainerRunning {
     param([string]$ContainerName)
 
@@ -420,7 +513,9 @@ function Start-DockerCore {
     }
 
     $composeArgs = $composeBaseArgs + @('up', '-d') + $coreServices
-    Invoke-DockerCommand -Arguments (@('compose') + $composeArgs)
+    Invoke-DockerCommandWithRuntimeChannelTokens -Arguments (
+        @('compose') + $composeArgs
+    )
     Write-Host '[Evelyn] Minecraft services are deferred. Run start_voyager.bat when a Minecraft command is requested.'
 }
 
@@ -434,11 +529,34 @@ function Test-HostSupervisorRunning {
     return [bool]$matches
 }
 
+function Stop-PreviousHostSupervisorGeneration {
+    if (Test-HostSupervisorRunning) {
+        # Every launcher invocation creates (or accepts) one coherent set of
+        # process-scoped channel credentials. Retire an older supervisor tree
+        # before accepting a bridge from the new generation.
+        Write-Host '[Evelyn] Rotating the existing Host Supervisor generation.'
+        New-Item -ItemType Directory -Force -Path (
+            Split-Path -Parent $supervisorStopRequest
+        ) | Out-Null
+        Set-Content -LiteralPath $supervisorStopRequest -Value (
+            'credential generation rotation at ' + (Get-Date).ToString('s')
+        ) -Encoding UTF8 -Force
+        $retireDeadline = (Get-Date).AddSeconds(10)
+        while ((Get-Date) -lt $retireDeadline) {
+            if (-not (Test-HostSupervisorRunning)) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        if (Test-HostSupervisorRunning) {
+            throw 'Existing Host Supervisor did not stop for credential rotation.'
+        }
+    }
+}
+
 function Start-HostSupervisor {
     if (Test-HostSupervisorRunning) {
-        Write-Host '[Evelyn] Windows Host Supervisor is already running.'
-        Wait-HostSupervisorReady -MinimumHeartbeat ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 4)
-        return
+        throw 'A Host Supervisor started concurrently; refusing a duplicate owner.'
     }
 
     $hostPython = Resolve-HostPython
@@ -455,6 +573,9 @@ Set-Location '$projectRoot'
 `$env:OMNIVOICE_SERVER_URL = 'http://127.0.0.1:8880'
 `$env:VISION_SERVICE_URL = 'http://127.0.0.1:8891'
 `$env:EVELYN_RUNTIME_ARTIFACTS_DIR = '$projectRoot\runtime_artifacts'
+# The Windows bridge is a status reporter, not a control-plane caller. Keep
+# the independent Bot API control credential out of the supervisor tree.
+Remove-Item Env:EVELYN_INTERNAL_CONTROL_TOKEN -ErrorAction SilentlyContinue
 if (-not `$env:LOCAL_MIC_START_THRESHOLD) { `$env:LOCAL_MIC_START_THRESHOLD = '0.002' }
 if (-not `$env:LOCAL_MIC_CONTINUE_THRESHOLD) { `$env:LOCAL_MIC_CONTINUE_THRESHOLD = '0.001' }
 if (-not `$env:LOCAL_MIC_MIN_VOICED_MS) { `$env:LOCAL_MIC_MIN_VOICED_MS = '280' }
@@ -471,7 +592,33 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
     } else {
         $false
     }
-    Start-PowerShellWindow -Title 'Evelyn Host Supervisor' -Script $pythonCommand -Visible:$visible
+    $previousReporter = [Environment]::GetEnvironmentVariable(
+        'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousInternal = [Environment]::GetEnvironmentVariable(
+        'EVELYN_INTERNAL_CONTROL_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    try {
+        Set-ProcessEnvironmentVariable `
+            -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+            -Value $localBridgeStatusAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+            -Value $null
+        Start-PowerShellWindow `
+            -Title 'Evelyn Host Supervisor' `
+            -Script $pythonCommand `
+            -Visible:$visible
+    } finally {
+        Set-ProcessEnvironmentVariable `
+            -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+            -Value $previousReporter
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+            -Value $previousInternal
+    }
     Wait-HostSupervisorReady -MinimumHeartbeat $launchStartedAt
 }
 
@@ -494,23 +641,57 @@ function Open-ControlPage {
     Start-Process $controlPageUrl | Out-Null
 }
 
-Assert-TtsProfileReady
-Start-DockerCore
+try {
+    # Keep channel credentials out of every child by default. The two narrow
+    # launch helpers above add only the credential each authorized child needs
+    # for the instant its process environment is captured.
+    Set-ProcessEnvironmentVariable `
+        -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+        -Value $null
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+        -Value $null
 
-Wait-Port -HostName '127.0.0.1' -Port 9820 -Label 'Main-LLM'
-Wait-Port -HostName '127.0.0.1' -Port 9822 -Label 'Router-LLM'
-Wait-Port -HostName '127.0.0.1' -Port 9821 -Label 'Sub-LLM'
-Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS'
-Wait-Port -HostName '127.0.0.1' -Port 8892 -Label 'STT'
-Wait-Port -HostName '127.0.0.1' -Port 8891 -Label 'Vision'
-Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'
-Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'
-Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'
-Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'
-Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'
+    Assert-TtsProfileReady
+    Stop-PreviousHostSupervisorGeneration
+    Start-DockerCore
 
-Start-HostSupervisor
+    Wait-Port -HostName '127.0.0.1' -Port 9820 -Label 'Main-LLM'
+    Wait-Port -HostName '127.0.0.1' -Port 9822 -Label 'Router-LLM'
+    Wait-Port -HostName '127.0.0.1' -Port 9821 -Label 'Sub-LLM'
+    Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS'
+    Wait-Port -HostName '127.0.0.1' -Port 8892 -Label 'STT'
+    Wait-Port -HostName '127.0.0.1' -Port 8891 -Label 'Vision'
+    Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'
+    Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'
+    Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'
+    Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'
+    Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'
 
-Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"
-Write-Host "[Evelyn] Windows Host Supervisor log: $supervisorLog"
-Open-ControlPage
+    Start-HostSupervisor
+
+    Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"
+    Write-Host "[Evelyn] Windows Host Supervisor log: $supervisorLog"
+    Open-ControlPage
+} finally {
+    Set-ProcessEnvironmentVariable `
+        -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
+        -Value $previousLocalBridgeStatusAuthToken
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
+        -Value $previousInternalControlToken
+}
+} finally {
+    # This outer boundary also covers failures before helper functions or the
+    # main launch block have been defined (for example a dirty-source error).
+    [Environment]::SetEnvironmentVariable(
+        'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
+        $previousLocalBridgeStatusAuthToken,
+        [EnvironmentVariableTarget]::Process
+    )
+    [Environment]::SetEnvironmentVariable(
+        'EVELYN_INTERNAL_CONTROL_TOKEN',
+        $previousInternalControlToken,
+        [EnvironmentVariableTarget]::Process
+    )
+}

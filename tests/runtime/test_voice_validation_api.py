@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 
@@ -62,6 +64,10 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             root=Path(self.temp_dir.name),
             owner_nonce="test-control-page",
         )
+        recovery = self.consent_manager.begin_revoke(reason="test_setup")
+        self.assertTrue(recovery["controlRequired"], recovery)
+        seeded = self.consent_manager.finish_revoke(applied=True)
+        self.assertTrue(seeded["ok"], seeded)
         self.manager_patch = patch.object(
             control_page_server,
             "get_voice_validation_manager",
@@ -113,19 +119,59 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def mic_control_result(enabled, *, source):
-        del source
+        revision = 101 if enabled else 102
+        action_id = "cd" * 16
+        bridge_digest = "ab" * 32
+        capture_stopped = not bool(enabled)
         return {
             "ok": True,
             "applied": True,
+            "httpStatus": 200,
+            "request": {
+                "revision": revision,
+                "actionId": action_id,
+                "enabled": bool(enabled),
+                "source": source,
+                "bridgeInstanceDigest": bridge_digest,
+            },
+            "ack": {
+                "schema": "local_io_bridge.mic-control-ack.v1",
+                "actionId": action_id,
+                "requestRevision": revision,
+                "observedRevision": revision,
+                "enabled": bool(enabled),
+                "bridgeInstanceDigest": bridge_digest,
+                "state": "applied",
+                "captureStopped": capture_stopped,
+            },
             "localBridge": {
+                "enabled": True,
                 "ready": True,
                 "micEnabled": bool(enabled),
+                "micControlRevision": revision,
+                "micControlActionId": action_id,
+                "micControlPendingRevision": 0,
+                "micControlPendingActionId": "",
+                "micControlState": "applied",
+                "micControlDesiredEnabled": bool(enabled),
+                "micControlError": "",
+                "micCaptureStopped": capture_stopped,
+                "stale": False,
+                "lastError": "",
                 "mic": {
                     "enabled": bool(enabled),
                     "captureReady": bool(enabled),
+                    "captureActive": bool(enabled),
+                    "captureStopped": capture_stopped,
                 },
             },
         }
+
+    @classmethod
+    def mic_control_without_exact_ack(cls, enabled, *, source):
+        result = cls.mic_control_result(enabled, source=source)
+        result.pop("ack")
+        return result
 
     def headers(self):
         return {
@@ -581,6 +627,278 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             [True, False],
         )
 
+    async def test_preview_from_idle_cannot_enable_during_discord_session(self):
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+        self.assertEqual(preview_response.status, 200)
+
+        started_response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["discord"]},
+        )
+        self.assertEqual(started_response.status, 201)
+
+        applied_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        applied = await applied_response.json()
+
+        self.assertEqual(applied_response.status, 409)
+        self.assertEqual(
+            applied["error"],
+            "voice_capture_confirm_token_stale",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.mic_control.assert_not_awaited()
+
+    async def test_discord_start_revokes_capture_applied_while_idle(self):
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+        applied_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        self.assertEqual(applied_response.status, 200)
+
+        started_response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["discord"]},
+        )
+
+        self.assertEqual(started_response.status, 201)
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_validation_mutation_exceptions_force_capture_off(self):
+        session = self.start_manager_session()
+        cases = (
+            (
+                "confirm",
+                "/api/control-page/voice-validation/confirm",
+                {
+                    "sessionId": session["sessionId"],
+                    "stepId": session["currentStep"]["id"],
+                    "heard": True,
+                },
+            ),
+            (
+                "retry",
+                "/api/control-page/voice-validation/retry",
+                {
+                    "sessionId": session["sessionId"],
+                    "stepId": session["currentStep"]["id"],
+                },
+            ),
+            (
+                "abort",
+                "/api/control-page/voice-validation/abort",
+                {"sessionId": session["sessionId"]},
+            ),
+        )
+        for method_name, path, payload in cases:
+            with self.subTest(operation=method_name):
+                binding = control_page_server._voice_capture_validation_binding(
+                    self.manager.snapshot()
+                )
+                preview = self.consent_manager.preview(
+                    validation_binding=binding
+                )
+                pending = self.consent_manager.begin_apply(
+                    confirm_token=preview["confirmToken"],
+                    validation_binding=binding,
+                )
+                self.consent_manager.finish_apply(
+                    lease_id=pending["leaseId"],
+                    applied=True,
+                    capture_ready=True,
+                )
+                self.consent_manager.bind_validation_session(
+                    session["sessionId"]
+                )
+                self.mic_control.reset_mock()
+
+                with patch.object(
+                    self.manager,
+                    method_name,
+                    side_effect=OSError("private report write failure"),
+                ):
+                    response = await self.client.post(
+                        path,
+                        headers=self.headers(),
+                        json=payload,
+                    )
+                body = await response.json()
+
+                self.assertEqual(response.status, 503)
+                self.assertEqual(
+                    body["error"],
+                    "voice_validation_mutation_failed",
+                )
+                self.assertEqual(
+                    self.consent_manager.status()["state"],
+                    "inactive",
+                )
+                self.assertEqual(
+                    [call.args[0] for call in self.mic_control.await_args_list],
+                    [False],
+                )
+
+    async def test_validation_mutation_snapshot_failure_forces_capture_off(self):
+        session = self.start_manager_session()
+        binding = control_page_server._voice_capture_validation_binding(session)
+        preview = self.consent_manager.preview(validation_binding=binding)
+        pending = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"],
+            validation_binding=binding,
+        )
+        self.consent_manager.finish_apply(
+            lease_id=pending["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.consent_manager.bind_validation_session(session["sessionId"])
+        self.mic_control.reset_mock()
+
+        with (
+            patch.object(
+                self.manager,
+                "confirm",
+                return_value={
+                    "ok": False,
+                    "error": "validation_session_not_found",
+                },
+            ),
+            patch.object(
+                self.manager,
+                "snapshot",
+                side_effect=OSError("private report write failure"),
+            ),
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-validation/confirm",
+                headers=self.headers(),
+                json={
+                    "sessionId": session["sessionId"],
+                    "stepId": session["currentStep"]["id"],
+                    "heard": True,
+                },
+            )
+        body = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["error"], "voice_validation_mutation_failed")
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
+    async def test_off_without_exact_ack_stays_revoking_until_reconcile(self):
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+        applied_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        self.assertEqual(applied_response.status, 200)
+
+        self.mic_control.side_effect = [
+            self.mic_control_without_exact_ack(False, source="test"),
+            self.mic_control_result(False, source="test"),
+        ]
+        revoked_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/revoke",
+            headers=self.headers(),
+            json={},
+        )
+        revoked = await revoked_response.json()
+
+        self.assertEqual(revoked_response.status, 503)
+        self.assertFalse(revoked["localBridge"]["micEnabled"])
+        self.assertFalse(revoked["controlApplied"])
+        self.assertEqual(self.consent_manager.status()["state"], "revoking")
+
+        reconciled_response = await self.client.get(
+            "/api/control-page/voice-capture-consent",
+            headers={"Origin": self.origin},
+        )
+        reconciled = await reconciled_response.json()
+
+        self.assertEqual(reconciled_response.status, 200)
+        self.assertEqual(reconciled["consent"]["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False, False],
+        )
+
+    async def test_malformed_bridge_payload_stays_revoking_until_retry(self):
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+        applied_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        self.assertEqual(applied_response.status, 200)
+
+        self.mic_control.side_effect = [
+            {
+                "ok": False,
+                "applied": False,
+                "error": "mic_control_ack_invalid",
+                "localBridge": "malformed-bridge-payload",
+            },
+            self.mic_control_result(False, source="test"),
+        ]
+        revoked_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/revoke",
+            headers=self.headers(),
+            json={},
+        )
+        revoked = await revoked_response.json()
+
+        self.assertEqual(revoked_response.status, 503)
+        self.assertEqual(revoked["localBridge"], {})
+        self.assertEqual(self.consent_manager.status()["state"], "revoking")
+
+        reconciled_response = await self.client.get(
+            "/api/control-page/voice-capture-consent",
+            headers={"Origin": self.origin},
+        )
+        reconciled = await reconciled_response.json()
+
+        self.assertEqual(reconciled_response.status, 200)
+        self.assertEqual(reconciled["consent"]["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False, False],
+        )
+
     async def test_grant_resumes_local_preflight_and_binds_lease(self):
         started_response = await self.client.post(
             "/api/control-page/voice-validation/start",
@@ -611,25 +929,11 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failed_capture_readiness_is_turned_back_off(self):
+        not_ready = self.mic_control_result(True, source="test")
+        not_ready["localBridge"]["mic"]["captureReady"] = False
         self.mic_control.side_effect = [
-            {
-                "ok": True,
-                "applied": True,
-                "localBridge": {
-                    "ready": True,
-                    "micEnabled": True,
-                    "mic": {"captureReady": False},
-                },
-            },
-            {
-                "ok": True,
-                "applied": True,
-                "localBridge": {
-                    "ready": True,
-                    "micEnabled": False,
-                    "mic": {"captureReady": False},
-                },
-            },
+            not_ready,
+            self.mic_control_result(False, source="test"),
         ]
         preview_response = await self.client.post(
             "/api/control-page/voice-capture-consent/preview",
@@ -682,7 +986,12 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             [True, False],
         )
 
-    async def test_state_write_failure_after_enable_still_requests_mic_off(self):
+    async def test_state_write_failure_retries_invalid_first_off_on_reconcile(self):
+        self.mic_control.side_effect = [
+            self.mic_control_result(True, source="test"),
+            self.mic_control_without_exact_ack(False, source="test"),
+            self.mic_control_result(False, source="test"),
+        ]
         preview_response = await self.client.post(
             "/api/control-page/voice-capture-consent/preview",
             headers=self.headers(),
@@ -706,10 +1015,647 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             payload["error"],
             "voice_capture_consent_state_write_failed",
         )
+        self.assertEqual(self.consent_manager.status()["state"], "revoking")
         self.assertEqual(
             [call.args[0] for call in self.mic_control.await_args_list],
             [True, False],
         )
+
+        reconciled_response = await self.client.get(
+            "/api/control-page/voice-capture-consent",
+            headers={"Origin": self.origin},
+        )
+        reconciled = await reconciled_response.json()
+
+        self.assertEqual(reconciled_response.status, 200)
+        self.assertEqual(reconciled["consent"]["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False, False],
+        )
+
+    async def test_cancelled_mic_on_wait_cleans_up_with_exact_off_ack(self):
+        on_waiting = asyncio.Event()
+
+        async def wait_for_control(enabled, *, source):
+            if enabled:
+                on_waiting.set()
+                await asyncio.Future()
+            return self.mic_control_result(enabled, source=source)
+
+        self.mic_control.side_effect = wait_for_control
+        preview = self.consent_manager.preview()
+
+        class _Request:
+            app = self.client.server.app
+
+            async def json(self):
+                return {"confirmToken": preview["confirmToken"]}
+
+        apply_task = asyncio.create_task(
+            control_page_server.voice_capture_consent_apply_handler(_Request())
+        )
+        await on_waiting.wait()
+        apply_task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await apply_task
+
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_terminal_session_during_apply_cleans_up_capture(self):
+        started_response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["local"]},
+        )
+        started = await started_response.json()
+        self.assertEqual(started["session"]["state"], "preflight")
+
+        on_waiting = asyncio.Event()
+        release_on = asyncio.Event()
+
+        async def wait_for_control(enabled, *, source):
+            if enabled:
+                on_waiting.set()
+                await release_on.wait()
+            return self.mic_control_result(enabled, source=source)
+
+        self.mic_control.side_effect = wait_for_control
+        preview = self.consent_manager.preview(
+            validation_binding=control_page_server._voice_capture_validation_binding(
+                started["session"]
+            )
+        )
+        apply_task = asyncio.create_task(
+            self.client.post(
+                "/api/control-page/voice-capture-consent/apply",
+                headers=self.headers(),
+                json={"confirmToken": preview["confirmToken"]},
+            )
+        )
+        await on_waiting.wait()
+
+        aborted = self.manager.abort(
+            session_id=str(started["session"]["sessionId"])
+        )
+        self.assertTrue(aborted["ok"], aborted)
+        self.assertEqual(aborted["session"]["state"], "aborted")
+        release_on.set()
+
+        response = await apply_task
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_activation_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_terminal_snapshot_after_apply_bind_cleans_up_capture(self):
+        running = self.start_manager_session()
+        terminal = {**running, "state": "failed"}
+        preview = self.consent_manager.preview(
+            validation_binding=control_page_server._voice_capture_validation_binding(
+                running
+            )
+        )
+
+        with patch.object(
+            self.manager,
+            "snapshot",
+            side_effect=[running, running, terminal],
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-capture-consent/apply",
+                headers=self.headers(),
+                json={"confirmToken": preview["confirmToken"]},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_activation_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_validation_get_reconciles_a_terminalizing_snapshot(self):
+        running = self.start_manager_session()
+        preview = self.consent_manager.preview()
+        started = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"]
+        )
+        activated = self.consent_manager.finish_apply(
+            lease_id=started["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.assertTrue(activated["ok"], activated)
+        bound = self.consent_manager.bind_validation_session(
+            str(running["sessionId"])
+        )
+        self.assertTrue(bound["ok"], bound)
+        terminal = {**running, "state": "failed"}
+
+        with patch.object(self.manager, "snapshot", return_value=terminal):
+            response = await self.client.get(
+                "/api/control-page/voice-validation",
+                headers={"Origin": self.origin},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["session"]["state"], "failed")
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
+    async def test_validation_get_reports_incomplete_terminal_cleanup(self):
+        running = self.start_manager_session()
+        preview = self.consent_manager.preview(
+            validation_binding=control_page_server._voice_capture_validation_binding(
+                running
+            )
+        )
+        started = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"],
+            validation_binding=control_page_server._voice_capture_validation_binding(
+                running
+            ),
+        )
+        activated = self.consent_manager.finish_apply(
+            lease_id=started["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.assertTrue(activated["ok"], activated)
+        bound = self.consent_manager.bind_validation_session(
+            str(running["sessionId"])
+        )
+        self.assertTrue(bound["ok"], bound)
+        terminal = {**running, "state": "failed"}
+        self.mic_control.side_effect = self.mic_control_without_exact_ack
+
+        with patch.object(self.manager, "snapshot", return_value=terminal):
+            response = await self.client.get(
+                "/api/control-page/voice-validation",
+                headers={"Origin": self.origin},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_cleanup_failed",
+        )
+        self.assertEqual(payload["session"]["state"], "failed")
+        self.assertEqual(self.consent_manager.status()["state"], "revoking")
+        self.assertFalse(payload["cleanup"]["controlApplied"])
+
+    async def test_abort_reports_incomplete_capture_cleanup(self):
+        running = self.start_manager_session()
+        binding = control_page_server._voice_capture_validation_binding(running)
+        preview = self.consent_manager.preview(validation_binding=binding)
+        started = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"],
+            validation_binding=binding,
+        )
+        activated = self.consent_manager.finish_apply(
+            lease_id=started["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.assertTrue(activated["ok"], activated)
+        bound = self.consent_manager.bind_validation_session(
+            str(running["sessionId"])
+        )
+        self.assertTrue(bound["ok"], bound)
+        self.mic_control.side_effect = self.mic_control_without_exact_ack
+
+        response = await self.client.post(
+            "/api/control-page/voice-validation/abort",
+            headers=self.headers(),
+            json={"sessionId": running["sessionId"]},
+        )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_cleanup_failed",
+        )
+        self.assertEqual(payload["session"]["state"], "aborted")
+        self.assertEqual(self.consent_manager.status()["state"], "revoking")
+
+    async def test_local_start_terminal_snapshot_after_bind_cleans_up(self):
+        preview = self.consent_manager.preview()
+        started = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"]
+        )
+        activated = self.consent_manager.finish_apply(
+            lease_id=started["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.assertTrue(activated["ok"], activated)
+        real_snapshot = self.manager.snapshot
+
+        def terminalize_post_bind(*args, **kwargs):
+            session = real_snapshot(*args, **kwargs)
+            if session.get("state") == "running":
+                return {**session, "state": "failed"}
+            return session
+
+        with patch.object(
+            self.manager,
+            "snapshot",
+            side_effect=terminalize_post_bind,
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-validation/start",
+                headers=self.headers(),
+                json={"suite": "voice-p0.v1", "surfaces": ["local"]},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_validation_changed_during_bind",
+        )
+        self.assertEqual(payload["session"]["state"], "failed")
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
+    async def test_post_activation_health_failure_cleans_up_capture(self):
+        self.health_mock.side_effect = RuntimeError("health unavailable")
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+
+        response = await self.client.post(
+            "/api/control-page/voice-capture-consent/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_activation_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_post_activation_resume_failure_cleans_up_capture(self):
+        started_response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["local"]},
+        )
+        self.assertEqual(
+            (await started_response.json())["session"]["state"],
+            "preflight",
+        )
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+
+        with patch.object(
+            self.manager,
+            "resume_after_preflight",
+            side_effect=RuntimeError("resume failed"),
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-capture-consent/apply",
+                headers=self.headers(),
+                json={"confirmToken": preview["confirmToken"]},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_activation_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+    async def test_post_activation_bind_failure_cleans_up_capture(self):
+        running = self.start_manager_session()
+        self.assertEqual(running["state"], "running")
+        preview_response = await self.client.post(
+            "/api/control-page/voice-capture-consent/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+
+        with patch.object(
+            self.consent_manager,
+            "bind_validation_session",
+            side_effect=RuntimeError("bind failed"),
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-capture-consent/apply",
+                headers=self.headers(),
+                json={"confirmToken": preview["confirmToken"]},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_activation_failed",
+        )
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [True, False],
+        )
+
+
+class VoiceCaptureMicTransportTests(unittest.IsolatedAsyncioTestCase):
+    internal_token = "transport-test-internal-token-1234567890"
+
+    async def call_transport(
+        self,
+        *,
+        enabled: bool,
+        source: str,
+        get_status: int = 200,
+        get_payload=None,
+        get_raw_text: str | None = None,
+    ) -> tuple[dict, list[dict]]:
+        calls: list[dict] = []
+        fence = {
+            "schema": "local_io_bridge.mic-enable-fence.v1",
+            "epoch": "ef" * 16,
+            "disableGeneration": 7,
+        }
+
+        async def mic_handler(request: web.Request) -> web.StreamResponse:
+            call = {
+                "method": request.method,
+                "internalToken": request.headers.get(
+                    control_page_server.EVELYN_INTERNAL_CONTROL_HEADER
+                ),
+            }
+            if request.method == "POST":
+                call["body"] = await request.json()
+            calls.append(call)
+            if request.method == "GET":
+                if get_raw_text is not None:
+                    return web.Response(
+                        text=get_raw_text,
+                        status=get_status,
+                        content_type="application/json",
+                    )
+                payload = (
+                    get_payload
+                    if get_payload is not None
+                    else {"ok": True, "enableFence": fence}
+                )
+                return web.json_response(payload, status=get_status)
+            return web.json_response(
+                {"ok": True, "applied": True},
+                status=200,
+            )
+
+        app = web.Application()
+        app.router.add_route("*", "/api/local-bridge/mic", mic_handler)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            bot_api_base = str(server.make_url("/")).rstrip("/")
+            with (
+                patch.object(
+                    control_page_server,
+                    "BOT_API_BASE",
+                    bot_api_base,
+                ),
+                patch.object(
+                    control_page_server,
+                    "EVELYN_INTERNAL_CONTROL_TOKEN",
+                    self.internal_token,
+                ),
+            ):
+                result = await control_page_server.request_local_bridge_mic_control(
+                    enabled,
+                    source=source,
+                )
+        finally:
+            await server.close()
+        return result, calls
+
+    async def test_on_gets_fence_and_posts_exact_internal_contract(self):
+        source = "voice_capture_consent:transport-test"
+
+        result, calls = await self.call_transport(
+            enabled=True,
+            source=source,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([call["method"] for call in calls], ["GET", "POST"])
+        self.assertEqual(
+            [call["internalToken"] for call in calls],
+            [self.internal_token, self.internal_token],
+        )
+        self.assertEqual(
+            calls[1]["body"],
+            {
+                "enabled": True,
+                "source": source,
+                "purpose": "voice_capture_consent",
+                "enableFence": {
+                    "schema": "local_io_bridge.mic-enable-fence.v1",
+                    "epoch": "ef" * 16,
+                    "disableGeneration": 7,
+                },
+            },
+        )
+
+    async def test_off_posts_internal_contract_without_fence_get(self):
+        source = "voice_capture_consent:transport-off"
+
+        result, calls = await self.call_transport(
+            enabled=False,
+            source=source,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([call["method"] for call in calls], ["POST"])
+        self.assertEqual(calls[0]["internalToken"], self.internal_token)
+        self.assertEqual(
+            calls[0]["body"],
+            {
+                "enabled": False,
+                "source": source,
+            },
+        )
+
+    async def test_on_does_not_post_when_fence_get_is_forbidden(self):
+        result, calls = await self.call_transport(
+            enabled=True,
+            source="voice_capture_consent:fence-forbidden",
+            get_status=403,
+            get_payload={"ok": False, "error": "mic_control_unauthorized"},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["httpStatus"], 403)
+        self.assertEqual([call["method"] for call in calls], ["GET"])
+        self.assertEqual(calls[0]["internalToken"], self.internal_token)
+
+    async def test_on_does_not_post_when_fence_response_is_corrupt(self):
+        result, calls = await self.call_transport(
+            enabled=True,
+            source="voice_capture_consent:fence-corrupt",
+            get_raw_text="{not-valid-json",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "mic_enable_fence_unavailable")
+        self.assertEqual([call["method"] for call in calls], ["GET"])
+        self.assertEqual(calls[0]["internalToken"], self.internal_token)
+
+
+class VoiceCaptureConsentContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_monitor_retries_after_recovery_attempt_raises(self):
+        app = {
+            control_page_server.VOICE_CAPTURE_CONSENT_LOCK_KEY: asyncio.Lock(),
+        }
+        recovery_retried = asyncio.Event()
+        reconcile_calls = 0
+        recovery_calls = 0
+
+        async def reconcile(_app, **_kwargs):
+            nonlocal reconcile_calls
+            reconcile_calls += 1
+            if reconcile_calls == 1:
+                return {"ok": True}
+            raise RuntimeError("reconcile failed")
+
+        async def recover(_app, **_kwargs):
+            nonlocal recovery_calls
+            recovery_calls += 1
+            if recovery_calls == 1:
+                raise RuntimeError("recovery failed")
+            recovery_retried.set()
+            return {"ok": False}
+
+        with (
+            patch.object(
+                control_page_server,
+                "_reconcile_voice_capture_consent",
+                side_effect=reconcile,
+            ),
+            patch.object(
+                control_page_server,
+                "_force_voice_capture_recovery",
+                side_effect=recover,
+            ),
+            patch.object(
+                control_page_server,
+                "_revoke_voice_capture_consent",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                control_page_server,
+                "VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC",
+                0.001,
+            ),
+        ):
+            context = control_page_server._voice_capture_consent_context(app)
+            await anext(context)
+            try:
+                await asyncio.wait_for(recovery_retried.wait(), timeout=1.0)
+            finally:
+                await context.aclose()
+
+        self.assertGreaterEqual(reconcile_calls, 3)
+        self.assertGreaterEqual(recovery_calls, 2)
+
+    async def test_startup_recovery_failure_still_starts_monitor(self):
+        app = {
+            control_page_server.VOICE_CAPTURE_CONSENT_LOCK_KEY: asyncio.Lock(),
+        }
+        monitor_ran = asyncio.Event()
+        reconcile_calls = 0
+
+        async def reconcile(_app, **_kwargs):
+            nonlocal reconcile_calls
+            reconcile_calls += 1
+            if reconcile_calls == 1:
+                raise RuntimeError("startup reconcile failed")
+            monitor_ran.set()
+            return {"ok": True}
+
+        with (
+            patch.object(
+                control_page_server,
+                "_reconcile_voice_capture_consent",
+                side_effect=reconcile,
+            ),
+            patch.object(
+                control_page_server,
+                "_force_voice_capture_recovery",
+                new=AsyncMock(side_effect=RuntimeError("startup recovery failed")),
+            ),
+            patch.object(
+                control_page_server,
+                "_revoke_voice_capture_consent",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                control_page_server,
+                "VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC",
+                0.001,
+            ),
+        ):
+            context = control_page_server._voice_capture_consent_context(app)
+            await anext(context)
+            try:
+                await asyncio.wait_for(monitor_ran.wait(), timeout=1.0)
+            finally:
+                await context.aclose()
+
+        self.assertGreaterEqual(reconcile_calls, 2)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,13 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
             Path(self.temp_dir.name),
         )
         self.memory_root_patch.start()
-        self.client = TestClient(TestServer(control_page_server.create_app()))
+        self.client = TestClient(
+            TestServer(
+                control_page_server.create_app(
+                    manage_voice_capture_consent=False
+                )
+            )
+        )
         await self.client.start_server()
         self.origin = str(self.client.make_url("/")).rstrip("/")
         session_response = await self.client.get(

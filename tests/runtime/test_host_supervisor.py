@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -17,6 +18,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.host_supervisor import (  # noqa: E402
     BRIDGE_PROCESS_IDENTITY_SCHEMA,
     HostSupervisor,
+    LOCAL_BRIDGE_RESTART_EXIT_CODE,
 )
 from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
 from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
@@ -174,6 +176,38 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertFalse(second["ok"])
         self.assertEqual(second["error"], "preview_token_reused")
 
+    def test_host_actions_do_not_recreate_dependencies_or_leak_credentials(self):
+        credentials = {
+            "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
+            "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            "DISCORD_BOT_TOKEN": "discord-secret",
+            "OPENAI_API_KEY": "model-secret",
+        }
+        with patch.dict(os.environ, credentials, clear=False):
+            bridge_env = self.supervisor._bridge_environment()
+            result = self.supervisor._execute_action("start_discord_bot")
+            tts_env = self.supervisor._docker_action_environment("start_tts")
+
+        self.assertTrue(result["ok"], result)
+        command, command_options = self.commands[-1]
+        discord_env = command_options["env"]
+        self.assertEqual(command[-2:], ["--no-deps", "discord_bot"])
+        self.assertEqual(
+            bridge_env["LOCAL_BRIDGE_STATUS_AUTH_TOKEN"],
+            "reporter-secret",
+        )
+        self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", bridge_env)
+        self.assertNotIn("DISCORD_BOT_TOKEN", bridge_env)
+        self.assertNotIn("OPENAI_API_KEY", bridge_env)
+        self.assertEqual(discord_env["DISCORD_BOT_TOKEN"], "discord-secret")
+        self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", discord_env)
+        self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", discord_env)
+        self.assertNotIn("OPENAI_API_KEY", discord_env)
+        self.assertEqual(
+            tts_env["DISCORD_BOT_TOKEN"],
+            "local-only-disabled",
+        )
+
     def test_preview_token_expires_after_two_minutes(self):
         preview = self.supervisor.handle_request(self.request())
         self.clock.value += 121
@@ -251,6 +285,54 @@ class HostSupervisorTests(unittest.TestCase):
 
         self.assertEqual(starts, [True])
         self.assertFalse(self.supervisor.manual_intervention_required)
+
+    def test_restart_exit_uses_supervisor_owned_credential_handoff(self):
+        stop_script = (
+            self.supervisor.project_root
+            / "evelyn_core"
+            / "runtime"
+            / "launchers"
+            / "stop_evelyn_local.ps1"
+        )
+        start_script = (
+            self.supervisor.project_root / "evelyn_core" / "start_local.bat"
+        )
+        stop_script.parent.mkdir(parents=True, exist_ok=True)
+        stop_script.write_text("# test", encoding="utf-8")
+        start_script.write_text("@rem test", encoding="utf-8")
+        launches: list[tuple[list[str], dict[str, object]]] = []
+        self.supervisor.popen = lambda command, **kwargs: (
+            launches.append((command, kwargs)) or FakeProcess()
+        )
+        child = FakeProcess()
+        child.returncode = LOCAL_BRIDGE_RESTART_EXIT_CODE
+        self.supervisor.child = child
+        credentials = {
+            "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
+            "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            "DISCORD_BOT_TOKEN": "discord-secret",
+            "EVELYN_CODEX_CREDENTIALS_DIR": "C:\\secure-codex",
+            "OPENAI_API_KEY": "model-secret",
+        }
+
+        with patch.dict(os.environ, credentials, clear=False):
+            self.supervisor._observe_child()
+
+        self.assertTrue(self.supervisor._stopping)
+        self.assertEqual(len(launches), 1)
+        command, options = launches[0]
+        environment = options["env"]
+        self.assertEqual(environment["DISCORD_BOT_TOKEN"], "discord-secret")
+        self.assertEqual(
+            environment["EVELYN_CODEX_CREDENTIALS_DIR"],
+            "C:\\secure-codex",
+        )
+        self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", environment)
+        self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", environment)
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertIn(str(stop_script), command[-1])
+        self.assertIn(str(start_script), command[-1])
+        self.assertTrue(self.supervisor.last_action["ok"])
 
     def test_wrong_schema_active_file_does_not_suppress_bridge_restart(self):
         manager = VoiceValidationManager(

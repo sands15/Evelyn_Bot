@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +29,47 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
             side_effect=lambda binding: not binding,
         )
         self._validation_context.start()
+        self.reporter_token = "r" * 48
+        self.internal_token = "i" * 48
+        self._reporter_token_patch = patch.object(
+            fast_api,
+            "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
+            self.reporter_token,
+        )
+        self._internal_token_patch = patch.object(
+            fast_api,
+            "EVELYN_INTERNAL_CONTROL_TOKEN",
+            self.internal_token,
+        )
+        self._reporter_token_patch.start()
+        self._internal_token_patch.start()
+        self._original_bridge_status = dict(fast_api.LOCAL_BRIDGE_STATUS)
+        self._original_mic_request = dict(
+            fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST
+        )
+        self._original_enable_fence = dict(
+            fast_api.LOCAL_BRIDGE_MIC_ENABLE_FENCE
+        )
+        fast_api.LOCAL_BRIDGE_STATUS.clear()
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": False,
+                "ready": False,
+                "mode": "windows_io_bridge",
+            }
+        )
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.clear()
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
+            {
+                "revision": 0,
+                "actionId": "",
+                "enabled": None,
+                "requestedAt": None,
+                "source": "",
+                "purpose": "",
+                "bridgeInstanceDigest": "",
+            }
+        )
         self.client = TestClient(
             TestServer(
                 fast_api.create_app(
@@ -39,6 +81,18 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.client.close()
+        fast_api.LOCAL_BRIDGE_STATUS.clear()
+        fast_api.LOCAL_BRIDGE_STATUS.update(self._original_bridge_status)
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.clear()
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
+            self._original_mic_request
+        )
+        fast_api.LOCAL_BRIDGE_MIC_ENABLE_FENCE.clear()
+        fast_api.LOCAL_BRIDGE_MIC_ENABLE_FENCE.update(
+            self._original_enable_fence
+        )
+        self._internal_token_patch.stop()
+        self._reporter_token_patch.stop()
         self._validation_context.stop()
         fast_api.LOCAL_VOICE_ADMISSION = self._original_manager
 
@@ -132,10 +186,33 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
 
         status = await self.client.post(
             "/api/local-bridge/status",
+            headers={
+                fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: self.reporter_token,
+            },
             json={
-                "bridgeInstanceId": "bridge-a",
+                "schema": "local_io_bridge.status.v1",
+                "statusSeq": 1,
+                "heartbeatAt": time.time(),
+                "pid": 4242,
+                "bridgeInstanceId": "a" * 32,
+                "startedAt": time.time() - 1.0,
+                "enabled": True,
                 "micEnabled": True,
                 "ready": True,
+                "micControlRevision": 0,
+                "micControlActionId": "",
+                "micControlPendingRevision": 0,
+                "micControlPendingActionId": "",
+                "micControlState": "idle",
+                "micControlDesiredEnabled": True,
+                "micControlError": "",
+                "micCaptureStopped": False,
+                "mic": {
+                    "enabled": True,
+                    "captureReady": True,
+                    "captureActive": True,
+                    "captureStopped": False,
+                },
             },
         )
         payload = await status.json()
@@ -152,6 +229,9 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
         capability = await issued.json()
         mic_off = await self.client.post(
             "/api/local-bridge/mic",
+            headers={
+                fast_api.EVELYN_INTERNAL_CONTROL_HEADER: self.internal_token,
+            },
             json={"enabled": False, "source": "control_page"},
         )
         self.assertEqual(mic_off.status, 202)

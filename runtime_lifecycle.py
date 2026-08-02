@@ -23,7 +23,7 @@ def resolve_restart_launcher(
             {
                 "DISCORD_ENABLED": "false",
                 "LOCAL_ONLY": "true",
-                "LOCAL_MIC_ENABLED": os.getenv("LOCAL_MIC_ENABLED", "true"),
+                "LOCAL_MIC_ENABLED": os.getenv("LOCAL_MIC_ENABLED", "false"),
                 "CONTROL_PAGE_PORT": str(control_page_port),
             }
         )

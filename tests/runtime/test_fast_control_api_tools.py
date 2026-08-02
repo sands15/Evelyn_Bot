@@ -15,13 +15,47 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
-sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
+try:
+    import numpy  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 from evelyn_core import explicit_memory_confirmation as explicit_memory  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
+
+
+class _JsonRequest:
+    def __init__(
+        self,
+        payload: object | None = None,
+        *,
+        method: str = "POST",
+        headers: dict[str, str] | None = None,
+        json_error: BaseException | None = None,
+    ) -> None:
+        self.method = method
+        self.headers = dict(headers or {})
+        self._payload = payload
+        self._json_error = json_error
+        self._raw_body = (
+            b""
+            if json_error is not None
+            else fast_api.json.dumps(payload).encode("utf-8")
+        )
+        self.content_length = len(self._raw_body)
+
+    async def json(self):
+        if self._json_error is not None:
+            raise self._json_error
+        return self._payload
+
+    async def read(self) -> bytes:
+        if self._json_error is not None:
+            raise self._json_error
+        return self._raw_body
 
 
 class FastControlApiToolTests(unittest.TestCase):
@@ -64,8 +98,16 @@ class FastControlApiToolTests(unittest.TestCase):
         fast_api.LOCAL_BRIDGE_SPEAK_SEQ = 0
         fast_api.LOCAL_BRIDGE_STATUS.clear()
         fast_api.LOCAL_BRIDGE_STATUS.update({"enabled": False, "ready": False, "mode": "windows_io_bridge"})
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.clear()
         fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
-            {"revision": 0, "enabled": None, "requestedAt": None, "source": ""}
+            {
+                "revision": 0,
+                "actionId": "",
+                "enabled": None,
+                "requestedAt": None,
+                "source": "",
+                "bridgeInstanceDigest": "",
+            }
         )
         fast_api.LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.update(
             {
@@ -78,6 +120,136 @@ class FastControlApiToolTests(unittest.TestCase):
         )
         fast_api.SHUTDOWN_REQUEST.update({"requested": False, "requestedAt": None, "source": "", "reason": ""})
         fast_api.RESTART_REQUEST.update({"requested": False, "requestedAt": None, "source": "", "reason": ""})
+        self.local_bridge_reporter_token = "r" * 48
+        self.internal_control_token = "i" * 48
+        self.local_bridge_started_at = fast_api.time.time() - 1.0
+        reporter_token_patcher = patch.object(
+            fast_api,
+            "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
+            self.local_bridge_reporter_token,
+            create=True,
+        )
+        internal_token_patcher = patch.object(
+            fast_api,
+            "EVELYN_INTERNAL_CONTROL_TOKEN",
+            self.internal_control_token,
+            create=True,
+        )
+        reporter_token_patcher.start()
+        internal_token_patcher.start()
+        self.addCleanup(reporter_token_patcher.stop)
+        self.addCleanup(internal_token_patcher.stop)
+
+    def local_bridge_status_payload(
+        self,
+        *,
+        bridge_instance_id: str = "a" * 32,
+        status_seq: int = 1,
+        started_at: float | None = None,
+        mic_enabled: bool = False,
+        mic_control_revision: int = 0,
+        mic_control_action_id: str = "",
+        pending_revision: int = 0,
+        pending_action_id: str = "",
+        control_state: str = "idle",
+        desired_enabled: bool | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if started_at is None:
+            started_at = self.local_bridge_started_at
+        if desired_enabled is None:
+            desired_enabled = mic_enabled
+        capture_stopped = not mic_enabled
+        payload: dict[str, object] = {
+            "schema": "local_io_bridge.status.v1",
+            "statusSeq": status_seq,
+            "heartbeatAt": fast_api.time.time(),
+            "pid": 4242,
+            "bridgeInstanceId": bridge_instance_id,
+            "startedAt": started_at,
+            "enabled": True,
+            "ready": True,
+            "micEnabled": mic_enabled,
+            "micControlRevision": mic_control_revision,
+            "micControlActionId": mic_control_action_id,
+            "micControlPendingRevision": pending_revision,
+            "micControlPendingActionId": pending_action_id,
+            "micControlState": control_state,
+            "micControlDesiredEnabled": desired_enabled,
+            "micControlError": "",
+            "micCaptureStopped": capture_stopped,
+            "mic": {
+                "enabled": mic_enabled,
+                "captureReady": mic_enabled,
+                "captureActive": False,
+                "captureStopped": capture_stopped,
+            },
+            "lastError": "",
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def local_bridge_status_request(
+        self,
+        payload: object,
+        *,
+        token: str | None = None,
+        json_error: BaseException | None = None,
+    ) -> _JsonRequest:
+        headers = {}
+        if token is not None:
+            headers[
+                getattr(
+                    fast_api,
+                    "LOCAL_BRIDGE_STATUS_AUTH_HEADER",
+                    "X-Evelyn-Local-Bridge-Token",
+                )
+            ] = token
+        return _JsonRequest(
+            payload,
+            headers=headers,
+            json_error=json_error,
+        )
+
+    def internal_control_request(
+        self,
+        payload: object,
+        *,
+        method: str = "POST",
+    ) -> _JsonRequest:
+        return _JsonRequest(
+            payload,
+            method=method,
+            headers={
+                getattr(
+                    fast_api,
+                    "EVELYN_INTERNAL_CONTROL_HEADER",
+                    "X-Evelyn-Internal-Control-Token",
+                ): self.internal_control_token,
+            },
+        )
+
+    def post_local_bridge_status(
+        self,
+        payload: object,
+        *,
+        token: str | None = None,
+        json_error: BaseException | None = None,
+    ):
+        return asyncio.run(
+            fast_api.local_bridge_status_handler(
+                self.local_bridge_status_request(
+                    payload,
+                    token=(
+                        self.local_bridge_reporter_token
+                        if token is None
+                        else token
+                    ),
+                    json_error=json_error,
+                )
+            )
+        )
 
     def admitted_local_payload(self, text: str) -> dict[str, object]:
         self._voice_turn_seq += 1
@@ -101,6 +273,109 @@ class FastControlApiToolTests(unittest.TestCase):
             "turnId": turn_id,
             "admissionToken": issued["admissionToken"],
         }
+
+    def prepare_mic_bridge(
+        self,
+        *,
+        bridge_instance_id: str = "a" * 32,
+        mic_enabled: bool = False,
+    ) -> None:
+        capture_stopped = not mic_enabled
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "schema": "local_io_bridge.status.v1",
+                "statusSeq": 1,
+                "heartbeatAt": fast_api.time.time(),
+                "pid": 4242,
+                "bridgeInstanceId": bridge_instance_id,
+                "startedAt": 1000.0,
+                "enabled": True,
+                "ready": True,
+                "micEnabled": mic_enabled,
+                "micControlRevision": 0,
+                "micControlActionId": "",
+                "micControlPendingRevision": 0,
+                "micControlPendingActionId": "",
+                "micControlState": "idle",
+                "micControlDesiredEnabled": mic_enabled,
+                "micControlError": "",
+                "micCaptureStopped": capture_stopped,
+                "mic": {
+                    "enabled": mic_enabled,
+                    "captureReady": mic_enabled,
+                    "captureActive": mic_enabled,
+                    "captureStopped": capture_stopped,
+                },
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+            }
+        )
+
+    def publish_mic_control_ack(
+        self,
+        request: dict[str, object],
+        *,
+        observed_revision: int | None = None,
+        observed_action_id: str | None = None,
+        bridge_instance_id: str = "a" * 32,
+        control_state: str = "applied",
+        control_error: str = "",
+        capture_stopped: bool | None = None,
+        pending_revision: int = 0,
+        pending_action_id: str = "",
+    ) -> None:
+        desired_enabled = bool(request["enabled"])
+        if capture_stopped is None:
+            capture_stopped = not desired_enabled
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "schema": "local_io_bridge.status.v1",
+                "statusSeq": 2,
+                "heartbeatAt": fast_api.time.time(),
+                "pid": 4242,
+                "bridgeInstanceId": bridge_instance_id,
+                "startedAt": 1000.0,
+                "enabled": True,
+                "ready": True,
+                "micEnabled": desired_enabled,
+                "micControlRevision": (
+                    int(request["revision"])
+                    if observed_revision is None
+                    else observed_revision
+                ),
+                "micControlActionId": (
+                    str(request.get("actionId") or "")
+                    if observed_action_id is None
+                    else observed_action_id
+                ),
+                "micControlPendingRevision": pending_revision,
+                "micControlPendingActionId": pending_action_id,
+                "micControlState": control_state,
+                "micControlDesiredEnabled": desired_enabled,
+                "micControlError": control_error,
+                "micCaptureStopped": capture_stopped,
+                "mic": {
+                    "enabled": desired_enabled,
+                    "captureReady": desired_enabled,
+                    "captureActive": desired_enabled,
+                    "captureStopped": capture_stopped,
+                },
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+            }
+        )
+
+    def request_authorized_mic_enable(
+        self,
+        *,
+        source: str = "unit",
+    ) -> dict[str, object]:
+        return fast_api.request_local_bridge_mic_control(
+            True,
+            source=source,
+            purpose="voice_capture_consent",
+            enable_fence=fast_api.local_bridge_mic_enable_fence_snapshot(),
+        )
 
     def test_memory_panel_slash_command_routes_without_main_llm(self) -> None:
         self.assertEqual(fast_api.detect_memory_panel_action("/memory"), "toggle")
@@ -919,24 +1194,20 @@ class FastControlApiToolTests(unittest.TestCase):
             "마인크래프트 시작해",
             source="control_page",
         )
+        status = self.local_bridge_status_payload(
+            extra={
+                "minecraftCommandRevision": command["revision"],
+                "minecraftCommandState": "ready",
+                "minecraftCommandResult": {
+                    "commandApplied": True,
+                    "connected": False,
+                },
+            }
+        )
 
-        class _Request:
-            method = "POST"
+        response = self.post_local_bridge_status(status)
 
-            async def json(self):
-                return {
-                    "enabled": True,
-                    "ready": True,
-                    "minecraftCommandRevision": command["revision"],
-                    "minecraftCommandState": "ready",
-                    "minecraftCommandResult": {
-                        "commandApplied": True,
-                        "connected": False,
-                    },
-                }
-
-        asyncio.run(fast_api.local_bridge_status_handler(_Request()))
-
+        self.assertEqual(response.status, 200)
         self.assertEqual(fast_api.LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST["command"], "")
         self.assertEqual(fast_api.LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST["action"], "")
 
@@ -1115,45 +1386,64 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["text"], "마이크 입력은 꺼져 있어.")
 
     def test_mic_enable_waits_for_bridge_ack_and_capture_ready(self) -> None:
-        async def scenario() -> str:
+        async def scenario() -> dict[str, object]:
+            self.prepare_mic_bridge()
+            request = self.request_authorized_mic_enable()
             control = asyncio.create_task(
-                fast_api.execute_local_bridge_mic_control(True, source="unit")
+                fast_api.wait_for_local_bridge_mic_control(
+                    request,
+                    timeout_sec=0.1,
+                )
             )
             await asyncio.sleep(0)
-            revision = int(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["revision"])
-            fast_api.LOCAL_BRIDGE_STATUS.update(
-                {
-                    "enabled": True,
-                    "ready": True,
-                    "micEnabled": True,
-                    "micControlRevision": revision,
-                    "mic": {"enabled": True, "captureReady": True},
-                    "lastError": "",
-                    "updatedAt": fast_api.time.time(),
-                }
+            self.publish_mic_control_ack(request)
+            self.assertEqual(
+                request["bridgeInstanceDigest"],
+                fast_api._local_bridge_instance_digest(
+                    "a" * 32
+                ),
             )
             return await control
 
-        reply = asyncio.run(scenario())
+        result = asyncio.run(scenario())
 
-        self.assertEqual(reply, "마이크 입력을 켰어.")
+        self.assertTrue(result["applied"])
         self.assertTrue(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"])
         self.assertEqual(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["source"], "unit")
 
     def test_mic_disable_reports_bridge_stop_failure_instead_of_false_success(self) -> None:
         async def scenario() -> str:
+            self.prepare_mic_bridge(mic_enabled=True)
             control = asyncio.create_task(
                 fast_api.execute_local_bridge_mic_control(False, source="unit")
             )
             await asyncio.sleep(0)
-            revision = int(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["revision"])
+            request = dict(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
             fast_api.LOCAL_BRIDGE_STATUS.update(
                 {
+                    "schema": "local_io_bridge.status.v1",
+                    "statusSeq": 2,
+                    "heartbeatAt": fast_api.time.time(),
+                    "pid": 4242,
+                    "bridgeInstanceId": "a" * 32,
+                    "startedAt": 1000.0,
                     "enabled": True,
                     "ready": True,
-                    "micEnabled": False,
-                    "micControlRevision": revision,
-                    "mic": {"enabled": False},
+                    "micEnabled": True,
+                    "micControlRevision": int(request["revision"]),
+                    "micControlActionId": request["actionId"],
+                    "micControlPendingRevision": 0,
+                    "micControlPendingActionId": "",
+                    "micControlState": "failed",
+                    "micControlDesiredEnabled": False,
+                    "micControlError": "mic_control_stop_failed",
+                    "micCaptureStopped": False,
+                    "mic": {
+                        "enabled": True,
+                        "captureReady": True,
+                        "captureActive": True,
+                        "captureStopped": False,
+                    },
                     "lastError": "mic_control_failed: RuntimeError('stop failed')",
                     "updatedAt": fast_api.time.time(),
                 }
@@ -1162,10 +1452,320 @@ class FastControlApiToolTests(unittest.TestCase):
 
         reply = asyncio.run(scenario())
 
-        self.assertIn("캡처 종료 중 오류", reply)
+        self.assertIn("적용 확인을 받지 못했어", reply)
         self.assertNotEqual(reply, "마이크 입력을 껐어.")
 
-    def test_mic_command_runs_before_main_llm_and_uses_actual_ack(self) -> None:
+    def test_mic_control_returns_exact_content_free_ack_receipt(self) -> None:
+        for desired_enabled in (True, False):
+            with self.subTest(desired_enabled=desired_enabled):
+                self.prepare_mic_bridge(mic_enabled=not desired_enabled)
+                request = (
+                    self.request_authorized_mic_enable()
+                    if desired_enabled
+                    else fast_api.request_local_bridge_mic_control(
+                        False,
+                        source="unit",
+                    )
+                )
+                self.publish_mic_control_ack(request)
+
+                result = asyncio.run(
+                    fast_api.wait_for_local_bridge_mic_control(
+                        request,
+                        timeout_sec=0.1,
+                    )
+                )
+
+                self.assertTrue(result["applied"])
+                self.assertEqual(
+                    result["ack"],
+                    {
+                        "schema": "local_io_bridge.mic-control-ack.v1",
+                        "actionId": request["actionId"],
+                        "requestRevision": request["revision"],
+                        "observedRevision": request["revision"],
+                        "enabled": desired_enabled,
+                        "bridgeInstanceDigest": request[
+                            "bridgeInstanceDigest"
+                        ],
+                        "state": "applied",
+                        "captureStopped": not desired_enabled,
+                    },
+                )
+
+    def test_mic_control_ack_requires_exact_action_id(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+        request = fast_api.request_local_bridge_mic_control(
+            False,
+            source="unit",
+        )
+        action_id = str(request["actionId"])
+        wrong_action_id = (
+            ("0" if action_id[0] != "0" else "1") + action_id[1:]
+        )
+        self.publish_mic_control_ack(
+            request,
+            observed_action_id=wrong_action_id,
+        )
+
+        rejected = asyncio.run(
+            fast_api.wait_for_local_bridge_mic_control(
+                request,
+                timeout_sec=0.1,
+            )
+        )
+
+        self.assertFalse(rejected["applied"])
+        self.assertEqual(rejected["error"], "mic_control_ack_invalid")
+        self.assertNotIn("ack", rejected)
+
+        self.publish_mic_control_ack(request)
+        accepted = asyncio.run(
+            fast_api.wait_for_local_bridge_mic_control(
+                request,
+                timeout_sec=0.1,
+            )
+        )
+        self.assertTrue(accepted["applied"])
+        self.assertEqual(accepted["ack"]["actionId"], action_id)
+
+    def test_mic_control_waiter_fails_when_current_request_supersedes_it(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+        superseded = fast_api.request_local_bridge_mic_control(
+            False,
+            source="unit:first",
+        )
+        current = fast_api.request_local_bridge_mic_control(
+            False,
+            source="unit:second",
+        )
+        self.publish_mic_control_ack(superseded)
+
+        with patch.object(
+            fast_api.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            result = asyncio.run(
+                fast_api.wait_for_local_bridge_mic_control(
+                    superseded,
+                    timeout_sec=0.1,
+                )
+            )
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "mic_control_superseded")
+        self.assertEqual(
+            fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["actionId"],
+            current["actionId"],
+        )
+        sleep.assert_not_awaited()
+
+    def test_mic_enable_rejects_missing_invalid_and_stale_enable_fence(self) -> None:
+        current_fence = fast_api.local_bridge_mic_enable_fence_snapshot()
+        stale_epoch = {
+            **current_fence,
+            "epoch": (
+                "0" * 32
+                if current_fence["epoch"] != "0" * 32
+                else "1" * 32
+            ),
+        }
+        stale_generation = {
+            **current_fence,
+            "disableGeneration": int(
+                current_fence["disableGeneration"]
+            )
+            + 1,
+        }
+        cases = (
+            (
+                "missing_fence",
+                {
+                    "enabled": True,
+                    "purpose": "voice_capture_consent",
+                },
+                403,
+                "mic_enable_not_authorized",
+            ),
+            (
+                "malformed_fence",
+                {
+                    "enabled": True,
+                    "purpose": "voice_capture_consent",
+                    "enableFence": {
+                        "schema": current_fence["schema"],
+                        "epoch": "not-hex",
+                        "disableGeneration": current_fence[
+                            "disableGeneration"
+                        ],
+                    },
+                },
+                403,
+                "mic_enable_not_authorized",
+            ),
+            (
+                "wrong_purpose",
+                {
+                    "enabled": True,
+                    "purpose": "operator_command",
+                    "enableFence": current_fence,
+                },
+                403,
+                "mic_enable_not_authorized",
+            ),
+            (
+                "stale_epoch",
+                {
+                    "enabled": True,
+                    "purpose": "voice_capture_consent",
+                    "enableFence": stale_epoch,
+                },
+                409,
+                "mic_enable_fence_stale",
+            ),
+            (
+                "stale_generation",
+                {
+                    "enabled": True,
+                    "purpose": "voice_capture_consent",
+                    "enableFence": stale_generation,
+                },
+                409,
+                "mic_enable_fence_stale",
+            ),
+        )
+
+        for label, request_payload, expected_status, expected_error in cases:
+            with self.subTest(label=label):
+                response = asyncio.run(
+                    fast_api.local_bridge_mic_handler(
+                        self.internal_control_request(request_payload)
+                    )
+                )
+                payload = fast_api.json.loads(response.text or "{}")
+
+                self.assertEqual(response.status, expected_status)
+                self.assertEqual(payload["error"], expected_error)
+                self.assertIsNone(
+                    fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"]
+                )
+
+    def test_mic_off_invalidates_fence_and_rejects_stale_on_afterward(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+        stale_fence = fast_api.local_bridge_mic_enable_fence_snapshot()
+        off_request = fast_api.request_local_bridge_mic_control(
+            False,
+            source="unit:cleanup",
+        )
+        current_fence = fast_api.local_bridge_mic_enable_fence_snapshot()
+        self.assertEqual(
+            current_fence["disableGeneration"],
+            int(stale_fence["disableGeneration"]) + 1,
+        )
+
+        response = asyncio.run(
+            fast_api.local_bridge_mic_handler(
+                self.internal_control_request(
+                    {
+                        "enabled": True,
+                        "source": "unit:late-on",
+                        "purpose": "voice_capture_consent",
+                        "enableFence": stale_fence,
+                    }
+                )
+            )
+        )
+        payload = fast_api.json.loads(response.text or "{}")
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["error"], "mic_enable_fence_stale")
+        self.assertFalse(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"])
+        self.assertEqual(
+            fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["actionId"],
+            off_request["actionId"],
+        )
+        self.assertEqual(
+            fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["revision"],
+            off_request["revision"],
+        )
+
+    def test_mic_control_rejects_higher_and_lower_observed_revision(self) -> None:
+        for delta in (-1, 1):
+            with self.subTest(delta=delta):
+                self.prepare_mic_bridge()
+                request = self.request_authorized_mic_enable()
+                self.publish_mic_control_ack(
+                    request,
+                    observed_revision=int(request["revision"]) + delta,
+                )
+
+                state, _snapshot, ack = (
+                    fast_api._local_bridge_mic_control_observation(request)
+                )
+
+                self.assertEqual(
+                    state,
+                    "pending" if delta < 0 else "failed",
+                )
+                self.assertIsNone(ack)
+
+    def test_mic_control_rejects_other_bridge_instance_digest(self) -> None:
+        self.prepare_mic_bridge()
+        request = self.request_authorized_mic_enable()
+        self.publish_mic_control_ack(
+            request,
+            bridge_instance_id="b" * 32,
+        )
+
+        result = asyncio.run(
+            fast_api.wait_for_local_bridge_mic_control(request, timeout_sec=0.1)
+        )
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "mic_control_ack_invalid")
+        self.assertNotIn("ack", result)
+
+    def test_mic_disable_rejects_applied_state_without_capture_stopped(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+        request = fast_api.request_local_bridge_mic_control(False, source="unit")
+        self.publish_mic_control_ack(request, capture_stopped=False)
+
+        result = asyncio.run(
+            fast_api.wait_for_local_bridge_mic_control(request, timeout_sec=0.1)
+        )
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "mic_control_ack_invalid")
+        self.assertNotIn("ack", result)
+
+    def test_mic_control_failed_state_is_rejected_without_polling(self) -> None:
+        self.prepare_mic_bridge()
+        request = self.request_authorized_mic_enable()
+        self.publish_mic_control_ack(
+            request,
+            control_state="failed",
+            control_error="mic_control_start_failed",
+        )
+
+        with patch.object(
+            fast_api.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            result = asyncio.run(
+                fast_api.wait_for_local_bridge_mic_control(
+                    request,
+                    timeout_sec=0.1,
+                )
+            )
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "mic_control_start_failed")
+        self.assertNotIn("ack", result)
+        sleep.assert_not_awaited()
+
+    def test_mic_on_command_runs_before_main_llm_and_requires_validation_consent(self) -> None:
         request_payload = self.admitted_local_payload("/mic on")
 
         class _Request:
@@ -1183,36 +1783,27 @@ class FastControlApiToolTests(unittest.TestCase):
         async def forbidden_main_llm(*args, **kwargs):
             raise AssertionError("main LLM must not run for a microphone control command")
 
-        async def scenario():
-            original_collect = fast_api.collect_runtime_health
-            original_ask = fast_api.ask_main_llm
-            fast_api.collect_runtime_health = fake_collect_runtime_health
-            fast_api.ask_main_llm = forbidden_main_llm
-            try:
-                request_task = asyncio.create_task(fast_api.chat_handler(_Request()))
-                await asyncio.sleep(0)
-                revision = int(fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["revision"])
-                fast_api.LOCAL_BRIDGE_STATUS.update(
-                    {
-                        "enabled": True,
-                        "ready": True,
-                        "micEnabled": True,
-                        "micControlRevision": revision,
-                        "mic": {"enabled": True, "captureReady": True},
-                        "lastError": "",
-                        "updatedAt": fast_api.time.time(),
-                    }
-                )
-                return await request_task
-            finally:
-                fast_api.collect_runtime_health = original_collect
-                fast_api.ask_main_llm = original_ask
-
-        response = asyncio.run(scenario())
+        original_collect = fast_api.collect_runtime_health
+        original_ask = fast_api.ask_main_llm
+        fast_api.collect_runtime_health = fake_collect_runtime_health
+        fast_api.ask_main_llm = forbidden_main_llm
+        try:
+            self.prepare_mic_bridge()
+            response = asyncio.run(fast_api.chat_handler(_Request()))
+        finally:
+            fast_api.collect_runtime_health = original_collect
+            fast_api.ask_main_llm = original_ask
         payload = fast_api.json.loads(response.text or "{}")
 
-        self.assertEqual(payload["reply"], "마이크 입력을 켰어.")
-        self.assertEqual(fast_api.CHAT_MESSAGES[-1]["text"], "마이크 입력을 켰어.")
+        expected = (
+            "마이크 입력은 음성 검증 화면에서 청취 동의를 확인한 뒤에만 "
+            "켤 수 있어."
+        )
+        self.assertEqual(payload["reply"], expected)
+        self.assertEqual(fast_api.CHAT_MESSAGES[-1]["text"], expected)
+        self.assertIsNone(
+            fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"]
+        )
 
     def test_chat_handler_blocks_future_claim_without_task_id(self) -> None:
         request_payload = self.admitted_local_payload("설정 확인해줘")
@@ -1949,18 +2540,156 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(state["voice"]["ttsTargetName"], "로컬 스피커")
         self.assertEqual(state["ui"]["submode"], "voice-speaking")
 
+    def test_local_bridge_status_rejects_missing_and_wrong_reporter_token_without_refresh(self) -> None:
+        baseline = self.local_bridge_status_payload(status_seq=4)
+        baseline["updatedAt"] = 123.0
+        fast_api.LOCAL_BRIDGE_STATUS.clear()
+        fast_api.LOCAL_BRIDGE_STATUS.update(baseline)
+        expected = fast_api.json.loads(
+            fast_api.json.dumps(fast_api.LOCAL_BRIDGE_STATUS)
+        )
+        candidate = self.local_bridge_status_payload(
+            status_seq=5,
+            extra={"ready": False},
+        )
+
+        for label, token in (("missing", None), ("wrong", "w" * 48)):
+            with self.subTest(label=label):
+                response = asyncio.run(
+                    fast_api.local_bridge_status_handler(
+                        self.local_bridge_status_request(
+                            candidate,
+                            token=token,
+                        )
+                    )
+                )
+                payload = fast_api.json.loads(response.text or "{}")
+
+                self.assertEqual(response.status, 403)
+                self.assertEqual(
+                    payload["error"],
+                    "local_bridge_status_unauthorized",
+                )
+                self.assertEqual(fast_api.LOCAL_BRIDGE_STATUS, expected)
+                self.assertEqual(
+                    fast_api.LOCAL_BRIDGE_STATUS["updatedAt"],
+                    123.0,
+                )
+
+    def test_local_bridge_status_invalid_or_partial_payload_does_not_refresh(self) -> None:
+        accepted = self.post_local_bridge_status(
+            self.local_bridge_status_payload(status_seq=1)
+        )
+        self.assertEqual(accepted.status, 200)
+        expected = fast_api.json.loads(
+            fast_api.json.dumps(fast_api.LOCAL_BRIDGE_STATUS)
+        )
+
+        cases = (
+            (
+                "invalid_json",
+                self.local_bridge_status_request(
+                    None,
+                    token=self.local_bridge_reporter_token,
+                    json_error=ValueError("invalid json"),
+                ),
+            ),
+            (
+                "partial",
+                self.local_bridge_status_request(
+                    {
+                        "schema": "local_io_bridge.status.v1",
+                        "statusSeq": 2,
+                        "bridgeInstanceId": "a" * 32,
+                    },
+                    token=self.local_bridge_reporter_token,
+                ),
+            ),
+        )
+        for label, request in cases:
+            with self.subTest(label=label):
+                response = asyncio.run(
+                    fast_api.local_bridge_status_handler(request)
+                )
+                payload = fast_api.json.loads(response.text or "{}")
+
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    payload["error"],
+                    "invalid_local_bridge_status",
+                )
+                self.assertEqual(fast_api.LOCAL_BRIDGE_STATUS, expected)
+
+    def test_local_bridge_status_rejects_duplicate_and_reversed_status_sequence(self) -> None:
+        accepted = self.post_local_bridge_status(
+            self.local_bridge_status_payload(status_seq=10)
+        )
+        self.assertEqual(accepted.status, 200)
+        expected = fast_api.json.loads(
+            fast_api.json.dumps(fast_api.LOCAL_BRIDGE_STATUS)
+        )
+
+        for label, status_seq in (("duplicate", 10), ("reversed", 9)):
+            with self.subTest(label=label):
+                response = self.post_local_bridge_status(
+                    self.local_bridge_status_payload(
+                        status_seq=status_seq,
+                        extra={"ready": False},
+                    )
+                )
+                payload = fast_api.json.loads(response.text or "{}")
+
+                self.assertEqual(response.status, 409)
+                self.assertEqual(
+                    payload["error"],
+                    "local_bridge_status_out_of_order",
+                )
+                self.assertEqual(fast_api.LOCAL_BRIDGE_STATUS, expected)
+
+    def test_local_bridge_status_rejects_delayed_previous_bridge_instance(self) -> None:
+        now = fast_api.time.time()
+        first = self.post_local_bridge_status(
+            self.local_bridge_status_payload(
+                bridge_instance_id="a" * 32,
+                status_seq=8,
+                started_at=now - 20.0,
+            )
+        )
+        replacement = self.post_local_bridge_status(
+            self.local_bridge_status_payload(
+                bridge_instance_id="b" * 32,
+                status_seq=1,
+                started_at=now - 10.0,
+            )
+        )
+        self.assertEqual(first.status, 200)
+        self.assertEqual(replacement.status, 200)
+        expected = fast_api.json.loads(
+            fast_api.json.dumps(fast_api.LOCAL_BRIDGE_STATUS)
+        )
+
+        delayed = self.post_local_bridge_status(
+            self.local_bridge_status_payload(
+                bridge_instance_id="a" * 32,
+                status_seq=9,
+                started_at=now - 20.0,
+                extra={"ready": False},
+            )
+        )
+        delayed_payload = fast_api.json.loads(delayed.text or "{}")
+
+        self.assertEqual(delayed.status, 409)
+        self.assertEqual(
+            delayed_payload["error"],
+            "local_bridge_status_out_of_order",
+        )
+        self.assertEqual(fast_api.LOCAL_BRIDGE_STATUS, expected)
+        self.assertEqual(
+            fast_api.LOCAL_BRIDGE_STATUS["bridgeInstanceId"],
+            "b" * 32,
+        )
+
     def test_local_bridge_status_post_drains_speak_requests_once(self) -> None:
-        class _Request:
-            method = "POST"
-
-            async def json(self):
-                return {
-                    "enabled": True,
-                    "ready": True,
-                    "lastError": "",
-                    "ttsWarmup": {"enabled": True, "done": True, "error": "", "ms": 400.0},
-                }
-
         fast_api.LOCAL_BRIDGE_STATUS.update(
             {
                 "enabled": True,
@@ -1972,8 +2701,32 @@ class FastControlApiToolTests(unittest.TestCase):
         queued = fast_api.queue_local_bridge_speech("hello bridge", source="unit")
         self.assertIsNotNone(queued)
 
-        first = asyncio.run(fast_api.local_bridge_status_handler(_Request()))
-        second = asyncio.run(fast_api.local_bridge_status_handler(_Request()))
+        first = self.post_local_bridge_status(
+            self.local_bridge_status_payload(
+                status_seq=1,
+                extra={
+                    "ttsWarmup": {
+                        "enabled": True,
+                        "done": True,
+                        "error": "",
+                        "ms": 400.0,
+                    },
+                },
+            )
+        )
+        second = self.post_local_bridge_status(
+            self.local_bridge_status_payload(
+                status_seq=2,
+                extra={
+                    "ttsWarmup": {
+                        "enabled": True,
+                        "done": True,
+                        "error": "",
+                        "ms": 400.0,
+                    },
+                },
+            )
+        )
 
         first_payload = fast_api.json.loads(first.text or "{}")
         second_payload = fast_api.json.loads(second.text or "{}")
@@ -1982,15 +2735,6 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertTrue(first_payload["localBridge"]["ttsWarmup"]["done"])
 
     def test_local_bridge_status_get_does_not_drain_speak_requests(self) -> None:
-        class _GetRequest:
-            method = "GET"
-
-        class _PostRequest:
-            method = "POST"
-
-            async def json(self):
-                return {"enabled": True, "ready": True, "lastError": ""}
-
         fast_api.LOCAL_BRIDGE_STATUS.update(
             {
                 "enabled": True,
@@ -2002,12 +2746,18 @@ class FastControlApiToolTests(unittest.TestCase):
         queued = fast_api.queue_local_bridge_speech("do not drain on get", source="unit")
         self.assertIsNotNone(queued)
 
-        get_response = asyncio.run(fast_api.local_bridge_status_handler(_GetRequest()))
+        get_response = asyncio.run(
+            fast_api.local_bridge_status_handler(
+                self.internal_control_request(None, method="GET")
+            )
+        )
         get_payload = fast_api.json.loads(get_response.text or "{}")
         self.assertEqual(get_payload["speakRequests"], [])
         self.assertEqual(len(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE), 1)
 
-        post_response = asyncio.run(fast_api.local_bridge_status_handler(_PostRequest()))
+        post_response = self.post_local_bridge_status(
+            self.local_bridge_status_payload()
+        )
         post_payload = fast_api.json.loads(post_response.text or "{}")
         self.assertEqual([item["text"] for item in post_payload["speakRequests"]], ["do not drain on get"])
         self.assertEqual(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE, [])

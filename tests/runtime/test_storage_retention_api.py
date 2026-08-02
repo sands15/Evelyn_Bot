@@ -50,7 +50,13 @@ class StorageRetentionApiTests(unittest.IsolatedAsyncioTestCase):
             return_value=self.payload,
         )
         self.report_patch.start()
-        self.client = TestClient(TestServer(control_page_server.create_app()))
+        self.client = TestClient(
+            TestServer(
+                control_page_server.create_app(
+                    manage_voice_capture_consent=False
+                )
+            )
+        )
         await self.client.start_server()
         self.origin = str(self.client.make_url("/")).rstrip("/")
 

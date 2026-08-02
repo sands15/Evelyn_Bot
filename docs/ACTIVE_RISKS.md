@@ -450,18 +450,35 @@ Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/stat
 `/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
 readiness와 복구 preview가 배포 전과 같은지 확인한다.
 
-## P0 — 손상된 마이크 동의 상태의 fail-open 가능성
+## P0 — Control Page hard-crash 뒤 host-side 캡처 watchdog 부재
 
-`voice_capture_consent.py`의 현재 loader는 상태 파일 누락·손상·읽기 실패를 모두
-새 `inactive` 상태로 바꾼다. startup reconcile은 이 상태에서 mic-off를 요청하지
-않고, 전용 JSON writer도 replace 전 file/directory `fsync`를 하지 않는다. 따라서
-마이크가 실제로 켜진 뒤 상태 commit이 손상되면 OFF ACK 없이 비활성으로 오판할 수
-있다.
+2026-08-02 source에서 이전의 손상 상태 fail-open은 닫혔다. consent load는
+`verified | missing | untrusted`를 구분하고, 누락·손상·symlink·invalid UTF-8·
+과도한 중첩·불변식 위반과 이전 owner의 active 계열 상태를 모두 `revoking`으로
+복구한다. exact revision/action/Bridge/capture-stopped ACK 뒤에만 durable
+`inactive`를 기록하며, OFF 실패·취소·상태 write 실패는 monitor가 다시 시도한다.
 
-다음 source P0는 load 결과를 `verified | missing | untrusted`로 구분하고, 신뢰할 수
-없는 상태와 이전 owner의 active 계열 상태에서 exact mic-off ACK를 받은 뒤에만
-durable `inactive`를 기록하는 것이다. OFF 실패는 `revoking`으로 보존해 재시작 뒤
-재시도해야 한다. 이는 코드 감사로 확인한 위험이며 실제 마이크는 켜지 않았다.
+같은 변경에서 Bridge status reporter와 Control Page 내부 제어를 별도 process-scoped
+bearer로 분리하고, exact `actionId`, 단조 `statusSeq`, Bridge instance 세대와
+ON enable fence를 도입했다. OFF는 `disableGeneration`을 먼저 올려 취소·철회 뒤
+늦은 ON을 거부한다. 부분·손상·중복·역전 heartbeat는 freshness를 갱신하지 않으며,
+ambient 환경값이나 일반 `/mic on`은 더 이상 캡처 ON 권한이 아니다. apply와
+validation confirm/retry/abort도 같은 app lock에서 terminal 전환과 exact OFF를
+직렬화한다. 최신 preview만 정확한 validation 세대에서 apply할 수 있고, unbound
+동의는 canonical idle만 허용하므로 idle ON 뒤 Discord-only 시작도 OFF로 돌아간다.
+mutation I/O 예외는 고정 503과 즉시 recovery/OFF로 닫힌다. Supervisor의 개별
+Docker 복구는 `--no-deps`이고, Bridge와 그 자식은 목적 밖 credential을 상속하지
+않는다. 전체 재시작 credential 연속성은 Supervisor-owned exit-code handoff가 맡는다.
+
+남은 P0는 Control Page가 정상 cleanup 없이 강제 종료되고 재기동되지 않는 경우다.
+현재 active consent의 만료는 Control Page monitor가 집행하므로, Host Supervisor나
+Bridge가 lease 만료·Control Page heartbeat 상실을 독립적으로 보고 exact capture
+stop을 수행하는 watchdog은 없다. 또한 동시에 뜬 Control Page owner를 배제하는
+process-lifetime OS lock 또는 durable generation CAS가 없다. 다음 source P0는
+content-free consent lease projection을 Host 경계에 전달하고, stale/expired owner에서
+Bridge가 스스로 capture를 멈춘 뒤 Supervisor가 exact stop evidence를 게시하게 하는
+것이다. mic 활성 뒤 health 수집 전체 deadline 부재로 consent lock이 오래 점유될 수
+있는 문제는 P1 starvation hardening으로 남긴다. 실제 마이크는 켜지 않았다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
