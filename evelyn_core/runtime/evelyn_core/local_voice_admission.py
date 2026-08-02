@@ -10,6 +10,9 @@ import time
 import unicodedata
 from typing import Any, Callable
 
+from .conversation_ingress_recovery import (
+    CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+)
 from .fast_action_runtime import (
     detect_local_mic_command,
     detect_local_runtime_command,
@@ -36,6 +39,52 @@ _MAX_TERMINAL_TOKENS = 512
 _MAX_REPLAY_TURNS = 512
 
 ValidationCurrent = Callable[[dict[str, Any]], bool]
+
+
+class LocalVoiceAdmissionTransactionError(RuntimeError):
+    """Raised before token consumption when durable claim proof is invalid."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class LocalVoiceAdmissionTransaction:
+    admission: dict[str, Any]
+    ingress_claim: LocalVoiceDurableIngressClaim | None
+
+
+@dataclass(frozen=True)
+class LocalVoiceIngressClaimRequest:
+    bridge_instance_id: str
+    turn_id: str
+    forward_text: str
+    forward_text_digest: str
+    validation_binding_digest: str
+    mode: str
+
+
+@dataclass(frozen=True)
+class LocalVoiceDurableIngressClaim:
+    schema: str
+    durable: bool
+    bridge_instance_id: str
+    local_turn_id: str
+    forward_text_digest: str
+    entry_id: str
+    ingress_turn_id: str
+    phase: str
+    disposition: str
+    should_process: bool
+    text_hash: str
+    journal_generation: int
+
+
+DurableIngressClaim = Callable[
+    [LocalVoiceIngressClaimRequest],
+    LocalVoiceDurableIngressClaim,
+]
 
 
 def normalize_local_voice_text(value: Any) -> str:
@@ -416,6 +465,9 @@ class LocalVoiceAdmissionManager:
         *,
         validation_binding: Any = None,
         validation_is_current: ValidationCurrent | None = None,
+        _before_commit: (
+            Callable[[_TokenRecord, str], bool | None] | None
+        ) = None,
     ) -> dict[str, Any]:
         presented_token = str(token or "")
         bridge_id = _identifier(bridge_instance_id)
@@ -472,6 +524,17 @@ class LocalVoiceAdmissionManager:
             if len(self._consumed_turns) >= _MAX_REPLAY_TURNS:
                 return invalidate("admission_replay_capacity_exhausted")
 
+            # A durable ingress claim is the irreversible side of local voice
+            # admission.  Run it while this token is still live and while the
+            # manager lock excludes a concurrent consume.  If it raises, none
+            # of the token, replay-ledger, or follow-up-lease mutations below
+            # are committed, so a retry can safely attempt the same claim.
+            should_admit = True
+            if _before_commit is not None:
+                should_admit = (
+                    _before_commit(record, forward_text) is not False
+                )
+
             self._tokens.pop(token_digest, None)
             turn_key = (record.bridge_instance_id, record.turn_id)
             if self._pending_turn_tokens.get(turn_key) == token_digest:
@@ -481,6 +544,20 @@ class LocalVoiceAdmissionManager:
                 now_value + self.replay_ttl_sec,
             )
             self._consumed_turns[turn_key] = now_value + self.replay_ttl_sec
+            if not should_admit:
+                # The stable ingress key already exists. Terminalize this
+                # capability and remember the replay, but do not turn a
+                # recovered duplicate into fresh conversational consent.
+                self._last_reason = "admission_ingress_duplicate"
+                return {
+                    "ok": False,
+                    "admitted": False,
+                    "suppressed": True,
+                    "reason": "admission_ingress_duplicate",
+                    "mode": record.mode,
+                    "forwardText": forward_text,
+                    "admission": self.public_status(),
+                }
             self._bridge_instance_id = bridge_id
             if record.mode in {"wake_entry", "followup"}:
                 self._active_until = now_value + self.followup_ttl_sec
@@ -497,11 +574,157 @@ class LocalVoiceAdmissionManager:
                 "admission": self.public_status(),
             }
 
+    @staticmethod
+    def _durable_ingress_claim_receipt(
+        value: Any,
+        request: LocalVoiceIngressClaimRequest,
+    ) -> LocalVoiceDurableIngressClaim:
+        if (
+            not isinstance(value, LocalVoiceDurableIngressClaim)
+            or value.bridge_instance_id != request.bridge_instance_id
+            or value.local_turn_id != request.turn_id
+            or value.forward_text_digest
+            != request.forward_text_digest
+        ):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_binding_mismatch"
+            )
+        expected_disposition = {
+            "accepted": "pending",
+            "response_ready": "pending",
+            "delivery_inflight": "delivery_inflight",
+            "delivery_succeeded": "delivered_pending_commit",
+            "delivery_ambiguous": "delivery_ambiguous",
+            "terminal_committing": "terminal_pending",
+            "completed": "completed",
+        }.get(value.phase)
+        if (
+            value.schema
+            != CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA
+            or value.durable is not True
+            or not _identifier(value.entry_id)
+            or not _identifier(value.ingress_turn_id)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                value.text_hash,
+            )
+            or value.text_hash != request.forward_text_digest
+            or type(value.should_process) is not bool
+            or expected_disposition is None
+            or (
+                value.should_process is True
+                and (
+                    value.phase != "accepted"
+                    or value.disposition != "claimed"
+                )
+            )
+            or (
+                value.should_process is False
+                and value.disposition != expected_disposition
+            )
+            or isinstance(value.journal_generation, bool)
+        ):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_invalid"
+            )
+        try:
+            generation = int(value.journal_generation)
+        except (TypeError, ValueError, OverflowError):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_invalid"
+            ) from None
+        if generation <= 0:
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_invalid"
+            )
+        return value
+
+    def consume_with_durable_claim(
+        self,
+        token: Any,
+        bridge_instance_id: Any,
+        turn_id: Any,
+        text: Any,
+        *,
+        durable_claim: DurableIngressClaim,
+        validation_binding: Any = None,
+        validation_is_current: ValidationCurrent | None = None,
+    ) -> LocalVoiceAdmissionTransaction:
+        """Bind one valid capability to durable ingress before consuming it.
+
+        The callback executes after every admission check but before any
+        one-shot token or follow-up-session mutation.  Therefore a callback
+        failure leaves the capability retryable, while every returned
+        admitted result has an exact durable claim receipt.
+        """
+
+        captured_claim: list[LocalVoiceDurableIngressClaim] = []
+
+        def claim_before_commit(
+            record: _TokenRecord,
+            forward_text: str,
+        ) -> bool:
+            request = LocalVoiceIngressClaimRequest(
+                bridge_instance_id=record.bridge_instance_id,
+                turn_id=record.turn_id,
+                forward_text=forward_text,
+                forward_text_digest=record.forward_text_digest,
+                validation_binding_digest=(
+                    record.validation_binding_digest
+                ),
+                mode=record.mode,
+            )
+            validated_claim = self._durable_ingress_claim_receipt(
+                durable_claim(request),
+                request,
+            )
+            captured_claim.append(validated_claim)
+            return validated_claim.should_process
+
+        admission = self.consume(
+            token,
+            bridge_instance_id,
+            turn_id,
+            text,
+            validation_binding=validation_binding,
+            validation_is_current=validation_is_current,
+            _before_commit=claim_before_commit,
+        )
+        if admission.get("suppressed") is True:
+            if (
+                len(captured_claim) != 1
+                or captured_claim[0].should_process is not False
+            ):
+                raise LocalVoiceAdmissionTransactionError(
+                    "local_voice_ingress_claim_invalid"
+                )
+            return LocalVoiceAdmissionTransaction(
+                admission=dict(admission),
+                ingress_claim=captured_claim[0],
+            )
+        if admission.get("admitted") is not True:
+            return LocalVoiceAdmissionTransaction(
+                admission=dict(admission),
+                ingress_claim=None,
+            )
+        if len(captured_claim) != 1:
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_invalid"
+            )
+        return LocalVoiceAdmissionTransaction(
+            admission=dict(admission),
+            ingress_claim=captured_claim[0],
+        )
+
 
 __all__ = [
     "DEFAULT_FOLLOWUP_TTL_SEC",
     "DEFAULT_REPLAY_TTL_SEC",
     "DEFAULT_TOKEN_TTL_SEC",
+    "LocalVoiceAdmissionTransaction",
+    "LocalVoiceAdmissionTransactionError",
+    "LocalVoiceDurableIngressClaim",
+    "LocalVoiceIngressClaimRequest",
     "LocalVoiceAdmissionManager",
     "STATUS_SCHEMA",
     "WAKE_WORD",

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -23,7 +26,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
+from evelyn_core import conversation_ingress_recovery as ingress_recovery  # noqa: E402
 from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
+    CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
     ConversationIngressRecoveryError,
     DEFAULT_INGRESS_MAX_AGE_SEC,
 )
@@ -48,17 +53,22 @@ class _IngressOwner:
 
     def __init__(self, claim: dict[str, object] | None = None) -> None:
         self.claim = claim or {
+            "schema": CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
             "entryId": "ingress-" + "1" * 64,
             "turnId": "journal-turn",
             "phase": "accepted",
+            "durable": True,
             "shouldProcess": True,
+            "journalGeneration": 1,
         }
         self.request_ids: list[str] = []
+        self.accepted_texts: list[str] = []
         self.events: list[tuple[str, str]] = []
         self.replay_record: dict[str, object] | None = None
 
     def claim_ingress(self, *, request_id, accepted_text):
         self.request_ids.append(str(request_id))
+        self.accepted_texts.append(str(accepted_text))
         return dict(self.claim)
 
     def ingress_record(self, entry_id, *, replay=False):
@@ -182,6 +192,586 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "conversation_ingress_completed_redelivery_suppressed",
         )
         self.assertEqual(completed.events, [])
+
+    async def test_local_voice_consumption_reuses_exact_atomic_claim(
+        self,
+    ) -> None:
+        manager = fast_api.LocalVoiceAdmissionManager()
+        bridge_id = "atomic-local-bridge"
+        turn_id = "atomic-local-turn"
+        issued = manager.issue(
+            bridge_id,
+            turn_id,
+            "이블린, 원자 경계 질문",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        payload = {
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "text": issued["forwardText"],
+            "admissionToken": issued["admissionToken"],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+            )
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "LOCAL_VOICE_ADMISSION",
+                    manager,
+                ),
+                patch.object(
+                    fast_api,
+                    "local_voice_validation_binding_is_current",
+                    side_effect=lambda binding: not binding,
+                ),
+                patch.object(
+                    owner,
+                    "claim_ingress",
+                    wraps=owner.claim_ingress,
+                ) as durable_claim,
+            ):
+                (
+                    admitted_text,
+                    preclaimed,
+                    rejection,
+                ) = fast_api.consume_local_voice_admission(
+                    payload,
+                    text=str(payload["text"]),
+                    source="local_bridge",
+                )
+                claim, cached, ingress_rejection = (
+                    fast_api._prepare_fast_control_ingress(
+                        payload,
+                        accepted_text=admitted_text,
+                        source="local_bridge",
+                        preclaimed=preclaimed,
+                    )
+                )
+            recovery_records = owner.ingress.recovery_records()
+
+        stable_key = json.dumps(
+            [bridge_id, turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.assertIsNone(rejection)
+        self.assertIsNone(cached)
+        self.assertIsNone(ingress_rejection)
+        self.assertEqual(durable_claim.call_count, 1)
+        self.assertEqual(claim["_effectId"], stable_key)
+        self.assertEqual(len(recovery_records), 1)
+        self.assertEqual(
+            recovery_records[0]["entryId"],
+            claim["entryId"],
+        )
+        self.assertEqual(
+            recovery_records[0]["acceptedText"],
+            "원자 경계 질문",
+        )
+        self.assertEqual(
+            preclaimed.text_hash,
+            fast_api.final_text_sha256("원자 경계 질문"),
+        )
+        self.assertEqual(manager.public_status()["acceptedCount"], 1)
+
+    async def test_local_voice_claim_failure_does_not_burn_token(
+        self,
+    ) -> None:
+        class FlakyIngressOwner(_IngressOwner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = True
+
+            def claim_ingress(self, *, request_id, accepted_text):
+                self.request_ids.append(str(request_id))
+                self.accepted_texts.append(str(accepted_text))
+                if self.fail:
+                    raise ConversationIngressRecoveryError(
+                        "conversation_ingress_recovery_write_failed"
+                    )
+                receipt = dict(self.claim)
+                receipt.update(
+                    {
+                        "entryId": (
+                            fast_api.conversation_ingress_entry_id(
+                                surface=(
+                                    fast_api.FAST_CONTROL_INGRESS_SURFACE
+                                ),
+                                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                                source_delivery_id=request_id,
+                            )
+                        ),
+                        "textHash": fast_api.final_text_sha256(
+                            accepted_text
+                        ),
+                        "phase": "accepted",
+                        "disposition": "claimed",
+                        "durable": True,
+                        "shouldProcess": True,
+                        "journalGeneration": 1,
+                    }
+                )
+                return receipt
+
+        manager = fast_api.LocalVoiceAdmissionManager()
+        owner = FlakyIngressOwner()
+        bridge_id = "atomic-retry-bridge"
+        turn_id = "atomic-retry-turn"
+        issued = manager.issue(
+            bridge_id,
+            turn_id,
+            "이블린, claim 실패 뒤 재시도",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        payload = {
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "text": issued["forwardText"],
+            "admissionToken": issued["admissionToken"],
+        }
+
+        with (
+            patch.object(
+                fast_api,
+                "FAST_CONTROL_CONTINUITY_OWNER",
+                owner,
+            ),
+            patch.object(
+                fast_api,
+                "LOCAL_VOICE_ADMISSION",
+                manager,
+            ),
+            patch.object(
+                fast_api,
+                "local_voice_validation_binding_is_current",
+                side_effect=lambda binding: not binding,
+            ),
+        ):
+            _, _, first_rejection = fast_api.consume_local_voice_admission(
+                payload,
+                text=str(payload["text"]),
+                source="local_bridge",
+            )
+            self.assertEqual(first_rejection.status, 503)
+            self.assertEqual(manager.public_status()["acceptedCount"], 0)
+            self.assertFalse(manager.public_status()["active"])
+
+            owner.fail = False
+            admitted_text, preclaimed, second_rejection = (
+                fast_api.consume_local_voice_admission(
+                    payload,
+                    text=str(payload["text"]),
+                    source="local_bridge",
+                )
+            )
+            claim, _, ingress_rejection = (
+                fast_api._prepare_fast_control_ingress(
+                    payload,
+                    accepted_text=admitted_text,
+                    source="local_bridge",
+                    preclaimed=preclaimed,
+                )
+            )
+
+        self.assertIsNone(second_rejection)
+        self.assertIsNone(ingress_rejection)
+        self.assertTrue(claim["shouldProcess"])
+        self.assertEqual(len(owner.request_ids), 2)
+        self.assertEqual(manager.public_status()["acceptedCount"], 1)
+
+    async def test_real_journal_io_failure_is_content_free_and_retryable(
+        self,
+    ) -> None:
+        manager = fast_api.LocalVoiceAdmissionManager()
+        bridge_id = "raw-io-error-bridge"
+        turn_id = "raw-io-error-turn"
+        issued = manager.issue(
+            bridge_id,
+            turn_id,
+            "이블린, 저장 실패 뒤 재시도",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        payload = {
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "text": issued["forwardText"],
+            "admissionToken": issued["admissionToken"],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+            )
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "LOCAL_VOICE_ADMISSION",
+                    manager,
+                ),
+                patch.object(
+                    fast_api,
+                    "local_voice_validation_binding_is_current",
+                    side_effect=lambda binding: not binding,
+                ),
+                patch.object(
+                    ingress_recovery,
+                    "atomic_json_write",
+                    side_effect=OSError("PRIVATE_PATH_CANARY"),
+                ),
+            ):
+                _, _, first_rejection = (
+                    fast_api.consume_local_voice_admission(
+                        payload,
+                        text=str(payload["text"]),
+                        source="local_bridge",
+                    )
+                )
+
+            self.assertEqual(first_rejection.status, 503)
+            self.assertEqual(
+                json.loads(first_rejection.text)["error"],
+                "conversation_ingress_recovery_unavailable",
+            )
+            self.assertNotIn("PRIVATE_PATH_CANARY", first_rejection.text)
+            self.assertEqual(manager.public_status()["acceptedCount"], 0)
+            self.assertFalse(manager.public_status()["active"])
+
+            recovered_owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+            )
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    recovered_owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "LOCAL_VOICE_ADMISSION",
+                    manager,
+                ),
+                patch.object(
+                    fast_api,
+                    "local_voice_validation_binding_is_current",
+                    side_effect=lambda binding: not binding,
+                ),
+            ):
+                admitted_text, preclaimed, retry_rejection = (
+                    fast_api.consume_local_voice_admission(
+                        payload,
+                        text=str(payload["text"]),
+                        source="local_bridge",
+                    )
+                )
+                claim, _, ingress_rejection = (
+                    fast_api._prepare_fast_control_ingress(
+                        payload,
+                        accepted_text=admitted_text,
+                        source="local_bridge",
+                        preclaimed=preclaimed,
+                    )
+                )
+
+        self.assertIsNone(retry_rejection)
+        self.assertIsNone(ingress_rejection)
+        self.assertTrue(claim["shouldProcess"])
+        self.assertEqual(manager.public_status()["acceptedCount"], 1)
+
+    async def test_process_exit_after_real_claim_recovers_exact_turn(
+        self,
+    ) -> None:
+        bridge_id = "crash-window-bridge"
+        turn_id = "crash-window-turn"
+        forward_text = "claim 직후 종료되는 질문"
+        request_id = json.dumps(
+            [bridge_id, turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        child = textwrap.dedent(
+            r"""
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            sys.path.insert(0, sys.argv[1])
+
+            from evelyn_core.fast_control_continuity import (
+                FastControlContinuityOwner,
+            )
+            from evelyn_core.local_voice_admission import (
+                LocalVoiceAdmissionManager,
+            )
+
+            root = Path(sys.argv[2])
+            bridge_id = sys.argv[3]
+            turn_id = sys.argv[4]
+            owner = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            manager = LocalVoiceAdmissionManager()
+            issued = manager.issue(
+                bridge_id,
+                turn_id,
+                "이블린, claim 직후 종료되는 질문",
+                validation_binding={},
+                validation_is_current=lambda binding: not binding,
+            )
+            request_id = json.dumps(
+                [bridge_id, turn_id],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+
+            def claim_then_exit(claim_request):
+                owner.claim_ingress(
+                    request_id=request_id,
+                    accepted_text=claim_request.forward_text,
+                )
+                os._exit(91)
+
+            manager.consume_with_durable_claim(
+                issued["admissionToken"],
+                bridge_id,
+                turn_id,
+                issued["forwardText"],
+                durable_claim=claim_then_exit,
+                validation_is_current=lambda binding: not binding,
+            )
+            raise SystemExit(92)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(RUNTIME_ROOT),
+                    temporary,
+                    bridge_id,
+                    turn_id,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                completed.returncode,
+                91,
+                completed.stderr,
+            )
+            recovered_owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            records = recovered_owner.ingress.recovery_records()
+            recovered_manager = fast_api.LocalVoiceAdmissionManager()
+            recovered_issued = recovered_manager.issue(
+                bridge_id,
+                turn_id,
+                f"이블린, {forward_text}",
+                validation_binding={},
+                validation_is_current=lambda binding: not binding,
+            )
+            recovered_payload = {
+                "source": "local_bridge",
+                "bridgeInstanceId": bridge_id,
+                "turnId": turn_id,
+                "text": recovered_issued["forwardText"],
+                "admissionToken": recovered_issued["admissionToken"],
+            }
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    recovered_owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "LOCAL_VOICE_ADMISSION",
+                    recovered_manager,
+                ),
+                patch.object(
+                    fast_api,
+                    "local_voice_validation_binding_is_current",
+                    side_effect=lambda binding: not binding,
+                ),
+            ):
+                (
+                    duplicate_text,
+                    duplicate_preclaim,
+                    duplicate_admission_rejection,
+                ) = fast_api.consume_local_voice_admission(
+                    recovered_payload,
+                    text=str(recovered_payload["text"]),
+                    source="local_bridge",
+                )
+                duplicate_claim, _, duplicate_ingress_rejection = (
+                    fast_api._prepare_fast_control_ingress(
+                        recovered_payload,
+                        accepted_text=duplicate_text,
+                        source="local_bridge",
+                        preclaimed=duplicate_preclaim,
+                    )
+                )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["phase"], "accepted")
+        self.assertTrue(records[0]["recovered"])
+        self.assertEqual(records[0]["sourceDeliveryId"], request_id)
+        self.assertEqual(records[0]["acceptedText"], forward_text)
+        self.assertIsNone(duplicate_admission_rejection)
+        self.assertEqual(duplicate_ingress_rejection.status, 409)
+        self.assertEqual(
+            json.loads(duplicate_ingress_rejection.text)["error"],
+            fast_api.FAST_CONTROL_INGRESS_PENDING_ERROR,
+        )
+        self.assertFalse(duplicate_claim["shouldProcess"])
+        self.assertEqual(
+            duplicate_claim["entryId"],
+            records[0]["entryId"],
+        )
+        self.assertEqual(
+            recovered_manager.public_status()["acceptedCount"],
+            0,
+        )
+        self.assertFalse(recovered_manager.public_status()["active"])
+        self.assertEqual(fast_api.CHAT_MESSAGES, [])
+        self.assertEqual(recovered_owner.restored_chat_messages(), [])
+
+    async def test_mismatched_entry_receipt_never_consumes_token(
+        self,
+    ) -> None:
+        class BindingOwner(_IngressOwner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.return_wrong_entry = True
+
+            def claim_ingress(self, *, request_id, accepted_text):
+                self.request_ids.append(str(request_id))
+                expected_entry_id = (
+                    fast_api.conversation_ingress_entry_id(
+                        surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                        scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                        source_delivery_id=request_id,
+                    )
+                )
+                return {
+                    "schema": (
+                        "conversation.ingress-recovery-receipt.v1"
+                    ),
+                    "entryId": (
+                        "ingress-" + "f" * 64
+                        if self.return_wrong_entry
+                        else expected_entry_id
+                    ),
+                    "turnId": "journal-binding-turn",
+                    "phase": "accepted",
+                    "disposition": "claimed",
+                    "durable": True,
+                    "shouldProcess": True,
+                    "textHash": fast_api.final_text_sha256(
+                        accepted_text
+                    ),
+                    "journalGeneration": 1,
+                }
+
+        manager = fast_api.LocalVoiceAdmissionManager()
+        owner = BindingOwner()
+        bridge_id = "binding-retry-bridge"
+        turn_id = "binding-retry-turn"
+        issued = manager.issue(
+            bridge_id,
+            turn_id,
+            "이블린, exact receipt만 받아",
+            validation_binding={},
+            validation_is_current=lambda binding: not binding,
+        )
+        payload = {
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "text": issued["forwardText"],
+            "admissionToken": issued["admissionToken"],
+        }
+
+        with (
+            patch.object(
+                fast_api,
+                "FAST_CONTROL_CONTINUITY_OWNER",
+                owner,
+            ),
+            patch.object(
+                fast_api,
+                "LOCAL_VOICE_ADMISSION",
+                manager,
+            ),
+            patch.object(
+                fast_api,
+                "local_voice_validation_binding_is_current",
+                side_effect=lambda binding: not binding,
+            ),
+        ):
+            _, _, rejection = fast_api.consume_local_voice_admission(
+                payload,
+                text=str(payload["text"]),
+                source="local_bridge",
+            )
+            self.assertEqual(rejection.status, 503)
+            self.assertEqual(manager.public_status()["acceptedCount"], 0)
+            self.assertFalse(manager.public_status()["active"])
+
+            owner.return_wrong_entry = False
+            admitted_text, preclaimed, retry_rejection = (
+                fast_api.consume_local_voice_admission(
+                    payload,
+                    text=str(payload["text"]),
+                    source="local_bridge",
+                )
+            )
+            claim, _, ingress_rejection = (
+                fast_api._prepare_fast_control_ingress(
+                    payload,
+                    accepted_text=admitted_text,
+                    source="local_bridge",
+                    preclaimed=preclaimed,
+                )
+            )
+
+        self.assertIsNone(retry_rejection)
+        self.assertIsNone(ingress_rejection)
+        self.assertEqual(len(owner.request_ids), 2)
+        self.assertTrue(claim["shouldProcess"])
+        self.assertEqual(manager.public_status()["acceptedCount"], 1)
 
     async def test_only_control_page_completed_retry_uses_guarded_cache(self) -> None:
         owner = _IngressOwner(

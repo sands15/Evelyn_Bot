@@ -281,7 +281,7 @@ class FastControlDeliveryMemoryBoundaryTests(
         with patch.object(
             fast_api,
             "consume_local_voice_admission",
-            return_value=("local handoff", None),
+            return_value=("local handoff", None, None),
         ), patch.object(
             fast_api,
             "plan_fast_tool_request_for_turn",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,12 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.local_voice_admission import (  # noqa: E402
     LocalVoiceAdmissionManager,
+    LocalVoiceAdmissionTransactionError,
+    LocalVoiceDurableIngressClaim,
     split_exact_leading_wake,
+)
+from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
+    CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
 )
 
 
@@ -79,6 +85,52 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
             validation_is_current=self.current,
         )
 
+    @staticmethod
+    def durable_claim_receipt(
+        *,
+        text_hash: str,
+        generation: int = 1,
+    ) -> dict:
+        return {
+            "schema": CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+            "entryId": "ingress-" + "1" * 64,
+            "turnId": "journal-turn-a",
+            "phase": "accepted",
+            "disposition": "claimed",
+            "durable": True,
+            "shouldProcess": True,
+            "textHash": text_hash,
+            "journalGeneration": generation,
+        }
+
+    def durable_claim_for(
+        self,
+        request,
+        *,
+        claim_bridge_id: str | None = None,
+        **overrides,
+    ) -> LocalVoiceDurableIngressClaim:
+        receipt = self.durable_claim_receipt(
+            text_hash=request.forward_text_digest
+        )
+        receipt.update(overrides)
+        return LocalVoiceDurableIngressClaim(
+            schema=receipt["schema"],
+            durable=receipt["durable"],
+            bridge_instance_id=(
+                claim_bridge_id or request.bridge_instance_id
+            ),
+            local_turn_id=request.turn_id,
+            forward_text_digest=request.forward_text_digest,
+            entry_id=receipt["entryId"],
+            ingress_turn_id=receipt["turnId"],
+            phase=receipt["phase"],
+            disposition=receipt["disposition"],
+            should_process=receipt["shouldProcess"],
+            text_hash=receipt["textHash"],
+            journal_generation=receipt["journalGeneration"],
+        )
+
     def test_exact_leading_wake_is_required_and_removed(self) -> None:
         admitted = self.issue("이블린, 지금 듣고 있어?")
         middle = self.manager.issue(
@@ -119,6 +171,262 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
         expired = self.issue("세 번째 질문", turn_id="turn-3")
         self.assertEqual(expired["reason"], "wake_word_required")
         self.assertFalse(self.manager.public_status()["active"])
+
+    def test_durable_claim_precedes_token_and_followup_commit(self) -> None:
+        issued = self.issue("이블린, 원자적으로 처리해")
+        observed: list[dict[str, object]] = []
+
+        def durable_claim(request):
+            observed.append(
+                {
+                    "text": request.forward_text,
+                    "acceptedCount": self.manager.public_status()[
+                        "acceptedCount"
+                    ],
+                    "active": self.manager.public_status()["active"],
+                    "consumedTurnCount": len(
+                        self.manager._consumed_turns  # noqa: SLF001
+                    ),
+                }
+            )
+            return self.durable_claim_for(request)
+
+        transaction = self.manager.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-a",
+            issued["forwardText"],
+            durable_claim=durable_claim,
+            validation_is_current=self.current,
+        )
+
+        self.assertTrue(transaction.admission["admitted"])
+        claim = transaction.ingress_claim
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.bridge_instance_id, self.bridge_id)
+        self.assertEqual(claim.local_turn_id, "turn-a")
+        self.assertEqual(claim.phase, "accepted")
+        self.assertEqual(claim.disposition, "claimed")
+        self.assertTrue(claim.should_process)
+        self.assertEqual(claim.text_hash, claim.forward_text_digest)
+        self.assertEqual(
+            observed,
+            [
+                {
+                    "text": "원자적으로 처리해",
+                    "acceptedCount": 0,
+                    "active": False,
+                    "consumedTurnCount": 0,
+                }
+            ],
+        )
+        self.assertEqual(self.manager.public_status()["acceptedCount"], 1)
+        self.assertTrue(self.manager.public_status()["active"])
+        self.assertEqual(
+            self.consume(issued)["reason"],
+            "admission_token_reused",
+        )
+
+    def test_durable_claim_failure_keeps_capability_retryable(self) -> None:
+        issued = self.issue("이블린, 실패 뒤 다시 처리해")
+
+        def fail_claim(_request):
+            raise OSError("durable journal unavailable")
+
+        with self.assertRaisesRegex(OSError, "journal unavailable"):
+            self.manager.consume_with_durable_claim(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-a",
+                issued["forwardText"],
+                durable_claim=fail_claim,
+                validation_is_current=self.current,
+            )
+
+        self.assertEqual(self.manager.public_status()["acceptedCount"], 0)
+        self.assertFalse(self.manager.public_status()["active"])
+        recovered = self.manager.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-a",
+            issued["forwardText"],
+            durable_claim=self.durable_claim_for,
+            validation_is_current=self.current,
+        )
+        self.assertTrue(recovered.admission["admitted"])
+
+    def test_durable_duplicate_does_not_open_followup_or_count(self) -> None:
+        issued = self.issue("이블린, 이미 기록된 질문")
+
+        transaction = self.manager.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-a",
+            issued["forwardText"],
+            durable_claim=lambda request: self.durable_claim_for(
+                request,
+                shouldProcess=False,
+                disposition="pending",
+            ),
+            validation_is_current=self.current,
+        )
+
+        self.assertFalse(transaction.admission["admitted"])
+        self.assertTrue(transaction.admission["suppressed"])
+        self.assertEqual(
+            transaction.admission["reason"],
+            "admission_ingress_duplicate",
+        )
+        self.assertFalse(transaction.ingress_claim.should_process)
+        self.assertEqual(self.manager.public_status()["acceptedCount"], 0)
+        self.assertFalse(self.manager.public_status()["active"])
+        self.assertEqual(len(self.manager._consumed_turns), 1)  # noqa: SLF001
+        self.assertEqual(
+            self.consume(issued)["reason"],
+            "admission_token_reused",
+        )
+        self.assertEqual(
+            self.manager.issue(
+                self.bridge_id,
+                "turn-a",
+                "이블린, 이미 기록된 질문",
+                validation_is_current=self.current,
+            )["reason"],
+            "local_voice_turn_already_consumed",
+        )
+        self.assertEqual(
+            self.manager.issue(
+                self.bridge_id,
+                "turn-next",
+                "호출어 없는 후속 질문",
+                validation_is_current=self.current,
+            )["reason"],
+            "wake_word_required",
+        )
+
+    def test_durable_followup_duplicate_does_not_change_lease(self) -> None:
+        wake = self.issue("이블린, 첫 질문", turn_id="turn-wake")
+        self.consume(wake, turn_id="turn-wake")
+        original_active_until = self.manager._active_until  # noqa: SLF001
+        self.clock.advance(10)
+        duplicate = self.issue("중복 후속 질문", turn_id="turn-duplicate")
+
+        transaction = self.manager.consume_with_durable_claim(
+            duplicate["admissionToken"],
+            self.bridge_id,
+            "turn-duplicate",
+            duplicate["forwardText"],
+            durable_claim=lambda request: self.durable_claim_for(
+                request,
+                shouldProcess=False,
+                disposition="pending",
+            ),
+            validation_is_current=self.current,
+        )
+
+        self.assertTrue(transaction.admission["suppressed"])
+        self.assertEqual(
+            self.manager._active_until,  # noqa: SLF001
+            original_active_until,
+        )
+        self.assertEqual(self.manager.public_status()["acceptedCount"], 1)
+        self.clock.advance(36)
+        self.assertEqual(
+            self.manager.issue(
+                self.bridge_id,
+                "turn-after-original-expiry",
+                "호출어 없는 질문",
+                validation_is_current=self.current,
+            )["reason"],
+            "wake_word_required",
+        )
+
+    def test_invalid_claim_receipt_never_consumes_capability(self) -> None:
+        issued = self.issue("이블린, 잘못된 claim은 거부해")
+
+        invalid_claims = (
+            lambda request: self.durable_claim_for(
+                request,
+                durable=False,
+            ),
+            lambda request: self.durable_claim_for(
+                request,
+                textHash="0" * 64,
+            ),
+            lambda request: self.durable_claim_for(
+                request,
+                phase="completed",
+                disposition="claimed",
+                shouldProcess=True,
+            ),
+            lambda request: self.durable_claim_for(
+                request,
+                claim_bridge_id="wrong-bridge",
+            ),
+        )
+        for invalid_claim in invalid_claims:
+            with self.subTest(invalid_claim=invalid_claim):
+                with self.assertRaises(
+                    LocalVoiceAdmissionTransactionError
+                ):
+                    self.manager.consume_with_durable_claim(
+                        issued["admissionToken"],
+                        self.bridge_id,
+                        "turn-a",
+                        issued["forwardText"],
+                        durable_claim=invalid_claim,
+                        validation_is_current=self.current,
+                    )
+                self.assertEqual(
+                    self.manager.public_status()["acceptedCount"],
+                    0,
+                )
+                self.assertFalse(self.manager.public_status()["active"])
+
+        self.assertTrue(self.consume(issued)["admitted"])
+
+    def test_concurrent_atomic_consume_claims_durably_once(self) -> None:
+        issued = self.issue("이블린, 동시 원자 소비")
+        claim_count = 0
+        count_lock = threading.Lock()
+
+        def durable_claim(request):
+            nonlocal claim_count
+            with count_lock:
+                claim_count += 1
+            return self.durable_claim_for(request)
+
+        def consume_once(_index: int):
+            return self.manager.consume_with_durable_claim(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-a",
+                issued["forwardText"],
+                durable_claim=durable_claim,
+                validation_is_current=self.current,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            transactions = list(executor.map(consume_once, range(2)))
+
+        self.assertEqual(claim_count, 1)
+        self.assertEqual(
+            sum(
+                transaction.admission.get("admitted") is True
+                for transaction in transactions
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                transaction.admission.get("reason")
+                == "admission_token_reused"
+                for transaction in transactions
+            ),
+            1,
+        )
 
     def test_high_impact_followup_requires_a_fresh_wake(self) -> None:
         first = self.issue("이블린, 준비됐어?", turn_id="turn-1")

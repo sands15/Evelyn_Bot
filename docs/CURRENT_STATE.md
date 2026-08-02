@@ -89,9 +89,13 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
     요구한다.
   - admission capability는 10초 일회성이고 bridge instance, turn,
     canonical forward-text SHA-256, mode와 exact validation attempt에 묶인다.
-    user row·planner·LLM·side effect보다 먼저 소비하며, 소비된 turn은 120초
-    replay ledger로 stream/non-stream 이중 실행을 막는다. validation-bound
-    소비는 일반 follow-up 창을 열거나 갱신하지 않는다.
+    admission lock 안에서 모든 binding을 검증한 뒤 canonical
+    `[bridgeInstanceId, turnId]`의 ingress journal claim을 먼저 durable commit하고,
+    exact frozen receipt를 검증한 뒤에만 token·replay ledger·follow-up·count를
+    한 번에 확정한다. claim 실패나 잘못된 receipt는 이 admission 상태를 바꾸지
+    않아 같은 token으로 안전하게 재시도할 수 있다. 소비된 turn은 120초 replay
+    ledger로 stream/non-stream 이중 실행을 막고, validation-bound 소비는 일반
+    follow-up 창을 열거나 갱신하지 않는다.
   - 공개 Control Page chat은 source를 `control_page`로 고정하고 브라우저의
     `local_bridge` 주장과 admission/bridge/validation 필드를 Bot API에
     전달하지 않는다. 공개 admission status는 count와 고정 reason만 남기며
@@ -1710,11 +1714,21 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   session/reply-slot 선점으로 동시 claim을 직렬화하며 기존 turn P 뒤 전달된 turn
   Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
   text와 source/entry/turn ID를 내보내지 않는다.
+- Local Voice Fast Control 경로는 별도 `consume()` 뒤 claim을 호출하지 않는다.
+  stream/non-stream이 같은 typed transaction을 사용하고, durable receipt의 schema,
+  entry ID, text hash, phase/disposition, process 여부와 journal generation을 exact
+  binding에 맞춰 검증한다. 실제 owner claim 직후 `os._exit`한 subprocess를
+  재시작하면 해당 accepted turn 하나가 recovered pending으로 남고 자동 대화
+  재실행은 0임을 확인했다. 재시작 뒤 같은 turn의 새 capability는 replay-only로
+  폐기되어 accepted count와 follow-up lease를 열지 않는다. raw journal I/O 오류도
+  private 오류 원문 없는 503으로 바뀌며 같은 token으로 재시도할 수 있다. 관련
+  Local Voice/Fast Control/ingress/continuity 179개가 통과했다. 이 증거는 token 발급
+  응답 뒤 chat 요청 전 재시작이나 실제 음성 장치 E2E까지 닫았다는 뜻은 아니다.
 - current ingress 검증은 core journal 20개, Discord owner 묶음 129개, Fast
   continuity/stream/proxy/UI 묶음 89개와 기존 Fast API 63개, bootstrap generation에
   맞춘 Fast Action 28개를 통과했다. memory 263개와 Supervisor/single-instance 58개,
   `compileall`과 `git diff --check`도 통과했다. 2026-08-02 `.venv-host`에서 CI와
-  같은 `unittest discover -s tests -t . -p "test_*.py"` 범위는 `Ran 2830`,
+  같은 `unittest discover -s tests -t . -p "test_*.py"` 범위는 `Ran 2841`,
   `OK (skipped=20)`이었다. 이전 Windows world-action lock 정리 오류 2개는 살아
   있는 자식을 검증하기 위해 잠금을 의도적으로 보존한 테스트가 임시 폴더 정리 전에
   정상 회수 경로를 실행하지 않던 harness 문제였다. 테스트 cleanup은 자식 종료를

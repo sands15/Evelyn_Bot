@@ -784,10 +784,23 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             @staticmethod
             def claim_ingress(*, request_id, accepted_text):
                 return {
-                    "entryId": "ingress-" + "a" * 64,
+                    "schema": (
+                        "conversation.ingress-recovery-receipt.v1"
+                    ),
+                    "entryId": fast_api.conversation_ingress_entry_id(
+                        surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                        scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                        source_delivery_id=request_id,
+                    ),
                     "turnId": "journal-turn",
                     "phase": "accepted",
+                    "disposition": "claimed",
+                    "durable": True,
                     "shouldProcess": True,
+                    "textHash": fast_api.final_text_sha256(
+                        accepted_text
+                    ),
+                    "journalGeneration": 1,
                 }
 
             @staticmethod

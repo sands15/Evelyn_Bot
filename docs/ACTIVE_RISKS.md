@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-02 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -450,6 +450,19 @@ Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/stat
 `/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
 readiness와 복구 preview가 배포 전과 같은지 확인한다.
 
+## P0 — 손상된 마이크 동의 상태의 fail-open 가능성
+
+`voice_capture_consent.py`의 현재 loader는 상태 파일 누락·손상·읽기 실패를 모두
+새 `inactive` 상태로 바꾼다. startup reconcile은 이 상태에서 mic-off를 요청하지
+않고, 전용 JSON writer도 replace 전 file/directory `fsync`를 하지 않는다. 따라서
+마이크가 실제로 켜진 뒤 상태 commit이 손상되면 OFF ACK 없이 비활성으로 오판할 수
+있다.
+
+다음 source P0는 load 결과를 `verified | missing | untrusted`로 구분하고, 신뢰할 수
+없는 상태와 이전 owner의 active 계열 상태에서 exact mic-off ACK를 받은 뒤에만
+durable `inactive`를 기록하는 것이다. OFF 실패는 `revoking`으로 보존해 재시작 뒤
+재시도해야 한다. 이는 코드 감사로 확인한 위험이며 실제 마이크는 켜지 않았다.
+
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
 Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재현 가능하게
@@ -470,15 +483,26 @@ Job ownership과 birth identity 기록을 확인한다. 실제 Windows Job close
 Supervisor에 배포하거나 실제 마이크를 켜지는 않았다.
 
 2026-08-02 ingress owner는 Fast Control과 Discord text의 LLM/tool/전달 전 claim,
-부분 전달 ambiguity, 중복 억제와 restart reconcile을 닫았다. 다만 Local Voice
-admission manager에는 token consume과 durable ingress claim을 한 transaction으로
-묶는 typed API가 아직 없다. 따라서 `consume -> claim` 사이 process crash는
-발화를 소비한 뒤 journal에 남기지 못할 수 있으며, 이 원자화 전까지 local voice
-crash-loss P0는 미폐쇄다. 실제 Discord reconnect/timeout/redelivery와 local 음성
+부분 전달 ambiguity, 중복 억제와 restart reconcile을 닫았다. Local Voice도
+admission lock 아래 token binding 검증, durable ingress claim, frozen typed receipt
+검증, token/replay/follow-up/count 확정 순서의 transaction을 사용한다. claim 실패나
+receipt 불일치는 admission 상태를 바꾸지 않는다. real journal claim 직후
+`os._exit`한 subprocess도 재시작 뒤 accepted pending 하나로 복구되고 자동 대화
+재실행은 0이었다. recovered duplicate capability는 replay-only로 폐기되어 follow-up
+동의와 accepted count를 열지 않고, raw journal I/O 오류도 원문 없는 503 뒤 같은
+token으로 재시도된다. 따라서 이전의 정확한 `consume -> claim` crash-loss 창은
+닫혔다.
+
+Local Voice crash-loss 전체가 닫힌 것은 아니다. admission token을 발급해 응답한 뒤
+Bridge의 chat 요청 전에 Bot API가 재시작하면 process-local token은 사라지고 아직
+journal도 없다. 또한 validation attempt는 다른 프로세스에서 claim `fsync` 중
+retry/abort될 수 있어 cross-process attempt lease 없는 TOCTOU가 남는다. durable turn
+reservation 또는 재시작 후 검증 가능한 capability, 그리고 attempt lease/terminal
+reject 계약이 다음 P0다. 실제 Discord reconnect/timeout/redelivery와 local 음성
 E2E도 현재 source로 실행하지 않았다. 이전 전체 Windows discover의 Mindcraft
 world-action 오류 2개는 child-alive quarantine 검증 뒤 test cleanup이 exact cancel
-회수 경로를 실행하도록 고쳐 닫았다. 2026-08-02 CI-equivalent discover 결과는
-`Ran 2830`, `OK (skipped=20)`이었다. 이는 source 회귀 증거이며 실제 Minecraft
+회수 경로를 실행하도록 고쳐 닫았다. 2026-08-02 최신 CI-equivalent discover 결과는
+`Ran 2841`, `OK (skipped=20)`이었다. 이는 source 회귀 증거이며 실제 Minecraft
 동작 검증을 대신하지 않는다.
 
 그러나 CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크
@@ -495,9 +519,10 @@ fail-closed 요청한다. 상태는 제어 메타데이터만 저장하고 음�
 현재 소스에는 캡처 동의와 별도의 발화 admission 경계도 추가됐다. 정확한 선행
 `이블린`, 성공 소비 뒤 45초 follow-up, shutdown/restart·mic·Minecraft 변경의
 매회 fresh wake를 요구한다. 10초 일회성 capability는 bridge instance, turn,
-canonical forward-text digest, mode와 exact validation attempt에 묶이고 user
-row·planner·LLM·side effect보다 먼저 소비된다. validation은 현재 step의 기대
-transcript 판정을 통과한 exact binding만 발급하며 소비 때 binding을 재검사한다.
+canonical forward-text digest, mode와 exact validation attempt에 묶이고 durable
+ingress claim과 exact receipt를 먼저 확보한 뒤 user row·planner·LLM·side effect
+전에 소비된다. validation은 현재 step의 기대 transcript 판정을 통과한 exact
+binding만 발급하며 소비 때 binding을 재검사한다.
 validation-bound 소비는 일반 follow-up lease를 열거나 갱신하지 않는다.
 공개 Control Page는 `local_bridge` source와 admission/bridge/validation 필드
 spoof를 Bot API 프록시 전에 거부한다. 다만 이 소스는 실행 중 서비스에 배포하지

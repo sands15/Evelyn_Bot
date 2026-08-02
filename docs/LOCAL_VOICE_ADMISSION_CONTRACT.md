@@ -1,7 +1,7 @@
 # Local Voice Admission Contract
 
 Document status: **Current source contract**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-02 KST
 
 로컬 마이크 캡처 동의는 오디오를 읽을 수 있다는 허가일 뿐, 주변의 모든 말을
 Evelyn 명령으로 실행해도 된다는 허가가 아니다. 이 문서는 Windows Local I/O
@@ -21,9 +21,10 @@ Bridge의 STT 결과가 Bot API의 대화·도구·변경성 side effect에 들�
   `POST /api/local-voice/admission`에서 capability를 발급받는다. 이 경계는
   주변 발화와 브라우저 source spoof를 막는 계약이며, 같은 호스트의 악성
   프로세스까지 인증하는 OS 보안 경계는 아니다.
-- `source=local_bridge`인 일반·stream chat은 capability를 성공적으로 소비한
-  뒤에만 user row 기록, planner, LLM 요청, TTS 또는 변경성 side effect를
-  시작한다. 소비 실패는 fail-closed다.
+- `source=local_bridge`인 일반·stream chat은 capability binding 검증과 durable
+  ingress claim을 같은 admission transaction에서 통과한 뒤에만 user row 기록,
+  planner, LLM 요청, TTS 또는 변경성 side effect를 시작한다. 어느 쪽이든
+  실패하면 fail-closed다.
 
 ## 호출어와 follow-up 상태
 
@@ -85,6 +86,32 @@ fallback이 같은 side effect를 두 번 만들지 못한다. 누락, 만료, �
 bridge/turn/text/binding 불일치와 소비 시점의 stale validation은 모두 고정
 reason code로 거부한다.
 
+## Durable ingress 원자성
+
+정상 Local Voice 경로는 admission token을 먼저 소비하고 나중에 journal을 쓰지
+않는다. manager lock 안에서 token, bridge, turn, canonical text, validation과
+follow-up 조건을 모두 검증한 뒤 다음 순서로 처리한다.
+
+1. canonical `[bridgeInstanceId, turnId]`를 source delivery ID로 durable ingress
+   journal에 claim한다.
+2. frozen receipt의 schema, deterministic entry ID, text hash, phase/disposition,
+   `shouldProcess`, 양수 journal generation과 Local Voice binding을 검증한다.
+3. 신규 claim일 때만 token 제거, replay ledger, follow-up lease와 accepted count를
+   확정한다.
+
+journal write 실패나 receipt 불일치는 token, replay ledger, follow-up lease와
+accepted count를 바꾸지 않아 같은 token으로 재시도할 수 있다. journal에 이미
+같은 turn이 있으면 capability와 replay ledger만 terminal 처리한다. 이 suppressed
+duplicate는 accepted turn으로 세지 않고 기존 follow-up lease를 열거나 연장하거나
+닫지 않으며, Fast Control은 기존 pending/completed redelivery 계약으로 409를
+반환한다. stream과 non-stream은 같은 typed transaction과 explicit preclaim receipt를
+사용한다.
+
+이 경계가 닫는 범위는 정확히 token `consume -> durable claim` 창이다. token 발급
+응답 뒤 Bridge의 chat 요청 전에 Bot API가 재시작하면 process-local token이 사라지고
+아직 journal이 없는 창은 남아 있다. validation retry/abort와 journal `fsync` 사이의
+cross-process attempt lease도 별도 계약이 필요하다.
+
 ## 개인정보와 관측
 
 manager는 프로세스 메모리에만 존재하며 재시작 시 복구하지 않는다. 공개
@@ -106,7 +133,11 @@ report에는 raw transcript·audio·prompt를 저장하지 않는다.
 ## 현재 검증 범위
 
 pure admission manager와 Bot API/Bridge의 합성 회귀, 공개 Control Page source
-경계는 로컬 소스 테스트 대상으로 포함한다. 그러나 실제 마이크·스피커에서
+경계는 로컬 소스 테스트 대상으로 포함한다. 실제 journal claim 직후 subprocess를
+강제 종료해 재시작 시 accepted pending 하나와 자동 대화 재실행 0을 확인했고,
+새 manager의 recovered duplicate 억제와 raw journal I/O 실패 후 같은 token 재시도도
+검증했다. 관련 Local Voice/Fast Control/ingress/continuity 179개와 전체 discover
+2,841개가 실패 없이 통과했다. 그러나 실제 마이크·스피커에서
 10개 accepted turn, 2개 barge-in, 15초 silence를 연속 수행한 live local E2E는
 아직 사용자 청취 확인과 함께 실행하지 않았다. 따라서 이 문서는 live hardware
 완료 증거가 아니라 현재 코드의 fail-closed 계약이다.

@@ -64,11 +64,15 @@ from .fast_tool_planner import (
     plan_fast_tool_request,
 )
 from .fast_control_continuity import (
+    FAST_CONTROL_INGRESS_SURFACE,
+    FAST_CONTROL_SESSION_KEY,
     FastControlContinuityOwner,
 )
 from .conversation_ingress_recovery import (
     ConversationIngressBindingMismatch,
     ConversationIngressRecoveryError,
+    conversation_ingress_entry_id,
+    final_text_sha256,
 )
 from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
@@ -93,6 +97,9 @@ from .host_ui_action_client import (
 )
 from .local_voice_admission import (
     LocalVoiceAdmissionManager,
+    LocalVoiceAdmissionTransactionError,
+    LocalVoiceDurableIngressClaim,
+    LocalVoiceIngressClaimRequest,
     normalize_validation_binding,
 )
 from .minecraft_world_lease import MinecraftWorldLeaseOwner
@@ -610,24 +617,189 @@ def consume_local_voice_admission(
     *,
     text: str,
     source: str,
-) -> tuple[str, web.Response | None]:
+) -> tuple[
+    str,
+    LocalVoiceDurableIngressClaim | None,
+    web.Response | None,
+]:
     if clean_text(source).lower() != "local_bridge":
-        return text, None
-    result = LOCAL_VOICE_ADMISSION.consume(
-        payload.get("admissionToken"),
-        payload.get("bridgeInstanceId"),
-        payload.get("turnId"),
-        text,
-        validation_binding=local_voice_validation_binding(payload),
-        validation_is_current=local_voice_validation_binding_is_current,
+        return text, None, None
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    unsafe_test_bypass = bool(
+        not owner.enabled
+        and getattr(
+            owner,
+            "_test_only_allow_unsafe_ingress",
+            False,
+        )
+        is True
     )
-    if result.get("admitted") is not True:
-        return "", local_voice_no_store_response(result, status=409)
+    transaction = None
+    if unsafe_test_bypass:
+        result = LOCAL_VOICE_ADMISSION.consume(
+            payload.get("admissionToken"),
+            payload.get("bridgeInstanceId"),
+            payload.get("turnId"),
+            text,
+            validation_binding=local_voice_validation_binding(payload),
+            validation_is_current=(
+                local_voice_validation_binding_is_current
+            ),
+        )
+    else:
+        bridge_instance_id = clean_text(
+            payload.get("bridgeInstanceId")
+        )
+        bridge_turn_id = clean_text(payload.get("turnId"))
+        request_id = json.dumps(
+            [bridge_instance_id, bridge_turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        try:
+            def durable_claim(
+                claim_request: LocalVoiceIngressClaimRequest,
+            ) -> LocalVoiceDurableIngressClaim:
+                receipt = dict(
+                    owner.claim_ingress(
+                        request_id=request_id,
+                        accepted_text=claim_request.forward_text,
+                    )
+                )
+                expected_entry_id = conversation_ingress_entry_id(
+                    surface=FAST_CONTROL_INGRESS_SURFACE,
+                    scope=FAST_CONTROL_SESSION_KEY,
+                    source_delivery_id=request_id,
+                )
+                if (
+                    claim_request.bridge_instance_id
+                    != bridge_instance_id
+                    or claim_request.turn_id != bridge_turn_id
+                    or receipt.get("entryId") != expected_entry_id
+                    or receipt.get("textHash")
+                    != final_text_sha256(claim_request.forward_text)
+                    or type(receipt.get("shouldProcess")) is not bool
+                    or type(receipt.get("journalGeneration")) is not int
+                ):
+                    raise LocalVoiceAdmissionTransactionError(
+                        "local_voice_ingress_claim_binding_mismatch"
+                    )
+                return LocalVoiceDurableIngressClaim(
+                    schema=str(receipt.get("schema") or ""),
+                    durable=receipt.get("durable") is True,
+                    bridge_instance_id=(
+                        claim_request.bridge_instance_id
+                    ),
+                    local_turn_id=claim_request.turn_id,
+                    forward_text_digest=(
+                        claim_request.forward_text_digest
+                    ),
+                    entry_id=str(receipt.get("entryId") or ""),
+                    ingress_turn_id=str(
+                        receipt.get("turnId") or ""
+                    ),
+                    phase=str(receipt.get("phase") or ""),
+                    disposition=str(
+                        receipt.get("disposition") or ""
+                    ),
+                    should_process=receipt["shouldProcess"],
+                    text_hash=str(receipt.get("textHash") or ""),
+                    journal_generation=receipt["journalGeneration"],
+                )
+
+            transaction = (
+                LOCAL_VOICE_ADMISSION.consume_with_durable_claim(
+                    payload.get("admissionToken"),
+                    payload.get("bridgeInstanceId"),
+                    payload.get("turnId"),
+                    text,
+                    durable_claim=durable_claim,
+                    validation_binding=local_voice_validation_binding(
+                        payload
+                    ),
+                    validation_is_current=(
+                        local_voice_validation_binding_is_current
+                    ),
+                )
+            )
+        except ConversationIngressBindingMismatch:
+            return (
+                "",
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_binding_mismatch",
+                    status=409,
+                ),
+            )
+        except ConversationIngressRecoveryError as exc:
+            invalid_request_codes = {
+                "conversation_ingress_source_delivery_id_invalid",
+                "conversation_ingress_scope_invalid",
+                "conversation_ingress_surface_invalid",
+                "conversation_ingress_accepted_text_invalid",
+            }
+            return (
+                "",
+                None,
+                _ingress_error_response(
+                    (
+                        "conversation_ingress_request_invalid"
+                        if exc.code in invalid_request_codes
+                        else "conversation_ingress_recovery_unavailable"
+                    ),
+                    status=(
+                        400 if exc.code in invalid_request_codes else 503
+                    ),
+                ),
+            )
+        except LocalVoiceAdmissionTransactionError:
+            return (
+                "",
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_recovery_unavailable",
+                    status=503,
+                ),
+            )
+        except (OSError, RuntimeError):
+            # Durable journal writers may surface their underlying I/O error.
+            # Keep the public failure content-free; the manager transaction
+            # has not consumed the capability when the claim raises.
+            return (
+                "",
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_recovery_unavailable",
+                    status=503,
+                ),
+            )
+        result = transaction.admission
+    durable_duplicate = bool(
+        transaction is not None
+        and transaction.ingress_claim is not None
+        and transaction.ingress_claim.should_process is False
+        and result.get("suppressed") is True
+        and result.get("reason") == "admission_ingress_duplicate"
+    )
+    if result.get("admitted") is not True and not durable_duplicate:
+        return (
+            "",
+            None,
+            local_voice_no_store_response(result, status=409),
+        )
     admitted_text = clean_text(result.get("forwardText"))
     if not admitted_text:
         failed = LOCAL_VOICE_ADMISSION.reject("admission_forward_text_invalid")
-        return "", local_voice_no_store_response(failed, status=409)
-    return admitted_text, None
+        return (
+            "",
+            None,
+            local_voice_no_store_response(failed, status=409),
+        )
+    return (
+        admitted_text,
+        transaction.ingress_claim if transaction is not None else None,
+        None,
+    )
 
 
 def should_emit_memory_recall_progress(text: str, *, source: str) -> bool:
@@ -733,6 +905,7 @@ def _prepare_fast_control_ingress(
     *,
     accepted_text: str,
     source: str,
+    preclaimed: LocalVoiceDurableIngressClaim | None = None,
 ) -> tuple[
     dict[str, Any] | None,
     tuple[dict[str, Any], MemoryExposurePosition | None] | None,
@@ -788,43 +961,74 @@ def _prepare_fast_control_ingress(
                 status=400,
             ),
         )
-    try:
-        claim = owner.claim_ingress(
-            request_id=request_id,
-            accepted_text=accepted_text,
-        )
-        claim = dict(claim)
-        claim["_effectId"] = request_id
-    except ConversationIngressBindingMismatch:
-        return (
-            None,
-            None,
-            _ingress_error_response(
-                "conversation_ingress_binding_mismatch",
-                status=409,
-            ),
-        )
-    except ConversationIngressRecoveryError as exc:
-        invalid_request_codes = {
-            "conversation_ingress_source_delivery_id_invalid",
-            "conversation_ingress_scope_invalid",
-            "conversation_ingress_surface_invalid",
-            "conversation_ingress_accepted_text_invalid",
+    if preclaimed is not None:
+        if (
+            normalized_source != "local_bridge"
+            or preclaimed.bridge_instance_id != bridge_instance_id
+            or preclaimed.local_turn_id != bridge_turn_id
+            or preclaimed.forward_text_digest
+            != final_text_sha256(accepted_text)
+            or preclaimed.durable is not True
+            or preclaimed.entry_id
+            != conversation_ingress_entry_id(
+                surface=FAST_CONTROL_INGRESS_SURFACE,
+                scope=FAST_CONTROL_SESSION_KEY,
+                source_delivery_id=request_id,
+            )
+            or preclaimed.text_hash != final_text_sha256(accepted_text)
+        ):
+            return (
+                None,
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_recovery_unavailable",
+                    status=503,
+                ),
+            )
+        claim = {
+            "entryId": preclaimed.entry_id,
+            "turnId": preclaimed.ingress_turn_id,
+            "phase": preclaimed.phase,
+            "shouldProcess": preclaimed.should_process,
         }
-        return (
-            None,
-            None,
-            _ingress_error_response(
-                (
-                    "conversation_ingress_request_invalid"
-                    if exc.code in invalid_request_codes
-                    else "conversation_ingress_recovery_unavailable"
+    else:
+        try:
+            claim = owner.claim_ingress(
+                request_id=request_id,
+                accepted_text=accepted_text,
+            )
+            claim = dict(claim)
+        except ConversationIngressBindingMismatch:
+            return (
+                None,
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_binding_mismatch",
+                    status=409,
                 ),
-                status=(
-                    400 if exc.code in invalid_request_codes else 503
+            )
+        except ConversationIngressRecoveryError as exc:
+            invalid_request_codes = {
+                "conversation_ingress_source_delivery_id_invalid",
+                "conversation_ingress_scope_invalid",
+                "conversation_ingress_surface_invalid",
+                "conversation_ingress_accepted_text_invalid",
+            }
+            return (
+                None,
+                None,
+                _ingress_error_response(
+                    (
+                        "conversation_ingress_request_invalid"
+                        if exc.code in invalid_request_codes
+                        else "conversation_ingress_recovery_unavailable"
+                    ),
+                    status=(
+                        400 if exc.code in invalid_request_codes else 503
+                    ),
                 ),
-            ),
-        )
+            )
+    claim["_effectId"] = request_id
     if claim.get("shouldProcess") is True:
         return claim, None, None
     if claim.get("phase") != "completed":
@@ -4018,10 +4222,12 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         or payload.get("requestId")
         or ""
     )
-    text, admission_rejection = consume_local_voice_admission(
-        payload,
-        text=text,
-        source=source,
+    text, preclaimed_ingress, admission_rejection = (
+        consume_local_voice_admission(
+            payload,
+            text=text,
+            source=source,
+        )
     )
     if admission_rejection is not None:
         return admission_rejection
@@ -4031,6 +4237,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             payload,
             accepted_text=text,
             source=source,
+            preclaimed=preclaimed_ingress,
         )
     )
     if ingress_rejection is not None:
@@ -4156,10 +4363,12 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         or payload.get("requestId")
         or ""
     )
-    text, admission_rejection = consume_local_voice_admission(
-        payload,
-        text=text,
-        source=source,
+    text, preclaimed_ingress, admission_rejection = (
+        consume_local_voice_admission(
+            payload,
+            text=text,
+            source=source,
+        )
     )
     if admission_rejection is not None:
         return admission_rejection
@@ -4169,6 +4378,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             payload,
             accepted_text=text,
             source=source,
+            preclaimed=preclaimed_ingress,
         )
     )
     if ingress_rejection is not None:
