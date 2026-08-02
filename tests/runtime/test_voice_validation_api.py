@@ -20,13 +20,24 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core import control_page_server  # noqa: E402
+from evelyn_core import (  # noqa: E402
+    control_page_server,
+    voice_capture_consent,
+    voice_validation,
+)
 from evelyn_core.control_page_http import CONTROL_PAGE_CSRF_HEADER  # noqa: E402
 from evelyn_core.voice_capture_consent import VoiceCaptureConsentManager  # noqa: E402
+from evelyn_core.voice_capture_consent_claim_lease import (  # noqa: E402
+    acquire_voice_capture_consent_claim_lease,
+)
 from evelyn_core.voice_validation import (  # noqa: E402
     SUITE_ID,
     VoiceValidationManager,
     active_validation_context,
+)
+from evelyn_core.voice_validation_attempt_lease import (  # noqa: E402
+    VoiceValidationAttemptLeaseUnavailable,
+    acquire_attempt_lease,
 )
 
 
@@ -200,6 +211,96 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"], result)
         return result["session"]
 
+    def activate_capture_for_session(self, session):
+        binding = control_page_server._voice_capture_validation_binding(session)
+        preview = self.consent_manager.preview(validation_binding=binding)
+        pending = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"],
+            validation_binding=binding,
+        )
+        self.consent_manager.finish_apply(
+            lease_id=pending["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        self.consent_manager.bind_validation_session(session["sessionId"])
+
+    def current_attempt_binding(self):
+        context = active_validation_context(
+            surface="local",
+            root=Path(self.temp_dir.name),
+        )
+        self.assertIsNotNone(context)
+        return {
+            "sessionId": context["sessionId"],
+            "stepId": context["stepId"],
+            "attempt": context["attempt"],
+            "attemptId": context["attemptId"],
+        }
+
+    @staticmethod
+    def session_attempt_key(session):
+        step = session["currentStep"]
+        return session["sessionId"], step["id"], step["attempt"]
+
+    async def assert_attempt_lease_failure_contract(self, session, *, error, status):
+        expected = self.session_attempt_key(session)
+        snapshot_response = await self.client.get(
+            "/api/control-page/voice-validation",
+            headers={"Origin": self.origin},
+        )
+        snapshot = (await snapshot_response.json())["session"]
+        self.assertEqual(snapshot_response.status, 200)
+        self.assertEqual(self.session_attempt_key(snapshot), expected)
+
+        step = session["currentStep"]
+        for operation, payload in (
+            ("start", {"suite": SUITE_ID, "surfaces": ["local"]}),
+            (
+                "confirm",
+                {
+                    "sessionId": session["sessionId"],
+                    "stepId": step["id"],
+                    "attempt": step["attempt"],
+                    "heard": True,
+                },
+            ),
+            (
+                "retry",
+                {
+                    "sessionId": session["sessionId"],
+                    "stepId": step["id"],
+                    "attempt": step["attempt"],
+                },
+            ),
+        ):
+            with self.subTest(operation=operation, error=error):
+                response = await self.client.post(
+                    f"/api/control-page/voice-validation/{operation}",
+                    headers=self.headers(),
+                    json=payload,
+                )
+                body = await response.json()
+                self.assertEqual(response.status, status)
+                self.assertEqual(body["error"], error)
+        self.mic_control.assert_not_awaited()
+
+        response = await self.client.post(
+            "/api/control-page/voice-validation/abort",
+            headers=self.headers(),
+            json={"sessionId": session["sessionId"]},
+        )
+        body = await response.json()
+        self.assertEqual(response.status, status)
+        self.assertEqual(body["error"], error)
+        self.assertTrue(body["cleanup"]["ok"])
+        self.assertEqual(self.session_attempt_key(self.manager.snapshot()), expected)
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
     def record_current(self, event, **payload):
         snapshot = self.manager.snapshot()
         step = snapshot["currentStep"]
@@ -362,6 +463,41 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 409)
         self.assertEqual(payload["error"], "validation_session_active")
+
+    async def test_busy_attempt_lease_keeps_snapshot_canonical_and_aborts_capture(self):
+        session = self.start_manager_session()
+        self.activate_capture_for_session(session)
+        self.mic_control.reset_mock()
+        lease = acquire_attempt_lease(
+            self.current_attempt_binding(),
+            root=Path(self.temp_dir.name),
+        )
+        try:
+            await self.assert_attempt_lease_failure_contract(
+                session,
+                error="validation_attempt_inflight",
+                status=409,
+            )
+        finally:
+            lease.release()
+
+    async def test_unavailable_attempt_lease_returns_503_without_rotation(self):
+        session = self.start_manager_session()
+        self.activate_capture_for_session(session)
+        self.mic_control.reset_mock()
+        unavailable = VoiceValidationAttemptLeaseUnavailable(
+            "voice_validation_attempt_lease_unavailable"
+        )
+        with patch.object(
+            voice_validation,
+            "acquire_attempt_leases",
+            side_effect=unavailable,
+        ):
+            await self.assert_attempt_lease_failure_contract(
+                session,
+                error="validation_attempt_lease_unavailable",
+                status=503,
+            )
 
     async def test_every_mutating_route_requires_csrf(self):
         for suffix in ("start", "confirm", "retry", "abort"):
@@ -996,6 +1132,198 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.args[0] for call in self.mic_control.await_args_list],
             [True, False],
+        )
+
+    async def test_revoke_manager_mutations_run_off_event_loop(self):
+        session = self.start_manager_session()
+        self.activate_capture_for_session(session)
+        self.mic_control.reset_mock()
+        event_loop_thread = threading.get_ident()
+        mutation_threads = []
+        begin_revoke = self.consent_manager.begin_revoke
+        finish_revoke = self.consent_manager.finish_revoke
+
+        def observed_begin_revoke(*, reason):
+            mutation_threads.append(threading.get_ident())
+            return begin_revoke(reason=reason)
+
+        def observed_finish_revoke(*, applied, error=""):
+            mutation_threads.append(threading.get_ident())
+            return finish_revoke(applied=applied, error=error)
+
+        with (
+            patch.object(
+                self.consent_manager,
+                "begin_revoke",
+                side_effect=observed_begin_revoke,
+            ),
+            patch.object(
+                self.consent_manager,
+                "finish_revoke",
+                side_effect=observed_finish_revoke,
+            ),
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-capture-consent/revoke",
+                headers=self.headers(),
+                json={},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(len(mutation_threads), 2)
+        self.assertTrue(
+            all(thread_id != event_loop_thread for thread_id in mutation_threads)
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
+    async def test_held_claim_lease_does_not_block_revoke_event_loop(self):
+        session = self.start_manager_session()
+        self.activate_capture_for_session(session)
+        self.mic_control.reset_mock()
+        started = threading.Event()
+        begin_revoke = self.consent_manager.begin_revoke
+
+        def observed_begin_revoke(*, reason):
+            started.set()
+            return begin_revoke(reason=reason)
+
+        lease = acquire_voice_capture_consent_claim_lease(
+            root=Path(self.temp_dir.name)
+        )
+        request_task = None
+        try:
+            with (
+                patch.object(
+                    voice_capture_consent,
+                    "DEFAULT_BLOCKING_TIMEOUT_SEC",
+                    0.5,
+                ),
+                patch.object(
+                    self.consent_manager,
+                    "begin_revoke",
+                    side_effect=observed_begin_revoke,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    self.client.post(
+                        "/api/control-page/voice-capture-consent/revoke",
+                        headers=self.headers(),
+                        json={},
+                    )
+                )
+                self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                await asyncio.sleep(0)
+                self.assertFalse(request_task.done())
+                lease.release()
+                response = await request_task
+        finally:
+            lease.release()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request_task
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+
+    async def test_held_claim_lease_does_not_block_apply_event_loop(self):
+        session = self.start_manager_session()
+        binding = control_page_server._voice_capture_validation_binding(session)
+        preview = self.consent_manager.preview(validation_binding=binding)
+        started = threading.Event()
+        begin_apply = self.consent_manager.begin_apply
+
+        def observed_begin_apply(**kwargs):
+            started.set()
+            return begin_apply(**kwargs)
+
+        lease = acquire_voice_capture_consent_claim_lease(
+            root=Path(self.temp_dir.name)
+        )
+        request_task = None
+        try:
+            with (
+                patch.object(
+                    voice_capture_consent,
+                    "DEFAULT_BLOCKING_TIMEOUT_SEC",
+                    0.5,
+                ),
+                patch.object(
+                    self.consent_manager,
+                    "begin_apply",
+                    side_effect=observed_begin_apply,
+                ),
+            ):
+                request_task = asyncio.create_task(
+                    self.client.post(
+                        "/api/control-page/voice-capture-consent/apply",
+                        headers=self.headers(),
+                        json={"confirmToken": preview["confirmToken"]},
+                    )
+                )
+                self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                await asyncio.sleep(0)
+                self.assertFalse(request_task.done())
+                lease.release()
+                response = await request_task
+        finally:
+            lease.release()
+            if request_task is not None and not request_task.done():
+                request_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request_task
+
+        payload = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["ok"], payload)
+
+    async def test_revoke_state_write_failure_still_turns_capture_off(self):
+        session = self.start_manager_session()
+        self.activate_capture_for_session(session)
+        self.mic_control.reset_mock()
+
+        with patch.object(
+            voice_capture_consent,
+            "atomic_json_write",
+            side_effect=OSError("read-only consent store"),
+        ):
+            response = await self.client.post(
+                "/api/control-page/voice-capture-consent/revoke",
+                headers=self.headers(),
+                json={},
+            )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            payload["error"],
+            "voice_capture_consent_state_write_failed",
+        )
+        self.assertTrue(payload["controlApplied"])
+        self.assertEqual(
+            [call.args[0] for call in self.mic_control.await_args_list],
+            [False],
+        )
+        consent = self.consent_manager.status()
+        self.assertEqual(consent["state"], "revoking")
+        self.assertEqual(consent["loadState"], "untrusted")
+        self.assertEqual(
+            self.consent_manager.preview(
+                validation_binding=(
+                    control_page_server._voice_capture_validation_binding(
+                        session
+                    )
+                )
+            )["error"],
+            "voice_capture_consent_recovery_required",
         )
 
     async def test_state_write_failure_retries_invalid_first_off_on_reconcile(self):

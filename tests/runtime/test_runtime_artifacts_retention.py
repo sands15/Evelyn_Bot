@@ -182,12 +182,17 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
 
         self.assertEqual([item.relative_path for item in plan.candidates], ["voyager/death_events.jsonl"])
 
-    def test_owner_claim_lock_is_never_selected(self) -> None:
+    def test_stable_owner_and_claim_locks_are_never_selected(self) -> None:
         now = 1_000_000.0
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_file(
                 root / "voice_capture_consent" / "owner_claim.lock",
+                "\0",
+                mtime=now - 100 * 86400,
+            )
+            write_file(
+                root / "voice_capture_consent" / "claim_lease.lock",
                 "\0",
                 mtime=now - 100 * 86400,
             )

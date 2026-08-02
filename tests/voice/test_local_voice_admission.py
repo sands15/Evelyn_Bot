@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
+from hashlib import sha256
 import json
 import sys
 import threading
@@ -16,11 +18,14 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.local_voice_admission import (  # noqa: E402
     LocalVoiceAdmissionManager,
     LocalVoiceAdmissionTransactionError,
+    LocalVoiceDurableIssuanceReservation,
     LocalVoiceDurableIngressClaim,
+    LocalVoiceDurableReservationRevocation,
     split_exact_leading_wake,
 )
 from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
     CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA,
 )
 
 
@@ -56,6 +61,8 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
             replay_ttl_sec=120,
         )
         self.bridge_id = "bridge-a"
+        self.capture_fence_digest = "a" * 64
+        self.rotated_capture_fence_digest = "b" * 64
 
     @staticmethod
     def current(binding: dict) -> bool:
@@ -131,6 +138,79 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
             journal_generation=receipt["journalGeneration"],
         )
 
+    def durable_reservation_for(
+        self,
+        request,
+        **overrides,
+    ) -> LocalVoiceDurableIssuanceReservation:
+        values = {
+            "schema": CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+            "durable": True,
+            "bridge_instance_id": request.bridge_instance_id,
+            "local_turn_id": request.turn_id,
+            "forward_text_digest": request.forward_text_digest,
+            "reservation_ref": request.reservation_ref,
+            "entry_id": "ingress-" + "2" * 64,
+            "ingress_turn_id": request.ingress_turn_id,
+            "phase": "reserved",
+            "disposition": "reserved",
+            "should_process": False,
+            "text_hash": request.forward_text_digest,
+            "journal_generation": 1,
+        }
+        values.update(overrides)
+        return LocalVoiceDurableIssuanceReservation(**values)
+
+    def recovered_claim_for(
+        self,
+        request,
+        **overrides,
+    ) -> LocalVoiceDurableIngressClaim:
+        values = {
+            "schema": CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+            "durable": True,
+            "bridge_instance_id": request.bridge_instance_id,
+            "local_turn_id": request.turn_id,
+            "forward_text_digest": request.forward_text_digest,
+            "entry_id": "ingress-" + "2" * 64,
+            "ingress_turn_id": request.ingress_turn_id,
+            "phase": "accepted",
+            "disposition": "claimed",
+            "should_process": True,
+            "text_hash": request.forward_text_digest,
+            "journal_generation": 2,
+            "reservation_ref": request.reservation_ref,
+            "reservation_verified": True,
+        }
+        values.update(overrides)
+        return LocalVoiceDurableIngressClaim(**values)
+
+    def durable_revocation_for(
+        self,
+        requests,
+        **overrides,
+    ) -> LocalVoiceDurableReservationRevocation:
+        values = {
+            "schema": (
+                CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+            ),
+            "durable": True,
+            "bindings": tuple(
+                (
+                    "ingress-"
+                    + sha256(request.ingress_turn_id.encode("utf-8")).hexdigest(),
+                    request.ingress_turn_id,
+                    request.forward_text_digest,
+                    request.reservation_ref,
+                )
+                for request in requests
+            ),
+            "revoked_count": len(requests),
+            "journal_generation": 2,
+        }
+        values.update(overrides)
+        return LocalVoiceDurableReservationRevocation(**values)
+
     def test_exact_leading_wake_is_required_and_removed(self) -> None:
         admitted = self.issue("이블린, 지금 듣고 있어?")
         middle = self.manager.issue(
@@ -197,6 +277,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
             "turn-a",
             issued["forwardText"],
             durable_claim=durable_claim,
+            capture_fence_digest=self.capture_fence_digest,
             validation_is_current=self.current,
         )
 
@@ -240,6 +321,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
                 "turn-a",
                 issued["forwardText"],
                 durable_claim=fail_claim,
+                capture_fence_digest=self.capture_fence_digest,
                 validation_is_current=self.current,
             )
 
@@ -251,9 +333,1034 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
             "turn-a",
             issued["forwardText"],
             durable_claim=self.durable_claim_for,
+            capture_fence_digest=self.capture_fence_digest,
             validation_is_current=self.current,
         )
         self.assertTrue(recovered.admission["admitted"])
+
+    def test_issuance_reservation_precedes_state_and_failure_rolls_back(self) -> None:
+        first = self.issue("이블린, 예약을 갱신해")
+        first_digest = sha256(
+            first["admissionToken"].encode("utf-8")
+        ).hexdigest()
+
+        def state():
+            return copy.deepcopy(
+                {
+                    "bridge": self.manager._bridge_instance_id,  # noqa: SLF001
+                    "active": self.manager._active_until,  # noqa: SLF001
+                    "tokens": self.manager._tokens,  # noqa: SLF001
+                    "pending": self.manager._pending_turn_tokens,  # noqa: SLF001
+                    "terminal": self.manager._terminal_tokens,  # noqa: SLF001
+                    "consumed": self.manager._consumed_turns,  # noqa: SLF001
+                    "accepted": self.manager._accepted_count,  # noqa: SLF001
+                    "rejected": self.manager._rejected_count,  # noqa: SLF001
+                    "lastReason": self.manager._last_reason,  # noqa: SLF001
+                    "lastMode": self.manager._last_mode,  # noqa: SLF001
+                }
+            )
+
+        before = state()
+        failed_requests = []
+
+        def fail_reservation(request):
+            failed_requests.append(request)
+            self.assertIn(first_digest, self.manager._tokens)  # noqa: SLF001
+            self.assertNotIn(
+                request.token_digest,
+                self.manager._tokens,  # noqa: SLF001
+            )
+            self.assertNotIn(
+                first_digest,
+                self.manager._terminal_tokens,  # noqa: SLF001
+            )
+            raise OSError("reservation journal unavailable")
+
+        with self.assertRaisesRegex(OSError, "journal unavailable"):
+            self.manager.issue_with_durable_reservation(
+                self.bridge_id,
+                "turn-a",
+                "이블린, 예약을 갱신해",
+                durable_reservation=fail_reservation,
+                capture_fence_digest=self.capture_fence_digest,
+                validation_is_current=self.current,
+            )
+
+        self.assertEqual(state(), before)
+        retried_requests = []
+
+        def reserve_retry(request):
+            retried_requests.append(request)
+            return self.durable_reservation_for(request)
+
+        transaction = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-a",
+            "이블린, 예약을 갱신해",
+            durable_reservation=reserve_retry,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+
+        self.assertTrue(transaction.admission["admitted"])
+        self.assertIsNotNone(transaction.reservation)
+        self.assertNotEqual(
+            failed_requests[0].reservation_ref,
+            retried_requests[0].reservation_ref,
+        )
+        self.assertEqual(
+            self.consume(first)["reason"],
+            "admission_token_superseded",
+        )
+        request_text = repr(retried_requests[0])
+        self.assertNotIn("예약을 갱신해", request_text)
+        self.assertNotIn(
+            transaction.admission["admissionToken"],
+            request_text,
+        )
+
+    def test_durable_mismatch_revokes_before_terminalizing(self) -> None:
+        transaction = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-revoke",
+            "이블린, 정확히 폐기해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+        issued = transaction.admission
+        token_digest = sha256(
+            issued["admissionToken"].encode("utf-8")
+        ).hexdigest()
+        observed = []
+
+        def revoke(requests):
+            self.assertEqual(len(requests), 1)
+            self.assertIn(token_digest, self.manager._tokens)  # noqa: SLF001
+            self.assertNotIn(
+                token_digest,
+                self.manager._terminal_tokens,  # noqa: SLF001
+            )
+            observed.extend(requests)
+            return self.durable_revocation_for(requests)
+
+        rejected = self.manager.consume(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-revoke",
+            "변조된 문장",
+            validation_is_current=self.current,
+            durable_revocation=revoke,
+        )
+
+        self.assertEqual(rejected["reason"], "admission_text_mismatch")
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].token_digest, token_digest)
+        self.assertFalse(self.manager.public_status()["revocationFenced"])
+        self.assertNotIn(token_digest, self.manager._tokens)  # noqa: SLF001
+        self.assertEqual(
+            self.manager.consume(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-revoke",
+                issued["forwardText"],
+                validation_is_current=self.current,
+            )["reason"],
+            "admission_text_mismatch",
+        )
+        proof = repr(observed[0])
+        self.assertNotIn("정확히 폐기해", proof)
+        self.assertNotIn(issued["admissionToken"], proof)
+
+    def test_capture_fence_rotation_revokes_before_durable_claim(self) -> None:
+        reservations = []
+        transaction = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-capture-rotation",
+            "이블린, 이전 동의로 처리하지 마",
+            durable_reservation=lambda request: (
+                reservations.append(request)
+                or self.durable_reservation_for(request)
+            ),
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+        claims = []
+        revocations = []
+
+        result = self.manager.consume_with_durable_claim(
+            transaction.admission["admissionToken"],
+            self.bridge_id,
+            "turn-capture-rotation",
+            transaction.admission["forwardText"],
+            durable_claim=lambda request: claims.append(request),
+            capture_fence_digest=self.rotated_capture_fence_digest,
+            durable_revocation=lambda requests: (
+                revocations.extend(requests)
+                or self.durable_revocation_for(requests)
+            ),
+            validation_is_current=self.current,
+        )
+
+        self.assertEqual(
+            result.admission["reason"],
+            "voice_capture_consent_not_current",
+        )
+        self.assertIsNone(result.ingress_claim)
+        self.assertEqual(claims, [])
+        self.assertEqual(len(revocations), 1)
+        self.assertEqual(
+            revocations[0].capture_fence_digest,
+            self.capture_fence_digest,
+        )
+        self.assertEqual(
+            revocations[0].ingress_turn_id,
+            reservations[0].ingress_turn_id,
+        )
+        self.assertEqual(
+            revocations[0].reservation_ref,
+            reservations[0].reservation_ref,
+        )
+        self.assertEqual(self.manager.public_status()["acceptedCount"], 0)
+
+    def test_durable_apis_reject_invalid_capture_fence_digest(self) -> None:
+        reservations = []
+        for invalid in (None, "", "0" * 63, "A" * 64):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    LocalVoiceAdmissionTransactionError,
+                    "local_voice_capture_fence_digest_invalid",
+                ):
+                    self.manager.issue_with_durable_reservation(
+                        self.bridge_id,
+                        "turn-invalid-capture-fence",
+                        "이블린, 유효한 세대만 받아",
+                        durable_reservation=lambda request: (
+                            reservations.append(request)
+                            or self.durable_reservation_for(request)
+                        ),
+                        capture_fence_digest=invalid,
+                        validation_is_current=self.current,
+                    )
+        self.assertEqual(reservations, [])
+
+        issued = self.issue(
+            "이블린, 소비도 유효한 세대만 받아",
+            turn_id="turn-invalid-capture-consume",
+        )
+        claims = []
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_capture_fence_digest_invalid",
+        ):
+            self.manager.consume_with_durable_claim(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-invalid-capture-consume",
+                issued["forwardText"],
+                durable_claim=lambda request: claims.append(request),
+                capture_fence_digest="not-a-digest",
+                validation_is_current=self.current,
+            )
+        self.assertEqual(claims, [])
+        self.assertTrue(
+            self.consume(
+                issued,
+                turn_id="turn-invalid-capture-consume",
+            )["admitted"]
+        )
+
+    def test_durable_reservation_requires_claim_before_valid_consume(self) -> None:
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-claim-required",
+            "이블린, claim 뒤에 소비해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        token_digest = sha256(
+            issued["admissionToken"].encode("utf-8")
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_durable_claim_required",
+        ):
+            self.manager.consume(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-claim-required",
+                issued["forwardText"],
+                validation_is_current=self.current,
+            )
+
+        self.assertIn(token_digest, self.manager._tokens)  # noqa: SLF001
+        self.assertFalse(self.manager.public_status()["revocationFenced"])
+        accepted = self.manager.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-claim-required",
+            issued["forwardText"],
+            durable_claim=self.recovered_claim_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+        self.assertTrue(accepted.admission["admitted"])
+
+    def test_durable_reservation_requires_exact_verified_claim_receipt(self) -> None:
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-exact-claim",
+            "이블린, 정확한 예약만 처리해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+
+        invalid_claims = (
+            lambda request: self.durable_claim_for(request),
+            lambda request: self.recovered_claim_for(
+                request,
+                reservation_ref="reservation-" + "0" * 64,
+            ),
+            lambda request: self.recovered_claim_for(
+                request,
+                ingress_turn_id="local-voice-ingress-" + "0" * 64,
+            ),
+        )
+        for invalid_claim in invalid_claims:
+            with self.subTest(invalid_claim=invalid_claim):
+                with self.assertRaises(LocalVoiceAdmissionTransactionError):
+                    self.manager.consume_with_durable_claim(
+                        issued["admissionToken"],
+                        self.bridge_id,
+                        "turn-exact-claim",
+                        issued["forwardText"],
+                        durable_claim=invalid_claim,
+                        capture_fence_digest=self.capture_fence_digest,
+                        validation_is_current=self.current,
+                    )
+                self.assertEqual(
+                    self.manager.public_status()["acceptedCount"],
+                    0,
+                )
+
+        accepted = self.manager.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-exact-claim",
+            issued["forwardText"],
+            durable_claim=self.recovered_claim_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+        self.assertTrue(accepted.admission["admitted"])
+
+    def test_invalid_revocation_receipt_keeps_token_and_sets_fence(self) -> None:
+        cases = (
+            (
+                "untyped",
+                lambda _requests: {"durable": True},
+                "local_voice_reservation_revocation_invalid",
+            ),
+            (
+                "wrong_binding",
+                lambda requests: self.durable_revocation_for(
+                    requests,
+                    bindings=(
+                        (
+                            "ingress-" + "3" * 64,
+                            requests[0].ingress_turn_id,
+                            "0" * 64,
+                            requests[0].reservation_ref,
+                        ),
+                    ),
+                ),
+                "local_voice_reservation_revocation_binding_mismatch",
+            ),
+        )
+        for label, revoke, expected_code in cases:
+            with self.subTest(label=label):
+                manager = LocalVoiceAdmissionManager(
+                    now=self.clock,
+                    token_factory=TokenFactory(),
+                    token_ttl_sec=10,
+                    followup_ttl_sec=45,
+                    replay_ttl_sec=120,
+                )
+                issued = manager.issue_with_durable_reservation(
+                    self.bridge_id,
+                    "turn-invalid-receipt",
+                    "이블린, 영수증을 검사해",
+                    durable_reservation=self.durable_reservation_for,
+                    capture_fence_digest=self.capture_fence_digest,
+                    validation_is_current=self.current,
+                ).admission
+                token_digest = sha256(
+                    issued["admissionToken"].encode("utf-8")
+                ).hexdigest()
+
+                with self.assertRaisesRegex(
+                    LocalVoiceAdmissionTransactionError,
+                    expected_code,
+                ):
+                    manager.consume(
+                        issued["admissionToken"],
+                        self.bridge_id,
+                        "turn-invalid-receipt",
+                        "변조",
+                        validation_is_current=self.current,
+                        durable_revocation=revoke,
+                    )
+
+                self.assertIn(token_digest, manager._tokens)  # noqa: SLF001
+                self.assertNotIn(
+                    token_digest,
+                    manager._terminal_tokens,  # noqa: SLF001
+                )
+                self.assertTrue(
+                    manager.public_status()["revocationFenced"]
+                )
+
+    def test_failed_reset_fences_until_exact_atomic_batch_retry(self) -> None:
+        issued = []
+        for index in range(2):
+            issued.append(
+                self.manager.issue_with_durable_reservation(
+                    self.bridge_id,
+                    f"turn-reset-{index}",
+                    f"이블린, 초기화 예약 {index}",
+                    durable_reservation=self.durable_reservation_for,
+                    capture_fence_digest=self.capture_fence_digest,
+                    validation_is_current=self.current,
+                ).admission
+            )
+        token_digests = {
+            sha256(item["admissionToken"].encode("utf-8")).hexdigest()
+            for item in issued
+        }
+        attempts = []
+
+        def fail_reset(requests):
+            attempts.append(requests)
+            self.assertEqual(set(self.manager._tokens), token_digests)  # noqa: SLF001
+            raise OSError("journal unavailable PRIVATE_CANARY")
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_reservation_revocation_failed",
+        ):
+            self.manager.reset(
+                "mic_disabled",
+                durable_revocation=fail_reset,
+            )
+
+        self.assertEqual(set(self.manager._tokens), token_digests)  # noqa: SLF001
+        self.assertTrue(self.manager.public_status()["revocationFenced"])
+        self.assertFalse(self.manager.public_status()["active"])
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_reservation_revocation_required",
+        ):
+            self.issue("이블린, 차단되어야 해", turn_id="turn-fenced")
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_reservation_revocation_required",
+        ):
+            self.manager.consume(
+                issued[0]["admissionToken"],
+                self.bridge_id,
+                "turn-reset-0",
+                issued[0]["forwardText"],
+                validation_is_current=self.current,
+            )
+
+        def retry_reset(requests):
+            attempts.append(requests)
+            self.assertEqual(requests, attempts[0])
+            self.assertEqual(set(self.manager._tokens), token_digests)  # noqa: SLF001
+            self.assertTrue(
+                self.manager.public_status()["revocationFenced"]
+            )
+            return self.durable_revocation_for(requests)
+
+        status = self.manager.reset(
+            "mic_disabled",
+            durable_revocation=retry_reset,
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(attempts[0]), 2)
+        self.assertFalse(status["revocationFenced"])
+        self.assertEqual(status["lastReason"], "mic_disabled")
+        self.assertEqual(self.manager._tokens, {})  # noqa: SLF001
+        self.assertNotIn("PRIVATE_CANARY", repr(attempts))
+
+    def test_outer_revocation_failure_fences_fresh_manager_until_reset(self) -> None:
+        recovered = LocalVoiceAdmissionManager(
+            now=self.clock,
+            token_factory=TokenFactory(),
+        )
+
+        fenced = recovered.require_durable_revocation()
+
+        self.assertTrue(fenced["revocationFenced"])
+        self.assertFalse(fenced["active"])
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_reservation_revocation_required",
+        ):
+            recovered.issue(
+                self.bridge_id,
+                "turn-fenced-after-restart",
+                "이블린, 아직 처리하지 마",
+                validation_is_current=self.current,
+            )
+
+        reset = recovered.reset("scope_revocation_recovered")
+        self.assertFalse(reset["revocationFenced"])
+        issued = recovered.issue(
+            self.bridge_id,
+            "turn-after-scope-reset",
+            "이블린, 이제 다시 처리해",
+            validation_is_current=self.current,
+        )
+        self.assertTrue(issued["admitted"])
+
+    def test_durable_same_turn_reissue_and_bridge_rotation_do_not_orphan(self) -> None:
+        first = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-rotate",
+            "이블린, 갱신하고 회전해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        unexpected_revocations = []
+        second = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-rotate",
+            "이블린, 갱신하고 회전해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            durable_revocation=lambda requests: (
+                unexpected_revocations.extend(requests)
+                or self.durable_revocation_for(requests)
+            ),
+            validation_is_current=self.current,
+        ).admission
+        first_digest = sha256(
+            first["admissionToken"].encode("utf-8")
+        ).hexdigest()
+        second_digest = sha256(
+            second["admissionToken"].encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(unexpected_revocations, [])
+        self.assertNotIn(first_digest, self.manager._tokens)  # noqa: SLF001
+        self.assertIn(second_digest, self.manager._tokens)  # noqa: SLF001
+
+        observed = []
+
+        def revoke_for_rotation(requests):
+            observed.extend(requests)
+            self.assertIn(second_digest, self.manager._tokens)  # noqa: SLF001
+            self.assertEqual(
+                self.manager._bridge_instance_id,  # noqa: SLF001
+                self.bridge_id,
+            )
+            return self.durable_revocation_for(requests)
+
+        status = self.manager.observe_bridge_instance(
+            "bridge-b",
+            durable_revocation=revoke_for_rotation,
+        )
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].token_digest, second_digest)
+        self.assertEqual(self.manager._tokens, {})  # noqa: SLF001
+        self.assertEqual(status["lastReason"], "bridge_instance_rotated")
+
+    def test_live_token_capacity_rejects_instead_of_evicting(self) -> None:
+        for index in range(256):
+            transaction = self.manager.issue_with_durable_reservation(
+                self.bridge_id,
+                f"turn-capacity-{index}",
+                "이블린, 용량 경계",
+                durable_reservation=self.durable_reservation_for,
+                capture_fence_digest=self.capture_fence_digest,
+                validation_is_current=self.current,
+            )
+            self.assertTrue(transaction.admission["admitted"])
+
+        rejected = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-capacity-overflow",
+            "이블린, 용량 초과",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        )
+
+        self.assertEqual(
+            rejected.admission["reason"],
+            "admission_token_capacity_exhausted",
+        )
+        self.assertEqual(len(self.manager._tokens), 256)  # noqa: SLF001
+
+    def test_restart_recovers_exact_wake_followup_and_validation_reservations(self) -> None:
+        binding = {
+            "sessionId": "validation-a",
+            "stepId": "03-mood",
+            "attempt": 1,
+            "attemptId": "attempt-a",
+        }
+        cases = (
+            ("wake_entry", "이블린, 재시작 뒤에도 처리해", None),
+            ("followup", "후속 질문도 처리해", None),
+            ("validation", "한 문장으로 오늘 기분을 말해줘", binding),
+        )
+        for index, (expected_mode, text, case_binding) in enumerate(
+            cases,
+            start=1,
+        ):
+            with self.subTest(mode=expected_mode):
+                issuer = LocalVoiceAdmissionManager(
+                    now=self.clock,
+                    token_factory=self.tokens,
+                    token_ttl_sec=10,
+                    followup_ttl_sec=45,
+                    replay_ttl_sec=120,
+                )
+                if expected_mode == "followup":
+                    wake = issuer.issue(
+                        self.bridge_id,
+                        f"wake-{index}",
+                        "이블린, 먼저 열어",
+                        validation_is_current=self.current,
+                    )
+                    issuer.consume(
+                        wake["admissionToken"],
+                        self.bridge_id,
+                        f"wake-{index}",
+                        wake["forwardText"],
+                        validation_is_current=self.current,
+                    )
+                reservation_requests = []
+
+                def reserve(request):
+                    reservation_requests.append(request)
+                    return self.durable_reservation_for(request)
+
+                issued = issuer.issue_with_durable_reservation(
+                    self.bridge_id,
+                    f"restart-{index}",
+                    text,
+                    durable_reservation=reserve,
+                    capture_fence_digest=self.capture_fence_digest,
+                    validation_binding=case_binding,
+                    validation_is_current=self.current,
+                ).admission
+                self.assertEqual(issued["mode"], expected_mode)
+
+                recovered = LocalVoiceAdmissionManager(
+                    now=self.clock,
+                    token_factory=self.tokens,
+                    token_ttl_sec=10,
+                    followup_ttl_sec=45,
+                    replay_ttl_sec=120,
+                )
+                claim_requests = []
+
+                def claim(request):
+                    claim_requests.append(request)
+                    self.assertEqual(
+                        request.reservation_ref,
+                        reservation_requests[0].reservation_ref,
+                    )
+                    self.assertEqual(
+                        request.ingress_turn_id,
+                        reservation_requests[0].ingress_turn_id,
+                    )
+                    return self.recovered_claim_for(
+                        request,
+                        _validation_lease_held=bool(case_binding),
+                    )
+
+                transaction = recovered.consume_with_durable_claim(
+                    issued["admissionToken"],
+                    self.bridge_id,
+                    f"restart-{index}",
+                    issued["forwardText"],
+                    durable_claim=claim,
+                    capture_fence_digest=self.capture_fence_digest,
+                    admission_mode=issued["mode"],
+                    validation_binding=case_binding,
+                    validation_is_current=self.current,
+                    durable_recovery_is_current=lambda: True,
+                )
+
+                self.assertTrue(transaction.admission["admitted"])
+                self.assertEqual(len(claim_requests), 1)
+                self.assertEqual(
+                    recovered.public_status()["active"],
+                    expected_mode != "validation",
+                )
+
+    def test_restart_recovery_cannot_claim_old_capture_fence(self) -> None:
+        reservations = []
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-stale-capture-recovery",
+            "이블린, 이전 동의 예약을 복구하지 마",
+            durable_reservation=lambda request: (
+                reservations.append(request)
+                or self.durable_reservation_for(request)
+            ),
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        recovered = LocalVoiceAdmissionManager(now=self.clock)
+        attempted_claims = []
+
+        def reject_stale_reservation(request):
+            attempted_claims.append(request)
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_ingress_claim_binding_mismatch"
+            )
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_ingress_claim_binding_mismatch",
+        ):
+            recovered.consume_with_durable_claim(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-stale-capture-recovery",
+                issued["forwardText"],
+                durable_claim=reject_stale_reservation,
+                capture_fence_digest=self.rotated_capture_fence_digest,
+                admission_mode=issued["mode"],
+                validation_is_current=self.current,
+                durable_recovery_is_current=lambda: True,
+            )
+
+        self.assertEqual(len(attempted_claims), 1)
+        self.assertEqual(
+            attempted_claims[0].capture_fence_digest,
+            self.rotated_capture_fence_digest,
+        )
+        self.assertNotEqual(
+            attempted_claims[0].ingress_turn_id,
+            reservations[0].ingress_turn_id,
+        )
+        self.assertNotEqual(
+            attempted_claims[0].reservation_ref,
+            reservations[0].reservation_ref,
+        )
+        self.assertEqual(recovered.public_status()["acceptedCount"], 0)
+        self.assertEqual(len(recovered._consumed_turns), 0)  # noqa: SLF001
+
+        accepted = recovered.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-stale-capture-recovery",
+            issued["forwardText"],
+            durable_claim=self.recovered_claim_for,
+            capture_fence_digest=self.capture_fence_digest,
+            admission_mode=issued["mode"],
+            validation_is_current=self.current,
+            durable_recovery_is_current=lambda: True,
+        )
+        self.assertTrue(accepted.admission["admitted"])
+
+    def test_unknown_recovery_rejects_malformed_mode_binding_and_token(self) -> None:
+        reservation_requests = []
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-recovery",
+            "이블린, 정확히 복구해",
+            durable_reservation=lambda request: (
+                reservation_requests.append(request)
+                or self.durable_reservation_for(request)
+            ),
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+
+        def attempt(token, mode, binding=None):
+            recovered = LocalVoiceAdmissionManager(now=self.clock)
+            claims = []
+
+            def claim(request):
+                claims.append(request)
+                return self.recovered_claim_for(request)
+
+            result = recovered.consume_with_durable_claim(
+                token,
+                self.bridge_id,
+                "turn-recovery",
+                issued["forwardText"],
+                durable_claim=claim,
+                capture_fence_digest=self.capture_fence_digest,
+                admission_mode=mode,
+                validation_binding=binding,
+                validation_is_current=self.current,
+                durable_recovery_is_current=lambda: True,
+            )
+            return result, claims
+
+        malformed, malformed_claims = attempt("short", "wake_entry")
+        bad_mode, bad_mode_claims = attempt(
+            issued["admissionToken"],
+            "WAKE_ENTRY",
+        )
+        bad_binding, bad_binding_claims = attempt(
+            issued["admissionToken"],
+            "wake_entry",
+            {
+                "sessionId": "validation-a",
+                "stepId": "03-mood",
+                "attempt": 1,
+                "attemptId": "attempt-a",
+            },
+        )
+        self.assertEqual(malformed.admission["reason"], "admission_token_invalid")
+        self.assertEqual(bad_mode.admission["reason"], "admission_mode_invalid")
+        self.assertEqual(
+            bad_binding.admission["reason"],
+            "admission_validation_mismatch",
+        )
+        self.assertEqual(
+            malformed_claims + bad_mode_claims + bad_binding_claims,
+            [],
+        )
+
+        recovered = LocalVoiceAdmissionManager(now=self.clock)
+
+        def stale_reservation_claim(request):
+            return self.recovered_claim_for(
+                request,
+                reservation_ref=reservation_requests[0].reservation_ref,
+                ingress_turn_id=reservation_requests[0].ingress_turn_id,
+            )
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_ingress_claim_binding_mismatch",
+        ):
+            recovered.consume_with_durable_claim(
+                "opaque-but-different-token-00000001",
+                self.bridge_id,
+                "turn-recovery",
+                issued["forwardText"],
+                durable_claim=stale_reservation_claim,
+                capture_fence_digest=self.capture_fence_digest,
+                admission_mode="wake_entry",
+                validation_is_current=self.current,
+                durable_recovery_is_current=lambda: True,
+            )
+        self.assertEqual(recovered.public_status()["acceptedCount"], 0)
+
+    def test_validation_recovery_requires_attempt_lease_proof(self) -> None:
+        binding = {
+            "sessionId": "validation-a",
+            "stepId": "03-mood",
+            "attempt": 1,
+            "attemptId": "attempt-a",
+        }
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-validation-lease",
+            "한 문장으로 오늘 기분을 말해줘",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_binding=binding,
+            validation_is_current=self.current,
+        ).admission
+        recovered = LocalVoiceAdmissionManager(now=self.clock)
+        arguments = {
+            "token": issued["admissionToken"],
+            "bridge_instance_id": self.bridge_id,
+            "turn_id": "turn-validation-lease",
+            "text": issued["forwardText"],
+            "admission_mode": "validation",
+            "validation_binding": binding,
+            "validation_is_current": self.current,
+            "durable_recovery_is_current": lambda: True,
+            "capture_fence_digest": self.capture_fence_digest,
+        }
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_validation_attempt_lease_required",
+        ):
+            recovered.consume_with_durable_claim(
+                durable_claim=self.recovered_claim_for,
+                **arguments,
+            )
+        self.assertEqual(recovered.public_status()["acceptedCount"], 0)
+        admitted = recovered.consume_with_durable_claim(
+            durable_claim=lambda request: self.recovered_claim_for(
+                request,
+                _validation_lease_held=True,
+            ),
+            **arguments,
+        )
+        self.assertTrue(admitted.admission["admitted"])
+
+    def test_generic_claim_cannot_authorize_unknown_token_recovery(self) -> None:
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-generic",
+            "이블린, 예약으로만 복구해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        recovered = LocalVoiceAdmissionManager(now=self.clock)
+
+        with self.assertRaisesRegex(
+            LocalVoiceAdmissionTransactionError,
+            "local_voice_ingress_reservation_unverified",
+        ):
+            recovered.consume_with_durable_claim(
+                issued["admissionToken"],
+                self.bridge_id,
+                "turn-generic",
+                issued["forwardText"],
+                durable_claim=self.durable_claim_for,
+                capture_fence_digest=self.capture_fence_digest,
+                admission_mode=issued["mode"],
+                validation_is_current=self.current,
+                durable_recovery_is_current=lambda: True,
+            )
+
+        self.assertEqual(recovered.public_status()["acceptedCount"], 0)
+        self.assertEqual(len(recovered._consumed_turns), 0)  # noqa: SLF001
+        retried = recovered.consume_with_durable_claim(
+            issued["admissionToken"],
+            self.bridge_id,
+            "turn-generic",
+            issued["forwardText"],
+            durable_claim=self.recovered_claim_for,
+            capture_fence_digest=self.capture_fence_digest,
+            admission_mode=issued["mode"],
+            validation_is_current=self.current,
+            durable_recovery_is_current=lambda: True,
+        )
+        self.assertTrue(retried.admission["admitted"])
+
+    def test_recovery_context_must_be_current_before_any_durable_claim(self) -> None:
+        issued = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-context",
+            "이블린, 현재 브리지에서만 복구해",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+
+        for recovery_current in (
+            lambda: False,
+            lambda: (_ for _ in ()).throw(OSError("heartbeat unreadable")),
+        ):
+            with self.subTest(recovery_current=recovery_current):
+                recovered = LocalVoiceAdmissionManager(now=self.clock)
+                claims = []
+                before = recovered.public_status()
+                transaction = recovered.consume_with_durable_claim(
+                    issued["admissionToken"],
+                    self.bridge_id,
+                    "turn-context",
+                    issued["forwardText"],
+                    durable_claim=lambda request: (
+                        claims.append(request)
+                        or self.recovered_claim_for(request)
+                    ),
+                    capture_fence_digest=self.capture_fence_digest,
+                    admission_mode=issued["mode"],
+                    validation_is_current=self.current,
+                    durable_recovery_is_current=recovery_current,
+                )
+                self.assertEqual(
+                    transaction.admission["reason"],
+                    "admission_recovery_context_stale",
+                )
+                self.assertEqual(claims, [])
+                self.assertEqual(recovered.public_status(), before)
+                self.assertEqual(
+                    len(recovered._consumed_turns),  # noqa: SLF001
+                    0,
+                )
+
+    def test_superseded_and_terminal_tokens_never_enter_recovery(self) -> None:
+        first = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-terminal",
+            "이블린, 마지막 토큰만 써",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        second = self.manager.issue_with_durable_reservation(
+            self.bridge_id,
+            "turn-terminal",
+            "이블린, 마지막 토큰만 써",
+            durable_reservation=self.durable_reservation_for,
+            capture_fence_digest=self.capture_fence_digest,
+            validation_is_current=self.current,
+        ).admission
+        claims = []
+
+        superseded = self.manager.consume_with_durable_claim(
+            first["admissionToken"],
+            self.bridge_id,
+            "turn-terminal",
+            first["forwardText"],
+            durable_claim=lambda request: (
+                claims.append(request)
+                or self.recovered_claim_for(request)
+            ),
+            capture_fence_digest=self.capture_fence_digest,
+            admission_mode=first["mode"],
+            validation_is_current=self.current,
+            durable_recovery_is_current=lambda: True,
+        )
+        self.assertEqual(
+            superseded.admission["reason"],
+            "admission_token_superseded",
+        )
+
+        mismatch = self.manager.consume(
+            second["admissionToken"],
+            self.bridge_id,
+            "turn-terminal",
+            "변조된 문장",
+            validation_is_current=self.current,
+            durable_revocation=self.durable_revocation_for,
+        )
+        self.assertEqual(mismatch["reason"], "admission_text_mismatch")
+        terminal = self.manager.consume_with_durable_claim(
+            second["admissionToken"],
+            self.bridge_id,
+            "turn-terminal",
+            second["forwardText"],
+            durable_claim=lambda request: (
+                claims.append(request)
+                or self.recovered_claim_for(request)
+            ),
+            capture_fence_digest=self.capture_fence_digest,
+            admission_mode=second["mode"],
+            validation_is_current=self.current,
+            durable_recovery_is_current=lambda: True,
+        )
+        self.assertEqual(
+            terminal.admission["reason"],
+            "admission_text_mismatch",
+        )
+        self.assertEqual(claims, [])
 
     def test_durable_duplicate_does_not_open_followup_or_count(self) -> None:
         issued = self.issue("이블린, 이미 기록된 질문")
@@ -268,6 +1375,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
                 shouldProcess=False,
                 disposition="pending",
             ),
+            capture_fence_digest=self.capture_fence_digest,
             validation_is_current=self.current,
         )
 
@@ -321,6 +1429,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
                 shouldProcess=False,
                 disposition="pending",
             ),
+            capture_fence_digest=self.capture_fence_digest,
             validation_is_current=self.current,
         )
 
@@ -375,6 +1484,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
                         "turn-a",
                         issued["forwardText"],
                         durable_claim=invalid_claim,
+                        capture_fence_digest=self.capture_fence_digest,
                         validation_is_current=self.current,
                     )
                 self.assertEqual(
@@ -403,6 +1513,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
                 "turn-a",
                 issued["forwardText"],
                 durable_claim=durable_claim,
+                capture_fence_digest=self.capture_fence_digest,
                 validation_is_current=self.current,
             )
 

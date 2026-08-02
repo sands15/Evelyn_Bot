@@ -584,6 +584,48 @@ class FastControlApiToolTests(unittest.TestCase):
         )
         self.assertEqual(bridge.calls, ["새 질문", "새 질문"])
 
+    def test_voice_validation_payload_isolated_from_context_providers(
+        self,
+    ) -> None:
+        fast_api.FAST_MEMORY_CONTEXT_RECEIPT.set(
+            {
+                "schema": "memory.context-receipt.v1",
+                "state": "provided",
+                "contentFree": True,
+            }
+        )
+        fast_api.FAST_MEMORY_EXPOSURE_POSITION.set(
+            SimpleNamespace(sequence=9)
+        )
+        build_context = AsyncMock(
+            side_effect=AssertionError("validation context provider ran")
+        )
+
+        with patch.object(
+            fast_api,
+            "build_fast_main_llm_request",
+            new=build_context,
+        ):
+            payload = fast_api.build_isolated_voice_validation_llm_payload(
+                "  이블린, 지금 듣고 있어?  "
+            )
+
+        build_context.assert_not_awaited()
+        self.assertEqual(
+            payload["messages"][-1],
+            {"role": "user", "content": "이블린, 지금 듣고 있어?"},
+        )
+        self.assertEqual(len(payload["messages"]), 2)
+        self.assertIn(
+            "Do not use or claim memory",
+            payload["messages"][0]["content"],
+        )
+        self.assertIsNone(fast_api.FAST_MEMORY_EXPOSURE_POSITION.get())
+        self.assertEqual(
+            fast_api.current_fast_memory_context_receipt()["state"],
+            "not_requested",
+        )
+
     def test_web_capability_question_bypasses_main_llm(self) -> None:
         reply = asyncio.run(
             fast_api.resolve_pre_llm_reply("웹검색 권한 없어?", source="local_bridge")

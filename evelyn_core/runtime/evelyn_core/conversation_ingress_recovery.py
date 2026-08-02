@@ -27,6 +27,9 @@ CONVERSATION_INGRESS_RECOVERY_HEAD_SCHEMA = (
 CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA = (
     "conversation.ingress-recovery-receipt.v1"
 )
+CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA = (
+    "conversation.ingress-reservation-revocation-receipt.v1"
+)
 CONVERSATION_INGRESS_RECOVERY_RECORD_SCHEMA = (
     "conversation.ingress-recovery-record.v1"
 )
@@ -47,6 +50,7 @@ _SURFACE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _PHASES = frozenset(
     {
+        "reserved",
         "accepted",
         "response_ready",
         "delivery_inflight",
@@ -56,7 +60,7 @@ _PHASES = frozenset(
         "completed",
     }
 )
-_PENDING_PHASES = _PHASES - {"completed"}
+_PENDING_PHASES = _PHASES - {"completed", "reserved"}
 _ERROR_CODES = frozenset(
     {
         "",
@@ -511,7 +515,8 @@ class ConversationIngressRecoveryJournal:
             raw.get("assistantText")
         )
         if (
-            not accepted_text
+            (phase == "reserved" and bool(accepted_text))
+            or (phase != "reserved" and not accepted_text)
             or len(accepted_text) > self.max_content_chars
             or len(assistant_text) > self.max_content_chars
         ):
@@ -534,7 +539,9 @@ class ConversationIngressRecoveryJournal:
             raise ConversationIngressRecoveryError(
                 "conversation_ingress_memory_receipt_invalid"
             )
-        if text_hash != final_text_sha256(accepted_text):
+        if phase != "reserved" and text_hash != final_text_sha256(
+            accepted_text
+        ):
             raise ConversationIngressRecoveryError(
                 "conversation_ingress_text_hash_mismatch"
             )
@@ -561,6 +568,7 @@ class ConversationIngressRecoveryJournal:
                 "conversation_ingress_assistant_binding_invalid"
             )
         phases_without_required_response = {
+            "reserved",
             "accepted",
             "delivery_inflight",
             "delivery_ambiguous",
@@ -573,7 +581,7 @@ class ConversationIngressRecoveryJournal:
             raise ConversationIngressRecoveryError(
                 "conversation_ingress_phase_content_invalid"
             )
-        if phase == "accepted" and assistant_text:
+        if phase in {"reserved", "accepted"} and assistant_text:
             raise ConversationIngressRecoveryError(
                 "conversation_ingress_phase_content_invalid"
             )
@@ -622,6 +630,10 @@ class ConversationIngressRecoveryJournal:
             max_chars=512,
             allow_empty=True,
         )
+        if phase == "reserved" and delivery_ref != _sha256(delivery_ref):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_ref_invalid"
+            )
         last_error_code = _error_code(
             raw.get("lastErrorCode"),
             allow_empty=True,
@@ -775,10 +787,16 @@ class ConversationIngressRecoveryJournal:
         journal_hash = str(payload["journalHash"])
         try:
             atomic_json_write(self.path, payload, durable=True)
-            self._write_head(
-                generation=generation,
-                journal_hash=journal_hash,
-            )
+            try:
+                self._write_head(
+                    generation=generation,
+                    journal_hash=journal_hash,
+                )
+            except Exception:
+                self._write_head(
+                    generation=generation,
+                    journal_hash=journal_hash,
+                )
         except Exception:
             self._state = "error"
             self._integrity = "failed"
@@ -978,6 +996,7 @@ class ConversationIngressRecoveryJournal:
         phase = str(entry["phase"])
         if disposition is None:
             disposition = {
+                "reserved": "reserved",
                 "accepted": "pending",
                 "response_ready": "pending",
                 "delivery_inflight": "delivery_inflight",
@@ -1016,6 +1035,337 @@ class ConversationIngressRecoveryJournal:
             "expiresAt": float(entry["expiresAt"]),
             "journalGeneration": int(self._generation),
         }
+
+    def reserve_ingress(
+        self,
+        *,
+        surface: Any,
+        scope: Any,
+        source_delivery_id: Any,
+        text_hash: Any,
+        turn_id: Any,
+        reservation_ref: Any,
+        ttl_sec: Any,
+    ) -> dict[str, Any]:
+        """Durably reserve an ingress key without storing conversation text."""
+
+        normalized_surface = _surface(surface)
+        normalized_scope = _bounded_identifier(
+            scope,
+            code="conversation_ingress_scope_invalid",
+            max_chars=512,
+        )
+        normalized_delivery_id = _bounded_identifier(
+            source_delivery_id,
+            code="conversation_ingress_source_delivery_id_invalid",
+            max_chars=512,
+        )
+        normalized_text_hash = _sha256(text_hash)
+        normalized_turn_id = _turn_id(turn_id)
+        normalized_reservation_ref = _sha256(reservation_ref)
+        ttl = _finite_nonnegative(
+            ttl_sec,
+            code="conversation_ingress_reservation_ttl_invalid",
+        )
+        if ttl <= 0.0 or ttl > self.max_age_sec:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_ttl_invalid"
+            )
+        entry_id = conversation_ingress_entry_id(
+            surface=normalized_surface,
+            scope=normalized_scope,
+            source_delivery_id=normalized_delivery_id,
+        )
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            existing = self._entries.get(entry_id)
+            if existing is not None and (
+                existing["phase"] != "reserved"
+                or existing["textHash"] != normalized_text_hash
+                or existing["turnId"] != normalized_turn_id
+                or existing["surface"] != normalized_surface
+                or existing["scope"] != normalized_scope
+                or existing["sourceDeliveryId"]
+                != normalized_delivery_id
+            ):
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_binding_mismatch"
+                )
+            before = _clone_entries(self._entries)
+            if existing is None and len(self._entries) >= self.max_entries:
+                completed = sorted(
+                    (
+                        entry
+                        for entry in self._entries.values()
+                        if entry["phase"] == "completed"
+                    ),
+                    key=lambda item: (
+                        float(item["updatedAt"]),
+                        str(item["entryId"]),
+                    ),
+                )
+                if not completed:
+                    raise ConversationIngressRecoveryError(
+                        "conversation_ingress_capacity_exhausted"
+                    )
+                self._entries.pop(str(completed[0]["entryId"]), None)
+            now = self._now()
+            reserved = {
+                "entryId": entry_id,
+                "surface": normalized_surface,
+                "scope": normalized_scope,
+                "sourceDeliveryId": normalized_delivery_id,
+                "turnId": normalized_turn_id,
+                "phase": "reserved",
+                "textHash": normalized_text_hash,
+                "assistantHash": "",
+                "assistantBindingHash": "",
+                "acceptedText": "",
+                "assistantText": "",
+                "memoryReceiptRef": unattributed_memory_receipt_ref(),
+                "deliveryRef": normalized_reservation_ref,
+                "continuityGeneration": 0,
+                "createdAt": now,
+                "updatedAt": now,
+                "expiresAt": now + ttl,
+                "recoveredAt": 0.0,
+                "lastErrorCode": "",
+            }
+            self._entries[entry_id] = reserved
+            try:
+                self._write()
+            except Exception:
+                self._entries = before
+                raise
+            return self._receipt(reserved, disposition="reserved")
+
+    def claim_reserved_ingress(
+        self,
+        *,
+        surface: Any,
+        scope: Any,
+        source_delivery_id: Any,
+        accepted_text: Any,
+        turn_id: Any,
+        reservation_ref: Any,
+    ) -> dict[str, Any]:
+        """Promote an exact durable reservation to accepted ingress."""
+
+        normalized_surface = _surface(surface)
+        normalized_scope = _bounded_identifier(
+            scope,
+            code="conversation_ingress_scope_invalid",
+            max_chars=512,
+        )
+        normalized_delivery_id = _bounded_identifier(
+            source_delivery_id,
+            code="conversation_ingress_source_delivery_id_invalid",
+            max_chars=512,
+        )
+        normalized_text = self._content(
+            accepted_text,
+            code="conversation_ingress_accepted_text_invalid",
+        )
+        text_hash = final_text_sha256(normalized_text)
+        normalized_turn_id = _turn_id(turn_id)
+        normalized_reservation_ref = _sha256(reservation_ref)
+        entry_id = conversation_ingress_entry_id(
+            surface=normalized_surface,
+            scope=normalized_scope,
+            source_delivery_id=normalized_delivery_id,
+        )
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            entry = self._entry(entry_id)
+            exact_binding = bool(
+                entry["textHash"] == text_hash
+                and entry["turnId"] == normalized_turn_id
+                and entry["deliveryRef"] == normalized_reservation_ref
+                and entry["surface"] == normalized_surface
+                and entry["scope"] == normalized_scope
+                and entry["sourceDeliveryId"] == normalized_delivery_id
+            )
+            if entry["phase"] == "accepted" and exact_binding:
+                if entry["acceptedText"] != normalized_text:
+                    raise ConversationIngressBindingMismatch(
+                        "conversation_ingress_binding_mismatch"
+                    )
+                return self._receipt(entry)
+            if entry["phase"] != "reserved" or not exact_binding:
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_binding_mismatch"
+                )
+            now = self._now()
+
+            def mutate() -> None:
+                entry.update(
+                    {
+                        "phase": "accepted",
+                        "acceptedText": normalized_text,
+                        "createdAt": now,
+                        "updatedAt": now,
+                        "expiresAt": now + self.max_age_sec,
+                        "recoveredAt": 0.0,
+                    }
+                )
+
+            self._mutate_and_write(mutate)
+            return self._receipt(
+                entry,
+                disposition="claimed",
+                should_process=True,
+            )
+
+    def revoke_reserved_ingress_batch(
+        self,
+        reservations: Any,
+    ) -> dict[str, Any]:
+        """Atomically delete only an exact set of unconsumed reservations."""
+
+        if not isinstance(reservations, (list, tuple)) or not reservations:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_revocation_invalid"
+            )
+        if len(reservations) > 256:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_revocation_invalid"
+            )
+        normalized: list[dict[str, str]] = []
+        for raw in reservations:
+            if not isinstance(raw, dict):
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_reservation_revocation_invalid"
+                )
+            surface = _surface(raw.get("surface"))
+            scope = _bounded_identifier(
+                raw.get("scope"),
+                code="conversation_ingress_scope_invalid",
+                max_chars=512,
+            )
+            source_delivery_id = _bounded_identifier(
+                raw.get("source_delivery_id"),
+                code="conversation_ingress_source_delivery_id_invalid",
+                max_chars=512,
+            )
+            normalized.append(
+                {
+                    "entryId": conversation_ingress_entry_id(
+                        surface=surface,
+                        scope=scope,
+                        source_delivery_id=source_delivery_id,
+                    ),
+                    "surface": surface,
+                    "scope": scope,
+                    "sourceDeliveryId": source_delivery_id,
+                    "turnId": _turn_id(raw.get("turn_id")),
+                    "textHash": _sha256(raw.get("text_hash")),
+                    "reservationRef": _sha256(
+                        raw.get("reservation_ref")
+                    ),
+                }
+            )
+        normalized.sort(key=lambda item: item["entryId"])
+        if len({item["entryId"] for item in normalized}) != len(normalized):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_revocation_invalid"
+            )
+
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            for item in normalized:
+                entry = self._entries.get(item["entryId"])
+                if not entry or not (
+                    entry["phase"] == "reserved"
+                    and entry["surface"] == item["surface"]
+                    and entry["scope"] == item["scope"]
+                    and entry["sourceDeliveryId"]
+                    == item["sourceDeliveryId"]
+                    and entry["turnId"] == item["turnId"]
+                    and entry["textHash"] == item["textHash"]
+                    and entry["deliveryRef"] == item["reservationRef"]
+                ):
+                    raise ConversationIngressBindingMismatch(
+                        "conversation_ingress_binding_mismatch"
+                    )
+            before = _clone_entries(self._entries)
+            for item in normalized:
+                self._entries.pop(item["entryId"], None)
+            try:
+                self._write()
+            except Exception:
+                self._entries = before
+                raise
+            return {
+                "schema": (
+                    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+                ),
+                "durable": True,
+                "revokedCount": len(normalized),
+                "bindings": [
+                    {
+                        "entryId": item["entryId"],
+                        "turnId": item["turnId"],
+                        "textHash": item["textHash"],
+                        "reservationRef": item["reservationRef"],
+                    }
+                    for item in normalized
+                ],
+                "journalGeneration": int(self._generation),
+            }
+
+    def revoke_reserved_ingress_scope(
+        self,
+        *,
+        surface: Any,
+        scope: Any,
+    ) -> dict[str, Any]:
+        """Atomically delete every reservation in one exact owner scope."""
+
+        normalized_surface = _surface(surface)
+        normalized_scope = _bounded_identifier(
+            scope,
+            code="conversation_ingress_scope_invalid",
+            max_chars=512,
+        )
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            bindings = [
+                {
+                    "entryId": str(entry["entryId"]),
+                    "turnId": str(entry["turnId"]),
+                    "textHash": str(entry["textHash"]),
+                    "reservationRef": str(entry["deliveryRef"]),
+                }
+                for entry in sorted(
+                    self._entries.values(),
+                    key=lambda item: str(item["entryId"]),
+                )
+                if entry["phase"] == "reserved"
+                and entry["surface"] == normalized_surface
+                and entry["scope"] == normalized_scope
+            ]
+            if bindings:
+                before = _clone_entries(self._entries)
+                for binding in bindings:
+                    self._entries.pop(binding["entryId"], None)
+                try:
+                    self._write()
+                except Exception:
+                    self._entries = before
+                    raise
+            return {
+                "schema": (
+                    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+                ),
+                "durable": True,
+                "revokedCount": len(bindings),
+                "bindings": bindings,
+                "journalGeneration": int(self._generation),
+            }
 
     def claim(
         self,
@@ -1674,6 +2024,7 @@ __all__ = [
     "CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA",
     "CONVERSATION_INGRESS_RECOVERY_RECORD_SCHEMA",
     "CONVERSATION_INGRESS_RECOVERY_SCHEMA",
+    "CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA",
     "ConversationIngressBindingMismatch",
     "ConversationIngressRecoveryError",
     "ConversationIngressRecoveryJournal",

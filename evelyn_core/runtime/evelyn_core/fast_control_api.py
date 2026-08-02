@@ -68,11 +68,13 @@ from .fast_tool_planner import (
     plan_fast_tool_request,
 )
 from .fast_control_continuity import (
+    FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF,
     FAST_CONTROL_INGRESS_SURFACE,
     FAST_CONTROL_SESSION_KEY,
     FastControlContinuityOwner,
 )
 from .conversation_ingress_recovery import (
+    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA,
     ConversationIngressBindingMismatch,
     ConversationIngressRecoveryError,
     conversation_ingress_entry_id,
@@ -102,7 +104,11 @@ from .host_ui_action_client import (
 from .local_voice_admission import (
     LocalVoiceAdmissionManager,
     LocalVoiceAdmissionTransactionError,
+    LocalVoiceDurableReservationRevocation,
+    LocalVoiceDurableIssuanceReservation,
     LocalVoiceDurableIngressClaim,
+    LocalVoiceReservationRevocationRequest,
+    LocalVoiceIssuanceReservationRequest,
     LocalVoiceIngressClaimRequest,
     normalize_validation_binding,
 )
@@ -169,8 +175,25 @@ from .text import (
     visible_text as shared_visible_text,
 )
 from .voice_validation import (
+    emit_voice_validation_event,
     validation_attempt_binding_is_current,
     validation_transcript_admission_status,
+)
+from .voice_validation_attempt_lease import (
+    VoiceValidationAttemptLeaseBusy,
+    VoiceValidationAttemptLeaseSet,
+    VoiceValidationAttemptLeaseUnavailable,
+    acquire_attempt_lease,
+)
+from .voice_capture_consent import (
+    HOST_LEASE_STALE_SEC,
+    WATCHDOG_STATUS_SCHEMA,
+    voice_capture_consent_fence_matches,
+)
+from .voice_capture_consent_claim_lease import (
+    VoiceCaptureConsentClaimLeaseBusy,
+    VoiceCaptureConsentClaimLeaseUnavailable,
+    acquire_voice_capture_consent_claim_lease,
 )
 
 
@@ -216,6 +239,12 @@ FAST_HISTORY_MEMORY_RECEIPT_REF: ContextVar[
     dict[str, Any] | None
 ] = ContextVar(
     "fast_history_memory_receipt_ref",
+    default=None,
+)
+FAST_VALIDATION_ATTEMPT_LEASE: ContextVar[
+    VoiceValidationAttemptLeaseSet | None
+] = ContextVar(
+    "fast_validation_attempt_lease",
     default=None,
 )
 RESEARCH_PROGRESS_TEXTS = (
@@ -320,6 +349,16 @@ BOOT_STEPS = (
 )
 
 CONTINUITY_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+VOICE_CAPTURE_HOST_LEASE_PATH = (
+    CONTINUITY_ARTIFACTS_ROOT
+    / "voice_capture_consent"
+    / "owner_heartbeat.json"
+)
+VOICE_CAPTURE_CONSENT_STATE_PATH = (
+    CONTINUITY_ARTIFACTS_ROOT
+    / "voice_capture_consent"
+    / "state.json"
+)
 CONTINUITY_AUTHENTICITY = load_continuity_authenticity(
     protected_root=get_repo_root(),
     additional_protected_roots=(CONTINUITY_ARTIFACTS_ROOT,),
@@ -443,6 +482,7 @@ class MemoryGuardedJsonResponse(web.Response):
         after_write: Callable[[], None] | None = None,
         before_write: Callable[[], None] | None = None,
         after_write_failure: Callable[[str], None] | None = None,
+        after_terminal: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
             text=json.dumps(payload, ensure_ascii=False),
@@ -459,6 +499,8 @@ class MemoryGuardedJsonResponse(web.Response):
         self._after_write_success_called = False
         self._after_write_failure = after_write_failure
         self._after_write_failure_called = False
+        self._after_terminal = after_terminal
+        self._after_terminal_called = False
         self.headers["Cache-Control"] = "no-store"
         self.headers.update(
             control_page_memory_handoff_headers(expected_position)
@@ -488,6 +530,25 @@ class MemoryGuardedJsonResponse(web.Response):
             }
         )
         self.headers.update(control_page_memory_handoff_headers(None))
+
+    def adopt_after_terminal(self, callback: Callable[[], None]) -> None:
+        """Run one additional callback after EOF or terminal write failure."""
+
+        if self._after_terminal_called:
+            callback()
+            return
+        previous = self._after_terminal
+        if previous is None:
+            self._after_terminal = callback
+            return
+
+        def combined() -> None:
+            try:
+                previous()
+            finally:
+                callback()
+
+        self._after_terminal = combined
 
     def _enter_memory_guard(self) -> None:
         if self._memory_guard_disabled or self._memory_guard is not None:
@@ -528,16 +589,17 @@ class MemoryGuardedJsonResponse(web.Response):
         callback = self._after_write_success
         self._after_write_success = None
         self._after_write_failure = None
-        if callback is None:
-            return
         try:
-            callback()
+            if callback is not None:
+                callback()
         except Exception as exc:
             print(
                 "[FAST CONTROL] post_write_callback_failed "
                 f"errorType={type(exc).__name__}",
                 flush=True,
             )
+        finally:
+            self._run_after_terminal()
 
     def _run_after_write_failure(self, error_code: str) -> None:
         if self._after_write_failure_called:
@@ -546,13 +608,31 @@ class MemoryGuardedJsonResponse(web.Response):
         callback = self._after_write_failure
         self._after_write_failure = None
         self._after_write_success = None
-        if callback is None:
-            return
         try:
-            callback(error_code)
+            if callback is not None:
+                callback(error_code)
         except Exception as exc:
             print(
                 "[FAST CONTROL] post_write_failure_callback_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+        finally:
+            self._run_after_terminal()
+
+    def _run_after_terminal(self) -> None:
+        if self._after_terminal_called:
+            return
+        self._after_terminal_called = True
+        callback = self._after_terminal
+        self._after_terminal = None
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] terminal_callback_failed "
                 f"errorType={type(exc).__name__}",
                 flush=True,
             )
@@ -565,15 +645,22 @@ class MemoryGuardedJsonResponse(web.Response):
         except MemoryDeletionJournalIntegrityError:
             self._exit_memory_guard()
             if self.prepared:
+                self._run_after_terminal()
                 raise
             self._replace_with_integrity_failure()
-            return await super().prepare(request)
+            try:
+                return await super().prepare(request)
+            except BaseException:
+                self._run_after_terminal()
+                raise
         except BaseException as exc:
             self._exit_memory_guard(exc)
             if self._before_write_called:
                 self._run_after_write_failure(
                     "conversation_ingress_delivery_failed"
                 )
+            else:
+                self._run_after_terminal()
             raise
 
     async def write_eof(self, data: bytes = b"") -> None:
@@ -599,6 +686,7 @@ def memory_guarded_json_response(
     after_write: Callable[[], None] | None = None,
     before_write: Callable[[], None] | None = None,
     after_write_failure: Callable[[str], None] | None = None,
+    after_terminal: Callable[[], None] | None = None,
 ) -> MemoryGuardedJsonResponse:
     return MemoryGuardedJsonResponse(
         payload,
@@ -607,6 +695,7 @@ def memory_guarded_json_response(
         after_write=after_write,
         before_write=before_write,
         after_write_failure=after_write_failure,
+        after_terminal=after_terminal,
     )
 
 
@@ -615,16 +704,297 @@ def clean_text(value: Any) -> str:
 
 
 _INVALID_LOCAL_VOICE_VALIDATION_BINDING = object()
+_LOCAL_VOICE_VALIDATION_LEASE_KEY = "_validationAttemptLease"
 
 
 def local_voice_no_store_response(
     payload: dict[str, Any],
     *,
     status: int,
+    after_terminal: Callable[[], None] | None = None,
 ) -> web.Response:
+    if after_terminal is not None:
+        return memory_guarded_json_response(
+            payload,
+            expected_position=None,
+            status=status,
+            after_terminal=after_terminal,
+        )
     response = json_response(payload, status=status)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def local_voice_fixed_failure(
+    error_code: str,
+    *,
+    status: int,
+    after_terminal: Callable[[], None] | None = None,
+) -> web.Response:
+    """Return a content-free failure without mutating admission state."""
+
+    return local_voice_no_store_response(
+        {
+            "ok": False,
+            "admitted": False,
+            "reason": error_code,
+            "error": error_code,
+        },
+        status=status,
+        after_terminal=after_terminal,
+    )
+
+
+def _durable_local_voice_reservation_revocation(
+    requests: tuple[LocalVoiceReservationRevocationRequest, ...],
+) -> LocalVoiceDurableReservationRevocation:
+    """Revoke an exact content-free reservation set in one journal write."""
+
+    if not requests or not FAST_CONTROL_CONTINUITY_OWNER.enabled:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_reservation_revocation_failed"
+        )
+    raw_requests: list[dict[str, Any]] = []
+    expected_bindings: list[tuple[str, str, str, str]] = []
+    for request in requests:
+        request_id = json.dumps(
+            [request.bridge_instance_id, request.turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        entry_id = conversation_ingress_entry_id(
+            surface=FAST_CONTROL_INGRESS_SURFACE,
+            scope=FAST_CONTROL_SESSION_KEY,
+            source_delivery_id=request_id,
+        )
+        raw_requests.append(
+            {
+                "request_id": request_id,
+                "text_hash": request.forward_text_digest,
+                "turn_id": request.ingress_turn_id,
+                "reservation_ref": request.reservation_ref,
+            }
+        )
+        expected_bindings.append(
+            (
+                entry_id,
+                request.ingress_turn_id,
+                request.forward_text_digest,
+                request.reservation_ref,
+            )
+        )
+    try:
+        receipt = dict(
+            FAST_CONTROL_CONTINUITY_OWNER.revoke_reserved_ingress_batch(
+                raw_requests
+            )
+        )
+        raw_bindings = receipt.get("bindings")
+        if not isinstance(raw_bindings, list):
+            raise ValueError("bindings")
+        bindings = tuple(
+            sorted(
+                (
+                    str(binding["entryId"]),
+                    str(binding["turnId"]),
+                    str(binding["textHash"]),
+                    str(binding["reservationRef"]),
+                )
+                for binding in raw_bindings
+                if isinstance(binding, dict)
+                and set(binding)
+                == {"entryId", "turnId", "textHash", "reservationRef"}
+            )
+        )
+        generation = receipt.get("journalGeneration")
+        revoked_count = receipt.get("revokedCount")
+        if (
+            receipt.get("schema")
+            != CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+            or receipt.get("durable") is not True
+            or isinstance(revoked_count, bool)
+            or revoked_count != len(requests)
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation <= 0
+            or bindings != tuple(sorted(expected_bindings))
+        ):
+            raise ValueError("receipt")
+    except LocalVoiceAdmissionTransactionError:
+        raise
+    except Exception as exc:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_reservation_revocation_failed"
+        ) from exc
+    return LocalVoiceDurableReservationRevocation(
+        schema=str(receipt["schema"]),
+        durable=True,
+        bindings=bindings,
+        revoked_count=revoked_count,
+        journal_generation=generation,
+    )
+
+
+def _durable_local_voice_scope_revocation() -> dict[str, Any]:
+    """Revoke restart-orphaned local-voice reservations content-free."""
+
+    if not FAST_CONTROL_CONTINUITY_OWNER.enabled:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_reservation_revocation_failed"
+        )
+    try:
+        receipt = dict(
+            FAST_CONTROL_CONTINUITY_OWNER.revoke_reserved_local_voice_ingress()
+        )
+        raw_bindings = receipt.get("bindings")
+        revoked_count = receipt.get("revokedCount")
+        generation = receipt.get("journalGeneration")
+        if (
+            receipt.get("schema")
+            != CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+            or receipt.get("durable") is not True
+            or type(revoked_count) is not int
+            or revoked_count < 0
+            or not isinstance(raw_bindings, list)
+            or len(raw_bindings) != revoked_count
+            or type(generation) is not int
+            or generation < 0
+        ):
+            raise ValueError("receipt")
+        normalized = []
+        for binding in raw_bindings:
+            if not isinstance(binding, dict) or set(binding) != {
+                "entryId",
+                "turnId",
+                "textHash",
+                "reservationRef",
+            }:
+                raise ValueError("binding")
+            values = tuple(clean_text(binding[key]) for key in (
+                "entryId",
+                "turnId",
+                "textHash",
+                "reservationRef",
+            ))
+            if (
+                re.fullmatch(r"ingress-[0-9a-f]{64}", values[0]) is None
+                or re.fullmatch(r"lva-[0-9a-f]{64}", values[1]) is None
+                or re.fullmatch(r"[0-9a-f]{64}", values[2]) is None
+                or re.fullmatch(r"[0-9a-f]{64}", values[3]) is None
+            ):
+                raise ValueError("binding")
+            normalized.append(values)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("binding")
+        return receipt
+    except LocalVoiceAdmissionTransactionError:
+        raise
+    except Exception as exc:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_reservation_revocation_failed"
+        ) from exc
+
+
+def _reset_local_voice_admission(
+    reason: str,
+    *,
+    revoke_scope: bool = False,
+) -> dict[str, Any]:
+    status = LOCAL_VOICE_ADMISSION.reset(
+        reason,
+        durable_revocation=_durable_local_voice_reservation_revocation,
+    )
+    if revoke_scope and FAST_CONTROL_CONTINUITY_OWNER.enabled:
+        try:
+            _durable_local_voice_scope_revocation()
+        except Exception:
+            LOCAL_VOICE_ADMISSION.require_durable_revocation()
+            raise
+    return status
+
+
+def _private_local_voice_capture_fence_digest() -> str:
+    digest = clean_text(
+        LOCAL_BRIDGE_STATUS.get("voiceCaptureFenceDigest")
+    ).lower()
+    return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else ""
+
+
+def _acquire_local_voice_capture_claim_lease():
+    try:
+        return acquire_voice_capture_consent_claim_lease(
+            root=CONTINUITY_ARTIFACTS_ROOT,
+        )
+    except VoiceCaptureConsentClaimLeaseBusy:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_capture_claim_inflight"
+        ) from None
+    except VoiceCaptureConsentClaimLeaseUnavailable:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_capture_claim_lease_unavailable"
+        ) from None
+
+
+def _revoke_local_voice_for_capture_fence() -> tuple[str, int]:
+    """Close every live capability when host capture consent is not current."""
+
+    try:
+        with _acquire_local_voice_capture_claim_lease():
+            _reset_local_voice_admission(
+                "voice_capture_consent_not_current",
+                revoke_scope=True,
+            )
+    except LocalVoiceAdmissionTransactionError as exc:
+        if exc.code in {
+            "local_voice_capture_claim_inflight",
+            "local_voice_capture_claim_lease_unavailable",
+        }:
+            if exc.code.endswith("_unavailable"):
+                try:
+                    LOCAL_VOICE_ADMISSION.require_durable_revocation()
+                except Exception:
+                    pass
+            return exc.code, 503
+        try:
+            LOCAL_VOICE_ADMISSION.require_durable_revocation()
+        except Exception:
+            pass
+        return "local_voice_reservation_revocation_failed", 503
+    except Exception:
+        try:
+            LOCAL_VOICE_ADMISSION.require_durable_revocation()
+        except Exception:
+            pass
+        return "local_voice_reservation_revocation_failed", 503
+    return "voice_capture_consent_not_current", 409
+
+
+def _acquire_local_voice_validation_lease(
+    binding: Any,
+) -> tuple[VoiceValidationAttemptLeaseSet | None, web.Response | None]:
+    normalized = normalize_validation_binding(binding)
+    if not normalized:
+        return None, None
+    try:
+        return acquire_attempt_lease(normalized), None
+    except VoiceValidationAttemptLeaseBusy:
+        return None, local_voice_fixed_failure(
+            "validation_attempt_inflight",
+            status=409,
+        )
+    except VoiceValidationAttemptLeaseUnavailable:
+        return None, local_voice_fixed_failure(
+            "validation_attempt_lease_unavailable",
+            status=503,
+        )
+
+
+def _release_local_voice_validation_lease(
+    payload: dict[str, Any],
+) -> None:
+    lease = payload.pop(_LOCAL_VOICE_VALIDATION_LEASE_KEY, None)
+    if isinstance(lease, VoiceValidationAttemptLeaseSet):
+        lease.release()
 
 
 def local_voice_validation_binding(payload: dict[str, Any]) -> Any:
@@ -647,6 +1017,49 @@ def local_voice_validation_binding_is_current(binding: dict[str, Any]) -> bool:
     )
 
 
+def _emit_local_voice_turn_accepted(
+    binding: Any,
+    turn_id: Any,
+) -> dict[str, Any] | None:
+    normalized = normalize_validation_binding(binding)
+    accepted_turn_id = clean_text(turn_id)
+    if not normalized or not accepted_turn_id:
+        return None
+    material = json.dumps(
+        {
+            "attemptId": normalized["attemptId"],
+            "sessionId": normalized["sessionId"],
+            "stepId": normalized["stepId"],
+            "turnId": accepted_turn_id,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    try:
+        return emit_voice_validation_event(
+            "local",
+            "turn_accepted",
+            session_id=normalized["sessionId"],
+            step_id=normalized["stepId"],
+            attempt_id=normalized["attemptId"],
+            eventId=(
+                "local-accepted-"
+                + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+            ),
+            turnId=accepted_turn_id,
+        )
+    except Exception as exc:
+        # The ingress claim is already durable. Observability must not leave
+        # its one-shot capability live or turn the committed claim into 503.
+        print(
+            "[FAST CONTROL] local_voice_validation_event_write_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return None
+
+
 def consume_local_voice_admission(
     payload: dict[str, Any],
     *,
@@ -659,6 +1072,49 @@ def consume_local_voice_admission(
 ]:
     if clean_text(source).lower() != "local_bridge":
         return text, None, None
+    binding = local_voice_validation_binding(payload)
+    validation_lease, lease_rejection = (
+        _acquire_local_voice_validation_lease(binding)
+    )
+    if lease_rejection is not None:
+        return "", None, lease_rejection
+    lease_holder = [validation_lease]
+    try:
+        return _consume_local_voice_admission_with_lease(
+            payload,
+            text=text,
+            binding=binding,
+            lease_holder=lease_holder,
+        )
+    finally:
+        unreleased = lease_holder[0]
+        if unreleased is not None:
+            lease_holder[0] = None
+            unreleased.release()
+
+
+def _consume_local_voice_admission_with_lease(
+    payload: dict[str, Any],
+    *,
+    text: str,
+    binding: Any,
+    lease_holder: list[VoiceValidationAttemptLeaseSet | None],
+) -> tuple[
+    str,
+    LocalVoiceDurableIngressClaim | None,
+    web.Response | None,
+]:
+    validation_lease = lease_holder[0]
+
+    def take_validation_terminal_callback() -> Callable[[], None] | None:
+        nonlocal validation_lease
+        if validation_lease is None:
+            return None
+        callback = validation_lease.release
+        validation_lease = None
+        lease_holder[0] = None
+        return callback
+
     owner = FAST_CONTROL_CONTINUITY_OWNER
     unsafe_test_bypass = bool(
         not owner.enabled
@@ -670,15 +1126,48 @@ def consume_local_voice_admission(
         is True
     )
     transaction = None
+    if owner.enabled and not local_voice_capture_fence_is_current(
+        payload.get("bridgeInstanceId")
+    ):
+        error_code, status = _revoke_local_voice_for_capture_fence()
+        return (
+            "",
+            None,
+            local_voice_fixed_failure(
+                error_code,
+                status=status,
+                after_terminal=take_validation_terminal_callback(),
+            ),
+        )
+    capture_fence_digest = (
+        _private_local_voice_capture_fence_digest()
+        if owner.enabled
+        else ""
+    )
+    if owner.enabled and not capture_fence_digest:
+        error_code, status = _revoke_local_voice_for_capture_fence()
+        return (
+            "",
+            None,
+            local_voice_fixed_failure(
+                error_code,
+                status=status,
+                after_terminal=take_validation_terminal_callback(),
+            ),
+        )
     if unsafe_test_bypass:
         result = LOCAL_VOICE_ADMISSION.consume(
             payload.get("admissionToken"),
             payload.get("bridgeInstanceId"),
             payload.get("turnId"),
             text,
-            validation_binding=local_voice_validation_binding(payload),
+            admission_mode=payload.get("admissionMode"),
+            validation_binding=binding,
             validation_is_current=(
                 local_voice_validation_binding_is_current
+            ),
+            durable_revocation=(
+                _durable_local_voice_reservation_revocation
             ),
         )
     else:
@@ -695,52 +1184,80 @@ def consume_local_voice_admission(
             def durable_claim(
                 claim_request: LocalVoiceIngressClaimRequest,
             ) -> LocalVoiceDurableIngressClaim:
-                receipt = dict(
-                    owner.claim_ingress(
-                        request_id=request_id,
-                        accepted_text=claim_request.forward_text,
+                with _acquire_local_voice_capture_claim_lease():
+                    if (
+                        not local_voice_capture_fence_is_current(
+                            claim_request.bridge_instance_id
+                        )
+                        or not hmac.compare_digest(
+                            claim_request.capture_fence_digest,
+                            _private_local_voice_capture_fence_digest(),
+                        )
+                    ):
+                        raise LocalVoiceAdmissionTransactionError(
+                            "local_voice_capture_fence_not_current"
+                        )
+                    receipt = dict(
+                        owner.claim_reserved_ingress(
+                            request_id=request_id,
+                            accepted_text=claim_request.forward_text,
+                            turn_id=claim_request.ingress_turn_id,
+                            reservation_ref=claim_request.reservation_ref,
+                        )
                     )
-                )
-                expected_entry_id = conversation_ingress_entry_id(
-                    surface=FAST_CONTROL_INGRESS_SURFACE,
-                    scope=FAST_CONTROL_SESSION_KEY,
-                    source_delivery_id=request_id,
-                )
-                if (
-                    claim_request.bridge_instance_id
-                    != bridge_instance_id
-                    or claim_request.turn_id != bridge_turn_id
-                    or receipt.get("entryId") != expected_entry_id
-                    or receipt.get("textHash")
-                    != final_text_sha256(claim_request.forward_text)
-                    or type(receipt.get("shouldProcess")) is not bool
-                    or type(receipt.get("journalGeneration")) is not int
-                ):
-                    raise LocalVoiceAdmissionTransactionError(
-                        "local_voice_ingress_claim_binding_mismatch"
+                    expected_entry_id = conversation_ingress_entry_id(
+                        surface=FAST_CONTROL_INGRESS_SURFACE,
+                        scope=FAST_CONTROL_SESSION_KEY,
+                        source_delivery_id=request_id,
                     )
-                return LocalVoiceDurableIngressClaim(
-                    schema=str(receipt.get("schema") or ""),
-                    durable=receipt.get("durable") is True,
-                    bridge_instance_id=(
+                    if (
                         claim_request.bridge_instance_id
-                    ),
-                    local_turn_id=claim_request.turn_id,
-                    forward_text_digest=(
-                        claim_request.forward_text_digest
-                    ),
-                    entry_id=str(receipt.get("entryId") or ""),
-                    ingress_turn_id=str(
-                        receipt.get("turnId") or ""
-                    ),
-                    phase=str(receipt.get("phase") or ""),
-                    disposition=str(
-                        receipt.get("disposition") or ""
-                    ),
-                    should_process=receipt["shouldProcess"],
-                    text_hash=str(receipt.get("textHash") or ""),
-                    journal_generation=receipt["journalGeneration"],
-                )
+                        != bridge_instance_id
+                        or claim_request.turn_id != bridge_turn_id
+                        or receipt.get("entryId") != expected_entry_id
+                        or receipt.get("turnId")
+                        != claim_request.ingress_turn_id
+                        or receipt.get("textHash")
+                        != claim_request.forward_text_digest
+                        or type(receipt.get("shouldProcess")) is not bool
+                        or type(receipt.get("journalGeneration")) is not int
+                    ):
+                        raise LocalVoiceAdmissionTransactionError(
+                            "local_voice_ingress_claim_binding_mismatch"
+                        )
+                    claim = LocalVoiceDurableIngressClaim(
+                        schema=str(receipt.get("schema") or ""),
+                        durable=receipt.get("durable") is True,
+                        bridge_instance_id=(
+                            claim_request.bridge_instance_id
+                        ),
+                        local_turn_id=claim_request.turn_id,
+                        forward_text_digest=(
+                            claim_request.forward_text_digest
+                        ),
+                        entry_id=str(receipt.get("entryId") or ""),
+                        ingress_turn_id=str(
+                            receipt.get("turnId") or ""
+                        ),
+                        phase=str(receipt.get("phase") or ""),
+                        disposition=str(
+                            receipt.get("disposition") or ""
+                        ),
+                        should_process=receipt["shouldProcess"],
+                        text_hash=str(receipt.get("textHash") or ""),
+                        journal_generation=receipt["journalGeneration"],
+                        reservation_ref=claim_request.reservation_ref,
+                        reservation_verified=True,
+                        _validation_lease_held=(
+                            validation_lease is not None
+                        ),
+                    )
+                    LOCAL_VOICE_ADMISSION._durable_ingress_claim_receipt(
+                        claim,
+                        claim_request,
+                    )
+                    _emit_local_voice_turn_accepted(binding, bridge_turn_id)
+                    return claim
 
             transaction = (
                 LOCAL_VOICE_ADMISSION.consume_with_durable_claim(
@@ -749,21 +1266,30 @@ def consume_local_voice_admission(
                     payload.get("turnId"),
                     text,
                     durable_claim=durable_claim,
-                    validation_binding=local_voice_validation_binding(
-                        payload
+                    durable_revocation=(
+                        _durable_local_voice_reservation_revocation
                     ),
+                    admission_mode=payload.get("admissionMode"),
+                    validation_binding=binding,
                     validation_is_current=(
                         local_voice_validation_binding_is_current
                     ),
+                    durable_recovery_is_current=(
+                        lambda: local_voice_recovery_context_is_current(
+                            bridge_instance_id
+                        )
+                    ),
+                    capture_fence_digest=capture_fence_digest,
                 )
             )
         except ConversationIngressBindingMismatch:
             return (
                 "",
                 None,
-                _ingress_error_response(
-                    "conversation_ingress_binding_mismatch",
+                local_voice_fixed_failure(
+                    "local_voice_turn_binding_mismatch",
                     status=409,
+                    after_terminal=take_validation_terminal_callback(),
                 ),
             )
         except ConversationIngressRecoveryError as exc:
@@ -785,15 +1311,49 @@ def consume_local_voice_admission(
                     status=(
                         400 if exc.code in invalid_request_codes else 503
                     ),
+                    after_terminal=take_validation_terminal_callback(),
                 ),
             )
-        except LocalVoiceAdmissionTransactionError:
+        except LocalVoiceAdmissionTransactionError as exc:
+            if exc.code == "local_voice_capture_fence_not_current":
+                error_code, status = _revoke_local_voice_for_capture_fence()
+                return (
+                    "",
+                    None,
+                    local_voice_fixed_failure(
+                        error_code,
+                        status=status,
+                        after_terminal=(
+                            take_validation_terminal_callback()
+                        ),
+                    ),
+                )
+            if exc.code in {
+                "local_voice_capture_claim_inflight",
+                "local_voice_capture_claim_lease_unavailable",
+            }:
+                return (
+                    "",
+                    None,
+                    local_voice_fixed_failure(
+                        exc.code,
+                        status=503,
+                        after_terminal=(
+                            take_validation_terminal_callback()
+                        ),
+                    ),
+                )
             return (
                 "",
                 None,
                 _ingress_error_response(
-                    "conversation_ingress_recovery_unavailable",
+                    (
+                        "local_voice_reservation_revocation_failed"
+                        if "revocation" in exc.code
+                        else "conversation_ingress_recovery_unavailable"
+                    ),
                     status=503,
+                    after_terminal=take_validation_terminal_callback(),
                 ),
             )
         except (OSError, RuntimeError):
@@ -806,9 +1366,15 @@ def consume_local_voice_admission(
                 _ingress_error_response(
                     "conversation_ingress_recovery_unavailable",
                     status=503,
+                    after_terminal=take_validation_terminal_callback(),
                 ),
             )
         result = transaction.admission
+    if transaction is None and result.get("admitted") is True:
+        _emit_local_voice_turn_accepted(
+            binding,
+            payload.get("turnId"),
+        )
     durable_duplicate = bool(
         transaction is not None
         and transaction.ingress_claim is not None
@@ -820,7 +1386,11 @@ def consume_local_voice_admission(
         return (
             "",
             None,
-            local_voice_no_store_response(result, status=409),
+            local_voice_no_store_response(
+                result,
+                status=409,
+                after_terminal=take_validation_terminal_callback(),
+            ),
         )
     admitted_text = clean_text(result.get("forwardText"))
     if not admitted_text:
@@ -828,8 +1398,16 @@ def consume_local_voice_admission(
         return (
             "",
             None,
-            local_voice_no_store_response(failed, status=409),
+            local_voice_no_store_response(
+                failed,
+                status=409,
+                after_terminal=take_validation_terminal_callback(),
+            ),
         )
+    if validation_lease is not None:
+        payload[_LOCAL_VOICE_VALIDATION_LEASE_KEY] = validation_lease
+        validation_lease = None
+        lease_holder[0] = None
     return (
         admitted_text,
         transaction.ingress_claim if transaction is not None else None,
@@ -927,11 +1505,13 @@ def _ingress_error_response(
     error_code: str,
     *,
     status: int,
+    after_terminal: Callable[[], None] | None = None,
 ) -> MemoryGuardedJsonResponse:
     return memory_guarded_json_response(
         {"ok": False, "error": error_code},
         expected_position=None,
         status=status,
+        after_terminal=after_terminal,
     )
 
 
@@ -1637,6 +2217,7 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
     snapshot = dict(LOCAL_BRIDGE_STATUS)
     snapshot.pop("bridgeInstanceId", None)
+    snapshot.pop("voiceCaptureFenceDigest", None)
     snapshot["voiceAdmission"] = LOCAL_VOICE_ADMISSION.public_status()
     raw_error = clean_text(snapshot.get("lastError"))
     error_fallback = (
@@ -1684,6 +2265,126 @@ def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
         clean_text(snapshot.get("lastError")) or "local_bridge_stale"
     )
     return snapshot
+
+
+def local_voice_recovery_context_is_current(
+    bridge_instance_id: Any,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Authorize restart recovery only while capture consent is current."""
+
+    return local_voice_capture_fence_is_current(
+        bridge_instance_id,
+        now=now,
+    )
+
+
+def local_voice_capture_fence_digest_if_current(
+    bridge_instance_id: Any,
+    *,
+    now: float | None = None,
+) -> str:
+    """Return the private, current consent generation digest or ``""``."""
+
+    if not _configured_control_token(LOCAL_BRIDGE_STATUS_AUTH_TOKEN):
+        return ""
+    if LOCAL_BRIDGE_MIC_CONTROL_REQUEST.get("enabled") is False:
+        return ""
+    checked_at = _finite_number(time.time() if now is None else now)
+    bridge_id = clean_text(bridge_instance_id)
+    if (
+        checked_at is None
+        or checked_at <= 0
+        or not bridge_id
+        or bridge_id
+        != clean_text(LOCAL_BRIDGE_STATUS.get("bridgeInstanceId"))
+    ):
+        return ""
+    snapshot = local_bridge_status_snapshot(now=checked_at)
+    mic = snapshot.get("mic")
+    watchdog = LOCAL_BRIDGE_STATUS.get("voiceCaptureWatchdog")
+    fence_digest = LOCAL_BRIDGE_STATUS.get("voiceCaptureFenceDigest")
+    if not isinstance(watchdog, dict):
+        return ""
+    watchdog_checked_at = _finite_number(watchdog.get("checkedAt"))
+    heartbeat_at = _finite_number(LOCAL_BRIDGE_STATUS.get("heartbeatAt"))
+    watchdog_age = (
+        None
+        if watchdog_checked_at is None
+        else checked_at - watchdog_checked_at
+    )
+    if not (
+        watchdog.get("schema") == WATCHDOG_STATUS_SCHEMA
+        and watchdog.get("state") == "authorized"
+        and not clean_text(watchdog.get("reason"))
+        and watchdog.get("captureStopped") is False
+        and watchdog.get("stoppedAt") is None
+        and watchdog.get("contentFree") is True
+        and isinstance(fence_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", fence_digest) is not None
+        and watchdog_age is not None
+        and 0.0 <= watchdog_age <= HOST_LEASE_STALE_SEC
+        and heartbeat_at is not None
+        and watchdog_checked_at is not None
+        and watchdog_checked_at <= heartbeat_at
+        and snapshot.get("enabled") is True
+        and snapshot.get("ready") is True
+        and snapshot.get("stale") is False
+        and snapshot.get("micEnabled") is True
+        and snapshot.get("micControlDesiredEnabled") is True
+        and int(snapshot.get("micControlPendingRevision") or 0) == 0
+        and snapshot.get("micControlState") in {"idle", "applied"}
+        and not clean_text(snapshot.get("micControlError"))
+        and snapshot.get("micCaptureStopped") is False
+        and snapshot.get("restartStarted") is False
+        and snapshot.get("shutdownStarted") is False
+        and isinstance(mic, dict)
+        and mic.get("enabled") is True
+        and mic.get("captureReady") is True
+        and mic.get("captureActive") is True
+        and mic.get("captureStopped") is False
+        and RESTART_REQUEST.get("requested") is not True
+        and SHUTDOWN_REQUEST.get("requested") is not True
+    ):
+        return ""
+    try:
+        if not voice_capture_consent_fence_matches(
+            VOICE_CAPTURE_HOST_LEASE_PATH,
+            VOICE_CAPTURE_CONSENT_STATE_PATH,
+            expected_digest=fence_digest,
+            now=lambda: checked_at,
+        ):
+            return ""
+        # Do not bind a grant to a digest swapped concurrently with the
+        # authenticated state/lease check above.
+        return (
+            fence_digest
+            if hmac.compare_digest(
+                fence_digest,
+                clean_text(
+                    LOCAL_BRIDGE_STATUS.get("voiceCaptureFenceDigest")
+                ),
+            )
+            else ""
+        )
+    except Exception:
+        return ""
+
+
+def local_voice_capture_fence_is_current(
+    bridge_instance_id: Any,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Match the live authenticated Bridge to the durable host consent."""
+
+    return bool(
+        local_voice_capture_fence_digest_if_current(
+            bridge_instance_id,
+            now=now,
+        )
+    )
 
 
 def _configured_control_token(value: Any) -> str:
@@ -1838,6 +2539,12 @@ def _normalize_local_bridge_status(
     )
     if any(type(payload.get(field)) is not bool for field in boolean_fields):
         return None
+    lifecycle_fields = ("restartStarted", "shutdownStarted")
+    if any(
+        field in payload and type(payload.get(field)) is not bool
+        for field in lifecycle_fields
+    ):
+        return None
     if payload.get("enabled") is not True:
         return None
     revision = _strict_nonnegative_int(payload.get("micControlRevision"))
@@ -1910,6 +2617,81 @@ def _normalize_local_bridge_status(
         )
     ):
         return None
+    watchdog = payload.get("voiceCaptureWatchdog")
+    fence_digest = payload.get("voiceCaptureFenceDigest")
+    normalized_watchdog: dict[str, Any] | None = None
+    if watchdog is not None or fence_digest is not None:
+        watchdog_keys = {
+            "schema",
+            "state",
+            "reason",
+            "checkedAt",
+            "captureStopped",
+            "stoppedAt",
+            "contentFree",
+        }
+        if not isinstance(watchdog, dict) or set(watchdog) != watchdog_keys:
+            return None
+        watchdog_state = _bounded_status_text(
+            watchdog.get("state"),
+            limit=32,
+        )
+        watchdog_reason = _bounded_status_text(
+            watchdog.get("reason"),
+            limit=120,
+        )
+        watchdog_checked_at = _finite_number(watchdog.get("checkedAt"))
+        stopped_at = watchdog.get("stoppedAt")
+        normalized_stopped_at = (
+            None if stopped_at is None else _finite_number(stopped_at)
+        )
+        valid_fence_digest = bool(
+            isinstance(fence_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", fence_digest)
+        )
+        if (
+            watchdog.get("schema") != WATCHDOG_STATUS_SCHEMA
+            or watchdog_state not in {"authorized", "blocked", "stop_failed"}
+            or watchdog_reason is None
+            or watchdog_checked_at is None
+            or watchdog_checked_at <= 0
+            or watchdog_checked_at > heartbeat_at
+            or abs(now - watchdog_checked_at)
+            > LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC
+            or type(watchdog.get("captureStopped")) is not bool
+            or watchdog.get("captureStopped")
+            is not payload.get("micCaptureStopped")
+            or (
+                stopped_at is not None
+                and (
+                    normalized_stopped_at is None
+                    or normalized_stopped_at <= 0
+                )
+            )
+            or watchdog.get("contentFree") is not True
+            or (
+                watchdog_state == "authorized"
+                and (
+                    watchdog_reason
+                    or not valid_fence_digest
+                    or stopped_at is not None
+                )
+            )
+            or (
+                watchdog_state != "authorized"
+                and (not watchdog_reason or fence_digest != "")
+            )
+        ):
+            return None
+        normalized_watchdog = {
+            "schema": WATCHDOG_STATUS_SCHEMA,
+            "state": watchdog_state,
+            "reason": watchdog_reason,
+            "checkedAt": watchdog_checked_at,
+            "captureStopped": watchdog["captureStopped"],
+            "stoppedAt": normalized_stopped_at,
+            "contentFree": True,
+        }
 
     # Preserve known operational evidence only. Unknown fields never become
     # authoritative merely because a reporter included them.
@@ -1966,9 +2748,14 @@ def _normalize_local_bridge_status(
             ],
             "micControlError": control_error,
             "micCaptureStopped": payload["micCaptureStopped"],
+            "restartStarted": bool(payload.get("restartStarted", False)),
+            "shutdownStarted": bool(payload.get("shutdownStarted", False)),
             "mic": normalized_mic,
         }
     )
+    if normalized_watchdog is not None:
+        normalized["voiceCaptureWatchdog"] = normalized_watchdog
+        normalized["voiceCaptureFenceDigest"] = str(fence_digest)
     return normalized
 
 
@@ -2112,8 +2899,16 @@ def request_local_bridge_mic_control(
         LOCAL_BRIDGE_MIC_ENABLE_FENCE["disableGeneration"] = (
             int(LOCAL_BRIDGE_MIC_ENABLE_FENCE["disableGeneration"]) + 1
         )
+    revocation_error: LocalVoiceAdmissionTransactionError | None = None
     if not enabled:
-        LOCAL_VOICE_ADMISSION.reset("mic_disabled")
+        try:
+            _reset_local_voice_admission(
+                "mic_disabled",
+                revoke_scope=True,
+            )
+        except LocalVoiceAdmissionTransactionError as exc:
+            # Publish physical OFF even while the admission fence stays shut.
+            revocation_error = exc
     current_revision = int(LOCAL_BRIDGE_MIC_CONTROL_REQUEST.get("revision") or 0)
     observed_revision = _strict_nonnegative_int(
         LOCAL_BRIDGE_STATUS.get("micControlRevision")
@@ -2133,6 +2928,8 @@ def request_local_bridge_mic_control(
             "bridgeInstanceDigest": bridge_instance_digest,
         }
     )
+    if revocation_error is not None:
+        raise revocation_error
     return dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
 
 
@@ -2298,7 +3095,13 @@ async def execute_local_bridge_mic_control(enabled: bool, *, source: str) -> str
             "마이크 입력은 음성 검증 화면에서 청취 동의를 확인한 뒤에만 "
             "켤 수 있어."
         )
-    request = request_local_bridge_mic_control(False, source=source)
+    try:
+        request = request_local_bridge_mic_control(False, source=source)
+    except LocalVoiceAdmissionTransactionError:
+        return (
+            "마이크 중지 요청은 보냈지만 음성 예약 철회를 확인하지 못했어. "
+            "새 음성 입력은 차단된 상태야."
+        )
     result = await wait_for_local_bridge_mic_control(request)
     snapshot = dict(result.get("localBridge") or {})
     if not result.get("applied"):
@@ -2487,6 +3290,17 @@ MINECRAFT_WORLD_MODE = MinecraftModeComposition(
         clean_text=clean_text,
         monotonic=time.monotonic,
         sleep=asyncio.sleep,
+    )
+)
+VOICE_VALIDATION_LLM_SYSTEM_PROMPT = "\n\n".join(
+    (
+        FAST_MAIN_LLM_SYSTEM_PROMPT,
+        (
+            "This is an isolated voice transport validation turn. Answer only "
+            "the current user message directly. Do not use or claim memory, "
+            "conversation history, tools, runtime state, vision, search, or "
+            "external facts. Do not initiate actions. Keep the answer concise."
+        ),
     )
 )
 MINECRAFT_WORLD_LEASE_OWNER = MinecraftWorldLeaseOwner(
@@ -3227,7 +4041,14 @@ def execute_memory_panel_action(action: str) -> str:
 
 
 def request_local_shutdown(*, source: str, reason: str = "") -> dict[str, Any]:
-    LOCAL_VOICE_ADMISSION.reset("shutdown_requested")
+    revocation_error: LocalVoiceAdmissionTransactionError | None = None
+    try:
+        _reset_local_voice_admission(
+            "shutdown_requested",
+            revoke_scope=True,
+        )
+    except LocalVoiceAdmissionTransactionError as exc:
+        revocation_error = exc
     SHUTDOWN_REQUEST.update(
         {
             "requested": True,
@@ -3236,6 +4057,8 @@ def request_local_shutdown(*, source: str, reason: str = "") -> dict[str, Any]:
             "reason": clean_text(reason) or "operator_request",
         }
     )
+    if revocation_error is not None:
+        raise revocation_error
     return {
         "ok": True,
         "message": "Local Evelyn shutdown requested. Windows local I/O bridge will run the stop script.",
@@ -3244,7 +4067,10 @@ def request_local_shutdown(*, source: str, reason: str = "") -> dict[str, Any]:
 
 
 def request_local_restart(*, source: str, reason: str = "") -> dict[str, Any]:
-    LOCAL_VOICE_ADMISSION.reset("restart_requested")
+    _reset_local_voice_admission(
+        "restart_requested",
+        revoke_scope=True,
+    )
     RESTART_REQUEST.update(
         {
             "requested": True,
@@ -3670,17 +4496,47 @@ async def build_main_llm_payload(
     return payload
 
 
+def build_isolated_voice_validation_llm_payload(text: str) -> dict[str, Any]:
+    """Build a voice-validation request without context or provider access."""
+
+    reset_fast_memory_context_receipt()
+    payload: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "system",
+                "content": VOICE_VALIDATION_LLM_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": clean_text(text)},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 700,
+        "stream": True,
+        "cache_prompt": True,
+    }
+    if MAIN_LLM_STOP_TOKENS:
+        payload["stop"] = list(MAIN_LLM_STOP_TOKENS)
+    return payload
+
+
 async def iter_main_llm_deltas(
     text: str,
     *,
     source: str,
     tool_plan: FastToolPlan | None = None,
+    isolated_validation: bool = False,
 ) -> AsyncIterator[str]:
-    payload, failure_reply = await build_main_llm_request_payload(
-        text,
-        source=source,
-        tool_plan=tool_plan,
-    )
+    if isolated_validation:
+        if tool_plan is not None:
+            raise RuntimeError("validation_tool_plan_forbidden")
+        payload = build_isolated_voice_validation_llm_payload(text)
+        failure_reply = ""
+    else:
+        payload, failure_reply = await build_main_llm_request_payload(
+            text,
+            source=source,
+            tool_plan=tool_plan,
+        )
     if failure_reply:
         yield failure_reply
         return
@@ -3733,11 +4589,26 @@ async def ask_main_llm(
     *,
     source: str,
     tool_plan: FastToolPlan | None = None,
+    isolated_validation: bool = False,
 ) -> str:
+    if isolated_validation and tool_plan is not None:
+        raise RuntimeError("validation_tool_plan_forbidden")
     stream = (
-        iter_main_llm_deltas(text, source=source)
-        if tool_plan is None
-        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+        iter_main_llm_deltas(
+            text,
+            source=source,
+            isolated_validation=True,
+        )
+        if isolated_validation
+        else (
+            iter_main_llm_deltas(text, source=source)
+            if tool_plan is None
+            else iter_main_llm_deltas(
+                text,
+                source=source,
+                tool_plan=tool_plan,
+            )
+        )
     )
     parts = [
         delta
@@ -3751,16 +4622,31 @@ async def ask_main_llm_and_queue_speech(
     *,
     source: str,
     tool_plan: FastToolPlan | None = None,
+    isolated_validation: bool = False,
 ) -> tuple[str, int]:
+    if isolated_validation and tool_plan is not None:
+        raise RuntimeError("validation_tool_plan_forbidden")
     raw_parts: list[str] = []
     clean_seen_len = 0
     sentence_buffer = ""
     emitted_chunks: list[str] = []
     queued_count = 0
     stream = (
-        iter_main_llm_deltas(text, source=source)
-        if tool_plan is None
-        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+        iter_main_llm_deltas(
+            text,
+            source=source,
+            isolated_validation=True,
+        )
+        if isolated_validation
+        else (
+            iter_main_llm_deltas(text, source=source)
+            if tool_plan is None
+            else iter_main_llm_deltas(
+                text,
+                source=source,
+                tool_plan=tool_plan,
+            )
+        )
     )
     async for delta in stream:
         raw_parts.append(delta)
@@ -4393,36 +5279,333 @@ async def local_voice_admission_handler(
     text = clean_text(payload.get("text"))
     binding = local_voice_validation_binding(payload)
     normalized_binding = normalize_validation_binding(binding)
-    if normalized_binding:
-        transcript_admission = validation_transcript_admission_status(
-            "local",
-            text,
-            normalized_binding,
+    validation_lease, lease_rejection = (
+        _acquire_local_voice_validation_lease(binding)
+    )
+    if lease_rejection is not None:
+        return lease_rejection
+
+    def respond(
+        response_payload: dict[str, Any],
+        *,
+        status: int,
+    ) -> web.Response:
+        nonlocal validation_lease
+        after_terminal = (
+            validation_lease.release
+            if validation_lease is not None
+            else None
         )
-        if transcript_admission.get("current") is not True:
-            return local_voice_no_store_response(
-                LOCAL_VOICE_ADMISSION.reject("validation_attempt_stale"),
-                status=409,
+        validation_lease = None
+        return local_voice_no_store_response(
+            response_payload,
+            status=status,
+            after_terminal=after_terminal,
+        )
+
+    try:
+        if normalized_binding:
+            transcript_admission = validation_transcript_admission_status(
+                "local",
+                text,
+                normalized_binding,
             )
-        if transcript_admission.get("matched") is not True:
-            return local_voice_no_store_response(
-                LOCAL_VOICE_ADMISSION.reject(
-                    clean_text(transcript_admission.get("reason"))
-                    or "validation_transcript_mismatch"
+            if transcript_admission.get("current") is not True:
+                return respond(
+                    LOCAL_VOICE_ADMISSION.reject(
+                        "validation_attempt_stale"
+                    ),
+                    status=409,
+                )
+            if transcript_admission.get("matched") is not True:
+                return respond(
+                    LOCAL_VOICE_ADMISSION.reject(
+                        clean_text(transcript_admission.get("reason"))
+                        or "validation_transcript_mismatch"
+                    ),
+                    status=409,
+                )
+
+        owner = FAST_CONTROL_CONTINUITY_OWNER
+        unsafe_test_bypass = bool(
+            not owner.enabled
+            and getattr(
+                owner,
+                "_test_only_allow_unsafe_ingress",
+                False,
+            )
+            is True
+        )
+        if unsafe_test_bypass:
+            result = LOCAL_VOICE_ADMISSION.issue(
+                payload.get("bridgeInstanceId"),
+                payload.get("turnId"),
+                text,
+                validation_binding=binding,
+                validation_is_current=(
+                    local_voice_validation_binding_is_current
                 ),
-                status=409,
+                durable_revocation=(
+                    _durable_local_voice_reservation_revocation
+                ),
             )
-    result = LOCAL_VOICE_ADMISSION.issue(
-        payload.get("bridgeInstanceId"),
-        payload.get("turnId"),
-        text,
-        validation_binding=binding,
-        validation_is_current=local_voice_validation_binding_is_current,
-    )
-    return local_voice_no_store_response(
-        result,
-        status=200 if result.get("admitted") is True else 409,
-    )
+        elif not owner.enabled:
+            return respond(
+                {
+                    "ok": False,
+                    "admitted": False,
+                    "reason": "conversation_ingress_recovery_unavailable",
+                    "error": "conversation_ingress_recovery_unavailable",
+                },
+                status=503,
+            )
+        else:
+            bridge_instance_id = clean_text(
+                payload.get("bridgeInstanceId")
+            )
+            bridge_turn_id = clean_text(payload.get("turnId"))
+            if not local_voice_capture_fence_is_current(
+                bridge_instance_id
+            ):
+                error_code, status = _revoke_local_voice_for_capture_fence()
+                return respond(
+                    {
+                        "ok": False,
+                        "admitted": False,
+                        "reason": error_code,
+                        "error": error_code,
+                    },
+                    status=status,
+                )
+            capture_fence_digest = (
+                _private_local_voice_capture_fence_digest()
+            )
+            if not capture_fence_digest:
+                error_code, status = _revoke_local_voice_for_capture_fence()
+                return respond(
+                    {
+                        "ok": False,
+                        "admitted": False,
+                        "reason": error_code,
+                        "error": error_code,
+                    },
+                    status=status,
+                )
+            request_id = json.dumps(
+                [bridge_instance_id, bridge_turn_id],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+
+            def durable_reservation(
+                reservation_request: LocalVoiceIssuanceReservationRequest,
+            ) -> LocalVoiceDurableIssuanceReservation:
+                with _acquire_local_voice_capture_claim_lease():
+                    if (
+                        not local_voice_capture_fence_is_current(
+                            reservation_request.bridge_instance_id
+                        )
+                        or not hmac.compare_digest(
+                            reservation_request.capture_fence_digest,
+                            _private_local_voice_capture_fence_digest(),
+                        )
+                    ):
+                        raise LocalVoiceAdmissionTransactionError(
+                            "local_voice_capture_fence_not_current"
+                        )
+                    receipt = dict(
+                        owner.reserve_ingress(
+                            request_id=request_id,
+                            text_hash=(
+                                reservation_request.forward_text_digest
+                            ),
+                            turn_id=reservation_request.ingress_turn_id,
+                            reservation_ref=(
+                                reservation_request.reservation_ref
+                            ),
+                            ttl_sec=reservation_request.ttl_sec,
+                        )
+                    )
+                    expected_entry_id = conversation_ingress_entry_id(
+                        surface=FAST_CONTROL_INGRESS_SURFACE,
+                        scope=FAST_CONTROL_SESSION_KEY,
+                        source_delivery_id=request_id,
+                    )
+                    if (
+                        reservation_request.bridge_instance_id
+                        != bridge_instance_id
+                        or reservation_request.turn_id != bridge_turn_id
+                        or receipt.get("entryId") != expected_entry_id
+                        or receipt.get("turnId")
+                        != reservation_request.ingress_turn_id
+                        or receipt.get("textHash")
+                        != reservation_request.forward_text_digest
+                        or receipt.get("phase") != "reserved"
+                        or receipt.get("disposition") != "reserved"
+                        or receipt.get("shouldProcess") is not False
+                        or type(receipt.get("journalGeneration")) is not int
+                    ):
+                        raise LocalVoiceAdmissionTransactionError(
+                            "local_voice_issuance_reservation_binding_mismatch"
+                        )
+                    reservation = LocalVoiceDurableIssuanceReservation(
+                        schema=str(receipt.get("schema") or ""),
+                        durable=receipt.get("durable") is True,
+                        bridge_instance_id=(
+                            reservation_request.bridge_instance_id
+                        ),
+                        local_turn_id=reservation_request.turn_id,
+                        forward_text_digest=(
+                            reservation_request.forward_text_digest
+                        ),
+                        reservation_ref=(
+                            reservation_request.reservation_ref
+                        ),
+                        entry_id=str(receipt.get("entryId") or ""),
+                        ingress_turn_id=str(receipt.get("turnId") or ""),
+                        phase=str(receipt.get("phase") or ""),
+                        disposition=str(receipt.get("disposition") or ""),
+                        should_process=receipt["shouldProcess"],
+                        text_hash=str(receipt.get("textHash") or ""),
+                        journal_generation=receipt["journalGeneration"],
+                    )
+                    if (
+                        not local_voice_capture_fence_is_current(
+                            reservation_request.bridge_instance_id
+                        )
+                        or not hmac.compare_digest(
+                            reservation_request.capture_fence_digest,
+                            _private_local_voice_capture_fence_digest(),
+                        )
+                    ):
+                        _durable_local_voice_reservation_revocation(
+                            (
+                                LocalVoiceReservationRevocationRequest(
+                                    bridge_instance_id=(
+                                        reservation_request.bridge_instance_id
+                                    ),
+                                    turn_id=reservation_request.turn_id,
+                                    forward_text_digest=(
+                                        reservation_request.forward_text_digest
+                                    ),
+                                    validation_binding_digest=(
+                                        reservation_request.validation_binding_digest
+                                    ),
+                                    mode=reservation_request.mode,
+                                    token_digest=(
+                                        reservation_request.token_digest
+                                    ),
+                                    ingress_turn_id=(
+                                        reservation_request.ingress_turn_id
+                                    ),
+                                    reservation_ref=(
+                                        reservation_request.reservation_ref
+                                    ),
+                                    capture_fence_digest=(
+                                        reservation_request.capture_fence_digest
+                                    ),
+                                ),
+                            )
+                        )
+                        raise LocalVoiceAdmissionTransactionError(
+                            "local_voice_capture_fence_not_current"
+                        )
+                    return reservation
+
+            transaction = (
+                LOCAL_VOICE_ADMISSION.issue_with_durable_reservation(
+                    payload.get("bridgeInstanceId"),
+                    payload.get("turnId"),
+                    text,
+                    durable_reservation=durable_reservation,
+                    durable_revocation=(
+                        _durable_local_voice_reservation_revocation
+                    ),
+                    capture_fence_digest=capture_fence_digest,
+                    validation_binding=binding,
+                    validation_is_current=(
+                        local_voice_validation_binding_is_current
+                    ),
+                )
+            )
+            result = transaction.admission
+        response = respond(
+            result,
+            status=200 if result.get("admitted") is True else 409,
+        )
+    except ConversationIngressBindingMismatch:
+        return respond(
+            {
+                "ok": False,
+                "admitted": False,
+                "reason": "local_voice_turn_binding_mismatch",
+                "error": "local_voice_turn_binding_mismatch",
+            },
+            status=409,
+        )
+    except ConversationIngressRecoveryError:
+        return respond(
+            {
+                "ok": False,
+                "admitted": False,
+                "reason": "conversation_ingress_recovery_unavailable",
+                "error": "conversation_ingress_recovery_unavailable",
+            },
+            status=503,
+        )
+    except LocalVoiceAdmissionTransactionError as exc:
+        if exc.code == "local_voice_capture_fence_not_current":
+            error_code, status = _revoke_local_voice_for_capture_fence()
+            return respond(
+                {
+                    "ok": False,
+                    "admitted": False,
+                    "reason": error_code,
+                    "error": error_code,
+                },
+                status=status,
+            )
+        if exc.code in {
+            "local_voice_capture_claim_inflight",
+            "local_voice_capture_claim_lease_unavailable",
+        }:
+            return respond(
+                {
+                    "ok": False,
+                    "admitted": False,
+                    "reason": exc.code,
+                    "error": exc.code,
+                },
+                status=503,
+            )
+        error_code = (
+            "local_voice_reservation_revocation_failed"
+            if "revocation" in exc.code
+            else "conversation_ingress_recovery_unavailable"
+        )
+        return respond(
+            {
+                "ok": False,
+                "admitted": False,
+                "reason": error_code,
+                "error": error_code,
+            },
+            status=503,
+        )
+    except (OSError, RuntimeError):
+        return respond(
+            {
+                "ok": False,
+                "admitted": False,
+                "reason": "conversation_ingress_recovery_unavailable",
+                "error": "conversation_ingress_recovery_unavailable",
+            },
+            status=503,
+        )
+    finally:
+        if validation_lease is not None:
+            validation_lease.release()
+    return response
 
 
 def _cached_fast_control_json_response(
@@ -4564,7 +5747,9 @@ async def _finalize_fast_chat_response(
     memory_write_receipt: dict[str, Any] | None,
     error_code: str,
     ingress_claim: dict[str, Any] | None = None,
+    validation_lease: VoiceValidationAttemptLeaseSet | None = None,
 ) -> web.StreamResponse:
+    isolated_validation = validation_lease is not None
     response_exposure = capture_combined_memory_exposure(
         FAST_MEMORY_EXPOSURE_POSITION.get(),
         current_memory_exposure_position(),
@@ -4581,7 +5766,7 @@ async def _finalize_fast_chat_response(
         ingress_entry_id = clean_text(
             (ingress_claim or {}).get("entryId")
         )
-        if ingress_entry_id:
+        if ingress_entry_id and not isolated_validation:
             try:
                 FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
                     ingress_entry_id,
@@ -4592,28 +5777,34 @@ async def _finalize_fast_chat_response(
                 return _ingress_error_response(
                     "conversation_ingress_recovery_unavailable",
                     status=503,
+                    after_terminal=(
+                        validation_lease.release
+                        if validation_lease is not None
+                        else None
+                    ),
                 )
-        append_chat_message(
-            "assistant",
-            "Evelyn",
-            reply,
-            source="fast_control_api",
-            task_id=(
-                task_record.task_id
-                if task_record is not None
-                else None
-            ),
-            task_status=(
-                task_record.status
-                if task_record is not None
-                else None
-            ),
-            memory_receipt=response_memory_receipt_ref,
-            memory_write_receipt=memory_write_receipt,
-        )
+        if not isolated_validation:
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                reply,
+                source="fast_control_api",
+                task_id=(
+                    task_record.task_id
+                    if task_record is not None
+                    else None
+                ),
+                task_status=(
+                    task_record.status
+                    if task_record is not None
+                    else None
+                ),
+                memory_receipt=response_memory_receipt_ref,
+                memory_write_receipt=memory_write_receipt,
+            )
         continuity = (
             _pending_fast_control_continuity_result()
-            if ingress_entry_id
+            if ingress_entry_id or isolated_validation
             else (
                 commit_fast_control_terminal_turn(
                     task_record.task_id,
@@ -4638,8 +5829,10 @@ async def _finalize_fast_chat_response(
             and queued_speech_count <= 0
         ):
             queue_local_bridge_speech(reply, source=source)
-        health = await cached_fast_runtime_health()
-        state = build_control_state(health)
+        state = {}
+        if validation_lease is None:
+            health = await cached_fast_runtime_health()
+            state = build_control_state(health)
         final_response_exposure = current_memory_exposure_position()
         result: dict[str, Any] = {
             "ok": not bool(error_code),
@@ -4677,16 +5870,35 @@ async def _finalize_fast_chat_response(
             def begin_ingress_delivery() -> None:
                 FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
                     ingress_entry_id,
-                    delivery_ref=FAST_CONTROL_HTTP_DELIVERY_REF,
+                    delivery_ref=(
+                        FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+                        if isolated_validation
+                        else FAST_CONTROL_HTTP_DELIVERY_REF
+                    ),
+                    streaming=isolated_validation,
                 )
 
             def fail_ingress_delivery(failure_code: str) -> None:
+                if isolated_validation:
+                    FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                        ingress_entry_id,
+                        assistant_text=reply,
+                        memory_receipt_ref=response_memory_receipt_ref,
+                    )
+                    return
                 FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
                     ingress_entry_id,
                     error_code=failure_code,
                 )
 
             def complete_ingress_delivery() -> None:
+                if isolated_validation:
+                    FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                        ingress_entry_id,
+                        assistant_text=reply,
+                        memory_receipt_ref=response_memory_receipt_ref,
+                    )
+                    return
                 FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
                     ingress_entry_id,
                     delivery_ref=FAST_CONTROL_HTTP_DELIVERY_REF,
@@ -4744,6 +5956,11 @@ async def _finalize_fast_chat_response(
             after_write=after_write,
             before_write=before_write,
             after_write_failure=after_write_failure,
+            after_terminal=(
+                validation_lease.release
+                if validation_lease is not None
+                else None
+            ),
         )
 
 
@@ -4784,28 +6001,52 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     )
     if admission_rejection is not None:
         return admission_rejection
-    reset_fast_memory_context_receipt()
-    ingress_claim, cached_replay, ingress_rejection = (
-        _prepare_fast_control_ingress(
-            payload,
-            accepted_text=text,
-            source=source,
-            preclaimed=preclaimed_ingress,
-        )
+    validation_lease = payload.pop(
+        _LOCAL_VOICE_VALIDATION_LEASE_KEY,
+        None,
     )
+    isolated_validation = validation_lease is not None
+    reset_fast_memory_context_receipt()
+    try:
+        ingress_claim, cached_replay, ingress_rejection = (
+            _prepare_fast_control_ingress(
+                payload,
+                accepted_text=text,
+                source=source,
+                preclaimed=preclaimed_ingress,
+            )
+        )
+    except BaseException:
+        if validation_lease is not None:
+            validation_lease.release()
+        raise
     if ingress_rejection is not None:
+        if validation_lease is not None:
+            if isinstance(
+                ingress_rejection,
+                MemoryGuardedJsonResponse,
+            ):
+                ingress_rejection.adopt_after_terminal(
+                    validation_lease.release
+                )
+            else:
+                validation_lease.release()
         return ingress_rejection
     if cached_replay is not None:
         cached_record, cached_exposure = cached_replay
-        return _cached_fast_control_json_response(
+        response = _cached_fast_control_json_response(
             cached_record,
             exposure=cached_exposure,
             source=source,
         )
+        if validation_lease is not None:
+            response.adopt_after_terminal(validation_lease.release)
+        return response
     if ingress_claim is not None:
         action_id = str(ingress_claim["_effectId"])
     suppress_tts = should_suppress_tts_for_command(text)
-    append_chat_message("user", "정훈", text, source=source)
+    if validation_lease is None:
+        append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
     queued_speech_count = 0
     error_code = ""
@@ -4813,38 +6054,63 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     task_runner: Callable[[str, str], Awaitable[str]] | None = None
     memory_write_receipt: dict[str, Any] | None = None
     try:
-        (
-            memory_command_matched,
-            memory_command_reply,
-            memory_write_receipt,
-            memory_command_error,
-        ) = execute_explicit_memory_confirmation(
-            text,
-            action_id=action_id,
-        )
+        if validation_lease is not None:
+            memory_command_matched = False
+            memory_command_reply = ""
+            memory_command_error = ""
+        else:
+            (
+                memory_command_matched,
+                memory_command_reply,
+                memory_write_receipt,
+                memory_command_error,
+            ) = execute_explicit_memory_confirmation(
+                text,
+                action_id=action_id,
+            )
         if memory_command_matched:
             reply = memory_command_reply
             error_code = memory_command_error
         else:
-            tool_plan = await plan_fast_tool_request_for_turn(
-                text
+            tool_plan = (
+                None
+                if validation_lease is not None
+                else await plan_fast_tool_request_for_turn(text)
             )
-            pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
+            pre_llm_reply = (
+                None
+                if validation_lease is not None
+                else await resolve_pre_llm_reply(text, source=source)
+            )
             if pre_llm_reply is not None:
                 reply = pre_llm_reply
             else:
-                prepared_action = prepare_tool_plan_background_action(
-                    tool_plan,
-                    text,
-                    source=source,
-                ) or prepare_registered_background_action(text, source=source)
+                prepared_action = (
+                    None
+                    if validation_lease is not None
+                    else prepare_tool_plan_background_action(
+                        tool_plan,
+                        text,
+                        source=source,
+                    )
+                    or prepare_registered_background_action(
+                        text,
+                        source=source,
+                    )
+                )
                 if prepared_action is not None:
                     task_record, task_runner = prepared_action
                     reply = task_record.start_reply
                 else:
                     if should_queue_local_bridge_speech(source):
                         if tool_plan is None:
-                            reply, queued_speech_count = await ask_main_llm_and_queue_speech(text, source=source)
+                            reply, queued_speech_count = await ask_main_llm_and_queue_speech(
+                                text,
+                                source=source,
+                                isolated_validation=(
+                                    validation_lease is not None
+                                ),
+                            )
                         else:
                             reply, queued_speech_count = await ask_main_llm_and_queue_speech(
                                 text,
@@ -4853,7 +6119,13 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
                             )
                     else:
                         if tool_plan is None:
-                            reply = await ask_main_llm(text, source=source)
+                            reply = await ask_main_llm(
+                                text,
+                                source=source,
+                                isolated_validation=(
+                                    validation_lease is not None
+                                ),
+                            )
                         else:
                             reply = await ask_main_llm(text, source=source, tool_plan=tool_plan)
             if not reply:
@@ -4865,6 +6137,8 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             )
         )
     except MemoryDeletionJournalIntegrityError:
+        if validation_lease is not None:
+            validation_lease.release()
         raise
     except Exception as exc:
         error_code = "fast_control_chat_failed"
@@ -4873,7 +6147,11 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             f"errorType={type(exc).__name__}",
             flush=True,
         )
-        if task_record is not None and task_record.status == "running":
+        if (
+            not isolated_validation
+            and task_record is not None
+            and task_record.status == "running"
+        ):
             ACTION_COORDINATOR.fail(
                 task_record.task_id,
                 error_code,
@@ -4882,25 +6160,35 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             )
         reply = public_failure_message(error_code)
         task_runner = None
-    return await _finalize_fast_chat_response(
-        text=text,
-        reply=reply,
-        source=source,
-        suppress_tts=suppress_tts,
-        queued_speech_count=queued_speech_count,
-        task_record=task_record,
-        task_runner=task_runner,
-        memory_write_receipt=memory_write_receipt,
-        error_code=error_code,
-        ingress_claim=ingress_claim,
-    )
+    except BaseException:
+        if validation_lease is not None:
+            validation_lease.release()
+        raise
+    try:
+        return await _finalize_fast_chat_response(
+            text=text,
+            reply=reply,
+            source=source,
+            suppress_tts=suppress_tts,
+            queued_speech_count=queued_speech_count,
+            task_record=task_record,
+            task_runner=task_runner,
+            memory_write_receipt=memory_write_receipt,
+            error_code=error_code,
+            ingress_claim=ingress_claim,
+            validation_lease=validation_lease,
+        )
+    except BaseException:
+        if validation_lease is not None:
+            validation_lease.release()
+        raise
 
 
 async def write_stream_event(response: web.StreamResponse, payload: dict[str, Any]) -> None:
     await response.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
+async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
     except Exception:
@@ -4925,6 +6213,12 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     )
     if admission_rejection is not None:
         return admission_rejection
+    validation_lease = payload.pop(
+        _LOCAL_VOICE_VALIDATION_LEASE_KEY,
+        None,
+    )
+    isolated_validation = validation_lease is not None
+    FAST_VALIDATION_ATTEMPT_LEASE.set(validation_lease)
     reset_fast_memory_context_receipt()
     ingress_claim, cached_replay, ingress_rejection = (
         _prepare_fast_control_ingress(
@@ -4947,7 +6241,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if ingress_claim is not None:
         action_id = str(ingress_claim["_effectId"])
     suppress_tts = should_suppress_tts_for_command(text)
-    append_chat_message("user", "정훈", text, source=source)
+    if validation_lease is None:
+        append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
 
     response = web.StreamResponse(
@@ -5016,7 +6311,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             if ingress_entry_id and not ingress_delivery_started:
                 FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
                     ingress_entry_id,
-                    delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
+                    delivery_ref=(
+                        FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+                        if isolated_validation
+                        else FAST_CONTROL_STREAM_DELIVERY_REF
+                    ),
                     streaming=True,
                 )
                 ingress_delivery_started = True
@@ -5196,34 +6495,35 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             response_memory_receipt_ref = (
                 current_fast_response_memory_receipt_ref()
             )
-            if ingress_entry_id:
+            if ingress_entry_id and not isolated_validation:
                 FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
                     ingress_entry_id,
                     assistant_text=reply,
                     memory_receipt_ref=response_memory_receipt_ref,
                 )
-            append_chat_message(
-                "assistant",
-                "Evelyn",
-                reply,
-                source="fast_control_api_stream",
-                task_id=(
-                    task_record.task_id
-                    if task_record is not None
-                    else None
-                ),
-                task_status=(
-                    task_record.status
-                    if task_record is not None
-                    else None
-                ),
-                memory_receipt=response_memory_receipt_ref,
-                memory_write_receipt=memory_write_receipt,
-            )
+            if not isolated_validation:
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    reply,
+                    source="fast_control_api_stream",
+                    task_id=(
+                        task_record.task_id
+                        if task_record is not None
+                        else None
+                    ),
+                    task_status=(
+                        task_record.status
+                        if task_record is not None
+                        else None
+                    ),
+                    memory_receipt=response_memory_receipt_ref,
+                    memory_write_receipt=memory_write_receipt,
+                )
             terminal_reply_recorded = True
             continuity = (
                 _pending_fast_control_continuity_result()
-                if ingress_entry_id
+                if ingress_entry_id or isolated_validation
                 else commit_fast_control_turn(
                     text,
                     reply,
@@ -5266,24 +6566,37 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 mark_stream_delivery_ambiguous(
                     "conversation_ingress_delivery_disconnected"
                 )
+                if isolated_validation and ingress_entry_id:
+                    FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                        ingress_entry_id,
+                        assistant_text=reply,
+                        memory_receipt_ref=response_memory_receipt_ref,
+                    )
                 raise
             response_finished = True
 
         delivery_committed = True
         if ingress_entry_id:
-            FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
-                ingress_entry_id,
-                delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
-            )
-            delivery_continuity = commit_fast_control_turn(
-                text,
-                reply,
-                memory_receipt=response_memory_receipt_ref,
-                ingress_entry_id=ingress_entry_id,
-            )
-            delivery_committed = bool(
-                delivery_continuity.get("durable") is True
-            )
+            if isolated_validation:
+                FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                    ingress_entry_id,
+                    assistant_text=reply,
+                    memory_receipt_ref=response_memory_receipt_ref,
+                )
+            else:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
+                )
+                delivery_continuity = commit_fast_control_turn(
+                    text,
+                    reply,
+                    memory_receipt=response_memory_receipt_ref,
+                    ingress_entry_id=ingress_entry_id,
+                )
+                delivery_committed = bool(
+                    delivery_continuity.get("durable") is True
+                )
         if (
             delivery_committed
             and task_record is not None
@@ -5293,34 +6606,53 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             launch_background_action(task_record, task_runner)
 
     try:
-        (
-            memory_command_matched,
-            memory_command_reply,
-            memory_write_receipt,
-            memory_command_error,
-        ) = execute_explicit_memory_confirmation(
-            text,
-            action_id=action_id,
-        )
+        if validation_lease is not None:
+            memory_command_matched = False
+            memory_command_reply = ""
+            memory_command_error = ""
+        else:
+            (
+                memory_command_matched,
+                memory_command_reply,
+                memory_write_receipt,
+                memory_command_error,
+            ) = execute_explicit_memory_confirmation(
+                text,
+                action_id=action_id,
+            )
         if memory_command_matched:
             reply = enforce_action_reply_contract(
                 memory_command_reply
             )
             await emit_sentence(reply)
         else:
-            tool_plan = await plan_fast_tool_request_for_turn(
-                text
+            tool_plan = (
+                None
+                if validation_lease is not None
+                else await plan_fast_tool_request_for_turn(text)
             )
-            pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
+            pre_llm_reply = (
+                None
+                if validation_lease is not None
+                else await resolve_pre_llm_reply(text, source=source)
+            )
             if pre_llm_reply is not None:
                 reply = enforce_action_reply_contract(pre_llm_reply)
                 await emit_sentence(reply)
             else:
-                prepared_action = prepare_tool_plan_background_action(
-                    tool_plan,
-                    text,
-                    source=source,
-                ) or prepare_registered_background_action(text, source=source)
+                prepared_action = (
+                    None
+                    if validation_lease is not None
+                    else prepare_tool_plan_background_action(
+                        tool_plan,
+                        text,
+                        source=source,
+                    )
+                    or prepare_registered_background_action(
+                        text,
+                        source=source,
+                    )
+                )
                 if prepared_action is not None:
                     task_record, task_runner = prepared_action
                     reply = enforce_action_reply_contract(
@@ -5330,9 +6662,21 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     await emit_sentence(reply)
                 else:
                     llm_stream = (
-                        iter_main_llm_deltas(text, source=source)
-                        if tool_plan is None
-                        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+                        iter_main_llm_deltas(
+                            text,
+                            source=source,
+                            isolated_validation=True,
+                        )
+                        if isolated_validation
+                        else (
+                            iter_main_llm_deltas(text, source=source)
+                            if tool_plan is None
+                            else iter_main_llm_deltas(
+                                text,
+                                source=source,
+                                tool_plan=tool_plan,
+                            )
+                        )
                     )
                     try:
                         first_delta = await anext(llm_stream)
@@ -5340,7 +6684,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     except StopAsyncIteration:
                         first_delta = ""
                         has_first_delta = False
-                    if should_emit_memory_recall_progress(
+                    if validation_lease is None and should_emit_memory_recall_progress(
                         text,
                         source=source,
                     ):
@@ -5383,6 +6727,20 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             mark_stream_delivery_ambiguous(
                 "conversation_ingress_delivery_failed"
             )
+            if isolated_validation and ingress_entry_id:
+                partial_reply = (
+                    visible_text("".join(raw_parts))
+                    or clean_text(" ".join(emitted_chunks))
+                    or public_failure_message("fast_control_stream_failed")
+                )
+                if not bool(getattr(response, "_eof_sent", False)):
+                    with contextlib.suppress(Exception):
+                        await response.write_eof()
+                FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                    ingress_entry_id,
+                    assistant_text=partial_reply,
+                    memory_receipt_ref=not_used_memory_receipt_ref(),
+                )
             response_finished = True
             return response
         raise
@@ -5395,6 +6753,22 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             flush=True,
         )
         if ingress_delivery_started:
+            if isolated_validation and ingress_entry_id:
+                partial_reply = (
+                    visible_text("".join(raw_parts))
+                    or clean_text(" ".join(emitted_chunks))
+                    or failure_reply
+                )
+                if not bool(getattr(response, "_eof_sent", False)):
+                    with contextlib.suppress(Exception):
+                        await response.write_eof()
+                FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                    ingress_entry_id,
+                    assistant_text=partial_reply,
+                    memory_receipt_ref=not_used_memory_receipt_ref(),
+                )
+                response_finished = True
+                return response
             # Once any stream event crossed the HTTP boundary, a later
             # generation failure cannot be represented by a second fixed
             # assistant payload. Preserve the observed prefix as ambiguous
@@ -5407,7 +6781,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if ingress_delivery_failed or terminal_reply_recorded:
             response_finished = True
             return response
-        if task_record is not None and task_record.status == "running":
+        if (
+            not isolated_validation
+            and task_record is not None
+            and task_record.status == "running"
+        ):
             failed = ACTION_COORDINATOR.fail(
                 task_record.task_id,
                 error_code,
@@ -5424,7 +6802,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 task_status=failed.status,
                 memory_receipt=not_used_memory_receipt_ref(),
             )
-        else:
+        elif not isolated_validation:
             append_chat_message(
                 "assistant",
                 "Evelyn",
@@ -5433,7 +6811,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 memory_receipt=not_used_memory_receipt_ref(),
             )
         failure_receipt = not_used_memory_receipt_ref()
-        if ingress_entry_id:
+        if ingress_entry_id and not isolated_validation:
             try:
                 FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
                     ingress_entry_id,
@@ -5453,7 +6831,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 )
         continuity = (
             _pending_fast_control_continuity_result()
-            if ingress_entry_id
+            if ingress_entry_id or isolated_validation
             else (
                 commit_fast_control_terminal_turn(
                     task_record.task_id,
@@ -5497,29 +6875,42 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             mark_stream_delivery_ambiguous(
                 "conversation_ingress_delivery_disconnected"
             )
+            if isolated_validation and ingress_entry_id:
+                FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                    ingress_entry_id,
+                    assistant_text=failure_reply,
+                    memory_receipt_ref=failure_receipt,
+                )
             response_finished = True
             return response
         if ingress_entry_id:
-            FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
-                ingress_entry_id,
-                delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
-            )
-            (
-                commit_fast_control_terminal_turn(
-                    task_record.task_id,
-                    text,
-                    failure_reply,
-                    memory_receipt=failure_receipt,
-                    ingress_entry_id=ingress_entry_id,
+            if isolated_validation:
+                FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                    ingress_entry_id,
+                    assistant_text=failure_reply,
+                    memory_receipt_ref=failure_receipt,
                 )
-                if task_record is not None
-                else commit_fast_control_turn(
-                    text,
-                    failure_reply,
-                    memory_receipt=failure_receipt,
-                    ingress_entry_id=ingress_entry_id,
+            else:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
                 )
-            )
+                (
+                    commit_fast_control_terminal_turn(
+                        task_record.task_id,
+                        text,
+                        failure_reply,
+                        memory_receipt=failure_receipt,
+                        ingress_entry_id=ingress_entry_id,
+                    )
+                    if task_record is not None
+                    else commit_fast_control_turn(
+                        text,
+                        failure_reply,
+                        memory_receipt=failure_receipt,
+                        ingress_entry_id=ingress_entry_id,
+                    )
+                )
     finally:
         if llm_stream is not None:
             close_stream = getattr(
@@ -5548,8 +6939,33 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     return response
 
 
+async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
+    context_token = FAST_VALIDATION_ATTEMPT_LEASE.set(None)
+    try:
+        response = await _chat_stream_handler(request)
+        validation_lease = FAST_VALIDATION_ATTEMPT_LEASE.get()
+        if (
+            validation_lease is not None
+            and isinstance(response, MemoryGuardedJsonResponse)
+        ):
+            response.adopt_after_terminal(validation_lease.release)
+            FAST_VALIDATION_ATTEMPT_LEASE.set(None)
+        elif validation_lease is not None:
+            if not response.prepared:
+                await response.prepare(request)
+            if not bool(getattr(response, "_eof_sent", False)):
+                await response.write_eof()
+        return response
+    finally:
+        validation_lease = FAST_VALIDATION_ATTEMPT_LEASE.get()
+        if validation_lease is not None:
+            validation_lease.release()
+        FAST_VALIDATION_ATTEMPT_LEASE.reset(context_token)
+
+
 async def local_bridge_status_handler(request: web.Request) -> web.StreamResponse:
     speak_requests: list[dict[str, Any]] = []
+    status_ack: dict[str, Any] | None = None
     if request.method == "POST":
         authorized, error, status = _request_has_control_token(
             request,
@@ -5600,9 +7016,29 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
         LOCAL_BRIDGE_STATUS.update(normalized)
         LOCAL_BRIDGE_STATUS["updatedAt"] = accepted_at
         bridge_instance_id = normalized["bridgeInstanceId"]
-        LOCAL_VOICE_ADMISSION.observe_bridge_instance(bridge_instance_id)
+        status_ack = local_bridge_status_snapshot()
+        status_ack["bridgeInstanceDigest"] = hashlib.sha256(
+            bridge_instance_id.encode("utf-8")
+        ).hexdigest()
+        try:
+            LOCAL_VOICE_ADMISSION.observe_bridge_instance(
+                bridge_instance_id,
+                durable_revocation=(
+                    _durable_local_voice_reservation_revocation
+                ),
+            )
+        except LocalVoiceAdmissionTransactionError:
+            # Keep status/control delivery alive so the Bridge can physically
+            # stop capture. The manager's durable revocation fence stays shut.
+            pass
         if normalized["micEnabled"] is False:
-            LOCAL_VOICE_ADMISSION.reset("mic_disabled")
+            try:
+                _reset_local_voice_admission(
+                    "mic_disabled",
+                    revoke_scope=True,
+                )
+            except LocalVoiceAdmissionTransactionError:
+                pass
         minecraft_revision = _strict_nonnegative_int(
             normalized.get("minecraftCommandRevision")
         ) or 0
@@ -5623,7 +7059,7 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
     return json_response(
         {
             "ok": True,
-            "localBridge": local_bridge_status_snapshot(),
+            "localBridge": status_ack or local_bridge_status_snapshot(),
             "speakRequests": speak_requests,
             "outputDeviceRequest": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
             if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice")
@@ -5680,8 +7116,6 @@ async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
             {"ok": False, "error": "missing_mic_enabled"},
             status=400,
         )
-    if value is False:
-        LOCAL_VOICE_ADMISSION.reset("mic_disabled")
     purpose = clean_text(payload.get("purpose"))
     source = clean_text(payload.get("source")) or "control_page"
     if len(source) > 128:
@@ -5707,6 +7141,15 @@ async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
             status=(
                 409 if error == "mic_enable_fence_stale" else 403
             ),
+        )
+    except LocalVoiceAdmissionTransactionError:
+        return json_response(
+            {
+                "ok": False,
+                "applied": False,
+                "error": "local_voice_reservation_revocation_failed",
+            },
+            status=503,
         )
     result = await wait_for_local_bridge_mic_control(request_state)
     return json_response(
@@ -5899,10 +7342,18 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
         payload = {}
     source = clean_text((payload or {}).get("source")) or "control_page"
     reason = clean_text((payload or {}).get("reason")) or "shutdown_endpoint"
-    return memory_guarded_json_response(
-        request_local_shutdown(source=source, reason=reason),
-        expected_position=None,
-    )
+    try:
+        result = request_local_shutdown(source=source, reason=reason)
+    except LocalVoiceAdmissionTransactionError:
+        return memory_guarded_json_response(
+            {
+                "ok": False,
+                "error": "local_voice_reservation_revocation_failed",
+            },
+            expected_position=None,
+            status=503,
+        )
+    return memory_guarded_json_response(result, expected_position=None)
 
 
 def create_app(

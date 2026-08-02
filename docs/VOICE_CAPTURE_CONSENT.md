@@ -74,6 +74,14 @@ blocker가 없으면 같은 세션으로 `running` 전환된다.
 backend·stable inode·regular-file 검증이 불가능하면 fail-closed한다. runtime artifact
 retention은 규칙의 범위나 파일 나이와 무관하게 `owner_claim.lock`을 정리 후보에서
 제외한다.
+
+같은 디렉터리의 `claim_lease.lock`은 durable consent state 변경과 Bot API의 마지막
+fence 확인+local-voice reservation/claim을 선형화한다. Control Page writer는 이미
+선형화된 claim을 최대 2초 기다린다. 그 안에 잠금을 얻지 못하거나 state write가
+실패하면 메모리에서 먼저 `revoking/untrusted`로 닫고 physical OFF를 계속 시도한다.
+Bot API는 잠금을 기다리지 않으며 busy·unavailable이면 원문 claim 전에 content-free
+503으로 닫힌다. 이 파일도 stable 1-byte regular file이며 retention이 삭제하거나
+atomic replace하지 않는다.
 상태 파일은 누적 로그가 아니라 단일 최신 상태이며, ON 요청 전에 `enabling`,
 OFF 요청 전에 `revoking`을 먼저 기록해 재시작 시 fail-closed 복구할 수 있게
 한다. durable writer는 replace 전 temporary file을 `fsync`하고, Windows에서는
@@ -126,6 +134,10 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 - Local Bridge는 각 status tick과 마이크 ON 전·후에 strict schema, 목적 제한 HMAC,
   4초 freshness, 원래 owner/lease digest binding을 검사한다. 누락·손상·symlink·
   stale·expired·replacement는 모두 캡처 권한 부재다.
+- Bot API에는 캡처 HMAC 키를 전달하지 않는다. bearer-authenticated Bridge status가
+  보고한 content-free fence digest를 `owner_heartbeat.json`의 projection과 durable
+  consent state에 3자 일치시키고, current Bridge/mic/watchdog 상태와 함께 local
+  admission 발급·claim을 판정한다. 공개 status에서는 fence digest를 제거한다.
 - 권한을 잃으면 Bridge는 새 입력을 받지 않고 admission 상태를 폐기한 뒤 exact mic
   stop을 수행한다. stop 자체가 실패하면 종료 코드 76으로 Bridge 프로세스를 즉시
   끝내 OS가 캡처 handle을 회수하게 한다.
@@ -150,13 +162,20 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 - 검증 예외는 현재 session/step/attempt/attemptId와 기대 transcript 판정이
   모두 일치할 때만 허용되고, 10초 일회성 capability 소비 시 binding을 다시
   확인한다. 이 예외는 일반 45초 follow-up 창을 열거나 갱신하지 않는다.
-- 동의 철회·mic-off·bridge instance 교체는 아직 소비하지 않은 admission과
-  follow-up 상태를 폐기한다.
+- capability는 응답 전에 raw text/token 없는 durable reservation을 만든다. 발급
+  전·reservation 직전·직후와 claim 직전에 위 capture fence를 다시 확인하므로,
+  철회 race나 Bot 재시작은 exact reservation이 없으면 대화를 시작할 수 없다.
+- 동의 철회·mic-off·bridge instance 교체는 아직 소비하지 않은 admission,
+  reservation과 follow-up 상태를 exact revoke한다.
+- durable reservation/claim proof는 발급 consent fence digest를 포함한다. Bot
+  manager가 재시작하거나 동의가 A→B로 교체돼도 A token은 B proof로 claim할 수
+  없고, OFF/restart/shutdown은 process-local 목록에 없는 `reserved` row도 scope
+  단위로 purge한다.
 
 이 경계의 합성 테스트와 공개 브라우저 source-spoof 차단은 구현됐지만 실제
 마이크·스피커 10턴과 silence의 live E2E는 아직 사용자 청취 확인과 함께
-검증하지 않았다. hard-crash watchdog 반영 뒤 current-source 회귀는 runtime
-692개(skip 4), voice 574개(skip 5), 전체 2938개(skip 20)가 통과했다.
+검증하지 않았다. 최종 current-source hardening 묶음은 267개(skip 1), CI-equivalent
+전체 discover는 3044개(skip 20)가 통과했다.
 
 ## 아직 남은 검증·강화 경계
 

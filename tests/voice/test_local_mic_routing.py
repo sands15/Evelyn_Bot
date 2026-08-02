@@ -93,6 +93,7 @@ def fresh_host_lease(*, owner: str = "a" * 64, lease: str = "b" * 64) -> dict:
         "heartbeatAt": time.time(),
         "expiresAt": time.time() + 60,
         "checkedAt": time.time(),
+        "fenceDigest": "c" * 64,
     }
 
 
@@ -1281,6 +1282,7 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
             "heartbeatAt": None,
             "expiresAt": None,
             "checkedAt": time.time(),
+            "fenceDigest": "",
         }
 
     @staticmethod
@@ -1306,6 +1308,7 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_owner_stops_capture_and_discards_all_pending_audio(self):
         bridge, service = self.active_bridge()
+        bridge.voice_capture_fence_digest = "c" * 64
         bridge.queue.put_nowait((b"normal", {}))
         bridge.priority_queue.put_nowait((b"priority", {}))
         bridge.barge_in_queue.put_nowait((b"barge", {}))
@@ -1321,6 +1324,7 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.capture_stopped)  # type: ignore[attr-defined]
         self.assertEqual(bridge.discarded_pending_mic_segment_count, 3)
         self.assertEqual(bridge.voice_capture_watchdog_state, "blocked")
+        self.assertEqual(bridge.voice_capture_fence_digest, "")
         self.assertIsNotNone(bridge.voice_capture_watchdog_last_stopped_at)
         self.assertEqual(
             bridge.voice_capture_watchdog_last_stopped_at,
@@ -1329,6 +1333,7 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_failure_never_publishes_false_capture_stopped(self):
         bridge, service = self.active_bridge(stop_fails=True)
+        bridge.voice_capture_fence_digest = "c" * 64
         bridge._schedule_watchdog_fail_safe_exit = Mock()  # type: ignore[method-assign]
         bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
             return_value=self.blocked()
@@ -1340,12 +1345,44 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(bridge.service, service)
         self.assertFalse(bridge.mic_capture_stopped)
         self.assertEqual(bridge.voice_capture_watchdog_state, "stop_failed")
+        self.assertEqual(bridge.voice_capture_fence_digest, "")
         self.assertEqual(
             bridge.mic_control_error,
             "voice_capture_watchdog_stop_failed",
         )
         self.assertIsNone(bridge.voice_capture_watchdog_last_stopped_at)
         bridge._schedule_watchdog_fail_safe_exit.assert_called_once_with()  # type: ignore[union-attr]
+
+    async def test_authorized_watchdog_records_only_stable_fence_digest(self):
+        bridge, _service = self.active_bridge()
+        lease = fresh_host_lease()
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            return_value=lease
+        )
+
+        await bridge._enforce_voice_capture_watchdog()
+
+        self.assertEqual(
+            bridge.voice_capture_fence_digest,
+            lease["fenceDigest"],
+        )
+        watchdog = bridge._voice_capture_watchdog_status()
+        self.assertNotIn("fenceDigest", watchdog)
+        self.assertNotIn("ownerDigest", watchdog)
+        self.assertNotIn("leaseDigest", watchdog)
+
+    async def test_mic_off_clears_fence_before_stop_failure(self):
+        bridge, _service = self.active_bridge(stop_fails=True)
+        bridge.voice_capture_fence_digest = "c" * 64
+
+        await bridge._apply_mic_control_request(
+            revision=40,
+            enabled=False,
+            action_id=f"{40:032x}",
+        )
+
+        self.assertEqual(bridge.voice_capture_fence_digest, "")
+        self.assertEqual(bridge.mic_control_state, "failed")
 
     async def test_stop_failure_fail_safe_forces_process_exit(self):
         with patch.object(local_io_bridge.os, "_exit") as exit_process:

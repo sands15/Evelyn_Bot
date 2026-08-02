@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -804,6 +805,21 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                 }
 
             @staticmethod
+            def claim_reserved_ingress(
+                *,
+                request_id,
+                accepted_text,
+                turn_id,
+                reservation_ref,
+            ):
+                receipt = ContinuityOwner.claim_ingress(
+                    request_id=request_id,
+                    accepted_text=accepted_text,
+                )
+                receipt["turnId"] = turn_id
+                return receipt
+
+            @staticmethod
             def mark_ingress_delivery_inflight(*_args, **_kwargs):
                 return {}
 
@@ -852,10 +868,26 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         fast_api.iter_main_llm_deltas = fail_iter
         try:
-            with patch.object(
-                fast_api,
-                "FAST_CONTROL_CONTINUITY_OWNER",
-                ContinuityOwner(),
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    ContinuityOwner(),
+                ),
+                patch.object(
+                    fast_api,
+                    "local_voice_capture_fence_is_current",
+                    return_value=True,
+                ),
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": "a" * 64},
+                ),
+                patch.object(
+                    fast_api,
+                    "_acquire_local_voice_capture_claim_lease",
+                    side_effect=lambda: nullcontext(),
+                ),
             ):
                 events = await self.post_stream("실패 테스트")
         finally:

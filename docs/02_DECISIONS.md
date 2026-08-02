@@ -72,7 +72,9 @@ type: decision-log
 - 상태: 승인
 - 결정: 공유 artifact를 지나는 capture owner lease, Bridge status와 Supervisor stop
   evidence는 서로 다른 HMAC domain을 사용한다. 키는 공식 launcher 세대마다 새로
-  만들고 Control Page, Host Supervisor, Local Bridge에만 전달한다.
+  만들고 Control Page, Host Supervisor, Local Bridge에만 전달한다. Bot API에는 키를
+  주지 않고, authenticated Bridge가 보고한 content-free fence digest를 Host lease와
+  durable consent state에 대조해 admission을 판정한다.
 - 이유: 공유 폴더의 read/write 권한만으로 캡처 권한이나 physical OFF 증거를 위조할
   수 없어야 하며, raw owner/lease 값이나 음성 데이터를 저장할 필요도 없어야 한다.
 - 근거: [[VOICE_CAPTURE_CONSENT]],
@@ -80,4 +82,23 @@ type: decision-log
   `tests/runtime/test_host_supervisor.py`
 - 영향: artifact는 content-free digest와 인증 tag만 보존한다. 키 누락·오류,
   cross-scope replay, stale·replacement와 status rollback은 fail-closed하며 일반
-  자식 프로세스에는 키를 상속하지 않는다.
+  자식 프로세스에는 키를 상속하지 않는다. Bot API가 캡처 lease를 새로 서명할
+  권한은 없으며 공개 상태에서도 fence digest를 제거한다.
+
+## 2026-08-02 — Local Voice admission을 캡처 동의 세대와 선형화
+
+- 상태: 승인
+- 결정: durable Local Voice reservation·claim proof를 발급 당시 capture fence
+  digest에 묶고, consent state write와 마지막 reserve/claim은 stable OS claim lease로
+  직렬화한다. durable reservation이 있는 token은 exact reservation ref·ingress turn과
+  `reservation_verified=true` receipt만 소비한다. OFF 계열 전이는 manager 재시작으로
+  알 수 없는 같은 scope의 `reserved` row도 durable purge한다.
+- 이유: 동의 A에서 발급한 token이 동의 B에서 부활하거나, 철회와 accepted text 저장이
+  엇갈리거나, Bot 재시작 때문에 미소비 reservation이 대화 권한으로 남아서는 안 된다.
+- 근거: [[LOCAL_VOICE_ADMISSION_CONTRACT]], [[VOICE_CAPTURE_CONSENT]],
+  `evelyn_core/runtime/evelyn_core/local_voice_admission.py`,
+  `tests/runtime/test_fast_control_ingress_integration.py`
+- 영향: claim이 먼저 durable commit되면 token은 terminalize하고 관측 이벤트 오류가
+  이를 503/retryable 상태로 되돌리지 않는다. 철회가 claim lease를 제때 얻지 못하면
+  메모리에서 먼저 `revoking`으로 닫고 physical OFF를 계속 시도한다. raw audio와
+  transcript는 이 계약이나 보고서에 추가로 저장하지 않는다.

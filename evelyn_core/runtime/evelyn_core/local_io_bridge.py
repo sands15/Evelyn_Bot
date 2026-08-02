@@ -178,6 +178,8 @@ VOICE_CAPTURE_HOST_LEASE_PATH = (
     / "owner_heartbeat.json"
 )
 LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
+LOCAL_VOICE_BOT_CONNECT_MAX_RETRIES = 8
+LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC = 0.5
 
 
 class LocalVoiceAdmissionDrop(RuntimeError):
@@ -277,6 +279,7 @@ class LocalIoBridge:
         )
         self.voice_capture_watchdog_checked_at = time.time()
         self.voice_capture_watchdog_last_stopped_at: float | None = None
+        self.voice_capture_fence_digest = ""
         self.ready = False
         self.status_seq = 0
         self.speaking = False
@@ -543,6 +546,7 @@ class LocalIoBridge:
         print(f"[LOCAL BRIDGE] mic_ready={self.ready} device={LOCAL_MIC_DEVICE or 'default'} error={self.last_error or 'none'}", flush=True)
 
     async def _stop_mic_service(self, *, reason: str) -> None:
+        self.voice_capture_fence_digest = ""
         self._invalidate_local_voice_admission(reason)
         service = self.service
         self._discard_pending_mic_segments()
@@ -579,6 +583,14 @@ class LocalIoBridge:
     ) -> str:
         if lease.get("authorized") is not True:
             return str(lease.get("reason") or "voice_capture_consent_heartbeat_untrusted")
+        if (
+            re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(lease.get("fenceDigest") or ""),
+            )
+            is None
+        ):
+            return "voice_capture_consent_heartbeat_untrusted"
         observed = (
             str(lease.get("ownerDigest") or ""),
             str(lease.get("leaseDigest") or ""),
@@ -602,6 +614,9 @@ class LocalIoBridge:
         self.voice_capture_watchdog_state = state or ("blocked" if reason else "authorized")
         self.voice_capture_watchdog_reason = reason
         self.voice_capture_watchdog_checked_at = float(lease.get("checkedAt") or time.time())
+        self.voice_capture_fence_digest = (
+            str(lease.get("fenceDigest") or "") if not reason else ""
+        )
         if not reason:
             self.voice_capture_watchdog_last_stopped_at = None
         if stopped:
@@ -1096,6 +1111,7 @@ class LocalIoBridge:
                 f"{BOT_API_BASE}/api/local-voice/admission",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=False,
             ) as response:
                 data = await response.json(content_type=None)
                 self._apply_voice_admission_status(data)
@@ -1194,11 +1210,93 @@ class LocalIoBridge:
             "turnId": str(grant.get("turnId") or ""),
             "bridgeInstanceId": str(grant.get("bridgeInstanceId") or ""),
             "admissionToken": str(grant.get("admissionToken") or ""),
+            "admissionMode": str(grant.get("mode") or ""),
         }
         validation = dict(grant.get("validation") or {})
         if validation:
             payload["validation"] = validation
         return payload
+
+    def _local_voice_connection_retry_allowed(
+        self,
+        grant: dict[str, Any],
+    ) -> bool:
+        try:
+            issued_at = float(grant.get("issuedMonotonic"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        age = time.monotonic() - issued_at
+        return bool(
+            0.0 <= age < LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC
+            and self._voice_admission_lifecycle_is_current(
+                grant.get("epoch")
+            )
+        )
+
+    @contextlib.asynccontextmanager
+    async def _local_voice_bot_response(
+        self,
+        path: str,
+        *,
+        payload: dict[str, Any],
+        grant: dict[str, Any],
+        timeout_sec: float,
+    ):
+        """Bound safe Bot restart retries before exposing a response."""
+
+        assert self.session is not None
+        connector_retries = 0
+        stale_context_retried = False
+        while True:
+            async with contextlib.AsyncExitStack() as stack:
+                try:
+                    response = await stack.enter_async_context(
+                        self.session.post(
+                            f"{BOT_API_BASE}{path}",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=timeout_sec),
+                            allow_redirects=False,
+                        )
+                    )
+                except aiohttp.ClientConnectorError:
+                    if (
+                        connector_retries
+                        >= LOCAL_VOICE_BOT_CONNECT_MAX_RETRIES
+                        or not self._local_voice_connection_retry_allowed(grant)
+                    ):
+                        raise
+                    connector_retries += 1
+                    await asyncio.sleep(
+                        LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC
+                    )
+                    if not self._local_voice_connection_retry_allowed(grant):
+                        raise
+                    continue
+
+                if (
+                    response.status == 409
+                    and not stale_context_retried
+                    and self._local_voice_connection_retry_allowed(grant)
+                ):
+                    try:
+                        failure = await response.json(content_type=None)
+                    except Exception:
+                        failure = {}
+                    if (
+                        isinstance(failure, dict)
+                        and failure.get("reason")
+                        == "admission_recovery_context_stale"
+                    ):
+                        heartbeat_accepted = await self._post_status()
+                        if (
+                            heartbeat_accepted
+                            and self._local_voice_connection_retry_allowed(grant)
+                        ):
+                            stale_context_retried = True
+                            continue
+
+                yield response
+                return
 
     def _emit_validation(
         self,
@@ -1595,7 +1693,6 @@ class LocalIoBridge:
                 )
                 return
             self.transcript_count += 1
-            self._emit_validation("turn_accepted", meta=meta)
             print(f"[LOCAL BRIDGE] transcript_received chars={len(text)}", flush=True)
             if should_suppress_tts_for_command(text):
                 stage_started = time.perf_counter()
@@ -1741,7 +1838,12 @@ class LocalIoBridge:
         assert self.session is not None
         payload = await self._local_voice_chat_payload(text, grant)
         grant["_botDispatched"] = True
-        async with self.session.post(f"{BOT_API_BASE}/api/control-page/chat", json=payload, timeout=aiohttp.ClientTimeout(total=150)) as resp:
+        async with self._local_voice_bot_response(
+            "/api/control-page/chat",
+            payload=payload,
+            grant=grant,
+            timeout_sec=150,
+        ) as resp:
             data = await resp.json(content_type=None)
             self._apply_voice_admission_status(data)
             if resp.status == 409 and isinstance(data, dict) and data.get("error") == "local_voice_wake_required":
@@ -1992,10 +2094,11 @@ class LocalIoBridge:
             saw_delta = False
             payload = await self._local_voice_chat_payload(text, grant)
             grant["_botDispatched"] = True
-            async with self.session.post(
-                f"{BOT_API_BASE}/api/control-page/chat-stream",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=180),
+            async with self._local_voice_bot_response(
+                "/api/control-page/chat-stream",
+                payload=payload,
+                grant=grant,
+                timeout_sec=180,
             ) as resp:
                 if resp.status != 200:
                     try:
@@ -2168,10 +2271,11 @@ class LocalIoBridge:
         done_seen = False
         payload = await self._local_voice_chat_payload(text, grant)
         grant["_botDispatched"] = True
-        async with self.session.post(
-            f"{BOT_API_BASE}/api/control-page/chat-stream",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=180),
+        async with self._local_voice_bot_response(
+            "/api/control-page/chat-stream",
+            payload=payload,
+            grant=grant,
+            timeout_sec=180,
         ) as resp:
             if resp.status != 200:
                 try:
@@ -2605,17 +2709,17 @@ class LocalIoBridge:
             stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
         return played_bytes
 
-    async def _post_status(self, extra: dict[str, Any] | None = None) -> None:
+    async def _post_status(self, extra: dict[str, Any] | None = None) -> bool:
         async with self.status_lock:
-            await self._post_status_serialized(extra)
+            return await self._post_status_serialized(extra)
 
     async def _post_status_serialized(
         self,
         extra: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         await self._enforce_voice_capture_watchdog()
         if self.session is None:
-            return
+            return False
         self.status_seq += 1
         status_seq = self.status_seq
         self._refresh_output_readiness()
@@ -2682,6 +2786,8 @@ class LocalIoBridge:
             "micControlDesiredEnabled": self.mic_control_desired_enabled,
             "micControlError": self.mic_control_error,
             "micCaptureStopped": self.mic_capture_stopped,
+            "restartStarted": self.restart_started,
+            "shutdownStarted": self.shutdown_started,
             "minecraftCommandRevision": self.minecraft_command_request_revision,
             "minecraftCommandState": self.minecraft_command_state,
             "minecraftCommandError": self.minecraft_command_error,
@@ -2719,6 +2825,7 @@ class LocalIoBridge:
             "lastTtsPlayback": dict(self.last_tts_playback),
             "voiceAdmission": self._voice_admission_public_status(),
             "voiceCaptureWatchdog": self._voice_capture_watchdog_status(),
+            "voiceCaptureFenceDigest": self.voice_capture_fence_digest,
             "ttsWarmup": {
                 "enabled": LOCAL_BRIDGE_TTS_ENABLED and LOCAL_BRIDGE_TTS_WARMUP_ENABLED,
                 "done": self.tts_warmup_done,
@@ -2794,11 +2901,32 @@ class LocalIoBridge:
                     )
                 },
                 timeout=aiohttp.ClientTimeout(total=2),
+                allow_redirects=False,
             ) as resp:
                 data = await resp.json(content_type=None)
+                acknowledged = data.get("localBridge") if isinstance(data, dict) else None
+                if not (
+                    resp.status == 200
+                    and isinstance(data, dict)
+                    and data.get("ok") is True
+                    and isinstance(acknowledged, dict)
+                    and acknowledged.get("bridgeInstanceDigest")
+                    == hashlib.sha256(
+                        self.bridge_instance_id.encode("utf-8")
+                    ).hexdigest()
+                    and type(acknowledged.get("pid")) is int
+                    and acknowledged.get("pid") == os.getpid()
+                    and type(acknowledged.get("statusSeq")) is int
+                    and acknowledged.get("statusSeq") == status_seq
+                    and isinstance(acknowledged.get("startedAt"), (int, float))
+                    and not isinstance(acknowledged.get("startedAt"), bool)
+                    and float(acknowledged["startedAt"]) == self.started_at
+                ):
+                    return False
                 self._handle_control_response(data)
+                return True
         except Exception:
-            pass
+            return False
 
     def _handle_control_response(self, data: dict[str, Any]) -> None:
         if self.restart_started or self.shutdown_started:

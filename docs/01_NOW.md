@@ -18,8 +18,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
-- admission token 발급 뒤 Bot 재시작과 validation attempt cross-process lease
 - 로컬 및 Discord 음성의 실제 장치 E2E 검증
+- 검증된 source를 실행 이미지로 교체하고 revision/readiness를 다시 확인
 - 실제 Minecraft 승인 행동과 결과 증거 검증
 - 전체 회귀, Docker 빌드와 smoke를 통한 최종 운영 증거 확보
 
@@ -32,6 +32,17 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   프로세스 crash와 후속 인수 회귀를 통과했다.
 - Local Voice의 `consume -> durable ingress claim` crash-loss 창은 typed transaction과
   실제 claim 직후 강제 종료·재시작 회귀로 닫았다.
+- Local Voice token은 응답 전에 content-free durable reservation을 만들며, Bot
+  재시작 뒤 exact binding과 현재 capture-consent fence로만 claim할 수 있다. v2 proof는
+  발급 fence digest를 포함하며 OFF는 restart-orphan reserved row도 scope purge한다.
+  durable consent write와 마지막 reserve/claim은 stable `claim_lease.lock`으로
+  선형화되어 A→B token 부활과 revoke-vs-acceptedText race를 닫았다. 철회 대기는
+  2초로 제한되고 timeout·write 실패는 memory-first `revoking`과 physical OFF로
+  닫힌다. post-claim validation event 실패도 token이나 LLM 재실행을 열지 않는다.
+- validation issue/consume과 retry/abort는 cross-process attempt lease로 직렬화되고,
+  성공·409·503 lease를 실제 HTTP terminal까지 유지한다. validation LLM은
+  memory/history/tool 없이 격리되며 assistant 원문은 normal history/replay에 남기지
+  않는다.
 - 손상·누락된 capture consent, OFF supersession, 취소 뒤 늦은 ON, heartbeat 위조·
   역전과 validation terminal 경쟁은 exact ACK/auth/statusSeq/enable fence로 닫았다.
 - consent preview는 최신 1개와 정확한 validation 세대에만 유효하며, idle ON 뒤
@@ -41,9 +52,10 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Control Page hard-crash 뒤에도 서명된 content-free lease가 4초 stale이면 Bridge가
   독립적으로 캡처를 멈춘다. stop 실패는 Bridge exit 76으로 OS handle을 회수하고,
   Supervisor는 현재 자식·instance·sequence·physical OFF를 모두 확인한다.
-- 관련 source 회귀는 runtime 692개(skip 4), voice 전체 574개(skip 5), 전체 discover
-  2938개(skip 20)가 통과했다. 실제 마이크·스피커·Discord live 검증은 수행하지
-  않았다.
+- 관련 CI-equivalent 전체 discover 3044개(skip 20), 최종 hardening 묶음 267개
+  (skip 1)가 통과했다.
+  `compileall`, `pip check`, JS 구문, Compose config와 diff check도 통과했다. 실제
+  마이크·스피커·Discord live 검증은 수행하지 않았다.
 
 ## 작업 원칙
 

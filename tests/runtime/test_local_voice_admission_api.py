@@ -19,6 +19,54 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 
 
+def _bridge_status_payload(
+    now: float,
+    *,
+    include_capture_fence: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema": "local_io_bridge.status.v1",
+        "statusSeq": 1,
+        "heartbeatAt": now,
+        "pid": 4242,
+        "bridgeInstanceId": "a" * 32,
+        "startedAt": now - 1.0,
+        "enabled": True,
+        "micEnabled": True,
+        "ready": True,
+        "micControlRevision": 0,
+        "micControlActionId": "",
+        "micControlPendingRevision": 0,
+        "micControlPendingActionId": "",
+        "micControlState": "idle",
+        "micControlDesiredEnabled": True,
+        "micControlError": "",
+        "micCaptureStopped": False,
+        "mic": {
+            "enabled": True,
+            "captureReady": True,
+            "captureActive": True,
+            "captureStopped": False,
+        },
+    }
+    if include_capture_fence:
+        payload.update(
+            {
+                "voiceCaptureWatchdog": {
+                    "schema": fast_api.WATCHDOG_STATUS_SCHEMA,
+                    "state": "authorized",
+                    "reason": "",
+                    "checkedAt": now,
+                    "captureStopped": False,
+                    "stoppedAt": None,
+                    "contentFree": True,
+                },
+                "voiceCaptureFenceDigest": "d" * 64,
+            }
+        )
+    return payload
+
+
 class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._original_manager = fast_api.LOCAL_VOICE_ADMISSION
@@ -29,6 +77,13 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
             side_effect=lambda binding: not binding,
         )
         self._validation_context.start()
+        self._unsafe_ingress_patch = patch.object(
+            fast_api.FAST_CONTROL_CONTINUITY_OWNER,
+            "_test_only_allow_unsafe_ingress",
+            True,
+            create=True,
+        )
+        self._unsafe_ingress_patch.start()
         self.reporter_token = "r" * 48
         self.internal_token = "i" * 48
         self._reporter_token_patch = patch.object(
@@ -94,6 +149,7 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
         self._internal_token_patch.stop()
         self._reporter_token_patch.stop()
         self._validation_context.stop()
+        self._unsafe_ingress_patch.stop()
         fast_api.LOCAL_VOICE_ADMISSION = self._original_manager
 
     async def issue(
@@ -223,6 +279,94 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(token, public_text)
         self.assertNotIn("PRIVATE_STATUS_CANARY", public_text)
         self.assertTrue(payload["voiceAdmission"]["contentFree"])
+
+    async def test_capture_fence_status_is_private_and_fail_closed(self) -> None:
+        now = time.time()
+        status = await self.client.post(
+            "/api/local-bridge/status",
+            headers={
+                fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: self.reporter_token,
+            },
+            json=_bridge_status_payload(now),
+        )
+        response_payload = await status.json()
+
+        self.assertEqual(status.status, 200, response_payload)
+        self.assertNotIn(
+            "voiceCaptureFenceDigest",
+            response_payload["localBridge"],
+        )
+        self.assertEqual(
+            response_payload["localBridge"]["voiceCaptureWatchdog"][
+                "state"
+            ],
+            "authorized",
+        )
+        with patch.object(
+            fast_api,
+            "voice_capture_consent_fence_matches",
+            return_value=True,
+        ) as matcher:
+            self.assertTrue(
+                fast_api.local_voice_capture_fence_is_current(
+                    "a" * 32,
+                    now=now,
+                )
+            )
+        matcher.assert_called_once_with(
+            fast_api.VOICE_CAPTURE_HOST_LEASE_PATH,
+            fast_api.VOICE_CAPTURE_CONSENT_STATE_PATH,
+            expected_digest="d" * 64,
+            now=matcher.call_args.kwargs["now"],
+        )
+        with patch.object(
+            fast_api,
+            "voice_capture_consent_fence_matches",
+            return_value=False,
+        ):
+            self.assertFalse(
+                fast_api.local_voice_capture_fence_is_current(
+                    "a" * 32,
+                    now=now,
+                )
+            )
+        self.assertFalse(
+            fast_api.local_voice_capture_fence_is_current(
+                "a" * 32,
+                now=now + fast_api.HOST_LEASE_STALE_SEC + 0.01,
+            )
+        )
+        fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"] = False
+        self.assertFalse(
+            fast_api.local_voice_capture_fence_is_current(
+                "a" * 32,
+                now=now,
+            )
+        )
+
+    async def test_capture_fence_status_pair_is_exact(self) -> None:
+        now = time.time()
+        missing = fast_api._normalize_local_bridge_status(
+            _bridge_status_payload(now, include_capture_fence=False),
+            now=now,
+        )
+        self.assertIsNotNone(missing)
+        self.assertNotIn("voiceCaptureFenceDigest", missing)
+
+        one_sided = _bridge_status_payload(now)
+        one_sided.pop("voiceCaptureFenceDigest")
+        self.assertIsNone(
+            fast_api._normalize_local_bridge_status(one_sided, now=now)
+        )
+
+        mismatched_stop = _bridge_status_payload(now)
+        mismatched_stop["voiceCaptureWatchdog"]["captureStopped"] = True
+        self.assertIsNone(
+            fast_api._normalize_local_bridge_status(
+                mismatched_stop,
+                now=now,
+            )
+        )
 
     async def test_mic_off_revokes_an_unconsumed_capability(self) -> None:
         issued = await self.issue("이블린, 아직 처리하지 마")

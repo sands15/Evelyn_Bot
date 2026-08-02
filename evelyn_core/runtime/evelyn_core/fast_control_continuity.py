@@ -15,8 +15,10 @@ from .conversation_memory_receipt import (
     unattributed_memory_receipt_ref,
 )
 from .conversation_ingress_recovery import (
+    ConversationIngressBindingMismatch,
     ConversationIngressRecoveryError,
     ConversationIngressRecoveryJournal,
+    final_text_sha256,
     normalize_final_conversation_text,
 )
 from .session_continuity import SessionContinuityCheckpoint
@@ -40,6 +42,15 @@ FAST_CONTROL_SYSTEM_PROMPT = (
 )
 DEFAULT_FAST_CONTROL_MAX_AGE_SEC = 30 * 60.0
 DEFAULT_FAST_CONTROL_MAX_HISTORY_ITEMS = 40
+FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF = (
+    "fast-control:voice-validation-ephemeral"
+)
+_EPHEMERAL_VALIDATION_RESPONSE_PREFIX = (
+    "validation-response-sha256:"
+)
+_EPHEMERAL_VALIDATION_RECOVERY_PREFIX = (
+    "validation-recovery-sha256:"
+)
 
 
 class FastControlContinuityOwner:
@@ -226,27 +237,132 @@ class FastControlContinuityOwner:
 
         with self._lock:
             ingress = self._require_ingress()
-            pending = ingress.recovery_records()
             normalized_request_id = normalize_final_conversation_text(
                 request_id
             )
-            if pending and not any(
-                record.get("surface") == FAST_CONTROL_INGRESS_SURFACE
-                and record.get("scope") == FAST_CONTROL_SESSION_KEY
-                and normalize_final_conversation_text(
-                    record.get("sourceDeliveryId")
-                )
-                == normalized_request_id
-                for record in pending
-            ):
-                raise ConversationIngressRecoveryError(
-                    "conversation_ingress_recovery_pending"
-                )
+            self._reject_unrelated_pending(
+                ingress,
+                normalized_request_id,
+            )
             return ingress.claim(
                 surface=FAST_CONTROL_INGRESS_SURFACE,
                 scope=FAST_CONTROL_SESSION_KEY,
                 source_delivery_id=normalized_request_id,
                 accepted_text=accepted_text,
+            )
+
+    @staticmethod
+    def _reject_unrelated_pending(
+        ingress: ConversationIngressRecoveryJournal,
+        request_id: str,
+    ) -> None:
+        pending = ingress.recovery_records()
+        if pending and not any(
+            record.get("surface") == FAST_CONTROL_INGRESS_SURFACE
+            and record.get("scope") == FAST_CONTROL_SESSION_KEY
+            and normalize_final_conversation_text(
+                record.get("sourceDeliveryId")
+            )
+            == request_id
+            for record in pending
+        ):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_recovery_pending"
+            )
+
+    def reserve_ingress(
+        self,
+        *,
+        request_id: Any,
+        text_hash: Any,
+        turn_id: Any,
+        reservation_ref: Any,
+        ttl_sec: Any,
+    ) -> dict[str, Any]:
+        """Reserve a content-free request binding before capability return."""
+
+        with self._lock:
+            return self._require_ingress().reserve_ingress(
+                surface=FAST_CONTROL_INGRESS_SURFACE,
+                scope=FAST_CONTROL_SESSION_KEY,
+                source_delivery_id=normalize_final_conversation_text(
+                    request_id
+                ),
+                text_hash=text_hash,
+                turn_id=turn_id,
+                reservation_ref=reservation_ref,
+                ttl_sec=ttl_sec,
+            )
+
+    def claim_reserved_ingress(
+        self,
+        *,
+        request_id: Any,
+        accepted_text: Any,
+        turn_id: Any,
+        reservation_ref: Any,
+    ) -> dict[str, Any]:
+        """Atomically promote an exact request reservation to accepted."""
+
+        with self._lock:
+            ingress = self._require_ingress()
+            normalized_request_id = normalize_final_conversation_text(
+                request_id
+            )
+            self._reject_unrelated_pending(
+                ingress,
+                normalized_request_id,
+            )
+            return ingress.claim_reserved_ingress(
+                surface=FAST_CONTROL_INGRESS_SURFACE,
+                scope=FAST_CONTROL_SESSION_KEY,
+                source_delivery_id=normalized_request_id,
+                accepted_text=accepted_text,
+                turn_id=turn_id,
+                reservation_ref=reservation_ref,
+            )
+
+    def revoke_reserved_ingress_batch(
+        self,
+        reservations: Any,
+    ) -> dict[str, Any]:
+        """Atomically revoke exact unconsumed local-voice reservations."""
+
+        if (
+            not isinstance(reservations, (list, tuple))
+            or not reservations
+            or any(not isinstance(item, dict) for item in reservations)
+        ):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_reservation_revocation_invalid"
+            )
+        with self._lock:
+            ingress = self._require_ingress()
+            return ingress.revoke_reserved_ingress_batch(
+                [
+                    {
+                        "surface": FAST_CONTROL_INGRESS_SURFACE,
+                        "scope": FAST_CONTROL_SESSION_KEY,
+                        "source_delivery_id": (
+                            normalize_final_conversation_text(
+                                item.get("request_id")
+                            )
+                        ),
+                        "text_hash": item.get("text_hash"),
+                        "turn_id": item.get("turn_id"),
+                        "reservation_ref": item.get("reservation_ref"),
+                    }
+                    for item in reservations
+                ]
+            )
+
+    def revoke_reserved_local_voice_ingress(self) -> dict[str, Any]:
+        """Revoke every outstanding local-voice issuance reservation."""
+
+        with self._lock:
+            return self._require_ingress().revoke_reserved_ingress_scope(
+                surface=FAST_CONTROL_INGRESS_SURFACE,
+                scope=FAST_CONTROL_SESSION_KEY,
             )
 
     def bind_ingress_response(
@@ -305,6 +421,209 @@ class FastControlContinuityOwner:
                 entry_id,
                 error_code=error_code,
             )
+
+    @staticmethod
+    def _ephemeral_validation_response_marker(
+        assistant_text: Any,
+    ) -> str:
+        normalized = normalize_final_conversation_text(assistant_text)
+        if not normalized:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_assistant_text_invalid"
+            )
+        return (
+            _EPHEMERAL_VALIDATION_RESPONSE_PREFIX
+            + final_text_sha256(normalized)
+        )
+
+    @staticmethod
+    def _is_ephemeral_validation_record(
+        record: dict[str, Any],
+    ) -> bool:
+        marker = normalize_final_conversation_text(
+            record.get("assistantText")
+        )
+        prefix = next(
+            (
+                candidate
+                for candidate in (
+                    _EPHEMERAL_VALIDATION_RESPONSE_PREFIX,
+                    _EPHEMERAL_VALIDATION_RECOVERY_PREFIX,
+                )
+                if marker.startswith(candidate)
+            ),
+            "",
+        )
+        digest = marker.removeprefix(prefix) if prefix else ""
+        receipt_ref = sanitize_memory_receipt_ref(
+            record.get("memoryReceiptRef")
+        )
+        return bool(
+            prefix
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            and receipt_ref is not None
+            and receipt_ref.get("state") == "unattributed"
+            and receipt_ref.get("suppliedNoteCount") == 0
+            and record.get("deliveryRef")
+            == FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+        )
+
+    @staticmethod
+    def _ephemeral_validation_recovery_marker(
+        record: dict[str, Any],
+    ) -> str:
+        entry_id = clean_text(record.get("entryId"))
+        if not entry_id:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_entry_not_found"
+            )
+        return (
+            _EPHEMERAL_VALIDATION_RECOVERY_PREFIX
+            + final_text_sha256(
+                f"{entry_id}:{FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF}"
+            )
+        )
+
+    def _finish_ephemeral_ingress(
+        self,
+        entry_id: Any,
+    ) -> dict[str, Any]:
+        """Finish a marked ingress by advancing only checkpoint metadata."""
+
+        with self._lock:
+            ingress = self._require_ingress()
+            checkpoint = self._require_checkpoint()
+            record = ingress.record_for(entry_id)
+            if record is None:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_entry_not_found"
+                )
+            if not self._is_ephemeral_validation_record(record):
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_assistant_binding_mismatch"
+                )
+            phase = clean_text(record.get("phase"))
+            marker = str(record["assistantText"])
+            receipt_ref = record["memoryReceiptRef"]
+            if phase == "completed":
+                ingress_receipt = ingress.complete(
+                    record["entryId"],
+                    continuity_generation=record["continuityGeneration"],
+                    assistant_text=marker,
+                    memory_receipt_ref=receipt_ref,
+                )
+                result = dict(checkpoint.status())
+                result["ingressReceipt"] = ingress_receipt
+                result["ephemeral"] = True
+                return result
+
+            current_generation = self._checkpoint_generation()
+            if phase == "delivery_succeeded":
+                expected_generation = current_generation + 1
+                ingress.begin_terminal_commit(
+                    record["entryId"],
+                    continuity_generation=expected_generation,
+                    assistant_text=marker,
+                    memory_receipt_ref=receipt_ref,
+                )
+            elif phase == "terminal_committing":
+                expected_generation = int(
+                    record["continuityGeneration"]
+                )
+            else:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_transition_invalid"
+                )
+
+            if current_generation + 1 == expected_generation:
+                raw_status = checkpoint.flush(force=True)
+            elif current_generation == expected_generation:
+                raw_status = checkpoint.status()
+            else:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_recovery_unavailable"
+                )
+            if (
+                raw_status.get("state") == "error"
+                or raw_status.get("rollbackProtected") is not True
+                or self._checkpoint_generation() != expected_generation
+            ):
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_recovery_unavailable"
+                )
+            self._require_ingress()
+            ingress_receipt = ingress.complete(
+                record["entryId"],
+                continuity_generation=expected_generation,
+                assistant_text=marker,
+                memory_receipt_ref=receipt_ref,
+            )
+            result = dict(raw_status)
+            result["ingressReceipt"] = ingress_receipt
+            result["ephemeral"] = True
+            return result
+
+    def _complete_ephemeral_ingress_marker(
+        self,
+        entry_id: Any,
+        *,
+        marker: str,
+    ) -> dict[str, Any]:
+        receipt_ref = unattributed_memory_receipt_ref()
+        with self._lock:
+            ingress = self._require_ingress()
+            record = ingress.record_for(entry_id)
+            if record is None:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_entry_not_found"
+                )
+            if (
+                record.get("deliveryRef")
+                != FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+            ):
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_delivery_binding_mismatch"
+                )
+            ingress.bind_response(
+                entry_id,
+                assistant_text=marker,
+                memory_receipt_ref=receipt_ref,
+            )
+            record = ingress.record_for(entry_id)
+            if record is None:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_entry_not_found"
+                )
+            ingress.mark_delivery_succeeded(
+                entry_id,
+                delivery_ref=record["deliveryRef"],
+            )
+            return self._finish_ephemeral_ingress(entry_id)
+
+    def complete_ephemeral_ingress(
+        self,
+        entry_id: Any,
+        *,
+        assistant_text: Any,
+        memory_receipt_ref: Any = None,
+    ) -> dict[str, Any]:
+        """Complete delivered validation ingress without session history."""
+
+        marker = self._ephemeral_validation_response_marker(
+            assistant_text
+        )
+        source_receipt_ref = self._receipt_ref(memory_receipt_ref)
+        if source_receipt_ref.get("state") == "bound":
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_memory_receipt_invalid"
+            )
+        # Validation replies are intentionally non-replayable. The fixed
+        # content-free receipt also makes retries independent of memory state.
+        return self._complete_ephemeral_ingress_marker(
+            entry_id,
+            marker=marker,
+        )
 
     def ingress_record(
         self,
@@ -485,6 +804,36 @@ class FastControlContinuityOwner:
         for record in records:
             phase = clean_text(record.get("phase"))
             try:
+                if (
+                    phase in {"delivery_inflight", "delivery_ambiguous"}
+                    and record.get("deliveryRef")
+                    == FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+                ):
+                    marker = clean_text(record.get("assistantText"))
+                    if marker and not self._is_ephemeral_validation_record(
+                        record
+                    ):
+                        raise ConversationIngressBindingMismatch(
+                            "conversation_ingress_assistant_binding_mismatch"
+                        )
+                    self._complete_ephemeral_ingress_marker(
+                        record["entryId"],
+                        marker=(
+                            marker
+                            or self._ephemeral_validation_recovery_marker(
+                                record
+                            )
+                        ),
+                    )
+                    projection["reconciledCount"] += 1
+                    continue
+                if (
+                    phase in {"delivery_succeeded", "terminal_committing"}
+                    and self._is_ephemeral_validation_record(record)
+                ):
+                    self._finish_ephemeral_ingress(record["entryId"])
+                    projection["reconciledCount"] += 1
+                    continue
                 if phase == "delivery_succeeded":
                     self.record_completed_turn(
                         str(record["acceptedText"]),
@@ -823,6 +1172,7 @@ __all__ = [
     "DEFAULT_FAST_CONTROL_MAX_AGE_SEC",
     "DEFAULT_FAST_CONTROL_MAX_HISTORY_ITEMS",
     "FAST_CONTROL_CONTINUITY_STATUS_SCHEMA",
+    "FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF",
     "FAST_CONTROL_INGRESS_RECOVERY_STATUS_SCHEMA",
     "FAST_CONTROL_INGRESS_SURFACE",
     "FAST_CONTROL_SESSION_KEY",

@@ -1423,9 +1423,17 @@ async def _await_voice_capture_task(task: asyncio.Task[Any]) -> Any:
     return task.result()
 
 
-async def _publish_voice_capture_host_lease(manager: Any) -> dict[str, Any]:
-    task = asyncio.create_task(asyncio.to_thread(manager.publish_host_lease))
+async def _run_voice_capture_manager_call(
+    callback: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    task = asyncio.create_task(asyncio.to_thread(callback, *args, **kwargs))
     return await _await_voice_capture_task(task)
+
+
+async def _publish_voice_capture_host_lease(manager: Any) -> dict[str, Any]:
+    return await _run_voice_capture_manager_call(manager.publish_host_lease)
 
 
 async def _shutdown_voice_capture_consent(
@@ -1448,29 +1456,49 @@ async def _revoke_voice_capture_consent_locked(
 ) -> dict[str, Any]:
     manager = get_voice_capture_consent_manager()
     state_write_failed = False
-    try:
-        pending = manager.begin_revoke(reason=reason)
-    except Exception as exc:
-        state_write_failed = True
-        print(
-            "[CONTROL PAGE] voice_consent_revoke_state_write_failed "
-            f"reason={reason} errorType={type(exc).__name__}"
-        )
+    current = manager.status()
+    if current.get("recoveryRequired"):
+        pending = {
+            "ok": True,
+            "controlRequired": True,
+            "consent": current,
+        }
+    else:
         try:
-            pending = manager.require_recovery(
+            pending = await _run_voice_capture_manager_call(
+                manager.begin_revoke,
                 reason=reason,
-                error="voice_capture_consent_state_write_failed",
             )
-        except Exception as recovery_exc:
+        except Exception as exc:
+            state_write_failed = True
             print(
-                "[CONTROL PAGE] voice_consent_recovery_state_write_failed "
-                f"reason={reason} errorType={type(recovery_exc).__name__}"
+                "[CONTROL PAGE] voice_consent_revoke_state_write_failed "
+                f"reason={reason} errorType={type(exc).__name__}"
             )
-            pending = {
-                "ok": False,
-                "controlRequired": True,
-                "consent": manager.status(),
-            }
+            current = manager.status()
+            if current.get("recoveryRequired"):
+                pending = {
+                    "ok": False,
+                    "controlRequired": True,
+                    "consent": current,
+                }
+            else:
+                try:
+                    pending = await _run_voice_capture_manager_call(
+                        manager.require_recovery,
+                        reason=reason,
+                        error="voice_capture_consent_state_write_failed",
+                    )
+                except Exception as recovery_exc:
+                    print(
+                        "[CONTROL PAGE] voice_consent_recovery_state_write_failed "
+                        f"reason={reason} errorType={type(recovery_exc).__name__}"
+                    )
+                    pending = {
+                        "ok": False,
+                        "controlRequired": True,
+                        "consent": manager.status(),
+                    }
     try:
         await _publish_voice_capture_host_lease(manager)
     except Exception as exc:
@@ -1492,7 +1520,8 @@ async def _revoke_voice_capture_consent_locked(
         )
     except asyncio.CancelledError:
         try:
-            manager.require_recovery(
+            await _run_voice_capture_manager_call(
+                manager.require_recovery,
                 reason=reason,
                 error="voice_capture_disable_cancelled",
             )
@@ -1513,7 +1542,8 @@ async def _revoke_voice_capture_consent_locked(
     bridge = _voice_capture_local_bridge_snapshot(control)
     applied = _voice_capture_mic_disabled_ack(control)
     try:
-        completed = manager.finish_revoke(
+        completed = await _run_voice_capture_manager_call(
+            manager.finish_revoke,
             applied=applied,
             error=str(control.get("error") or "mic_control_ack_invalid"),
         )
@@ -1522,13 +1552,15 @@ async def _revoke_voice_capture_consent_locked(
             "[CONTROL PAGE] voice_consent_revoke_finish_write_failed "
             f"reason={reason} errorType={type(exc).__name__}"
         )
-        try:
-            manager.require_recovery(
-                reason=reason,
-                error="voice_capture_consent_state_write_failed",
-            )
-        except Exception:
-            pass
+        if not manager.status().get("recoveryRequired"):
+            try:
+                await _run_voice_capture_manager_call(
+                    manager.require_recovery,
+                    reason=reason,
+                    error="voice_capture_consent_state_write_failed",
+                )
+            except Exception:
+                pass
         return {
             "ok": False,
             "error": "voice_capture_consent_state_write_failed",
@@ -1561,7 +1593,11 @@ async def _force_voice_capture_recovery_locked(
 ) -> dict[str, Any]:
     manager = get_voice_capture_consent_manager()
     try:
-        manager.require_recovery(reason=reason, error=error)
+        await _run_voice_capture_manager_call(
+            manager.require_recovery,
+            reason=reason,
+            error=error,
+        )
     except Exception as exc:
         print(
             "[CONTROL PAGE] voice_consent_force_recovery_write_failed "
@@ -1644,7 +1680,8 @@ async def _voice_capture_consent_context(app: web.Application):
     async def heartbeat() -> None:
         while True:
             try:
-                if manager.status().get("captureMayBeActive"):
+                status = await _run_voice_capture_manager_call(manager.status)
+                if status.get("captureMayBeActive"):
                     await _publish_voice_capture_host_lease(manager)
             except asyncio.CancelledError:
                 raise
@@ -1773,7 +1810,8 @@ async def voice_capture_consent_apply_handler(
                 session=validation_before,
             )
         try:
-            started = manager.begin_apply(
+            started = await _run_voice_capture_manager_call(
+                manager.begin_apply,
                 confirm_token=str((payload or {}).get("confirmToken") or ""),
                 scope=str(
                     (payload or {}).get("scope")
@@ -1830,7 +1868,8 @@ async def voice_capture_consent_apply_handler(
             bridge = _voice_capture_local_bridge_snapshot(control)
             applied = _voice_capture_mic_control_ack(control, enabled=True)
             phase = "active_commit"
-            completed = manager.finish_apply(
+            completed = await _run_voice_capture_manager_call(
+                manager.finish_apply,
                 lease_id=lease_id,
                 applied=applied,
                 capture_ready=applied,
@@ -1876,8 +1915,9 @@ async def voice_capture_consent_apply_handler(
                 validation
             ):
                 bound_session_id = str(validation.get("sessionId") or "")
-                bound = manager.bind_validation_session(
-                    bound_session_id
+                bound = await _run_voice_capture_manager_call(
+                    manager.bind_validation_session,
+                    bound_session_id,
                 )
                 if not bound.get("ok"):
                     raise RuntimeError("voice_capture_validation_bind_failed")
@@ -2081,8 +2121,9 @@ async def voice_validation_start_handler(request: web.Request) -> web.StreamResp
                 and _voice_validation_uses_local(session)
             ):
                 try:
-                    bound = manager.bind_validation_session(
-                        str(session.get("sessionId") or "")
+                    bound = await _run_voice_capture_manager_call(
+                        manager.bind_validation_session,
+                        str(session.get("sessionId") or ""),
                     )
                 except Exception:
                     bound = {
@@ -2169,12 +2210,15 @@ async def voice_validation_start_handler(request: web.Request) -> web.StreamResp
     status = (
         201
         if result.get("ok")
+        else 503
+        if result.get("error") == "validation_attempt_lease_unavailable"
         else 409
         if result.get("error")
         in {
             "validation_session_active",
             "discord_target_unavailable",
             "ambiguous_discord_target",
+            "validation_attempt_inflight",
         }
         else 400
     )
@@ -2214,16 +2258,36 @@ async def _voice_validation_mutation_response(
                 },
                 status=503,
             )
-        cleanup = await _reconcile_voice_capture_consent_locked(
-            request.app,
-            validation_session=session,
-        )
+        error_code = str(result.get("error") or "")
+        if operation == "abort" and error_code in {
+            "validation_attempt_inflight",
+            "validation_attempt_lease_unavailable",
+        }:
+            # The in-flight Bot turn owns the attempt transition. Do not
+            # rotate its binding, but honor the user's safety intent by
+            # revoking host capture immediately.
+            cleanup = await _force_voice_capture_recovery_locked(
+                request.app,
+                reason="validation_abort_deferred",
+                error=error_code,
+            )
+            result = {**result, "cleanup": cleanup}
+        else:
+            cleanup = await _reconcile_voice_capture_consent_locked(
+                request.app,
+                validation_session=session,
+            )
         if not cleanup.get("ok"):
             return _voice_capture_cleanup_failure_response(
                 cleanup,
                 session=session,
             )
-    return json_response(result, status=200 if result.get("ok") else 409)
+    status = 200 if result.get("ok") else (
+        503
+        if result.get("error") == "validation_attempt_lease_unavailable"
+        else 409
+    )
+    return json_response(result, status=status)
 
 
 async def voice_validation_confirm_handler(request: web.Request) -> web.StreamResponse:

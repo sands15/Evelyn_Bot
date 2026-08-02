@@ -26,6 +26,7 @@ import sys
 from evelyn_core.conversation_ingress_recovery import (
     ConversationIngressRecoveryJournal,
     conversation_ingress_entry_id,
+    final_text_sha256,
 )
 from evelyn_core.conversation_memory_receipt import (
     not_used_memory_receipt_ref,
@@ -44,6 +45,16 @@ entry_id = conversation_ingress_entry_id(
     scope=claim_args["scope"],
     source_delivery_id=claim_args["source_delivery_id"],
 )
+reservation_ref = "c" * 64
+reservation_args = {
+    "surface": claim_args["surface"],
+    "scope": claim_args["scope"],
+    "source_delivery_id": claim_args["source_delivery_id"],
+    "text_hash": final_text_sha256(claim_args["accepted_text"]),
+    "turn_id": "local-turn-restart-1",
+    "reservation_ref": reservation_ref,
+    "ttl_sec": 10.0,
+}
 """
 
 WRITE_ACCEPTED = textwrap.dedent(
@@ -52,6 +63,16 @@ WRITE_ACCEPTED = textwrap.dedent(
 import os
 journal = ConversationIngressRecoveryJournal(path=path)
 journal.claim(**claim_args)
+os._exit({CRASH_EXIT_CODE})
+"""
+)
+
+WRITE_RESERVED = textwrap.dedent(
+    COMMON
+    + f"""
+import os
+journal = ConversationIngressRecoveryJournal(path=path)
+journal.reserve_ingress(**reservation_args)
 os._exit({CRASH_EXIT_CODE})
 """
 )
@@ -165,6 +186,44 @@ print(
 """
 )
 
+READ_RESERVED = textwrap.dedent(
+    COMMON
+    + """
+import json
+journal = ConversationIngressRecoveryJournal(path=path)
+before = journal.record_for(entry_id)
+recovery_before = journal.recovery_records()
+claim = journal.claim_reserved_ingress(
+    surface=reservation_args["surface"],
+    scope=reservation_args["scope"],
+    source_delivery_id=reservation_args["source_delivery_id"],
+    accepted_text=claim_args["accepted_text"],
+    turn_id=reservation_args["turn_id"],
+    reservation_ref=reservation_args["reservation_ref"],
+)
+duplicate = journal.claim_reserved_ingress(
+    surface=reservation_args["surface"],
+    scope=reservation_args["scope"],
+    source_delivery_id=reservation_args["source_delivery_id"],
+    accepted_text=claim_args["accepted_text"],
+    turn_id=reservation_args["turn_id"],
+    reservation_ref=reservation_args["reservation_ref"],
+)
+print(
+    json.dumps(
+        {
+            "before": before,
+            "recoveryBefore": recovery_before,
+            "claim": claim,
+            "duplicate": duplicate,
+            "record": journal.record_for(entry_id),
+        },
+        ensure_ascii=False,
+    )
+)
+"""
+)
+
 
 class ConversationIngressRecoveryRestartTests(unittest.TestCase):
     def environment(self) -> dict[str, str]:
@@ -227,6 +286,35 @@ class ConversationIngressRecoveryRestartTests(unittest.TestCase):
             result["replayError"],
             "conversation_ingress_replay_not_terminal",
         )
+
+    def test_fresh_process_promotes_content_free_reservation_once(self) -> None:
+        private_text = "재시작 경계 질문"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.run_script(
+                WRITE_RESERVED,
+                root,
+                expected_code=CRASH_EXIT_CODE,
+            )
+            persisted_before_claim = (root / "ingress.json").read_text(
+                encoding="utf-8"
+            )
+            result = json.loads(
+                self.run_script(
+                    READ_RESERVED,
+                    root,
+                    expected_code=0,
+                ).stdout
+            )
+
+        self.assertNotIn(private_text, persisted_before_claim)
+        self.assertEqual(result["before"]["phase"], "reserved")
+        self.assertEqual(result["before"]["acceptedText"], "")
+        self.assertEqual(result["recoveryBefore"], [])
+        self.assertTrue(result["claim"]["shouldProcess"])
+        self.assertFalse(result["duplicate"]["shouldProcess"])
+        self.assertEqual(result["record"]["phase"], "accepted")
+        self.assertEqual(result["record"]["acceptedText"], private_text)
 
     def test_fresh_process_converts_inflight_to_delivery_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

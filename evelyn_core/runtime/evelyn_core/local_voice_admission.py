@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import re
@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .conversation_ingress_recovery import (
     CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
+    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA,
 )
 from .fast_action_runtime import (
     detect_local_mic_command,
@@ -37,8 +38,11 @@ _MAX_TEXT_CHARS = 16_000
 _MAX_LIVE_TOKENS = 256
 _MAX_TERMINAL_TOKENS = 512
 _MAX_REPLAY_TURNS = 512
+_ADMISSION_MODES = frozenset({"wake_entry", "followup", "validation"})
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 
 ValidationCurrent = Callable[[dict[str, Any]], bool]
+DurableRecoveryCurrent = Callable[[], bool]
 
 
 class LocalVoiceAdmissionTransactionError(RuntimeError):
@@ -56,6 +60,43 @@ class LocalVoiceAdmissionTransaction:
 
 
 @dataclass(frozen=True)
+class LocalVoiceIssuanceTransaction:
+    admission: dict[str, Any]
+    reservation: LocalVoiceDurableIssuanceReservation | None
+
+
+@dataclass(frozen=True)
+class LocalVoiceIssuanceReservationRequest:
+    bridge_instance_id: str
+    turn_id: str
+    forward_text_digest: str
+    validation_binding_digest: str
+    mode: str
+    token_digest: str
+    capture_fence_digest: str
+    ingress_turn_id: str
+    reservation_ref: str
+    ttl_sec: float
+
+
+@dataclass(frozen=True)
+class LocalVoiceDurableIssuanceReservation:
+    schema: str
+    durable: bool
+    bridge_instance_id: str
+    local_turn_id: str
+    forward_text_digest: str
+    reservation_ref: str
+    entry_id: str
+    ingress_turn_id: str
+    phase: str
+    disposition: str
+    should_process: bool
+    text_hash: str
+    journal_generation: int
+
+
+@dataclass(frozen=True)
 class LocalVoiceIngressClaimRequest:
     bridge_instance_id: str
     turn_id: str
@@ -63,6 +104,32 @@ class LocalVoiceIngressClaimRequest:
     forward_text_digest: str
     validation_binding_digest: str
     mode: str
+    token_digest: str
+    capture_fence_digest: str
+    ingress_turn_id: str
+    reservation_ref: str
+
+
+@dataclass(frozen=True)
+class LocalVoiceReservationRevocationRequest:
+    bridge_instance_id: str
+    turn_id: str
+    forward_text_digest: str
+    validation_binding_digest: str
+    mode: str
+    token_digest: str
+    capture_fence_digest: str
+    ingress_turn_id: str
+    reservation_ref: str
+
+
+@dataclass(frozen=True)
+class LocalVoiceDurableReservationRevocation:
+    schema: str
+    durable: bool
+    bindings: tuple[tuple[str, str, str, str], ...]
+    revoked_count: int
+    journal_generation: int
 
 
 @dataclass(frozen=True)
@@ -79,11 +146,26 @@ class LocalVoiceDurableIngressClaim:
     should_process: bool
     text_hash: str
     journal_generation: int
+    reservation_ref: str = ""
+    reservation_verified: bool = False
+    _validation_lease_held: bool = field(
+        default=False,
+        compare=False,
+        repr=False,
+    )
 
 
 DurableIngressClaim = Callable[
     [LocalVoiceIngressClaimRequest],
     LocalVoiceDurableIngressClaim,
+]
+DurableIssuanceReservation = Callable[
+    [LocalVoiceIssuanceReservationRequest],
+    LocalVoiceDurableIssuanceReservation,
+]
+DurableReservationRevocation = Callable[
+    [tuple[LocalVoiceReservationRevocationRequest, ...]],
+    LocalVoiceDurableReservationRevocation,
 ]
 
 
@@ -114,6 +196,123 @@ def _text_digest(value: str) -> str:
 def _binding_digest(binding: dict[str, Any]) -> str:
     material = json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return sha256(material.encode("utf-8")).hexdigest()
+
+
+def _capture_fence_digest(value: Any, *, required: bool) -> str:
+    digest = str(value or "").strip()
+    if not digest and not required:
+        return ""
+    if _SHA256_PATTERN.fullmatch(digest) is None:
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_capture_fence_digest_invalid"
+        )
+    return digest
+
+
+def _admission_proof_digest(
+    domain: str,
+    *,
+    bridge_instance_id: str,
+    turn_id: str,
+    forward_text_digest: str,
+    validation_binding_digest: str,
+    mode: str,
+    token_digest: str,
+    capture_fence_digest: str = "",
+    include_token_digest: bool = True,
+) -> str:
+    bridge_id = _identifier(bridge_instance_id)
+    local_turn_id = _identifier(turn_id)
+    if (
+        not bridge_id
+        or not local_turn_id
+        or mode not in _ADMISSION_MODES
+        or _SHA256_PATTERN.fullmatch(forward_text_digest) is None
+        or _SHA256_PATTERN.fullmatch(validation_binding_digest) is None
+        or _SHA256_PATTERN.fullmatch(token_digest) is None
+    ):
+        raise LocalVoiceAdmissionTransactionError(
+            "local_voice_admission_proof_binding_invalid"
+        )
+    fields = {
+        "bridgeInstanceId": bridge_id,
+        "forwardTextDigest": forward_text_digest,
+        "mode": mode,
+        "turnId": local_turn_id,
+        "validationBindingDigest": validation_binding_digest,
+    }
+    if include_token_digest:
+        fields["tokenDigest"] = token_digest
+    if capture_fence_digest:
+        fields["captureFenceDigest"] = _capture_fence_digest(
+            capture_fence_digest,
+            required=True,
+        )
+    material = json.dumps(
+        fields,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(f"{domain}\0{material}".encode("utf-8")).hexdigest()
+
+
+def local_voice_ingress_turn_id(
+    *,
+    bridge_instance_id: str,
+    turn_id: str,
+    forward_text_digest: str,
+    validation_binding_digest: str,
+    mode: str,
+    token_digest: str,
+    capture_fence_digest: str = "",
+) -> str:
+    """Return a content-free stable identifier for one local turn binding."""
+
+    digest = _admission_proof_digest(
+        (
+            "local_voice.admission.ingress-turn.v2"
+            if capture_fence_digest
+            else "local_voice.admission.ingress-turn.v1"
+        ),
+        bridge_instance_id=bridge_instance_id,
+        turn_id=turn_id,
+        forward_text_digest=forward_text_digest,
+        validation_binding_digest=validation_binding_digest,
+        mode=mode,
+        token_digest=token_digest,
+        capture_fence_digest=capture_fence_digest,
+        include_token_digest=False,
+    )
+    return f"lva-{digest}"
+
+
+def local_voice_reservation_ref(
+    *,
+    bridge_instance_id: str,
+    turn_id: str,
+    forward_text_digest: str,
+    validation_binding_digest: str,
+    mode: str,
+    token_digest: str,
+    capture_fence_digest: str = "",
+) -> str:
+    """Return the exact content-free proof used by the durable reservation."""
+
+    return _admission_proof_digest(
+        (
+            "local_voice.admission.reservation.v2"
+            if capture_fence_digest
+            else "local_voice.admission.reservation.v1"
+        ),
+        bridge_instance_id=bridge_instance_id,
+        turn_id=turn_id,
+        forward_text_digest=forward_text_digest,
+        validation_binding_digest=validation_binding_digest,
+        mode=mode,
+        token_digest=token_digest,
+        capture_fence_digest=capture_fence_digest,
+    )
 
 
 def normalize_validation_binding(value: Any) -> dict[str, Any] | None:
@@ -169,6 +368,8 @@ class _TokenRecord:
     validation_binding_digest: str
     validation_bound: bool
     mode: str
+    durably_reserved: bool
+    capture_fence_digest: str
     issued_at: float
     expires_at: float
 
@@ -205,6 +406,7 @@ class LocalVoiceAdmissionManager:
         self._rejected_count = 0
         self._last_reason = "not_started"
         self._last_mode = "inactive"
+        self._revocation_fenced = False
 
     def _cleanup(self, now_value: float) -> None:
         for digest, record in list(self._tokens.items()):
@@ -238,6 +440,140 @@ class LocalVoiceAdmissionManager:
         self._tokens.clear()
         self._pending_turn_tokens.clear()
 
+    @staticmethod
+    def _revocation_request(
+        record: _TokenRecord,
+    ) -> LocalVoiceReservationRevocationRequest:
+        return LocalVoiceReservationRevocationRequest(
+            bridge_instance_id=record.bridge_instance_id,
+            turn_id=record.turn_id,
+            forward_text_digest=record.forward_text_digest,
+            validation_binding_digest=record.validation_binding_digest,
+            mode=record.mode,
+            token_digest=record.token_digest,
+            capture_fence_digest=record.capture_fence_digest,
+            ingress_turn_id=local_voice_ingress_turn_id(
+                bridge_instance_id=record.bridge_instance_id,
+                turn_id=record.turn_id,
+                forward_text_digest=record.forward_text_digest,
+                validation_binding_digest=record.validation_binding_digest,
+                mode=record.mode,
+                token_digest=record.token_digest,
+                capture_fence_digest=record.capture_fence_digest,
+            ),
+            reservation_ref=local_voice_reservation_ref(
+                bridge_instance_id=record.bridge_instance_id,
+                turn_id=record.turn_id,
+                forward_text_digest=record.forward_text_digest,
+                validation_binding_digest=record.validation_binding_digest,
+                mode=record.mode,
+                token_digest=record.token_digest,
+                capture_fence_digest=record.capture_fence_digest,
+            ),
+        )
+
+    @staticmethod
+    def _durable_revocation_receipt(
+        value: Any,
+        requests: tuple[LocalVoiceReservationRevocationRequest, ...],
+    ) -> LocalVoiceDurableReservationRevocation:
+        if (
+            not isinstance(value, LocalVoiceDurableReservationRevocation)
+            or value.schema
+            != CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA
+            or value.durable is not True
+            or type(value.revoked_count) is not int
+            or value.revoked_count != len(requests)
+            or type(value.journal_generation) is not int
+            or value.journal_generation <= 0
+            or not isinstance(value.bindings, tuple)
+            or any(
+                not isinstance(binding, tuple)
+                or len(binding) != 4
+                or not _identifier(binding[0])
+                or not _identifier(binding[1])
+                or _SHA256_PATTERN.fullmatch(binding[2]) is None
+                or _SHA256_PATTERN.fullmatch(binding[3]) is None
+                for binding in value.bindings
+            )
+            or len({binding[0] for binding in value.bindings})
+            != len(value.bindings)
+        ):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_reservation_revocation_invalid"
+            )
+        expected = sorted(
+            (
+                request.ingress_turn_id,
+                request.forward_text_digest,
+                request.reservation_ref,
+            )
+            for request in requests
+        )
+        if sorted(binding[1:] for binding in value.bindings) != expected:
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_reservation_revocation_binding_mismatch"
+            )
+        return value
+
+    def _set_revocation_fence(self) -> None:
+        self._revocation_fenced = True
+        self._active_until = 0.0
+        self._last_mode = "inactive"
+        self._last_reason = "local_voice_reservation_revocation_failed"
+
+    def _require_revocation_clear(self) -> None:
+        if self._revocation_fenced:
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_reservation_revocation_required"
+            )
+
+    def require_durable_revocation(self) -> dict[str, Any]:
+        """Fence admission after an outer durable scope-revocation failure."""
+
+        with self._lock:
+            self._cleanup(float(self._now()))
+            self._set_revocation_fence()
+            return self.public_status()
+
+    def _revoke_records(
+        self,
+        records: tuple[_TokenRecord, ...],
+        durable_revocation: DurableReservationRevocation | None,
+    ) -> LocalVoiceDurableReservationRevocation | None:
+        requests = tuple(
+            sorted(
+                (
+                    self._revocation_request(record)
+                    for record in records
+                    if record.durably_reserved
+                ),
+                key=lambda request: (
+                    request.ingress_turn_id,
+                    request.reservation_ref,
+                ),
+            )
+        )
+        if not requests:
+            return None
+        try:
+            if durable_revocation is None:
+                raise LocalVoiceAdmissionTransactionError(
+                    "local_voice_reservation_revocation_failed"
+                )
+            return self._durable_revocation_receipt(
+                durable_revocation(requests),
+                requests,
+            )
+        except LocalVoiceAdmissionTransactionError:
+            self._set_revocation_fence()
+            raise
+        except Exception:
+            self._set_revocation_fence()
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_reservation_revocation_failed"
+            ) from None
+
     def _validation_is_current(
         self,
         binding: dict[str, Any],
@@ -270,9 +606,19 @@ class LocalVoiceAdmissionManager:
             self._cleanup(float(self._now()))
             return self._reject(reason)
 
-    def _rotate_bridge(self, bridge_instance_id: str, *, now_value: float) -> None:
+    def _rotate_bridge(
+        self,
+        bridge_instance_id: str,
+        *,
+        now_value: float,
+        durable_revocation: DurableReservationRevocation | None = None,
+    ) -> None:
         if bridge_instance_id == self._bridge_instance_id:
             return
+        self._revoke_records(
+            tuple(self._tokens.values()),
+            durable_revocation,
+        )
         self._invalidate_live_tokens(
             reason="bridge_instance_rotated",
             now_value=now_value,
@@ -282,27 +628,47 @@ class LocalVoiceAdmissionManager:
         self._last_mode = "inactive"
         self._last_reason = "bridge_instance_rotated"
 
-    def observe_bridge_instance(self, bridge_instance_id: Any) -> dict[str, Any]:
+    def observe_bridge_instance(
+        self,
+        bridge_instance_id: Any,
+        *,
+        durable_revocation: DurableReservationRevocation | None = None,
+    ) -> dict[str, Any]:
         normalized = _identifier(bridge_instance_id)
         with self._lock:
             now_value = float(self._now())
             self._cleanup(now_value)
+            self._require_revocation_clear()
             if not normalized:
                 return self._reject("bridge_instance_invalid")
-            self._rotate_bridge(normalized, now_value=now_value)
+            self._rotate_bridge(
+                normalized,
+                now_value=now_value,
+                durable_revocation=durable_revocation,
+            )
             return self.public_status()
 
-    def reset(self, reason: str = "reset") -> dict[str, Any]:
+    def reset(
+        self,
+        reason: str = "reset",
+        *,
+        durable_revocation: DurableReservationRevocation | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             now_value = float(self._now())
             self._cleanup(now_value)
             fixed_reason = normalize_local_voice_text(reason).lower()
             fixed_reason = re.sub(r"[^a-z0-9_]+", "_", fixed_reason).strip("_")
             fixed_reason = fixed_reason[:80] or "reset"
+            self._revoke_records(
+                tuple(self._tokens.values()),
+                durable_revocation,
+            )
             self._invalidate_live_tokens(reason=fixed_reason, now_value=now_value)
             self._active_until = 0.0
             self._last_mode = "inactive"
             self._last_reason = fixed_reason
+            self._revocation_fenced = False
             return self.public_status()
 
     def public_status(self) -> dict[str, Any]:
@@ -310,7 +676,9 @@ class LocalVoiceAdmissionManager:
             now_value = float(self._now())
             self._cleanup(now_value)
             active = bool(
-                self._bridge_instance_id and now_value < self._active_until
+                not self._revocation_fenced
+                and self._bridge_instance_id
+                and now_value < self._active_until
             )
             return {
                 "schema": STATUS_SCHEMA,
@@ -319,6 +687,7 @@ class LocalVoiceAdmissionManager:
                 "acceptedCount": self._accepted_count,
                 "rejectedCount": self._rejected_count,
                 "lastReason": self._last_reason,
+                "revocationFenced": self._revocation_fenced,
                 "contentFree": True,
             }
 
@@ -330,7 +699,100 @@ class LocalVoiceAdmissionManager:
         *,
         validation_binding: Any = None,
         validation_is_current: ValidationCurrent | None = None,
+        durable_revocation: DurableReservationRevocation | None = None,
     ) -> dict[str, Any]:
+        return self._issue(
+            bridge_instance_id,
+            turn_id,
+            text,
+            validation_binding=validation_binding,
+            validation_is_current=validation_is_current,
+            durable_reservation=None,
+            durable_revocation=durable_revocation,
+            capture_fence_digest="",
+        ).admission
+
+    def issue_with_durable_reservation(
+        self,
+        bridge_instance_id: Any,
+        turn_id: Any,
+        text: Any,
+        *,
+        durable_reservation: DurableIssuanceReservation,
+        capture_fence_digest: Any,
+        durable_revocation: DurableReservationRevocation | None = None,
+        validation_binding: Any = None,
+        validation_is_current: ValidationCurrent | None = None,
+    ) -> LocalVoiceIssuanceTransaction:
+        """Reserve an exact content-free capability before returning it."""
+
+        return self._issue(
+            bridge_instance_id,
+            turn_id,
+            text,
+            validation_binding=validation_binding,
+            validation_is_current=validation_is_current,
+            durable_reservation=durable_reservation,
+            durable_revocation=durable_revocation,
+            capture_fence_digest=_capture_fence_digest(
+                capture_fence_digest,
+                required=True,
+            ),
+        )
+
+    @staticmethod
+    def _durable_issuance_reservation_receipt(
+        value: Any,
+        request: LocalVoiceIssuanceReservationRequest,
+    ) -> LocalVoiceDurableIssuanceReservation:
+        if (
+            not isinstance(value, LocalVoiceDurableIssuanceReservation)
+            or value.bridge_instance_id != request.bridge_instance_id
+            or value.local_turn_id != request.turn_id
+            or value.forward_text_digest != request.forward_text_digest
+            or value.reservation_ref != request.reservation_ref
+            or value.ingress_turn_id != request.ingress_turn_id
+        ):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_issuance_reservation_binding_mismatch"
+            )
+        if (
+            value.schema != CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA
+            or value.durable is not True
+            or not _identifier(value.entry_id)
+            or value.phase != "reserved"
+            or value.disposition != "reserved"
+            or value.should_process is not False
+            or value.text_hash != request.forward_text_digest
+            or isinstance(value.journal_generation, bool)
+        ):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_issuance_reservation_invalid"
+            )
+        try:
+            generation = int(value.journal_generation)
+        except (TypeError, ValueError, OverflowError):
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_issuance_reservation_invalid"
+            ) from None
+        if generation <= 0:
+            raise LocalVoiceAdmissionTransactionError(
+                "local_voice_issuance_reservation_invalid"
+            )
+        return value
+
+    def _issue(
+        self,
+        bridge_instance_id: Any,
+        turn_id: Any,
+        text: Any,
+        *,
+        validation_binding: Any,
+        validation_is_current: ValidationCurrent | None,
+        durable_reservation: DurableIssuanceReservation | None,
+        durable_revocation: DurableReservationRevocation | None,
+        capture_fence_digest: str,
+    ) -> LocalVoiceIssuanceTransaction:
         bridge_id = _identifier(bridge_instance_id)
         normalized_turn_id = _identifier(turn_id)
         original_text = normalize_local_voice_text(text)
@@ -338,55 +800,100 @@ class LocalVoiceAdmissionManager:
         with self._lock:
             now_value = float(self._now())
             self._cleanup(now_value)
+            self._require_revocation_clear()
             if not bridge_id:
-                return self._reject("bridge_instance_invalid")
+                return LocalVoiceIssuanceTransaction(
+                    self._reject("bridge_instance_invalid"),
+                    None,
+                )
             if not normalized_turn_id:
-                return self._reject("turn_id_invalid")
+                return LocalVoiceIssuanceTransaction(
+                    self._reject("turn_id_invalid"),
+                    None,
+                )
             if not original_text or len(original_text) > _MAX_TEXT_CHARS:
-                return self._reject("voice_text_invalid")
+                return LocalVoiceIssuanceTransaction(
+                    self._reject("voice_text_invalid"),
+                    None,
+                )
             if binding is None:
-                return self._reject("validation_binding_invalid")
+                return LocalVoiceIssuanceTransaction(
+                    self._reject("validation_binding_invalid"),
+                    None,
+                )
 
-            self._rotate_bridge(bridge_id, now_value=now_value)
+            bridge_rotated = bridge_id != self._bridge_instance_id
+
+            def reject_after_bridge_observation(
+                reason: str,
+                *,
+                clear_followup: bool = False,
+            ) -> LocalVoiceIssuanceTransaction:
+                if bridge_rotated:
+                    self._rotate_bridge(
+                        bridge_id,
+                        now_value=now_value,
+                        durable_revocation=durable_revocation,
+                    )
+                if clear_followup:
+                    self._active_until = 0.0
+                return LocalVoiceIssuanceTransaction(
+                    self._reject(reason),
+                    None,
+                )
+
             turn_key = (bridge_id, normalized_turn_id)
             if turn_key in self._consumed_turns:
-                return self._reject("local_voice_turn_already_consumed")
+                return reject_after_bridge_observation(
+                    "local_voice_turn_already_consumed"
+                )
 
             fresh_wake, wake_forward_text = split_exact_leading_wake(original_text)
             if binding:
                 if not self._validation_is_current(binding, validation_is_current):
-                    return self._reject("validation_attempt_stale")
+                    return reject_after_bridge_observation(
+                        "validation_attempt_stale"
+                    )
                 # A validation prompt is an exact, attempt-bound bypass.  It must
                 # never inherit or create an ordinary hands-free follow-up lease.
-                self._active_until = 0.0
                 forward_text = (
                     wake_forward_text
                     if fresh_wake and local_voice_requires_fresh_wake(wake_forward_text)
                     else original_text
                 )
                 if local_voice_requires_fresh_wake(forward_text) and not fresh_wake:
-                    return self._reject("fresh_wake_required")
+                    return reject_after_bridge_observation(
+                        "fresh_wake_required",
+                        clear_followup=True,
+                    )
                 mode = "validation"
             else:
                 if not self._validation_is_current({}, validation_is_current):
-                    return self._reject("validation_binding_required")
+                    return reject_after_bridge_observation(
+                        "validation_binding_required"
+                    )
                 if fresh_wake:
                     forward_text = wake_forward_text
                     mode = "wake_entry"
                 elif (
-                    self._bridge_instance_id == bridge_id
+                    not bridge_rotated
                     and now_value < self._active_until
                 ):
                     forward_text = original_text
                     if local_voice_requires_fresh_wake(forward_text):
-                        return self._reject("fresh_wake_required")
+                        return reject_after_bridge_observation(
+                            "fresh_wake_required"
+                        )
                     mode = "followup"
                 else:
-                    return self._reject("wake_word_required")
+                    return reject_after_bridge_observation(
+                        "wake_word_required"
+                    )
 
             forward_digest = _text_digest(forward_text)
             binding_digest = _binding_digest(binding)
             previous_digest = self._pending_turn_tokens.get(turn_key)
+            previous = None
             if previous_digest:
                 previous = self._tokens.get(previous_digest)
                 if previous is not None and (
@@ -394,11 +901,16 @@ class LocalVoiceAdmissionManager:
                     or previous.validation_binding_digest != binding_digest
                     or previous.mode != mode
                 ):
-                    return self._reject("local_voice_turn_binding_mismatch")
-                self._tokens.pop(previous_digest, None)
-                self._terminal_tokens[previous_digest] = (
-                    "admission_token_superseded",
-                    now_value + self.replay_ttl_sec,
+                    return reject_after_bridge_observation(
+                        "local_voice_turn_binding_mismatch"
+                    )
+            if (
+                not bridge_rotated
+                and previous is None
+                and len(self._tokens) >= _MAX_LIVE_TOKENS
+            ):
+                return reject_after_bridge_observation(
+                    "admission_token_capacity_exhausted"
                 )
 
             token = ""
@@ -416,19 +928,73 @@ class LocalVoiceAdmissionManager:
                     token_digest = candidate_digest
                     break
             if not token:
-                return self._reject("admission_token_generation_failed")
-
-            if len(self._tokens) >= _MAX_LIVE_TOKENS:
-                oldest_digest, oldest = min(
-                    self._tokens.items(),
-                    key=lambda item: item[1].issued_at,
+                return reject_after_bridge_observation(
+                    "admission_token_generation_failed"
                 )
-                self._tokens.pop(oldest_digest, None)
-                oldest_key = (oldest.bridge_instance_id, oldest.turn_id)
-                if self._pending_turn_tokens.get(oldest_key) == oldest_digest:
-                    self._pending_turn_tokens.pop(oldest_key, None)
-                self._terminal_tokens[oldest_digest] = (
-                    "admission_token_evicted",
+
+            ingress_turn_id = local_voice_ingress_turn_id(
+                bridge_instance_id=bridge_id,
+                turn_id=normalized_turn_id,
+                forward_text_digest=forward_digest,
+                validation_binding_digest=binding_digest,
+                mode=mode,
+                token_digest=token_digest,
+                capture_fence_digest=capture_fence_digest,
+            )
+            reservation_ref = local_voice_reservation_ref(
+                bridge_instance_id=bridge_id,
+                turn_id=normalized_turn_id,
+                forward_text_digest=forward_digest,
+                validation_binding_digest=binding_digest,
+                mode=mode,
+                token_digest=token_digest,
+                capture_fence_digest=capture_fence_digest,
+            )
+            if bridge_rotated:
+                # Revoke old-bridge reservations before creating a reservation
+                # for the new bridge. A failed new reservation can then reduce
+                # availability, but it cannot leave an old token recoverable.
+                self._rotate_bridge(
+                    bridge_id,
+                    now_value=now_value,
+                    durable_revocation=durable_revocation,
+                )
+            elif (
+                previous is not None
+                and previous.durably_reserved
+                and durable_reservation is None
+            ):
+                # A durable same-turn reissue replaces the old row atomically.
+                # A non-durable reissue must explicitly revoke it first.
+                self._revoke_records((previous,), durable_revocation)
+
+            reservation = None
+            if durable_reservation is not None:
+                reservation_request = LocalVoiceIssuanceReservationRequest(
+                    bridge_instance_id=bridge_id,
+                    turn_id=normalized_turn_id,
+                    forward_text_digest=forward_digest,
+                    validation_binding_digest=binding_digest,
+                    mode=mode,
+                    token_digest=token_digest,
+                    capture_fence_digest=capture_fence_digest,
+                    ingress_turn_id=ingress_turn_id,
+                    reservation_ref=reservation_ref,
+                    ttl_sec=self.token_ttl_sec,
+                )
+                reservation = self._durable_issuance_reservation_receipt(
+                    durable_reservation(reservation_request),
+                    reservation_request,
+                )
+
+            # Only an exact durable receipt may supersede the prior capability
+            # or make the new process-local token visible.
+            if binding:
+                self._active_until = 0.0
+            if previous_digest:
+                self._tokens.pop(previous_digest, None)
+                self._terminal_tokens[previous_digest] = (
+                    "admission_token_superseded",
                     now_value + self.replay_ttl_sec,
                 )
 
@@ -440,13 +1006,15 @@ class LocalVoiceAdmissionManager:
                 validation_binding_digest=binding_digest,
                 validation_bound=bool(binding),
                 mode=mode,
+                durably_reserved=durable_reservation is not None,
+                capture_fence_digest=capture_fence_digest,
                 issued_at=now_value,
                 expires_at=now_value + self.token_ttl_sec,
             )
             self._pending_turn_tokens[turn_key] = token_digest
             self._last_mode = mode
             self._last_reason = "admission_token_issued"
-            return {
+            result = {
                 "ok": True,
                 "admitted": True,
                 "mode": mode,
@@ -455,6 +1023,7 @@ class LocalVoiceAdmissionManager:
                 "expiresInSec": self.token_ttl_sec,
                 "admission": self.public_status(),
             }
+            return LocalVoiceIssuanceTransaction(result, reservation)
 
     def consume(
         self,
@@ -463,10 +1032,15 @@ class LocalVoiceAdmissionManager:
         turn_id: Any,
         text: Any,
         *,
+        admission_mode: Any = None,
         validation_binding: Any = None,
         validation_is_current: ValidationCurrent | None = None,
+        durable_recovery_is_current: DurableRecoveryCurrent | None = None,
+        durable_revocation: DurableReservationRevocation | None = None,
+        _allow_durable_recovery: bool = False,
+        _capture_fence_digest: str = "",
         _before_commit: (
-            Callable[[_TokenRecord, str], bool | None] | None
+            Callable[[_TokenRecord, str, bool], bool | None] | None
         ) = None,
     ) -> dict[str, Any]:
         presented_token = str(token or "")
@@ -474,9 +1048,11 @@ class LocalVoiceAdmissionManager:
         normalized_turn_id = _identifier(turn_id)
         forward_text = normalize_local_voice_text(text)
         binding = normalize_validation_binding(validation_binding)
+        presented_mode = str(admission_mode or "").strip()
         with self._lock:
             now_value = float(self._now())
             self._cleanup(now_value)
+            self._require_revocation_clear()
             if not presented_token:
                 return self._reject("admission_token_missing")
             if len(presented_token) > 512:
@@ -486,10 +1062,71 @@ class LocalVoiceAdmissionManager:
             if terminal is not None:
                 return self._reject(terminal[0])
             record = self._tokens.get(token_digest)
-            if record is None:
+            recovered_unknown = record is None
+            if recovered_unknown and not _allow_durable_recovery:
                 return self._reject("admission_token_unknown")
+            if recovered_unknown:
+                if len(presented_token) < 24:
+                    return self._reject("admission_token_invalid")
+                if (
+                    not bridge_id
+                    or not normalized_turn_id
+                    or not forward_text
+                    or len(forward_text) > _MAX_TEXT_CHARS
+                ):
+                    return self._reject("admission_recovery_binding_invalid")
+                if presented_mode not in _ADMISSION_MODES:
+                    return self._reject("admission_mode_invalid")
+                if binding is None or (
+                    (presented_mode == "validation") != bool(binding)
+                ):
+                    return self._reject("admission_validation_mismatch")
+                if not self._validation_is_current(
+                    binding or {},
+                    validation_is_current,
+                ):
+                    return self._reject(
+                        "validation_attempt_stale"
+                        if binding
+                        else "validation_binding_required"
+                    )
+                if durable_recovery_is_current is None:
+                    return self._reject("admission_token_unknown")
+                try:
+                    recovery_is_current = (
+                        durable_recovery_is_current() is True
+                    )
+                except Exception:
+                    recovery_is_current = False
+                if not recovery_is_current:
+                    return {
+                        "ok": False,
+                        "admitted": False,
+                        "error": "local_voice_wake_required",
+                        "reason": "admission_recovery_context_stale",
+                        "admission": self.public_status(),
+                    }
+                forward_digest = _text_digest(forward_text)
+                binding_digest = _binding_digest(binding or {})
+                record = _TokenRecord(
+                    token_digest=token_digest,
+                    bridge_instance_id=bridge_id,
+                    turn_id=normalized_turn_id,
+                    forward_text_digest=forward_digest,
+                    validation_binding_digest=binding_digest,
+                    validation_bound=bool(binding),
+                    mode=presented_mode,
+                    durably_reserved=True,
+                    capture_fence_digest=_capture_fence_digest,
+                    issued_at=now_value,
+                    expires_at=now_value + self.token_ttl_sec,
+                )
+
+            assert record is not None
 
             def invalidate(reason: str) -> dict[str, Any]:
+                if not recovered_unknown:
+                    self._revoke_records((record,), durable_revocation)
                 self._tokens.pop(token_digest, None)
                 turn_key = (record.bridge_instance_id, record.turn_id)
                 if self._pending_turn_tokens.get(turn_key) == token_digest:
@@ -499,6 +1136,17 @@ class LocalVoiceAdmissionManager:
                     now_value + self.replay_ttl_sec,
                 )
                 return self._reject(reason)
+
+            if (
+                not recovered_unknown
+                and record.durably_reserved
+                and _capture_fence_digest
+                and not secrets.compare_digest(
+                    record.capture_fence_digest,
+                    _capture_fence_digest,
+                )
+            ):
+                return invalidate("voice_capture_consent_not_current")
 
             if not bridge_id or bridge_id != record.bridge_instance_id:
                 return invalidate("admission_bridge_mismatch")
@@ -510,19 +1158,31 @@ class LocalVoiceAdmissionManager:
                 return invalidate("admission_validation_mismatch")
             if bool(binding) != record.validation_bound:
                 return invalidate("admission_validation_mismatch")
+            if admission_mode is not None and (
+                presented_mode not in _ADMISSION_MODES
+                or presented_mode != record.mode
+            ):
+                return invalidate("admission_mode_mismatch")
             if not self._validation_is_current(binding or {}, validation_is_current):
                 return invalidate(
                     "validation_attempt_stale"
                     if record.validation_bound
                     else "validation_binding_required"
                 )
-            if record.mode == "followup" and not (
+            if not recovered_unknown and record.mode == "followup" and not (
                 self._bridge_instance_id == bridge_id
                 and now_value < self._active_until
             ):
                 return invalidate("followup_session_expired")
             if len(self._consumed_turns) >= _MAX_REPLAY_TURNS:
                 return invalidate("admission_replay_capacity_exhausted")
+
+            if recovered_unknown and bridge_id != self._bridge_instance_id:
+                self._rotate_bridge(
+                    bridge_id,
+                    now_value=now_value,
+                    durable_revocation=durable_revocation,
+                )
 
             # A durable ingress claim is the irreversible side of local voice
             # admission.  Run it while this token is still live and while the
@@ -532,7 +1192,18 @@ class LocalVoiceAdmissionManager:
             should_admit = True
             if _before_commit is not None:
                 should_admit = (
-                    _before_commit(record, forward_text) is not False
+                    _before_commit(
+                        record,
+                        forward_text,
+                        recovered_unknown,
+                    )
+                    is not False
+                )
+            elif recovered_unknown:
+                return self._reject("admission_token_unknown")
+            elif record.durably_reserved:
+                raise LocalVoiceAdmissionTransactionError(
+                    "local_voice_durable_claim_required"
                 )
 
             self._tokens.pop(token_digest, None)
@@ -585,6 +1256,10 @@ class LocalVoiceAdmissionManager:
             or value.local_turn_id != request.turn_id
             or value.forward_text_digest
             != request.forward_text_digest
+            or (
+                value.reservation_ref
+                and value.reservation_ref != request.reservation_ref
+            )
         ):
             raise LocalVoiceAdmissionTransactionError(
                 "local_voice_ingress_claim_binding_mismatch"
@@ -604,12 +1279,18 @@ class LocalVoiceAdmissionManager:
             or value.durable is not True
             or not _identifier(value.entry_id)
             or not _identifier(value.ingress_turn_id)
-            or not re.fullmatch(
-                r"[0-9a-f]{64}",
-                value.text_hash,
-            )
+            or _SHA256_PATTERN.fullmatch(value.text_hash) is None
             or value.text_hash != request.forward_text_digest
             or type(value.should_process) is not bool
+            or type(value.reservation_verified) is not bool
+            or type(value._validation_lease_held) is not bool
+            or (
+                value.reservation_verified
+                and (
+                    value.reservation_ref != request.reservation_ref
+                    or value.ingress_turn_id != request.ingress_turn_id
+                )
+            )
             or expected_disposition is None
             or (
                 value.should_process is True
@@ -647,8 +1328,12 @@ class LocalVoiceAdmissionManager:
         text: Any,
         *,
         durable_claim: DurableIngressClaim,
+        capture_fence_digest: Any,
+        durable_revocation: DurableReservationRevocation | None = None,
+        admission_mode: Any = None,
         validation_binding: Any = None,
         validation_is_current: ValidationCurrent | None = None,
+        durable_recovery_is_current: DurableRecoveryCurrent | None = None,
     ) -> LocalVoiceAdmissionTransaction:
         """Bind one valid capability to durable ingress before consuming it.
 
@@ -658,12 +1343,39 @@ class LocalVoiceAdmissionManager:
         admitted result has an exact durable claim receipt.
         """
 
+        capture_digest = _capture_fence_digest(
+            capture_fence_digest,
+            required=True,
+        )
         captured_claim: list[LocalVoiceDurableIngressClaim] = []
 
         def claim_before_commit(
             record: _TokenRecord,
             forward_text: str,
+            recovered_unknown: bool,
         ) -> bool:
+            ingress_turn_id = local_voice_ingress_turn_id(
+                bridge_instance_id=record.bridge_instance_id,
+                turn_id=record.turn_id,
+                forward_text_digest=record.forward_text_digest,
+                validation_binding_digest=(
+                    record.validation_binding_digest
+                ),
+                mode=record.mode,
+                token_digest=record.token_digest,
+                capture_fence_digest=capture_digest,
+            )
+            reservation_ref = local_voice_reservation_ref(
+                bridge_instance_id=record.bridge_instance_id,
+                turn_id=record.turn_id,
+                forward_text_digest=record.forward_text_digest,
+                validation_binding_digest=(
+                    record.validation_binding_digest
+                ),
+                mode=record.mode,
+                token_digest=record.token_digest,
+                capture_fence_digest=capture_digest,
+            )
             request = LocalVoiceIngressClaimRequest(
                 bridge_instance_id=record.bridge_instance_id,
                 turn_id=record.turn_id,
@@ -673,11 +1385,36 @@ class LocalVoiceAdmissionManager:
                     record.validation_binding_digest
                 ),
                 mode=record.mode,
+                token_digest=record.token_digest,
+                capture_fence_digest=capture_digest,
+                ingress_turn_id=ingress_turn_id,
+                reservation_ref=reservation_ref,
             )
             validated_claim = self._durable_ingress_claim_receipt(
                 durable_claim(request),
                 request,
             )
+            if record.durably_reserved:
+                if validated_claim.reservation_verified is not True:
+                    raise LocalVoiceAdmissionTransactionError(
+                        "local_voice_ingress_reservation_unverified"
+                    )
+                if (
+                    validated_claim.reservation_ref
+                    != request.reservation_ref
+                    or validated_claim.ingress_turn_id
+                    != request.ingress_turn_id
+                ):
+                    raise LocalVoiceAdmissionTransactionError(
+                        "local_voice_ingress_claim_binding_mismatch"
+                    )
+            if (
+                record.validation_bound
+                and validated_claim._validation_lease_held is not True
+            ):
+                raise LocalVoiceAdmissionTransactionError(
+                    "local_voice_validation_attempt_lease_required"
+                )
             captured_claim.append(validated_claim)
             return validated_claim.should_process
 
@@ -686,8 +1423,15 @@ class LocalVoiceAdmissionManager:
             bridge_instance_id,
             turn_id,
             text,
+            admission_mode=admission_mode,
             validation_binding=validation_binding,
             validation_is_current=validation_is_current,
+            durable_recovery_is_current=(
+                durable_recovery_is_current
+            ),
+            durable_revocation=durable_revocation,
+            _allow_durable_recovery=True,
+            _capture_fence_digest=capture_digest,
             _before_commit=claim_before_commit,
         )
         if admission.get("suppressed") is True:
@@ -723,12 +1467,19 @@ __all__ = [
     "DEFAULT_TOKEN_TTL_SEC",
     "LocalVoiceAdmissionTransaction",
     "LocalVoiceAdmissionTransactionError",
+    "LocalVoiceDurableIssuanceReservation",
     "LocalVoiceDurableIngressClaim",
+    "LocalVoiceDurableReservationRevocation",
+    "LocalVoiceIssuanceReservationRequest",
+    "LocalVoiceIssuanceTransaction",
     "LocalVoiceIngressClaimRequest",
+    "LocalVoiceReservationRevocationRequest",
     "LocalVoiceAdmissionManager",
     "STATUS_SCHEMA",
     "WAKE_WORD",
     "local_voice_requires_fresh_wake",
+    "local_voice_ingress_turn_id",
+    "local_voice_reservation_ref",
     "normalize_local_voice_text",
     "normalize_validation_binding",
     "split_exact_leading_wake",

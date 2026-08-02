@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -22,7 +22,14 @@ from evelyn_core.voice_capture_consent import (  # noqa: E402
 )
 
 
+_DEFAULT_RESPONSE = object()
+
+
 class _Response:
+    def __init__(self, status: int, payload: object) -> None:
+        self.status = status
+        self.payload = payload
+
     async def __aenter__(self):
         return self
 
@@ -31,12 +38,58 @@ class _Response:
 
     async def json(self, *, content_type=None):
         _ = content_type
-        return {}
+        return self.payload
 
 
 class _Session:
-    def post(self, *_args, **_kwargs):
-        return _Response()
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        ack_overrides: dict[str, object] | None = None,
+        response_payload: object = _DEFAULT_RESPONSE,
+    ) -> None:
+        self.status = status
+        self.ack_overrides = dict(ack_overrides or {})
+        self.response_payload = response_payload
+        self.requests: list[dict[str, object]] = []
+
+    def post(
+        self,
+        url,
+        *,
+        json,
+        headers,
+        timeout,
+        allow_redirects=True,
+    ):
+        del timeout
+        self.requests.append(
+            {
+                "url": str(url),
+                "payload": dict(json),
+                "headers": dict(headers),
+                "allowRedirects": bool(allow_redirects),
+            }
+        )
+        payload = self.response_payload
+        if payload is _DEFAULT_RESPONSE:
+            acknowledgement = {
+                field: json[field]
+                for field in (
+                    "pid",
+                    "statusSeq",
+                    "startedAt",
+                )
+            }
+            acknowledgement["bridgeInstanceDigest"] = (
+                local_io_bridge.hashlib.sha256(
+                    json["bridgeInstanceId"].encode("utf-8")
+                ).hexdigest()
+            )
+            acknowledgement.update(self.ack_overrides)
+            payload = {"ok": True, "localBridge": acknowledgement}
+        return _Response(self.status, payload)
 
 
 class _SoundDevice:
@@ -71,6 +124,95 @@ class _SoundDevice:
 
 
 class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_requires_exact_ack_and_disables_redirects(self) -> None:
+        bridge = LocalIoBridge()
+        session = _Session()
+        bridge.session = session  # type: ignore[assignment]
+        bridge.voice_capture_fence_digest = "c" * 64
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_voice_capture_watchdog",
+                new=AsyncMock(),
+            ),
+            patch.object(bridge, "_refresh_output_readiness"),
+            patch.object(bridge, "_output_devices_snapshot", return_value=[]),
+            patch("evelyn_core.local_io_bridge.atomic_json_write"),
+            patch("evelyn_core.local_io_bridge.emit_silence_liveness_event"),
+        ):
+            accepted = await bridge._post_status()
+
+        self.assertTrue(accepted)
+        self.assertEqual(len(session.requests), 1)
+        self.assertFalse(session.requests[0]["allowRedirects"])
+        self.assertTrue(
+            str(session.requests[0]["url"]).endswith(
+                "/api/local-bridge/status"
+            )
+        )
+        status_payload = session.requests[0]["payload"]
+        self.assertEqual(
+            status_payload["voiceCaptureFenceDigest"],
+            "c" * 64,
+        )
+        self.assertNotIn(
+            "fenceDigest",
+            status_payload["voiceCaptureWatchdog"],
+        )
+
+    async def test_status_rejects_non_exact_ack(self) -> None:
+        cases = (
+            (
+                "bridge_instance",
+                {"bridgeInstanceDigest": "0" * 64},
+                200,
+                _DEFAULT_RESPONSE,
+            ),
+            ("pid", {"pid": -1}, 200, _DEFAULT_RESPONSE),
+            (
+                "status_sequence",
+                {"statusSeq": -1},
+                200,
+                _DEFAULT_RESPONSE,
+            ),
+            ("started_at", {"startedAt": -1.0}, 200, _DEFAULT_RESPONSE),
+            ("http_status", {}, 202, _DEFAULT_RESPONSE),
+            ("response_shape", {}, 200, {"ok": True, "localBridge": []}),
+        )
+        for name, overrides, status, response_payload in cases:
+            with self.subTest(name=name):
+                bridge = LocalIoBridge()
+                session = _Session(
+                    status=status,
+                    ack_overrides=overrides,
+                    response_payload=response_payload,
+                )
+                bridge.session = session  # type: ignore[assignment]
+                bridge._handle_control_response = Mock()  # type: ignore[method-assign]
+
+                with (
+                    patch.object(
+                        bridge,
+                        "_enforce_voice_capture_watchdog",
+                        new=AsyncMock(),
+                    ),
+                    patch.object(bridge, "_refresh_output_readiness"),
+                    patch.object(
+                        bridge,
+                        "_output_devices_snapshot",
+                        return_value=[],
+                    ),
+                    patch("evelyn_core.local_io_bridge.atomic_json_write"),
+                    patch(
+                        "evelyn_core.local_io_bridge.emit_silence_liveness_event"
+                    ),
+                ):
+                    accepted = await bridge._post_status()
+
+                self.assertFalse(accepted)
+                bridge._handle_control_response.assert_not_called()  # type: ignore[union-attr]
+
     async def test_concurrent_status_reports_cannot_overwrite_newer_sequence(self) -> None:
         bridge = LocalIoBridge()
         bridge.session = _Session()  # type: ignore[assignment]

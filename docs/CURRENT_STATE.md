@@ -1740,6 +1740,16 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   status tick과 ON 전·후에 검사한다. 4초 stale, expiry, owner/lease replacement,
   누락·손상·symlink에서는 새 입력과 admission을 폐기하고 exact capture stop을
   수행한다. stop 실패는 exit 76으로 프로세스를 끝내 OS handle을 회수한다.
+  Bot API에는 capture HMAC 키를 주입하지 않는다. 대신 bearer-authenticated Bridge
+  status의 content-free fence digest를 Host lease와 Control Page durable consent state에
+  3자 대조하고, 현재 Bridge/mic/watchdog 상태와 함께 admission 발급·claim 경계에서
+  fail-closed 판정한다. 공개 status에서는 Bridge instance와 fence digest를 제거한다.
+  durable consent state 변경과 Bot API의 마지막 fence 확인+reservation/claim은 stable
+  `claim_lease.lock`의 process-local mutex+OS lock으로 선형화한다. Control Page의
+  blocking acquire는 2초 단일 deadline을 사용하고, timeout·state write 실패는
+  memory-first `revoking/untrusted` 뒤 physical OFF와 durable reconcile을 계속한다.
+  async revoke는 lock wait를 worker thread로 옮긴다. 두 stable lock은 retention 정리
+  대상에서 영구 제외된다.
   Supervisor stop evidence는 현재 child PID/시작 시각, 서명된 전체 status, 고정
   instance, `statusSeq` high-water, watchdog 시각과 nested/top-level physical OFF를
   모두 요구한다. owner heartbeat는 4 KiB, Bridge status는 128 KiB로 제한된다.
@@ -1761,21 +1771,40 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
   text와 source/entry/turn ID를 내보내지 않는다.
 - Local Voice Fast Control 경로는 별도 `consume()` 뒤 claim을 호출하지 않는다.
-  stream/non-stream이 같은 typed transaction을 사용하고, durable receipt의 schema,
-  entry ID, text hash, phase/disposition, process 여부와 journal generation을 exact
-  binding에 맞춰 검증한다. 실제 owner claim 직후 `os._exit`한 subprocess를
-  재시작하면 해당 accepted turn 하나가 recovered pending으로 남고 자동 대화
-  재실행은 0임을 확인했다. 재시작 뒤 같은 turn의 새 capability는 replay-only로
-  폐기되어 accepted count와 follow-up lease를 열지 않는다. raw journal I/O 오류도
-  private 오류 원문 없는 503으로 바뀌며 같은 token으로 재시도할 수 있다. 관련
-  Local Voice/Fast Control/ingress/continuity 179개가 통과했다. 이 증거는 token 발급
-  응답 뒤 chat 요청 전 재시작이나 실제 음성 장치 E2E까지 닫았다는 뜻은 아니다.
-- current ingress 검증은 core journal 20개, Discord owner 묶음 129개, Fast
-  continuity/stream/proxy/UI 묶음 89개와 기존 Fast API 63개, bootstrap generation에
-  맞춘 Fast Action 28개를 통과했다. memory 263개와 Supervisor/single-instance 58개,
-  `compileall`과 `git diff --check`도 통과했다. 2026-08-02 `.venv-host`에서 CI와
-  같은 `unittest discover -s tests -t . -p "test_*.py"` 범위는 `Ran 2841`,
-  `OK (skipped=20)`이었다. 이전 Windows world-action lock 정리 오류 2개는 살아
+  stream/non-stream이 같은 typed transaction을 사용하고, token 응답 전에 exact
+  content-free ingress reservation을 durable 기록한다. Bot 재시작 뒤에는 Bridge가
+  제시한 token digest, bridge/turn/text/mode/validation binding과 현재 capture fence를
+  다시 계산해 reservation을 claim하며, durable receipt의 schema, entry ID, text hash,
+  phase/disposition, process 여부와 journal generation을 exact 검증한다. durable
+  reservation token은 verified flag, reservation ref와 ingress turn도 exact해야 한다.
+  issue 전·reservation 직전·직후와 claim 직전에 capture-consent fence를 다시 검사한다.
+  철회 race에서는 exact reservation과 live capability를 revoke하며 revocation write를
+  증명하지 못하면 content-free 503으로 닫는다.
+  ingress turn과 reservation reference의 v2 proof에는 발급 capture fence digest가
+  포함된다. 따라서 Bot manager 재시작과 consent A→B 교체 뒤에도 A token이 B에서
+  claim되지 않는다. mic-off·철회·restart·shutdown은 manager가 모르는 restart-orphan
+  `reserved` row도 exact Fast Control scope에서 durable purge하며 claimed/completed와
+  다른 scope는 보존한다.
+  실제 reserve/claim/head write 오류와 claim 직후 `os._exit`을 재현했고, 재시작 뒤
+  accepted pending 하나, 자동 대화 재실행 0과 replay-only duplicate를 확인했다.
+  따라서 `token response -> Bot restart -> chat`과 `consume -> durable claim`의 source
+  crash-loss 창은 닫혔다. 이는 실제 음성 장치 E2E 완료를 뜻하지 않는다.
+- Local validation issue/consume과 confirm/retry/abort는 attempt별 cross-process OS
+  lease로 직렬화된다. 성공·409·503 응답의 lease는 실제 HTTP EOF 또는 terminal
+  failure까지 유지된다. validation LLM payload는 system+현재 user만 포함하고
+  memory/history/tool/search/vision을 사용하지 않는다. assistant 원문은 normal
+  history/checkpoint/replay에 저장하지 않고 content-free SHA-256 marker와
+  non-replayable receipt로 terminalize한다. accepted user text는 exact claim을 위해
+  bounded ingress journal TTL 동안만 남고 report/history로 복제하지 않는다. durable
+  claim 뒤 validation event write 실패는 type-only 로그로 흡수해 token과 LLM을
+  재실행하지 않으며, 누락된 accepted event는 현재 attempt의 성공 증거가 되지 않는다.
+- 최종 current-source hardening 묶음은 Local Voice admission, Fast Control ingress,
+  consent/claim lease, validation API·attempt lease와 retention을 포함해 267개(skip 1)가
+  통과했다. 2026-08-02 `.venv`에서 CI와 같은
+  `unittest discover -s tests -t . -p "test_*.py"` 범위는 `Ran 3044`,
+  `OK (skipped=20)`이었다. `compileall`, `pip check`, validation JavaScript 구문,
+  Compose config와 `git diff --check`도 통과했다. 이전 Windows world-action lock 정리
+  오류 2개는 살아
   있는 자식을 검증하기 위해 잠금을 의도적으로 보존한 테스트가 임시 폴더 정리 전에
   정상 회수 경로를 실행하지 않던 harness 문제였다. 테스트 cleanup은 자식 종료를
   모사한 뒤 exact cancel로 잠금을 반납하므로, child-alive 동안의 fail-closed fence는

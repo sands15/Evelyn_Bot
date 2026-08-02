@@ -488,12 +488,23 @@ startup을 중단하고 기존 owner의 state, heartbeat, revoke, mic ON/OFF를 
 철회가 끝나기 전에는 lock을 풀지 않는다. hard-crash에서는 커널이 lock을 회수하고
 successor가 기존 active lease를 복구하지 않은 채 startup recovery를 수행한다.
 
+동의 generation write와 Bot API local-voice reserve/claim 사이에는 별도 stable
+`claim_lease.lock`을 사용한다. 마지막 fence 검사부터 journal commit까지 같은 lock을
+유지하고, token/reservation v2 proof를 발급 fence digest에 묶는다. OFF 계열 전이는
+manager restart로 process-local token 목록이 비어 있어도 outstanding `reserved` row를
+scope 단위로 durable purge한다. 따라서 소스 수준의 revoke-vs-acceptedText TOCTOU와
+consent A→B에서 구 token이 되살아나는 경계는 닫혔다. Control Page writer의 대기는
+2초로 제한되고 timeout·state write 실패는 memory-first `revoking/untrusted`와
+physical OFF로 닫힌다. durable claim 뒤 관측 이벤트 오류도 token을 되살리거나 같은
+LLM을 다시 실행하지 않는다.
+
 실제 별도 Python 프로세스 경합·`os._exit(78)`·successor 인수와 aiohttp cleanup 취소
-중 contender 배제 회귀를 포함한 owner/인접 90개(skip 1), voice 전체 574개(skip 5)가
-통과했다. 따라서 source의 동시 owner P0는 닫혔다. 실행 중 Control Page 이미지는
-교체하지 않았고, Docker bind mount의 container 간 경합이나 Windows native와 Linux
-container를 섞은 lock coherence는 live 증거가 없다. mic 활성 뒤 health 수집 전체
-deadline 부재도 P1 starvation hardening으로 남긴다.
+중 contender 배제, claim/revoke 선형화, manager restart와 A→B proof 불일치 회귀를
+포함한 source 검증이 통과했다. 따라서 owner와 admission race의 source P0는 닫혔다.
+voice 전체 회귀의 최신 개수는 worklog의 최종 검증 항목을 따른다. 실행 중 Control
+Page 이미지는 교체하지 않았고, Docker bind mount의 container 간 경합이나 Windows
+native와 Linux container를 섞은 두 lock의 coherence는 live 증거가 없다. mic 활성 뒤
+health 수집 전체 deadline 부재도 P1 starvation hardening으로 남긴다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
@@ -515,27 +526,29 @@ Job ownership과 birth identity 기록을 확인한다. 실제 Windows Job close
 Supervisor에 배포하거나 실제 마이크를 켜지는 않았다.
 
 2026-08-02 ingress owner는 Fast Control과 Discord text의 LLM/tool/전달 전 claim,
-부분 전달 ambiguity, 중복 억제와 restart reconcile을 닫았다. Local Voice도
-admission lock 아래 token binding 검증, durable ingress claim, frozen typed receipt
-검증, token/replay/follow-up/count 확정 순서의 transaction을 사용한다. claim 실패나
-receipt 불일치는 admission 상태를 바꾸지 않는다. real journal claim 직후
-`os._exit`한 subprocess도 재시작 뒤 accepted pending 하나로 복구되고 자동 대화
-재실행은 0이었다. recovered duplicate capability는 replay-only로 폐기되어 follow-up
-동의와 accepted count를 열지 않고, raw journal I/O 오류도 원문 없는 503 뒤 같은
-token으로 재시도된다. 따라서 이전의 정확한 `consume -> claim` crash-loss 창은
-닫혔다.
+부분 전달 ambiguity, 중복 억제와 restart reconcile을 닫았다. Local Voice도 token을
+응답하기 전에 content-free durable reservation을 만들고, 재시작 뒤 Bridge가 제시한
+exact token/bridge/turn/text/mode/validation binding으로 reservation을 claim한다.
+claim receipt를 검증한 뒤에만 token/replay/follow-up/count를 확정하며 journal 오류나
+receipt 불일치는 대화를 시작하지 않는다. recovered duplicate는 replay-only로
+폐기되고 자동 대화 재실행은 0이다. 따라서 이전의 `issue response -> Bot restart ->
+chat`과 `consume -> claim` crash-loss source 창은 닫혔다.
 
-Local Voice crash-loss 전체가 닫힌 것은 아니다. admission token을 발급해 응답한 뒤
-Bridge의 chat 요청 전에 Bot API가 재시작하면 process-local token은 사라지고 아직
-journal도 없다. 또한 validation attempt는 다른 프로세스에서 claim `fsync` 중
-retry/abort될 수 있어 cross-process attempt lease 없는 TOCTOU가 남는다. durable turn
-reservation 또는 재시작 후 검증 가능한 capability, 그리고 attempt lease/terminal
-reject 계약이 다음 P0다. 실제 Discord reconnect/timeout/redelivery와 local 음성
-E2E도 현재 source로 실행하지 않았다. 이전 전체 Windows discover의 Mindcraft
-world-action 오류 2개는 child-alive quarantine 검증 뒤 test cleanup이 exact cancel
-회수 경로를 실행하도록 고쳐 닫았다. 2026-08-02 최신 CI-equivalent discover 결과는
-`Ran 2841`, `OK (skipped=20)`이었다. 이는 source 회귀 증거이며 실제 Minecraft
-동작 검증을 대신하지 않는다.
+validation mutation과 local admission issue/consume은 attempt별 cross-process OS
+lease를 공유하며, lease는 성공·409·503 JSON/stream의 실제 HTTP terminal까지
+유지된다. validation LLM은 memory/history/tool 없이 격리되고 assistant 원문은
+checkpoint/history/replay 대신 content-free terminal marker만 남긴다. 또한 Bot은
+Host HMAC 키를 받지 않은 채 authenticated Bridge fence digest를 Host lease와 durable
+consent state에 3자 대조한다. 발급 reservation 전·후와 claim 직전에 consent를 다시
+검사하고, 철회 race에서는 exact reservation/capability를 revoke한다.
+마지막 검사와 durable reserve/claim은 consent writer와 동일한 `claim_lease.lock`을
+사용하고 proof 자체도 capture fence generation에 묶인다. manager restart 뒤 OFF는
+process-local 목록에 없는 reserved row까지 scope purge한다.
+
+남은 위험은 source crash-loss가 아니라 실제 운영 증거다. 실행 중 이미지 교체,
+Discord reconnect/timeout/redelivery, 로컬 마이크·스피커의 10턴·2회 barge-in·15초
+무음과 사용자 청취 확인을 아직 수행하지 않았다. 실제 Windows native와 Linux
+container bind mount 사이의 lock coherence도 별도 live 증거가 필요하다.
 
 그러나 CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크
 입력부터 STT, 대화, TTS, 로컬 재생까지 계획된 surface별 10턴과 무음 구간을

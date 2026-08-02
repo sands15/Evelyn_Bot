@@ -23,9 +23,11 @@ from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
     CONVERSATION_INGRESS_RECOVERY_HEAD_SCHEMA,
     CONVERSATION_INGRESS_RECOVERY_RECEIPT_SCHEMA,
     CONVERSATION_INGRESS_RECOVERY_SCHEMA,
+    CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA,
     ConversationIngressBindingMismatch,
     ConversationIngressRecoveryError,
     ConversationIngressRecoveryJournal,
+    final_text_sha256,
 )
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
@@ -302,6 +304,494 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(existing)
         self.assertEqual(existing["textHash"], first["textHash"])
         self.assertFalse(existing["shouldProcess"])
+
+    def test_content_free_reservation_replaces_and_promotes_once(self) -> None:
+        private_text = "재시작 뒤에만 저장할 최종 음성 입력"
+        first_ref = "a" * 64
+        second_ref = "b" * 64
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            clock = Clock(100.0)
+            journal = self.make_journal(root, clock=clock)
+            args = {
+                "surface": "local_voice",
+                "scope": "bridge:owner",
+                "source_delivery_id": "bridge-1:turn-7",
+                "text_hash": final_text_sha256(private_text),
+                "turn_id": "local-turn-7",
+                "reservation_ref": first_ref,
+                "ttl_sec": 5.0,
+            }
+
+            reserved = journal.reserve_ingress(**args)
+            first_payload = (root / "ingress.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(journal.recovery_records(), [])
+
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                journal.reserve_ingress(
+                    **{
+                        **args,
+                        "text_hash": final_text_sha256("다른 입력"),
+                    }
+                )
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                journal.reserve_ingress(
+                    **{**args, "turn_id": "local-turn-8"}
+                )
+
+            clock.value = 101.0
+            replaced = journal.reserve_ingress(
+                **{**args, "reservation_ref": second_ref}
+            )
+            before_claim = journal.record_for(reserved["entryId"])
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                journal.claim_reserved_ingress(
+                    surface=args["surface"],
+                    scope=args["scope"],
+                    source_delivery_id=args["source_delivery_id"],
+                    accepted_text=private_text,
+                    turn_id=args["turn_id"],
+                    reservation_ref=first_ref,
+                )
+            promoted = journal.claim_reserved_ingress(
+                surface=args["surface"],
+                scope=args["scope"],
+                source_delivery_id=args["source_delivery_id"],
+                accepted_text=private_text,
+                turn_id=args["turn_id"],
+                reservation_ref=second_ref,
+            )
+            duplicate = journal.claim_reserved_ingress(
+                surface=args["surface"],
+                scope=args["scope"],
+                source_delivery_id=args["source_delivery_id"],
+                accepted_text=private_text,
+                turn_id=args["turn_id"],
+                reservation_ref=second_ref,
+            )
+            promoted_record = journal.record_for(promoted["entryId"])
+
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                journal.reserve_ingress(
+                    **{**args, "reservation_ref": second_ref}
+                )
+            journal.mark_response_ready(
+                promoted["entryId"],
+                assistant_text="짧은 답",
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            journal.mark_delivery_inflight(
+                promoted["entryId"],
+                delivery_ref="http:turn-7",
+            )
+            delivery_record = journal.record_for(promoted["entryId"])
+
+        self.assertEqual(reserved["phase"], "reserved")
+        self.assertEqual(reserved["disposition"], "reserved")
+        self.assertFalse(reserved["shouldProcess"])
+        self.assertNotIn(private_text, first_payload)
+        self.assertEqual(replaced["phase"], "reserved")
+        self.assertEqual(before_claim["acceptedText"], "")
+        self.assertEqual(before_claim["deliveryRef"], second_ref)
+        self.assertEqual(before_claim["expiresAt"], 106.0)
+        self.assertTrue(promoted["shouldProcess"])
+        self.assertEqual(promoted["disposition"], "claimed")
+        self.assertFalse(duplicate["shouldProcess"])
+        self.assertEqual(promoted_record["acceptedText"], private_text)
+        self.assertEqual(promoted_record["deliveryRef"], second_ref)
+        self.assertEqual(delivery_record["deliveryRef"], "http:turn-7")
+
+    def test_exact_reservation_batch_revocation_is_atomic_and_content_free(
+        self,
+    ) -> None:
+        private_text = "보고서에 남으면 안 되는 음성 입력"
+        private_token = "raw-local-voice-token"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(
+                        f"{private_text} {index}"
+                    ),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": final_text_sha256(
+                        f"{private_token}:{index}"
+                    ),
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            receipts = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            generation = journal.public_status()["generation"]
+
+            revocation = journal.revoke_reserved_ingress_batch(
+                reservations
+            )
+            rendered_receipt = json.dumps(
+                revocation,
+                ensure_ascii=False,
+            )
+            rendered_journal = (root / "ingress.json").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(
+            revocation["schema"],
+            CONVERSATION_INGRESS_RESERVATION_REVOCATION_RECEIPT_SCHEMA,
+        )
+        self.assertTrue(revocation["durable"])
+        self.assertEqual(revocation["revokedCount"], 2)
+        self.assertEqual(revocation["journalGeneration"], generation + 1)
+        self.assertEqual(len(revocation["bindings"]), 2)
+        self.assertTrue(
+            all(journal.record_for(item["entryId"]) is None for item in receipts)
+        )
+        self.assertNotIn(private_text, rendered_receipt)
+        self.assertNotIn(private_token, rendered_receipt)
+        self.assertNotIn(private_text, rendered_journal)
+        self.assertNotIn(private_token, rendered_journal)
+
+    def test_scope_revocation_removes_only_reserved_exact_scope(self) -> None:
+        reserved_text = "범위 철회 receipt에 남으면 안 되는 예약 원문"
+        accepted_text = "보존해야 하는 accepted 원문"
+        completed_text = "보존해야 하는 completed 원문"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root, max_entries=8)
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(
+                        f"{reserved_text} {index}"
+                    ),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": str(index) * 64,
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            reserved = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            other_scope = journal.reserve_ingress(
+                **{
+                    **reservations[0],
+                    "scope": "bridge:other",
+                    "source_delivery_id": "bridge-2:turn-1",
+                    "reservation_ref": "3" * 64,
+                }
+            )
+            accepted = journal.claim(
+                surface="local_voice",
+                scope="bridge:owner",
+                source_delivery_id="bridge-1:accepted",
+                accepted_text=accepted_text,
+            )
+            completed = journal.claim(
+                surface="local_voice",
+                scope="bridge:owner",
+                source_delivery_id="bridge-1:completed",
+                accepted_text=completed_text,
+            )
+            self.complete(journal, completed)
+            generation = journal.public_status()["generation"]
+
+            revocation = journal.revoke_reserved_ingress_scope(
+                surface="local_voice",
+                scope="bridge:owner",
+            )
+            no_op = journal.revoke_reserved_ingress_scope(
+                surface="local_voice",
+                scope="bridge:owner",
+            )
+            restarted = self.make_journal(root, max_entries=8)
+            rendered = json.dumps(revocation, ensure_ascii=False)
+
+        self.assertEqual(revocation["revokedCount"], 2)
+        self.assertEqual(revocation["journalGeneration"], generation + 1)
+        self.assertTrue(
+            all(restarted.record_for(item["entryId"]) is None for item in reserved)
+        )
+        self.assertEqual(
+            restarted.record_for(other_scope["entryId"])["phase"],
+            "reserved",
+        )
+        self.assertEqual(
+            restarted.record_for(accepted["entryId"])["acceptedText"],
+            accepted_text,
+        )
+        self.assertEqual(
+            restarted.record_for(completed["entryId"])["phase"],
+            "completed",
+        )
+        self.assertEqual(no_op["revokedCount"], 0)
+        self.assertEqual(no_op["bindings"], [])
+        self.assertEqual(no_op["journalGeneration"], generation + 1)
+        self.assertNotIn(reserved_text, rendered)
+        self.assertNotIn(accepted_text, rendered)
+        self.assertNotIn(completed_text, rendered)
+
+    def test_scope_revocation_write_failure_restores_every_reservation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(f"input-{index}"),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": str(index) * 64,
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            receipts = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            generation = journal.public_status()["generation"]
+
+            with patch.object(
+                journal,
+                "_write",
+                side_effect=OSError("simulated scope revocation failure"),
+            ):
+                with self.assertRaises(OSError):
+                    journal.revoke_reserved_ingress_scope(
+                        surface="local_voice",
+                        scope="bridge:owner",
+                    )
+
+            records = [
+                journal.record_for(receipt["entryId"])
+                for receipt in receipts
+            ]
+
+        self.assertEqual(journal.public_status()["generation"], generation)
+        self.assertTrue(all(record is not None for record in records))
+        self.assertTrue(all(record["phase"] == "reserved" for record in records))
+
+    def test_reservation_batch_revocation_mismatch_deletes_nothing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = self.make_journal(Path(temp_dir))
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(f"input-{index}"),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": str(index) * 64,
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            receipts = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            generation = journal.public_status()["generation"]
+            mismatched = [
+                reservations[0],
+                {**reservations[1], "reservation_ref": "f" * 64},
+            ]
+
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                journal.revoke_reserved_ingress_batch(mismatched)
+
+            restored = [
+                journal.record_for(item["entryId"]) for item in receipts
+            ]
+
+        self.assertEqual(journal.public_status()["generation"], generation)
+        self.assertTrue(all(item is not None for item in restored))
+
+    def test_revocation_head_failure_fences_until_restart_reconciles(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(f"input-{index}"),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": str(index) * 64,
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            receipts = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            generation = journal.public_status()["generation"]
+            real_write = ingress_module.atomic_json_write
+
+            def fail_revocation_head(
+                path: Path,
+                payload: dict,
+                **kwargs: object,
+            ) -> None:
+                if Path(path) == journal.head_path:
+                    raise OSError("simulated revocation head failure")
+                real_write(path, payload, **kwargs)
+
+            with patch.object(
+                ingress_module,
+                "atomic_json_write",
+                side_effect=fail_revocation_head,
+            ):
+                with self.assertRaises(OSError):
+                    journal.revoke_reserved_ingress_batch(reservations)
+
+                failed_status = journal.public_status()
+                persisted = json.loads(
+                    journal.path.read_text(encoding="utf-8")
+                )
+                stale_head = json.loads(
+                    journal.head_path.read_text(encoding="utf-8")
+                )
+                with self.assertRaises(
+                    ConversationIngressRecoveryError
+                ) as current_retry:
+                    journal.revoke_reserved_ingress_batch(reservations)
+
+            restarted = self.make_journal(root)
+            restarted_status = restarted.public_status()
+            restarted_records = [
+                restarted.record_for(receipt["entryId"])
+                for receipt in receipts
+            ]
+            repaired_head = json.loads(
+                journal.head_path.read_text(encoding="utf-8")
+            )
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                restarted.revoke_reserved_ingress_batch(reservations)
+
+        self.assertEqual(failed_status["state"], "error")
+        self.assertEqual(failed_status["integrity"], "failed")
+        self.assertEqual(failed_status["headState"], "write_failed")
+        self.assertFalse(failed_status["rollbackProtected"])
+        self.assertEqual(
+            failed_status["lastErrorCode"],
+            "conversation_ingress_recovery_write_failed",
+        )
+        self.assertEqual(failed_status["generation"], generation)
+        self.assertEqual(failed_status["entryCount"], 2)
+        self.assertEqual(
+            current_retry.exception.code,
+            "conversation_ingress_recovery_unavailable",
+        )
+        self.assertEqual(persisted["generation"], generation + 1)
+        self.assertEqual(persisted["entries"], [])
+        self.assertEqual(stale_head["generation"], generation)
+        self.assertEqual(
+            persisted["previousHash"], stale_head["journalHash"]
+        )
+        self.assertEqual(restarted_status["state"], "ready")
+        self.assertEqual(restarted_status["integrity"], "verified")
+        self.assertEqual(restarted_status["headState"], "current")
+        self.assertEqual(restarted_status["generation"], generation + 1)
+        self.assertTrue(all(record is None for record in restarted_records))
+        self.assertEqual(repaired_head["generation"], generation + 1)
+        self.assertEqual(
+            repaired_head["journalHash"], persisted["journalHash"]
+        )
+
+    def test_revocation_retries_exact_head_once_before_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            reservations = [
+                {
+                    "surface": "local_voice",
+                    "scope": "bridge:owner",
+                    "source_delivery_id": f"bridge-1:turn-{index}",
+                    "text_hash": final_text_sha256(f"input-{index}"),
+                    "turn_id": f"local-turn-{index}",
+                    "reservation_ref": str(index) * 64,
+                    "ttl_sec": 10.0,
+                }
+                for index in (1, 2)
+            ]
+            receipts = [
+                journal.reserve_ingress(**reservation)
+                for reservation in reservations
+            ]
+            generation = journal.public_status()["generation"]
+            real_write = ingress_module.atomic_json_write
+            head_attempts = 0
+            journal_attempts = 0
+
+            def fail_first_head(
+                path: Path,
+                payload: dict,
+                **kwargs: object,
+            ) -> None:
+                nonlocal head_attempts, journal_attempts
+                if Path(path) == journal.head_path:
+                    head_attempts += 1
+                    if head_attempts == 1:
+                        raise OSError("simulated transient head failure")
+                else:
+                    journal_attempts += 1
+                real_write(path, payload, **kwargs)
+
+            with patch.object(
+                ingress_module,
+                "atomic_json_write",
+                side_effect=fail_first_head,
+            ):
+                revocation = journal.revoke_reserved_ingress_batch(
+                    reservations
+                )
+
+            status = journal.public_status()
+            persisted = json.loads(
+                journal.path.read_text(encoding="utf-8")
+            )
+            head = json.loads(
+                journal.head_path.read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(revocation["durable"])
+        self.assertEqual(revocation["revokedCount"], 2)
+        self.assertEqual(revocation["journalGeneration"], generation + 1)
+        self.assertEqual(head_attempts, 2)
+        self.assertEqual(journal_attempts, 1)
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["integrity"], "verified")
+        self.assertEqual(status["headState"], "current")
+        self.assertTrue(status["rollbackProtected"])
+        self.assertEqual(persisted["generation"], generation + 1)
+        self.assertEqual(persisted["entries"], [])
+        self.assertEqual(head["generation"], generation + 1)
+        self.assertEqual(head["journalHash"], persisted["journalHash"])
+        self.assertTrue(
+            all(journal.record_for(item["entryId"]) is None for item in receipts)
+        )
 
     def test_terminal_receipt_is_durable_idempotent_and_replayable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

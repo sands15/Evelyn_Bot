@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 import unittest
@@ -31,7 +32,104 @@ def admission_status(*, rejected_count: int = 0) -> dict:
     }
 
 
+def connector_error() -> local_io_bridge.aiohttp.ClientConnectorError:
+    key = Mock(host="127.0.0.1", port=8798, ssl=False)
+    return local_io_bridge.aiohttp.ClientConnectorError(
+        key,
+        OSError(10061, "connection refused"),
+    )
+
+
+class _EnterFailure:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def __aenter__(self):
+        raise self.error
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return None
+
+
+class _LinesThenError:
+    def __init__(self, event: dict, error: BaseException) -> None:
+        self.line = (json.dumps(event) + "\n").encode("utf-8")
+        self.error = error
+        self.sent = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.sent:
+            self.sent = True
+            return self.line
+        raise self.error
+
+
+class _BotResponse:
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        payload: dict | None = None,
+        content=None,
+    ) -> None:
+        self.status = status
+        self.payload = dict(payload or {})
+        self.content = content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return None
+
+    async def json(self, *, content_type=None):
+        del content_type
+        return dict(self.payload)
+
+
+class _SequenceSession:
+    def __init__(self, *responses) -> None:
+        self.responses = list(responses)
+        self.requests: list[tuple[str, dict, bool]] = []
+
+    def post(self, url, *, json, timeout, allow_redirects=True):
+        del timeout
+        self.requests.append(
+            (str(url), dict(json), bool(allow_redirects))
+        )
+        return self.responses.pop(0)
+
+
 class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def grant(
+        bridge: LocalIoBridge,
+        *,
+        issued_monotonic: float | None = None,
+    ) -> dict:
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
+        bridge.active_turn_id = "turn-retry"
+        return {
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": "turn-retry",
+            "originalText": "이블린 안녕",
+            "forwardText": "안녕",
+            "admissionToken": "private-admission-token-1234567890",
+            "validation": {},
+            "mode": "wake_entry",
+            "issuedMonotonic": (
+                time.monotonic()
+                if issued_monotonic is None
+                else issued_monotonic
+            ),
+            "epoch": bridge.admission_epoch,
+            "_botDispatched": False,
+        }
+
     async def test_no_wake_rejection_is_a_silent_pre_chat_drop(self) -> None:
         class AdmissionResponse:
             status = 409
@@ -54,11 +152,13 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
 
         class AdmissionSession:
             def __init__(self) -> None:
-                self.requests: list[tuple[str, dict]] = []
+                self.requests: list[tuple[str, dict, bool]] = []
 
-            def post(self, url, *, json, timeout):
+            def post(self, url, *, json, timeout, allow_redirects=True):
                 del timeout
-                self.requests.append((str(url), dict(json)))
+                self.requests.append(
+                    (str(url), dict(json), bool(allow_redirects))
+                )
                 return AdmissionResponse()
 
         bridge = LocalIoBridge()
@@ -76,8 +176,9 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge._handle_segment(b"ambient speech", {"turnId": "turn-no-wake"})
 
         self.assertEqual(len(session.requests), 1)
-        request_url, request_payload = session.requests[0]
+        request_url, request_payload, allow_redirects = session.requests[0]
         self.assertTrue(request_url.endswith("/api/local-voice/admission"))
+        self.assertFalse(allow_redirects)
         self.assertEqual(request_payload["bridgeInstanceId"], bridge.bridge_instance_id)
         self.assertEqual(request_payload["turnId"], "turn-no-wake")
         self.assertNotIn("admissionToken", request_payload)
@@ -124,6 +225,7 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
                 "turnId": "turn-admitted",
                 "bridgeInstanceId": bridge.bridge_instance_id,
                 "admissionToken": "private-admission-token-1234567890",
+                "admissionMode": "validation",
                 "validation": {
                     "sessionId": "session-a",
                     "stepId": "step-a",
@@ -134,6 +236,334 @@ class LocalVoiceAdmissionBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("originalText", payload)
         self.assertNotIn("epoch", payload)
+
+    async def test_chat_retries_multiple_pre_header_connector_failures(
+        self,
+    ) -> None:
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        success = {
+            "ok": True,
+            "reply": "응",
+            "memoryState": "not_used",
+            "memoryBoundary": None,
+            "admission": admission_status(),
+        }
+        session = _SequenceSession(
+            _EnterFailure(connector_error()),
+            _EnterFailure(connector_error()),
+            _EnterFailure(connector_error()),
+            _BotResponse(payload=success),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        retry_sleep = AsyncMock()
+
+        with patch.object(local_io_bridge.asyncio, "sleep", retry_sleep):
+            result = await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(result.text, "응")
+        self.assertEqual(len(session.requests), 4)
+        self.assertTrue(
+            all(request == session.requests[0] for request in session.requests)
+        )
+        self.assertFalse(session.requests[0][2])
+        self.assertEqual(retry_sleep.await_count, 3)
+        self.assertTrue(
+            all(
+                awaited.args
+                == (local_io_bridge.LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC,)
+                for awaited in retry_sleep.await_args_list
+            )
+        )
+        self.assertTrue(grant["_botDispatched"])
+
+    async def test_chat_connector_retry_budget_is_bounded(self) -> None:
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        retry_budget = local_io_bridge.LOCAL_VOICE_BOT_CONNECT_MAX_RETRIES
+        session = _SequenceSession(
+            *(
+                _EnterFailure(connector_error())
+                for _ in range(retry_budget + 1)
+            ),
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        retry_sleep = AsyncMock()
+
+        with patch.object(local_io_bridge.asyncio, "sleep", retry_sleep):
+            with self.assertRaises(
+                local_io_bridge.aiohttp.ClientConnectorError
+            ):
+                await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(len(session.requests), retry_budget + 1)
+        self.assertEqual(retry_sleep.await_count, retry_budget)
+
+    async def test_chat_recovers_after_bot_restart_stale_context(self) -> None:
+        events: list[str] = []
+
+        class OrderedSession(_SequenceSession):
+            def post(self, url, *, json, timeout, allow_redirects=True):
+                events.append("request")
+                return super().post(
+                    url,
+                    json=json,
+                    timeout=timeout,
+                    allow_redirects=allow_redirects,
+                )
+
+        async def post_status() -> bool:
+            events.append("heartbeat")
+            return True
+
+        stale = {
+            "ok": False,
+            "admitted": False,
+            "error": "local_voice_wake_required",
+            "reason": "admission_recovery_context_stale",
+            "admission": admission_status(rejected_count=1),
+        }
+        success = {
+            "ok": True,
+            "reply": "응",
+            "memoryState": "not_used",
+            "memoryBoundary": None,
+            "admission": admission_status(),
+        }
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        session = OrderedSession(
+            _EnterFailure(connector_error()),
+            _BotResponse(status=409, payload=stale),
+            _BotResponse(payload=success),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._post_status = AsyncMock(  # type: ignore[method-assign]
+            side_effect=post_status
+        )
+        retry_sleep = AsyncMock()
+
+        with patch.object(local_io_bridge.asyncio, "sleep", retry_sleep):
+            result = await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(result.text, "응")
+        self.assertEqual(events, ["request", "request", "heartbeat", "request"])
+        self.assertEqual(len(session.requests), 3)
+        self.assertTrue(all(not request[2] for request in session.requests))
+        retry_sleep.assert_awaited_once_with(
+            local_io_bridge.LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC
+        )
+        bridge._post_status.assert_awaited_once()  # type: ignore[union-attr]
+
+    async def test_chat_stale_context_retry_is_limited_to_one(self) -> None:
+        stale = {
+            "ok": False,
+            "admitted": False,
+            "error": "local_voice_wake_required",
+            "reason": "admission_recovery_context_stale",
+            "admission": admission_status(rejected_count=1),
+        }
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        session = _SequenceSession(
+            _BotResponse(status=409, payload=stale),
+            _BotResponse(status=409, payload=stale),
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._post_status = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            local_io_bridge.LocalVoiceAdmissionDrop,
+            "admission_recovery_context_stale",
+        ):
+            await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(len(session.requests), 2)
+        bridge._post_status.assert_awaited_once()  # type: ignore[union-attr]
+
+    async def test_chat_stale_context_requires_accepted_heartbeat(self) -> None:
+        stale = {
+            "ok": False,
+            "admitted": False,
+            "error": "local_voice_wake_required",
+            "reason": "admission_recovery_context_stale",
+            "admission": admission_status(rejected_count=1),
+        }
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        session = _SequenceSession(
+            _BotResponse(status=409, payload=stale),
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._post_status = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            local_io_bridge.LocalVoiceAdmissionDrop,
+            "admission_recovery_context_stale",
+        ):
+            await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(len(session.requests), 1)
+        bridge._post_status.assert_awaited_once()  # type: ignore[union-attr]
+
+    async def test_chat_only_retries_exact_stale_context_409(self) -> None:
+        cases = (
+            (409, "wake_required", local_io_bridge.LocalVoiceAdmissionDrop),
+            (503, "admission_recovery_context_stale", RuntimeError),
+        )
+        for status, reason, error_type in cases:
+            with self.subTest(status=status, reason=reason):
+                bridge = LocalIoBridge()
+                grant = self.grant(bridge)
+                session = _SequenceSession(
+                    _BotResponse(
+                        status=status,
+                        payload={
+                            "ok": False,
+                            "admitted": False,
+                            "error": "local_voice_wake_required",
+                            "reason": reason,
+                            "admission": admission_status(rejected_count=1),
+                        },
+                    ),
+                    _BotResponse(payload={"ok": True}),
+                )
+                bridge.session = session  # type: ignore[assignment]
+                bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+
+                with self.assertRaises(error_type):
+                    await bridge._chat("안녕", grant=grant)
+
+                self.assertEqual(len(session.requests), 1)
+                bridge._post_status.assert_not_awaited()  # type: ignore[union-attr]
+
+    async def test_chat_stale_context_retry_expires_after_heartbeat(self) -> None:
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge, issued_monotonic=99.0)
+        session = _SequenceSession(
+            _BotResponse(
+                status=409,
+                payload={
+                    "ok": False,
+                    "admitted": False,
+                    "error": "local_voice_wake_required",
+                    "reason": "admission_recovery_context_stale",
+                    "admission": admission_status(rejected_count=1),
+                },
+            ),
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._post_status = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch.object(
+            local_io_bridge.time,
+            "monotonic",
+            side_effect=(100.0, 101.0, 106.0),
+        ):
+            with self.assertRaisesRegex(
+                local_io_bridge.LocalVoiceAdmissionDrop,
+                "admission_recovery_context_stale",
+            ):
+                await bridge._chat("안녕", grant=grant)
+
+        self.assertEqual(len(session.requests), 1)
+        bridge._post_status.assert_awaited_once()  # type: ignore[union-attr]
+
+    async def test_chat_never_retries_other_failures_or_http_response(self) -> None:
+        failures = (
+            asyncio.TimeoutError(),
+            local_io_bridge.aiohttp.ServerDisconnectedError("disconnected"),
+        )
+        for error in failures:
+            with self.subTest(error=type(error).__name__):
+                bridge = LocalIoBridge()
+                grant = self.grant(bridge)
+                session = _SequenceSession(
+                    _EnterFailure(error),
+                    _BotResponse(payload={"ok": True}),
+                )
+                bridge.session = session  # type: ignore[assignment]
+                with self.assertRaises(type(error)):
+                    await bridge._chat("안녕", grant=grant)
+                self.assertEqual(len(session.requests), 1)
+
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        session = _SequenceSession(
+            _BotResponse(status=503, payload={"ok": False}),
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        with self.assertRaisesRegex(RuntimeError, "chat_failed_503"):
+            await bridge._chat("안녕", grant=grant)
+        self.assertEqual(len(session.requests), 1)
+
+    async def test_chat_connector_retry_checks_window_around_sleep(self) -> None:
+        cases = (
+            ((100.0, 106.0), 0),
+            ((100.0, 101.0, 106.0), 1),
+        )
+        for monotonic_values, expected_sleeps in cases:
+            with self.subTest(expected_sleeps=expected_sleeps):
+                bridge = LocalIoBridge()
+                grant = self.grant(bridge, issued_monotonic=99.0)
+                session = _SequenceSession(
+                    _EnterFailure(connector_error()),
+                    _BotResponse(payload={"ok": True}),
+                )
+                bridge.session = session  # type: ignore[assignment]
+                retry_sleep = AsyncMock()
+
+                with patch.object(
+                    local_io_bridge.time,
+                    "monotonic",
+                    side_effect=monotonic_values,
+                ), patch.object(
+                    local_io_bridge.asyncio,
+                    "sleep",
+                    retry_sleep,
+                ):
+                    with self.assertRaises(
+                        local_io_bridge.aiohttp.ClientConnectorError
+                    ):
+                        await bridge._chat("안녕", grant=grant)
+
+                self.assertEqual(len(session.requests), 1)
+                self.assertEqual(retry_sleep.await_count, expected_sleeps)
+
+    async def test_chat_stream_never_retries_after_first_event(self) -> None:
+        bridge = LocalIoBridge()
+        grant = self.grant(bridge)
+        stream_error = connector_error()
+        response = _BotResponse(
+            content=_LinesThenError(
+                {
+                    "type": "memory_boundary",
+                    "memoryState": "not_used",
+                    "memoryBoundary": None,
+                },
+                stream_error,
+            )
+        )
+        session = _SequenceSession(
+            response,
+            _BotResponse(payload={"ok": True}),
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._speak = AsyncMock()  # type: ignore[method-assign]
+
+        with self.assertRaises(local_io_bridge.aiohttp.ClientConnectorError):
+            await bridge._chat_sentence_stream_and_speak(
+                "안녕",
+                grant=grant,
+            )
+
+        self.assertEqual(len(session.requests), 1)
+        bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
 
     async def test_mic_off_during_stt_cannot_issue_a_new_epoch_token(self) -> None:
         bridge = LocalIoBridge()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import statistics
 import threading
@@ -12,11 +11,18 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import wraps
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
 from .paths import get_runtime_artifacts_root
+from .runtime_artifact_io import atomic_json_write as _runtime_atomic_json_write
+from .voice_validation_attempt_lease import (
+    VoiceValidationAttemptLeaseBusy,
+    VoiceValidationAttemptLeaseUnavailable,
+    acquire_attempt_leases,
+)
 
 
 SESSION_SCHEMA = "voice_validation.session.v1"
@@ -244,13 +250,7 @@ def transcript_match(
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    _runtime_atomic_json_write(path, payload, durable=True)
 
 
 def _safe_json_read(path: Path) -> dict[str, Any] | None:
@@ -612,6 +612,7 @@ def validation_attempt_binding_is_current(
             and context.get("sessionId") == session_id
             and context.get("stepId") == step_id
             and context.get("attemptId") == attempt_id
+            and context.get("status") == "pending"
             and (
                 attempt is None
                 or int(context.get("attempt") or 0) == attempt
@@ -700,6 +701,7 @@ def validation_transcript_admission_status(
             and candidate.get("sessionId") == session_id
             and candidate.get("stepId") == step_id
             and candidate.get("attemptId") == attempt_id
+            and candidate.get("status") == "pending"
             and int(candidate.get("attempt") or 0) == attempt
         ),
         None,
@@ -715,6 +717,7 @@ def validation_transcript_admission_status(
             and item.get("surface") == normalized_surface
             and item.get("id") == step_id
             and item.get("_attemptId") == attempt_id
+            and item.get("status") == "pending"
             and _parse_attempt_revision(item.get("attempt")) == attempt
         ),
         None,
@@ -1010,6 +1013,105 @@ class ValidationPaths:
     @property
     def reports(self) -> Path:
         return self.root / "reports"
+
+
+def _affected_attempt_bindings(
+    session: dict[str, Any] | None,
+) -> tuple[dict[str, Any], ...]:
+    """Return every attempt that the current transition may invalidate."""
+
+    if not isinstance(session, dict):
+        return ()
+    session_id = str(session.get("sessionId") or "")
+    current = session.get("currentStep")
+    steps = session.get("_steps")
+    if not session_id or not isinstance(current, dict) or not isinstance(steps, list):
+        return ()
+    surface = str(session.get("surface") or "")
+    current_id = str(current.get("id") or "")
+    index = next(
+        (
+            offset
+            for offset, step in enumerate(steps)
+            if isinstance(step, dict)
+            and step.get("surface") == surface
+            and step.get("id") == current_id
+        ),
+        None,
+    )
+    if index is None:
+        return ()
+    affected = [steps[index]]
+    kind = str(steps[index].get("kind") or "")
+    if kind == "barge_source" and index + 1 < len(steps):
+        paired = steps[index + 1]
+        if (
+            isinstance(paired, dict)
+            and paired.get("surface") == surface
+            and paired.get("kind") == "barge_interrupt"
+        ):
+            affected.append(paired)
+    elif kind == "barge_interrupt" and index > 0:
+        paired = steps[index - 1]
+        if (
+            isinstance(paired, dict)
+            and paired.get("surface") == surface
+            and paired.get("kind") == "barge_source"
+        ):
+            affected.append(paired)
+
+    bindings = []
+    for step in affected:
+        attempt = _parse_attempt_revision(step.get("attempt"))
+        attempt_id = str(step.get("_attemptId") or "")
+        step_id = str(step.get("id") or "")
+        if attempt is not None and attempt_id and step_id:
+            bindings.append(
+                {
+                    "sessionId": session_id,
+                    "stepId": step_id,
+                    "attempt": attempt,
+                    "attemptId": attempt_id,
+                }
+            )
+    return tuple(bindings)
+
+
+def _attempt_lease_guard(*, snapshot: bool = False):
+    """Serialize one manager mutation with Bot-side attempt claims."""
+
+    def decorate(method):
+        @wraps(method)
+        def guarded(manager, *args, **kwargs):
+            with manager._lock:
+                try:
+                    leases = acquire_attempt_leases(
+                        _affected_attempt_bindings(manager._session),
+                        root=manager.paths.root.parent,
+                    )
+                except VoiceValidationAttemptLeaseBusy:
+                    if snapshot:
+                        return manager._public_session(
+                            capabilities=kwargs.get("capabilities")
+                        )
+                    return {"ok": False, "error": "validation_attempt_inflight"}
+                except VoiceValidationAttemptLeaseUnavailable:
+                    if snapshot:
+                        return manager._public_session(
+                            capabilities=kwargs.get("capabilities")
+                        )
+                    return {
+                        "ok": False,
+                        "error": "validation_attempt_lease_unavailable",
+                    }
+                try:
+                    return method(manager, *args, **kwargs)
+                finally:
+                    leases.release()
+
+        return guarded
+
+    return decorate
 
 
 class VoiceValidationManager:
@@ -1360,38 +1462,60 @@ class VoiceValidationManager:
             ):
                 self._session = None
                 return
-            if not self._loaded_session_is_canonical(payload):
-                self._invalidate_loaded_session(payload)
-                return
-            self._session = payload
-            self._event_offset = 0
-            self._seen_event_ids = set(str(item) for item in payload.get("_seenEventIds") or [])
-            current = self._session.get("currentStep") or {}
-            current_step = self._step_by_id(
-                str(self._session.get("surface") or ""),
-                str(current.get("id") or ""),
-            )
-            current_binding_missing = bool(
-                current_step is not None
-                and not str(current_step.get("_attemptId") or "")
-            )
-            bindings_added = self._ensure_attempt_bindings()
-            if (
-                current_binding_missing
-                and current_step is not None
-                and self._session.get("state") == "running"
-            ):
-                self._fail_attempt(
-                    current_step,
-                    "attempt_binding_migration_required",
+            canonical = self._loaded_session_is_canonical(payload)
+            try:
+                leases = acquire_attempt_leases(
+                    _affected_attempt_bindings(payload),
+                    root=self.paths.root.parent,
                 )
-                self._sync_current_step()
-                self._update_summary()
-                bindings_added = True
-            self._expire_if_needed()
-            self._ingest_event_log()
-            if bindings_added:
-                self._persist()
+            except (
+                VoiceValidationAttemptLeaseBusy,
+                VoiceValidationAttemptLeaseUnavailable,
+            ):
+                if canonical:
+                    self._session = payload
+                    self._seen_event_ids = set(
+                        str(item) for item in payload.get("_seenEventIds") or []
+                    )
+                    self._event_offset = 0
+                return
+            try:
+                if not canonical:
+                    self._invalidate_loaded_session(payload)
+                    return
+                self._session = payload
+                self._event_offset = 0
+                self._seen_event_ids = set(
+                    str(item) for item in payload.get("_seenEventIds") or []
+                )
+                current = self._session.get("currentStep") or {}
+                current_step = self._step_by_id(
+                    str(self._session.get("surface") or ""),
+                    str(current.get("id") or ""),
+                )
+                current_binding_missing = bool(
+                    current_step is not None
+                    and not str(current_step.get("_attemptId") or "")
+                )
+                bindings_added = self._ensure_attempt_bindings()
+                if (
+                    current_binding_missing
+                    and current_step is not None
+                    and self._session.get("state") == "running"
+                ):
+                    self._fail_attempt(
+                        current_step,
+                        "attempt_binding_migration_required",
+                    )
+                    self._sync_current_step()
+                    self._update_summary()
+                    bindings_added = True
+                self._expire_if_needed()
+                self._ingest_event_log()
+                if bindings_added:
+                    self._persist()
+            finally:
+                leases.release()
 
     def _expire_if_needed(self) -> None:
         if not self._session or self._session.get("state") in TERMINAL_STATES:
@@ -1433,6 +1557,7 @@ class VoiceValidationManager:
             session["capabilities"] = deepcopy(capabilities)
         return session
 
+    @_attempt_lease_guard(snapshot=True)
     def snapshot(self, *, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
@@ -1444,6 +1569,7 @@ class VoiceValidationManager:
                 self._persist()
             return self._public_session(capabilities=capabilities)
 
+    @_attempt_lease_guard()
     def start(
         self,
         *,
@@ -1535,6 +1661,7 @@ class VoiceValidationManager:
             self.prune_reports()
             return {"ok": True, "session": self._public_session()}
 
+    @_attempt_lease_guard()
     def resume_after_preflight(self, *, capabilities: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
@@ -1599,6 +1726,7 @@ class VoiceValidationManager:
         self._update_summary()
         self._persist()
 
+    @_attempt_lease_guard()
     def record_event(self, event: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
@@ -1993,6 +2121,7 @@ class VoiceValidationManager:
                 self._update_summary()
                 self._persist()
 
+    @_attempt_lease_guard()
     def confirm(
         self,
         *,
@@ -2049,6 +2178,7 @@ class VoiceValidationManager:
             self._persist()
             return {"ok": True, "session": self._public_session()}
 
+    @_attempt_lease_guard()
     def retry(
         self,
         *,
@@ -2175,6 +2305,7 @@ class VoiceValidationManager:
             self._persist()
             return {"ok": True, "session": self._public_session()}
 
+    @_attempt_lease_guard()
     def abort(self, *, session_id: str) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
@@ -2456,6 +2587,7 @@ class VoiceValidationManager:
         if not self._session:
             return
         self._update_summary()
+        self._persist()
         report_path = _session_artifact_path(
             self.paths.root.parent,
             self.paths.reports,
@@ -2463,10 +2595,8 @@ class VoiceValidationManager:
             ".json",
         )
         if report_path is None:
-            self._persist()
             return
         _atomic_json_write(report_path, self._report_payload())
-        self._persist()
         self.prune_reports()
 
     def prune_reports(self) -> list[str]:

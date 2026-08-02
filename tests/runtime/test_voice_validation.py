@@ -293,6 +293,18 @@ class VoiceValidationTests(unittest.TestCase):
         self.assertTrue(similarity_match["matched"])
         self.assertFalse(mismatch["matched"])
 
+    def test_validation_json_writes_request_durable_commit(self) -> None:
+        path = self.root / "voice_validation" / "active.json"
+        payload = {"schema": "test"}
+
+        with patch.object(
+            voice_validation_module,
+            "_runtime_atomic_json_write",
+        ) as atomic_write:
+            voice_validation_module._atomic_json_write(path, payload)
+
+        atomic_write.assert_called_once_with(path, payload, durable=True)
+
     def test_attempt_binding_guard_rejects_rotation_partial_and_abort(self) -> None:
         session = self.start()
         context = active_validation_context(
@@ -348,6 +360,73 @@ class VoiceValidationTests(unittest.TestCase):
                 now=self.clock,
             )
         )
+
+    def test_failed_attempt_binding_is_not_current_or_transcript_admissible(self) -> None:
+        self.start()
+        context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertIsNotNone(context)
+        binding = {
+            "sessionId": context["sessionId"],
+            "stepId": context["stepId"],
+            "attempt": context["attempt"],
+            "attemptId": context["attemptId"],
+        }
+
+        failed = self.record("stt_final", transcript="완전히 다른 말")["session"]
+
+        self.assertEqual(failed["currentStep"]["status"], "failed")
+        self.assertFalse(
+            validation_attempt_binding_is_current(
+                binding,
+                surface="local",
+                root=self.root,
+                now=self.clock,
+            )
+        )
+        admission = validation_transcript_admission_status(
+            "local",
+            "이블린",
+            binding,
+            root=self.root,
+            now=self.clock,
+        )
+        self.assertFalse(admission["current"])
+        self.assertFalse(admission["matched"])
+        self.assertEqual(admission["reason"], "validation_attempt_stale")
+
+    def test_affected_attempt_bindings_include_both_barge_steps(self) -> None:
+        source = {
+            "id": "07-barge-source",
+            "surface": "local",
+            "kind": "barge_source",
+            "attempt": 2,
+            "_attemptId": "a" * 32,
+        }
+        interrupt = {
+            "id": "08-barge-interrupt",
+            "surface": "local",
+            "kind": "barge_interrupt",
+            "attempt": 3,
+            "_attemptId": "b" * 32,
+        }
+        session = {
+            "sessionId": "voice-p0-test",
+            "surface": "local",
+            "currentStep": {"id": source["id"]},
+            "_steps": [source, interrupt],
+        }
+
+        source_bindings = voice_validation_module._affected_attempt_bindings(session)
+        session["currentStep"] = {"id": interrupt["id"]}
+        interrupt_bindings = voice_validation_module._affected_attempt_bindings(session)
+
+        expected = {source["id"], interrupt["id"]}
+        self.assertEqual({item["stepId"] for item in source_bindings}, expected)
+        self.assertEqual({item["stepId"] for item in interrupt_bindings}, expected)
 
     def test_attempt_binding_guard_can_reject_unbound_work_during_active_surface(
         self,
@@ -557,6 +636,162 @@ class VoiceValidationTests(unittest.TestCase):
         self.assertEqual(snapshot["sessionId"], started["sessionId"])
         self.assertEqual(snapshot["state"], "running")
         self.assertEqual(snapshot["currentStep"]["id"], "02-listening")
+
+    def test_held_attempt_lease_rejects_mutation_without_state_change(self) -> None:
+        session = self.start()
+        context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        binding = {
+            "sessionId": context["sessionId"],
+            "stepId": context["stepId"],
+            "attempt": context["attempt"],
+            "attemptId": context["attemptId"],
+        }
+        active_path = self.root / "voice_validation" / "active.json"
+        before_bytes = active_path.read_bytes()
+        before_session = deepcopy(self.manager._session)
+        leases = voice_validation_module.acquire_attempt_leases(
+            (binding,),
+            root=self.root,
+        )
+        try:
+            result = self.manager.abort(session_id=session["sessionId"])
+        finally:
+            leases.release()
+
+        self.assertEqual(
+            result,
+            {"ok": False, "error": "validation_attempt_inflight"},
+        )
+        self.assertEqual(self.manager._session, before_session)
+        self.assertEqual(active_path.read_bytes(), before_bytes)
+
+    def test_attempt_lease_unavailable_rejects_every_mutation_api(self) -> None:
+        session = self.start()
+        active_path = self.root / "voice_validation" / "active.json"
+        before_bytes = active_path.read_bytes()
+        before_session = deepcopy(self.manager._session)
+        operations = (
+            lambda: self.manager.start(
+                suite=SUITE_ID,
+                surfaces=("local",),
+                capabilities=READY_CAPABILITIES,
+            ),
+            lambda: self.manager.resume_after_preflight(
+                capabilities=READY_CAPABILITIES
+            ),
+            lambda: self.manager.record_event({"event": "error"}),
+            lambda: self.manager.confirm(
+                session_id=session["sessionId"],
+                step_id=session["currentStep"]["id"],
+                attempt=session["currentStep"]["attempt"],
+                heard=True,
+            ),
+            lambda: self.manager.retry(
+                session_id=session["sessionId"],
+                step_id=session["currentStep"]["id"],
+                attempt=session["currentStep"]["attempt"],
+            ),
+            lambda: self.manager.abort(session_id=session["sessionId"]),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), patch.object(
+                voice_validation_module,
+                "acquire_attempt_leases",
+                side_effect=voice_validation_module.VoiceValidationAttemptLeaseUnavailable(),
+            ):
+                result = operation()
+            self.assertEqual(
+                result,
+                {
+                    "ok": False,
+                    "error": "validation_attempt_lease_unavailable",
+                },
+            )
+            self.assertEqual(self.manager._session, before_session)
+            self.assertEqual(active_path.read_bytes(), before_bytes)
+
+    def test_snapshot_lease_failure_skips_expiry_and_event_ingestion(self) -> None:
+        self.start()
+        context = active_validation_context(
+            surface="local",
+            root=self.root,
+            now=self.clock,
+        )
+        emitted = emit_voice_validation_event(
+            "local",
+            "turn_accepted",
+            root=self.root,
+            session_id=context["sessionId"],
+            step_id=context["stepId"],
+            attempt_id=context["attemptId"],
+            now=self.clock,
+        )
+        self.assertIsNotNone(emitted)
+        self.clock.advance(1801)
+        active_path = self.root / "voice_validation" / "active.json"
+        before_bytes = active_path.read_bytes()
+        before_session = deepcopy(self.manager._session)
+        before_offset = self.manager._event_offset
+
+        for error in (
+            voice_validation_module.VoiceValidationAttemptLeaseBusy(),
+            voice_validation_module.VoiceValidationAttemptLeaseUnavailable(),
+        ):
+            with self.subTest(error=type(error).__name__), patch.object(
+                voice_validation_module,
+                "acquire_attempt_leases",
+                side_effect=error,
+            ):
+                snapshot = self.manager.snapshot()
+            self.assertEqual(snapshot["state"], "running")
+            self.assertEqual(snapshot["currentStep"]["events"], {})
+            self.assertEqual(self.manager._session, before_session)
+            self.assertEqual(self.manager._event_offset, before_offset)
+            self.assertEqual(active_path.read_bytes(), before_bytes)
+
+    def test_load_recovery_lease_failure_keeps_canonical_active_unmodified(self) -> None:
+        started = self.start()
+        active_path = self.root / "voice_validation" / "active.json"
+        before_bytes = active_path.read_bytes()
+
+        with patch.object(
+            voice_validation_module,
+            "acquire_attempt_leases",
+            side_effect=voice_validation_module.VoiceValidationAttemptLeaseBusy(),
+        ):
+            recovered = VoiceValidationManager(root=self.root, now=self.clock)
+
+        self.assertEqual(recovered._public_session()["sessionId"], started["sessionId"])
+        self.assertEqual(recovered._event_offset, 0)
+        self.assertEqual(active_path.read_bytes(), before_bytes)
+
+    def test_attempt_lease_is_released_when_mutation_raises(self) -> None:
+        self.start()
+
+        class FakeLeases:
+            released = False
+
+            def release(self) -> None:
+                self.released = True
+
+        leases = FakeLeases()
+        with patch.object(
+            voice_validation_module,
+            "acquire_attempt_leases",
+            return_value=leases,
+        ), patch.object(
+            self.manager,
+            "_expire_if_needed",
+            side_effect=RuntimeError("forced_mutation_failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forced_mutation_failure"):
+                self.manager.abort(session_id="irrelevant")
+
+        self.assertTrue(leases.released)
 
     def test_legacy_running_session_without_attempt_binding_fails_retryably(self) -> None:
         started = self.start()
@@ -1284,6 +1519,36 @@ class VoiceValidationTests(unittest.TestCase):
         session = self.manager.snapshot()
         self.assertEqual(session["state"], "failed")
         self.assertEqual(session["failureCode"], "session_expired")
+
+    def test_terminal_active_commits_before_report_failure(self) -> None:
+        session = self.start()
+        active_path = self.root / "voice_validation" / "active.json"
+        report_path = (
+            self.root
+            / "voice_validation"
+            / "reports"
+            / f"{session['sessionId']}.json"
+        )
+        real_write = voice_validation_module._atomic_json_write
+
+        def fail_report(path, payload):
+            if Path(path).parent.name == "reports":
+                raise OSError("forced_report_failure")
+            return real_write(path, payload)
+
+        with patch.object(
+            voice_validation_module,
+            "_atomic_json_write",
+            side_effect=fail_report,
+        ):
+            with self.assertRaisesRegex(OSError, "forced_report_failure"):
+                self.manager.abort(session_id=session["sessionId"])
+
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        self.assertEqual(active["state"], "aborted")
+        self.assertFalse(report_path.exists())
+        recovered = VoiceValidationManager(root=self.root, now=self.clock)
+        self.assertEqual(recovered._public_session()["state"], "aborted")
 
     def test_expired_session_rejects_mutation_without_prior_snapshot(self) -> None:
         operations = {

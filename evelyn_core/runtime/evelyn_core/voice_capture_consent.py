@@ -15,6 +15,10 @@ from typing import Any, Callable, Literal
 
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write, read_bounded_json
+from .voice_capture_consent_claim_lease import (
+    DEFAULT_BLOCKING_TIMEOUT_SEC,
+    acquire_voice_capture_consent_claim_lease,
+)
 
 
 CONSENT_SCHEMA = "voice.capture-consent.v1"
@@ -33,6 +37,7 @@ ARMED_TTL_SEC = 300.0
 ACTIVE_TTL_SEC = 1800.0
 HOST_LEASE_STALE_SEC = 4.0
 HOST_LEASE_MAX_BYTES = 4096
+CONSENT_STATE_MAX_BYTES = 8192
 ACTIVE_STATES = frozenset({"enabling", "active", "revoking"})
 TERMINAL_VALIDATION_STATES = frozenset({"passed", "failed", "aborted"})
 LOAD_STATES = frozenset({"verified", "missing", "untrusted"})
@@ -173,6 +178,78 @@ def voice_capture_artifact_is_authentic(
     )
 
 
+def _normalized_host_lease_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != _HOST_LEASE_KEYS:
+        return None
+    state = value.get("state")
+    owner_digest = _hex_digest(value.get("ownerDigest"), allow_empty=False)
+    lease_digest = _hex_digest(value.get("leaseDigest"), allow_empty=True)
+    auth_tag = _hex_digest(value.get("authTag"), allow_empty=False)
+    heartbeat_at = _finite_timestamp(value.get("heartbeatAt"))
+    expires_at = _finite_timestamp(value.get("expiresAt"))
+    if (
+        value.get("schema") != HOST_LEASE_SCHEMA
+        or value.get("scope") != SCOPE
+        or state not in _CONSENT_STATES
+        or owner_digest is None
+        or lease_digest is None
+        or auth_tag is None
+        or heartbeat_at is None
+        or value.get("contentFree") is not True
+        or value.get("authAlgorithm") != VOICE_CAPTURE_AUTH_ALGORITHM
+        or (
+            state == "inactive"
+            and (lease_digest or value.get("expiresAt") is not None)
+        )
+        or (state != "inactive" and (not lease_digest or expires_at is None))
+    ):
+        return None
+    return {
+        **value,
+        "ownerDigest": owner_digest,
+        "leaseDigest": lease_digest,
+        "heartbeatAt": heartbeat_at,
+        "expiresAt": expires_at,
+        "authTag": auth_tag,
+    }
+
+
+def _voice_capture_fence_digest(
+    *,
+    state: str,
+    owner_digest: str,
+    lease_digest: str,
+    expires_at: float | None,
+) -> str:
+    material = {
+        "schema": HOST_LEASE_SCHEMA,
+        "scope": SCOPE,
+        "state": state,
+        "ownerDigest": owner_digest,
+        "leaseDigest": lease_digest,
+        "expiresAt": expires_at,
+        "contentFree": True,
+        "authAlgorithm": VOICE_CAPTURE_AUTH_ALGORITHM,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _host_lease_fence_digest(payload: dict[str, Any]) -> str:
+    return _voice_capture_fence_digest(
+        state=str(payload["state"]),
+        owner_digest=str(payload["ownerDigest"]),
+        lease_digest=str(payload["leaseDigest"]),
+        expires_at=payload["expiresAt"],
+    )
+
+
 def inspect_voice_capture_host_lease(
     path: Path,
     *,
@@ -193,6 +270,7 @@ def inspect_voice_capture_host_lease(
             "heartbeatAt": None,
             "expiresAt": None,
             "checkedAt": float(now()) if checked_at is None else checked_at,
+            "fenceDigest": "",
         }
 
     try:
@@ -206,24 +284,8 @@ def inspect_voice_capture_host_lease(
         return blocked("voice_capture_consent_heartbeat_missing")
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         return blocked("voice_capture_consent_heartbeat_untrusted")
-    if not isinstance(payload, dict) or set(payload) != _HOST_LEASE_KEYS:
-        return blocked("voice_capture_consent_heartbeat_untrusted")
-    state = payload.get("state")
-    owner_digest = _hex_digest(payload.get("ownerDigest"), allow_empty=False)
-    lease_digest = _hex_digest(payload.get("leaseDigest"), allow_empty=True)
-    heartbeat_at = _finite_timestamp(payload.get("heartbeatAt"))
-    expires_at = _finite_timestamp(payload.get("expiresAt"))
-    if (
-        payload.get("schema") != HOST_LEASE_SCHEMA
-        or payload.get("scope") != SCOPE
-        or state not in _CONSENT_STATES
-        or owner_digest is None
-        or lease_digest is None
-        or heartbeat_at is None
-        or payload.get("contentFree") is not True
-        or (state == "inactive" and (lease_digest or payload.get("expiresAt") is not None))
-        or (state != "inactive" and (not lease_digest or expires_at is None))
-    ):
+    normalized = _normalized_host_lease_payload(payload)
+    if normalized is None:
         return blocked("voice_capture_consent_heartbeat_untrusted")
     if not voice_capture_artifact_is_authentic(
         payload,
@@ -231,8 +293,13 @@ def inspect_voice_capture_host_lease(
         auth_token=auth_token,
     ):
         return blocked("voice_capture_consent_heartbeat_untrusted")
+    state = str(normalized["state"])
     if state not in {"enabling", "active"}:
         return blocked(f"voice_capture_consent_{state}")
+    owner_digest = str(normalized["ownerDigest"])
+    lease_digest = str(normalized["leaseDigest"])
+    heartbeat_at = float(normalized["heartbeatAt"])
+    expires_at = float(normalized["expiresAt"])
     checked_at = float(now())
     age = checked_at - heartbeat_at
     if age < 0.0 or age > max(0.1, float(stale_after_sec)):
@@ -250,6 +317,7 @@ def inspect_voice_capture_host_lease(
         "heartbeatAt": heartbeat_at,
         "expiresAt": expires_at,
         "checkedAt": checked_at,
+        "fenceDigest": _host_lease_fence_digest(normalized),
     }
 
 
@@ -410,17 +478,89 @@ def _load_state_file(path: Path) -> tuple[LoadState, dict[str, Any] | None]:
     try:
         if path.is_symlink():
             return "untrusted", None
-        raw = path.read_text(encoding="utf-8")
+        payload = read_bounded_json(
+            path,
+            maximum_bytes=CONSENT_STATE_MAX_BYTES,
+        )
     except FileNotFoundError:
         return "missing", None
-    except (OSError, UnicodeError):
-        return "untrusted", None
-    try:
-        payload = json.loads(raw)
-    except (ValueError, TypeError, RecursionError):
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         return "untrusted", None
     validated = _validated_state(payload)
     return ("verified", validated) if validated is not None else ("untrusted", None)
+
+
+def voice_capture_consent_fence_matches(
+    host_lease_path: Path,
+    state_path: Path,
+    *,
+    expected_digest: str,
+    now: Callable[[], float] = time.time,
+    stale_after_sec: float = HOST_LEASE_STALE_SEC,
+) -> bool:
+    """Match the current durable consent state to a Bridge-attested lease.
+
+    ``expected_digest`` is not an authorization credential by itself. Callers
+    must obtain it from the authenticated Local I/O Bridge status channel,
+    whose Bridge verified the host lease HMAC before publishing the digest.
+    """
+
+    expected = _hex_digest(expected_digest, allow_empty=False)
+    if expected is None:
+        return False
+    try:
+        host_path = Path(host_lease_path)
+        if host_path.is_symlink():
+            return False
+        raw_host_lease = read_bounded_json(
+            host_path,
+            maximum_bytes=HOST_LEASE_MAX_BYTES,
+        )
+    except (
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        RecursionError,
+    ):
+        return False
+    host_lease = _normalized_host_lease_payload(raw_host_lease)
+    load_state, consent_state = _load_state_file(Path(state_path))
+    if (
+        host_lease is None
+        or load_state != "verified"
+        or consent_state is None
+        or host_lease.get("state") not in {"enabling", "active"}
+        or consent_state.get("state") not in {"enabling", "active"}
+    ):
+        return False
+    checked_at = float(now())
+    if not math.isfinite(checked_at):
+        return False
+    heartbeat_at = float(host_lease["heartbeatAt"])
+    host_expires_at = float(host_lease["expiresAt"])
+    state_expires_at = _finite_timestamp(consent_state.get("expiresAt"))
+    age = checked_at - heartbeat_at
+    if (
+        age < 0.0
+        or age > max(0.1, float(stale_after_sec))
+        or checked_at >= host_expires_at
+        or state_expires_at is None
+        or checked_at >= state_expires_at
+    ):
+        return False
+    host_digest = _host_lease_fence_digest(host_lease)
+    state_digest = _voice_capture_fence_digest(
+        state=str(consent_state["state"]),
+        owner_digest=_digest(str(consent_state["ownerNonce"])),
+        lease_digest=_digest(str(consent_state["leaseId"])),
+        expires_at=state_expires_at,
+    )
+    return bool(
+        hmac.compare_digest(expected, host_digest)
+        and hmac.compare_digest(expected, state_digest)
+    )
 
 
 class VoiceCaptureConsentManager:
@@ -438,6 +578,7 @@ class VoiceCaptureConsentManager:
         auth_token: str | None = None,
     ) -> None:
         base = Path(root or get_runtime_artifacts_root())
+        self.artifacts_root = base
         self.state_path = base / "voice_capture_consent" / "state.json"
         self.host_lease_path = (
             base / "voice_capture_consent" / "owner_heartbeat.json"
@@ -509,12 +650,31 @@ class VoiceCaptureConsentManager:
             "revokedAt": None,
         }
 
-    def _commit_state(self, candidate: dict[str, Any]) -> None:
+    def _commit_state(
+        self,
+        candidate: dict[str, Any],
+    ) -> None:
         committed = deepcopy(candidate)
         committed["updatedAt"] = self.now()
         if _validated_state(committed) is None:
             raise RuntimeError("voice_capture_consent_state_invalid")
-        atomic_json_write(self.state_path, committed, durable=True)
+        memory_first = committed["state"] == "revoking"
+        if memory_first:
+            self._state = committed
+        # Serialize every durable consent generation change with Bot-side
+        # admission reserve/claim.  Revocation waits for an already-linearized
+        # claim; a new claim either observes the committed state or fails closed.
+        try:
+            with acquire_voice_capture_consent_claim_lease(
+                root=self.artifacts_root,
+                blocking=True,
+                timeout_sec=DEFAULT_BLOCKING_TIMEOUT_SEC,
+            ):
+                atomic_json_write(self.state_path, committed, durable=True)
+        except BaseException:
+            if memory_first:
+                self._load_status = "untrusted"
+            raise
         self._state = committed
         self._load_status = "verified"
 
@@ -559,7 +719,7 @@ class VoiceCaptureConsentManager:
             }, auth_scope=HOST_LEASE_AUTH_SCOPE, auth_token=self.auth_token)
             if not payload["authTag"]:
                 raise RuntimeError("voice_capture_auth_token_unavailable")
-            atomic_json_write(self.host_lease_path, payload)
+            atomic_json_write(self.host_lease_path, payload, durable=True)
             return payload
 
     def _invalidate_previews_locked(self, *, except_token: str = "") -> None:
@@ -798,16 +958,9 @@ class VoiceCaptureConsentManager:
                 candidate = self._recovery(reason)
                 candidate["lastError"] = str(error or "")[:160]
 
-            # This exceptional transition is intentionally memory-first: once an
-            # ON result or persistence outcome is ambiguous, no new grant may be
-            # issued even if the recovery record itself cannot be committed.
-            self._state = candidate
-            try:
-                self._commit_state(candidate)
-            except BaseException:
-                self._state = candidate
-                self._load_status = "untrusted"
-                raise
+            # Once an ON result or persistence outcome is ambiguous, no new
+            # grant may be issued even if this recovery write also fails.
+            self._commit_state(candidate)
             return {
                 "ok": True,
                 "controlRequired": True,
@@ -964,6 +1117,7 @@ __all__ = [
     "ACTIVE_TTL_SEC",
     "ARMED_TTL_SEC",
     "CONSENT_SCHEMA",
+    "CONSENT_STATE_MAX_BYTES",
     "BRIDGE_STATUS_AUTH_SCOPE",
     "HOST_LEASE_SCHEMA",
     "HOST_LEASE_AUTH_SCOPE",
@@ -983,4 +1137,5 @@ __all__ = [
     "sign_voice_capture_artifact",
     "voice_capture_auth_scrubbed_environment",
     "voice_capture_artifact_is_authentic",
+    "voice_capture_consent_fence_matches",
 ]

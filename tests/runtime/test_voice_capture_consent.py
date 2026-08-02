@@ -4,6 +4,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +29,11 @@ from evelyn_core.voice_capture_consent import (  # noqa: E402
     sign_voice_capture_artifact,
     voice_capture_auth_scrubbed_environment,
     voice_capture_artifact_is_authentic,
+    voice_capture_consent_fence_matches,
+)
+from evelyn_core.voice_capture_consent_claim_lease import (  # noqa: E402
+    VoiceCaptureConsentClaimLeaseTimeout,
+    acquire_voice_capture_consent_claim_lease,
 )
 
 
@@ -199,6 +205,93 @@ class VoiceCaptureConsentTests(unittest.TestCase):
         self.clock.value += 3
         expired = other.begin_apply(confirm_token=expired_preview["confirmToken"])
         self.assertEqual(expired["error"], "voice_capture_confirm_token_expired")
+
+    def test_durable_revoke_fences_memory_before_claim_lease_commit(self):
+        self.activate()
+        lease = acquire_voice_capture_consent_claim_lease(root=self.root)
+        started = threading.Event()
+        completed = threading.Event()
+        result = []
+
+        def revoke() -> None:
+            started.set()
+            result.append(self.manager.begin_revoke(reason="user_revoked"))
+            completed.set()
+
+        worker = threading.Thread(target=revoke)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(timeout=2))
+            self.assertFalse(completed.wait(timeout=0.1))
+            self.assertEqual(
+                self.manager._state["state"],  # noqa: SLF001
+                "revoking",
+            )
+        finally:
+            lease.release()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(completed.is_set())
+        self.assertTrue(result[0]["controlRequired"])
+        self.assertEqual(self.manager.status()["state"], "revoking")
+
+    def test_revoke_timeout_stays_memory_first_until_retry(self):
+        self.activate()
+        before_disk = json.loads(
+            self.manager.state_path.read_text(encoding="utf-8")
+        )
+        lease = acquire_voice_capture_consent_claim_lease(root=self.root)
+        try:
+            with (
+                patch.object(
+                    consent_module,
+                    "DEFAULT_BLOCKING_TIMEOUT_SEC",
+                    0.02,
+                ),
+                self.assertRaisesRegex(
+                    VoiceCaptureConsentClaimLeaseTimeout,
+                    "^voice_capture_consent_claim_lease_timeout$",
+                ),
+            ):
+                self.manager.begin_revoke(reason="user_revoked")
+        finally:
+            lease.release()
+
+        self.assert_recovery_blocks_consent(
+            self.manager,
+            load_state="untrusted",
+            reason="user_revoked",
+        )
+        self.assertEqual(before_disk["state"], "active")
+        self.assertEqual(
+            json.loads(
+                self.manager.state_path.read_text(encoding="utf-8")
+            )["state"],
+            "active",
+        )
+
+        retried = self.manager.begin_revoke(reason="user_revoked")
+        self.assertTrue(retried["controlRequired"])
+        self.assertEqual(retried["consent"]["loadState"], "verified")
+
+    def test_revoke_write_failure_stays_memory_first_until_retry(self):
+        self.activate()
+        with patch.object(
+            consent_module,
+            "atomic_json_write",
+            side_effect=OSError("consent store unavailable"),
+        ):
+            with self.assertRaisesRegex(OSError, "store unavailable"):
+                self.manager.begin_revoke(reason="user_revoked")
+
+        self.assert_recovery_blocks_consent(
+            self.manager,
+            load_state="untrusted",
+            reason="user_revoked",
+        )
+        retried = self.manager.begin_revoke(reason="user_revoked")
+        self.assertTrue(retried["controlRequired"])
+        self.assertEqual(retried["consent"]["loadState"], "verified")
 
     def test_only_latest_preview_can_authorize_capture(self):
         older = self.manager.preview()
@@ -398,6 +491,34 @@ class VoiceCaptureConsentTests(unittest.TestCase):
         self.assertEqual(self.manager.status()["state"], "revoking")
         self.assertTrue(self.manager.finish_revoke(applied=True)["ok"])
         self.assertEqual(self.manager.status()["state"], "inactive")
+
+    def test_activation_failure_write_error_stays_memory_first(self):
+        preview = self.manager.preview()
+        started = self.manager.begin_apply(confirm_token=preview["confirmToken"])
+        with patch.object(
+            consent_module,
+            "atomic_json_write",
+            side_effect=OSError("consent store unavailable"),
+        ):
+            with self.assertRaisesRegex(OSError, "store unavailable"):
+                self.manager.finish_apply(
+                    lease_id=started["leaseId"],
+                    applied=False,
+                    capture_ready=False,
+                    error="mic_control_ack_timeout",
+                )
+
+        self.assert_recovery_blocks_consent(
+            self.manager,
+            load_state="untrusted",
+            reason="activation_failed",
+        )
+        self.assertEqual(
+            json.loads(self.manager.state_path.read_text(encoding="utf-8"))[
+                "state"
+            ],
+            "enabling",
+        )
 
     def test_missing_state_requires_off_ack_before_inactive(self):
         manager = self.make_manager(self.root / "missing-state")
@@ -642,6 +763,112 @@ class VoiceCaptureConsentTests(unittest.TestCase):
         for forbidden in ("audio", "transcript", "prompt", "text"):
             self.assertNotIn(forbidden, serialized)
 
+    def test_host_lease_fence_is_stable_across_heartbeats_and_durable(self):
+        self.activate()
+        with patch.object(
+            consent_module,
+            "atomic_json_write",
+            wraps=consent_module.atomic_json_write,
+        ) as atomic_write:
+            first = self.manager.publish_host_lease()
+            first_inspection = inspect_voice_capture_host_lease(
+                self.manager.host_lease_path,
+                now=self.clock,
+            )
+            self.clock.value += 1
+            second = self.manager.publish_host_lease()
+            second_inspection = inspect_voice_capture_host_lease(
+                self.manager.host_lease_path,
+                now=self.clock,
+            )
+
+        self.assertNotEqual(first["authTag"], second["authTag"])
+        self.assertEqual(
+            first_inspection["fenceDigest"],
+            second_inspection["fenceDigest"],
+        )
+        self.assertRegex(first_inspection["fenceDigest"], r"^[0-9a-f]{64}$")
+        self.assertTrue(
+            voice_capture_consent_fence_matches(
+                self.manager.host_lease_path,
+                self.manager.state_path,
+                expected_digest=first_inspection["fenceDigest"],
+                now=self.clock,
+            )
+        )
+        host_writes = [
+            call
+            for call in atomic_write.call_args_list
+            if call.args and call.args[0] == self.manager.host_lease_path
+        ]
+        self.assertEqual(len(host_writes), 2)
+        self.assertTrue(
+            all(call.kwargs.get("durable") is True for call in host_writes)
+        )
+
+    def test_fence_matcher_closes_revoke_publish_failure_window(self):
+        self.activate()
+        self.manager.publish_host_lease()
+        inspected = inspect_voice_capture_host_lease(
+            self.manager.host_lease_path,
+            now=self.clock,
+        )
+        expected_digest = inspected["fenceDigest"]
+
+        self.assertTrue(
+            voice_capture_consent_fence_matches(
+                self.manager.host_lease_path,
+                self.manager.state_path,
+                expected_digest=expected_digest,
+                now=self.clock,
+            )
+        )
+
+        self.manager.begin_revoke(reason="user_revoked")
+
+        # Simulate a failed host-lease publish: the old signed active lease is
+        # still fresh, but the durable consent state is already revoking.
+        self.assertTrue(
+            inspect_voice_capture_host_lease(
+                self.manager.host_lease_path,
+                now=self.clock,
+            )["authorized"]
+        )
+        self.assertFalse(
+            voice_capture_consent_fence_matches(
+                self.manager.host_lease_path,
+                self.manager.state_path,
+                expected_digest=expected_digest,
+                now=self.clock,
+            )
+        )
+
+    def test_fence_matcher_fails_closed_for_bad_digest_or_state(self):
+        self.activate()
+        self.manager.publish_host_lease()
+        expected_digest = inspect_voice_capture_host_lease(
+            self.manager.host_lease_path,
+            now=self.clock,
+        )["fenceDigest"]
+
+        self.assertFalse(
+            voice_capture_consent_fence_matches(
+                self.manager.host_lease_path,
+                self.manager.state_path,
+                expected_digest="0" * 64,
+                now=self.clock,
+            )
+        )
+        self.manager.state_path.write_text("{", encoding="utf-8")
+        self.assertFalse(
+            voice_capture_consent_fence_matches(
+                self.manager.host_lease_path,
+                self.manager.state_path,
+                expected_digest=expected_digest,
+                now=self.clock,
+            )
+        )
+
     def test_host_lease_inspection_fails_closed_for_untrusted_or_stale_files(self):
         self.activate()
         valid = self.manager.publish_host_lease()
@@ -695,6 +922,7 @@ class VoiceCaptureConsentTests(unittest.TestCase):
                 path.write_text(json.dumps(payload), encoding="utf-8")
                 result = inspect_voice_capture_host_lease(path, now=self.clock)
                 self.assertFalse(result["authorized"])
+                self.assertEqual(result["fenceDigest"], "")
                 self.assertTrue(result["reason"].startswith("voice_capture_consent_"))
 
         path.write_text("{", encoding="utf-8")
