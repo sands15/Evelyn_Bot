@@ -372,11 +372,22 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
         self.assertIn("build_local_docker_images.ps1", launcher)
         self.assertIn("& $dockerImageBuilder -ProjectRoot $projectRoot", launcher)
+        self.assertIn("$dockerBuildServices = @(", launcher)
+        self.assertIn("$dockerBuildServices += 'discord_bot'", launcher)
         self.assertIn(
-            "'bot_api',\n            'control_page',\n"
-            "            'discord_bot',\n            'vision'",
+            "& $dockerImageBuilder -ProjectRoot $projectRoot "
+            "-Services $dockerBuildServices",
             launcher,
         )
+        build_services = launcher[
+            launcher.index("$dockerBuildServices = @(") : launcher.index(
+                "if ($keepDiscordBot)", launcher.index("$dockerBuildServices = @(")
+            )
+        ]
+        self.assertIn("'bot_api'", build_services)
+        self.assertIn("'control_page'", build_services)
+        self.assertIn("'vision'", build_services)
+        self.assertNotIn("'discord_bot'", build_services)
         self.assertIn("Stop-BotApiForImageRefresh", launcher)
         self.assertIn("'--timeout', '60'", launcher)
         self.assertIn("$minecraftOwnerClaim", launcher)

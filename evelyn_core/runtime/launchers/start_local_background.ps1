@@ -510,24 +510,27 @@ function Start-DockerCore {
         'vision'
     )
 
+    $keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     if ($buildEnabled) {
         Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
         if (-not (Test-Path -LiteralPath $dockerImageBuilder -PathType Leaf)) {
             throw "Docker image builder not found: $dockerImageBuilder"
         }
-        & $dockerImageBuilder -ProjectRoot $projectRoot -Services @(
+        $dockerBuildServices = @(
             'bot_api',
             'control_page',
-            'discord_bot',
             'vision'
         )
+        if ($keepDiscordBot) {
+            $dockerBuildServices += 'discord_bot'
+        }
+        & $dockerImageBuilder -ProjectRoot $projectRoot -Services $dockerBuildServices
         Stop-BotApiForImageRefresh
     } else {
         Write-Host '[Evelyn] Reusing existing Docker images. Set EVELYN_DOCKER_BUILD=true to rebuild app images.'
     }
 
-    $keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     if (-not $keepDiscordBot) {
         Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('--profile', 'discord', 'stop', 'discord_bot')) -IgnoreFailure
     }
