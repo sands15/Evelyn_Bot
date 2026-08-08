@@ -237,13 +237,17 @@ async def deliver_proactive_followup_from_runtime(
                 required=(delivery_exposure_position is not None),
                 index_dir=deps.memory_index_dir,
             ):
+                playback_metrics: dict[str, Any] = {"meta": {}}
                 await deps.speak_answer(
                     vc,
                     answer,
                     turn_id=deps.current_turn_id(session_key),
                     session_key=session_key,
                     turn_scope=turn_scope,
+                    metrics=playback_metrics,
                 )
+                if playback_metrics["meta"].get("playback_completed") is False:
+                    raise RuntimeError("tts_playback_not_completed")
             if recovery_intent_id is not None:
                 deps.search_followup_recovery.complete(
                     recovery_intent_id
@@ -640,13 +644,17 @@ async def recover_search_followups_from_runtime(
                     ),
                     index_dir=deps.memory_index_dir,
                 ):
+                    playback_metrics: dict[str, Any] = {"meta": {}}
                     await deps.speak_answer(
                         voice_client,
                         answer,
                         turn_id=entry.get("turnId"),
                         session_key=session_key,
                         turn_scope=None,
+                        metrics=playback_metrics,
                     )
+                    if playback_metrics["meta"].get("playback_completed") is False:
+                        raise RuntimeError("tts_playback_not_completed")
                 recovery.complete(intent_id)
                 counts["redelivered"] += 1
                 continue

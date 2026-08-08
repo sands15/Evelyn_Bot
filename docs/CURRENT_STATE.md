@@ -136,6 +136,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     완료로 확정하지 않는다. Local streaming은 전역 누계가 아니라 이 턴의 exact
     queued/played chunk 수를 우선 사용한다. 고정 전달 실패와 user-only continuity
     경로로 보내며 single·streaming 양쪽을 검사한다.
+  - Voice search follow-up의 최초 전달과 재시작 복구도 같은 playback metrics를
+    소비한다. 무재생 최초 전달은 history/continuity를 commit하지 않고, 복구 중
+    무재생은 `delivery_uncertain`으로 보존해 자동 재전송하지 않는다.
   - 취소된 `TurnScope`에 current task가 늦게 attach되면 즉시 거부하고, 새
     background task는 coroutine 본문 실행 전에 취소한다. 음성 worker의 처리
     예외 로그는 exception type만 남기고 원문 메시지는 기록하지 않는다.
@@ -211,7 +214,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     내부 URL, filesystem 경로, token-like 문자열을 응답에 복사하지 않는다.
   - status와 task event의 오류 코드는 구문 검증하며 알 수 없는 문자열은
     surface별 고정 fallback으로 바꾼다.
-  - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다.
+  - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다. Router
+    fallback metadata는 `router_failed`, Local Bridge turn status는
+    `turn_pipeline_failed`만 보존한다.
   - Control Page legacy runtime service probe의 Bot API TCP/HTTP, Voyager,
     Codex와 전체 refresh 오류도 exact allowlist 코드만 공개한다. 최종 payload
     builder가 알 수 없는 error/login 문자열을 generic 코드로 바꾸므로 내부

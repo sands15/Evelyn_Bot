@@ -179,14 +179,18 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.logs, [])
 
     async def test_router_exception_returns_error_fallback(self) -> None:
-        self.router_result = RuntimeError("router down")
+        private_error = "PRIVATE_ROUTER_RESPONSE_CANARY"
+        self.router_result = RuntimeError(private_error)
 
         route, meta = await classify_llm_route_from_runtime("질문", deps=self.build_deps())
 
         self.assertEqual(route, "main_direct")
         self.assertEqual(meta["source"], "fallback")
-        self.assertIn("router down", meta["error"])
+        self.assertEqual(meta["error"], "router_failed")
         self.assertIn("route 실패", self.logs[0])
+        self.assertIn("errorType=RuntimeError", self.logs[0])
+        self.assertNotIn(private_error, repr(meta))
+        self.assertNotIn(private_error, repr(self.logs))
 
     async def test_invalid_router_result_returns_reasoned_fallback(self) -> None:
         self.router_result = ["not", "json"]

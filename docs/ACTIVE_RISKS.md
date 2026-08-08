@@ -251,6 +251,12 @@ streaming의 이 턴별 queued/played chunk 수를 투영하므로 부분 재생
 뒤늦게 attach되면 즉시 거부하고, 새 background task는 coroutine 본문 실행 전에
 취소한다. voice worker의 catch-all 로그에는 exception type만 남긴다.
 
+Voice search follow-up의 최초 전달과 재시작 복구도 별도 playback metrics를
+전달한다. 명시적 무재생은 최초 continuity를 commit하지 않으며, 복구에서는
+`delivery_uncertain`으로 남겨 자동 재전송하지 않는다. Router fallback metadata와
+Local Bridge turn status/log도 upstream 예외 원문 대신 고정 코드와 exception type만
+보존한다.
+
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,
 rollback protection, 양수 generation·session count와 이번 commit 성공

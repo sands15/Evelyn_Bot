@@ -205,6 +205,101 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_voice_recovery_keeps_unplayed_delivery_uncertain(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                journal = SearchFollowupRecoveryJournal(
+                    path=Path(temporary) / "active.json"
+                )
+                history = [
+                    {"role": "user", "content": "검색해줘"},
+                    {
+                        "role": "assistant",
+                        "content": "찾아보고 알려줄게",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
+                    {"role": "user", "content": "검색 질의"},
+                    {
+                        "role": "assistant",
+                        "content": "검색 결과 답변",
+                        "memoryReceiptRef": not_used_memory_receipt_ref(),
+                    },
+                ]
+                intent_id = journal.begin(
+                    guild_id=7,
+                    session_key="session-1",
+                    source="voice",
+                    turn_id="turn-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=None,
+                    reply_to_message_id=None,
+                    request_user_text="검색해줘",
+                    request_answer_text="찾아보고 알려줄게",
+                    query="검색 질의",
+                    continuity_generation=4,
+                )
+                journal.begin_delivery_prepare(
+                    intent_id,
+                    answer="검색 결과 답변",
+                    display_text="검색 결과 답변",
+                )
+                journal.mark_delivery_ready(
+                    intent_id,
+                    answer="검색 결과 답변",
+                    display_text="검색 결과 답변",
+                    continuity_generation=5,
+                )
+                playback_metrics: list[dict] = []
+
+                class Voice:
+                    @staticmethod
+                    def is_connected() -> bool:
+                        return True
+
+                class Bot:
+                    @staticmethod
+                    def get_guild(_guild_id):
+                        return SimpleNamespace(voice_client=Voice())
+
+                async def speak(_voice, _text, **kwargs):
+                    metrics = kwargs["metrics"]
+                    playback_metrics.append(metrics)
+                    metrics.setdefault("meta", {})["playback_completed"] = False
+
+                base = build_deps(
+                    get_conversation_history_result=history
+                )
+                deps = SearchFollowupRuntimeDeps(
+                    **{
+                        **base.__dict__,
+                        "bot": Bot(),
+                        "get_conversation_history": lambda **_kwargs: history,
+                        "format_display_text": lambda text, **_kwargs: text,
+                        "speak_answer": speak,
+                        "search_followup_recovery": journal,
+                        "continuity_status": lambda: {
+                            "checkpointGeneration": 5,
+                            "rollbackProtected": True,
+                        },
+                    }
+                )
+
+                recovered = await recover_search_followups_from_runtime(
+                    deps=deps
+                )
+
+                self.assertEqual(recovered["redelivered"], 0)
+                self.assertEqual(recovered["uncertain"], 1)
+                self.assertEqual(len(playback_metrics), 1)
+                self.assertEqual(
+                    journal.pending()[0]["phase"],
+                    "delivery_uncertain",
+                )
+
+        asyncio.run(scenario())
+
     def test_build_search_query_uses_provided_messages_without_history_lookup(self) -> None:
         history_calls: list[dict[str, int | str | None]] = []
         summary_path_calls: list[int | None] = []
@@ -321,6 +416,64 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             commit_targets,
             [("session", "turn")],
         )
+
+    def test_unplayed_voice_followup_is_not_committed(self) -> None:
+        events: list[str] = []
+        playback_metrics: list[dict] = []
+
+        class Voice:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+        class Bot:
+            @staticmethod
+            def get_guild(_guild_id):
+                return SimpleNamespace(voice_client=Voice())
+
+        async def speak(_voice, _text, **kwargs):
+            metrics = kwargs["metrics"]
+            playback_metrics.append(metrics)
+            metrics.setdefault("meta", {})["playback_completed"] = False
+
+        async def commit(*_args):
+            events.append("commit")
+            return durable_continuity_status(1)
+
+        base = build_deps()
+        deps = SearchFollowupRuntimeDeps(
+            **{
+                **base.__dict__,
+                "bot": Bot(),
+                "speak_answer": speak,
+                "append_history": lambda *_args, **_kwargs: events.append(
+                    "history"
+                ),
+                "schedule_memory_update": lambda *_args, **_kwargs: events.append(
+                    "memory"
+                ),
+                "commit_session_continuity": commit,
+            }
+        )
+
+        delivered = asyncio.run(
+            deliver_proactive_followup_from_runtime(
+                1,
+                "query",
+                "answer",
+                deps=deps,
+                session_key="session",
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                channel_id=None,
+                source="voice",
+            )
+        )
+
+        self.assertFalse(delivered)
+        self.assertEqual(len(playback_metrics), 1)
+        self.assertEqual(events, [])
 
     def test_partial_commit_status_logs_failure_and_keeps_turn(
         self,

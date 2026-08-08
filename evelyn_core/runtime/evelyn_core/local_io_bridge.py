@@ -1788,13 +1788,17 @@ class LocalIoBridge:
             raise
         except Exception as exc:
             self.runtime_errors.record("turn_pipeline_failed", exc)
-            self.last_error = repr(exc)
+            self.last_error = "turn_pipeline_failed"
             self._emit_validation(
                 "error",
                 meta=meta,
                 errorCode=type(exc).__name__,
             )
-            print(f"[LOCAL BRIDGE] segment_failed err={exc!r}", flush=True)
+            print(
+                "[LOCAL BRIDGE] segment_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
         finally:
             total_ms = (time.perf_counter() - turn_started) * 1000.0
             self.last_latency = {

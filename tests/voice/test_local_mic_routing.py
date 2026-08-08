@@ -428,6 +428,34 @@ class LocalMicRoutingTests(unittest.TestCase):
         bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
         self.assertEqual(bridge.last_latency["ttsMs"], 0.0)
 
+    def test_local_io_bridge_redacts_turn_pipeline_error_from_status_and_log(self) -> None:
+        private_error = "PRIVATE_STT_RESPONSE_CANARY"
+
+        async def scenario() -> tuple[LocalIoBridge, list[str]]:
+            bridge = LocalIoBridge()
+            bridge.mic_enabled = True
+            bridge.mic_capture_stopped = False
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            bridge._transcribe = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError(private_error)
+            )
+            with patch("builtins.print") as print_mock:
+                await bridge._handle_segment(b"pcm", {"source": "test"})
+            rendered_logs = [
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            ]
+            return bridge, rendered_logs
+
+        bridge, rendered_logs = asyncio.run(scenario())
+
+        self.assertEqual(bridge.last_error, "turn_pipeline_failed")
+        self.assertTrue(
+            any("segment_failed errorType=RuntimeError" in line for line in rendered_logs)
+        )
+        self.assertNotIn(private_error, repr(rendered_logs))
+        self.assertEqual(bridge._post_status.await_count, 2)  # type: ignore[union-attr]
+
     def test_local_io_bridge_tts_warmup_retries_until_ready(self) -> None:
         bridge = LocalIoBridge()
         bridge.session = object()

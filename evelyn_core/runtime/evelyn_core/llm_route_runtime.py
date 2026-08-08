@@ -197,11 +197,14 @@ async def classify_llm_route_from_runtime(
     except MemoryDeletionJournalIntegrityError:
         raise
     except Exception as exc:
-        deps.log(f"[ROUTER] route 실패 fallback 사용: {exc!r}")
+        deps.log(
+            "[ROUTER] route 실패 fallback 사용: "
+            f"errorType={type(exc).__name__}"
+        )
         return fallback_route, {
             "selected": fallback_route,
             "source": "fallback",
-            "error": deps.clean_text(repr(exc))[:120],
+            "error": "router_failed",
             "execution_budget": budget.to_dict(),
         }
 
