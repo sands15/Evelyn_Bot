@@ -30,9 +30,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   whole-turn·inter-agent exposure는 final sink까지 clear를 막고 goal/status의
   execution·gate·observation 원문은 저장하지 않는다.
   core deletion/edit broker·receipt/ACK, recovery exact correlation과 legacy cleanup은 P1이다.
-- 2026-08-08~09 memory 삭제는 Busy fallback과 2초 mutation admission을 유지하고, UI는 적용된
-  edit·provenance cleanup 503을 강제 재조회한 뒤 자동 재시도하지 않는다. replica 검증은
-  통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 남은 P1이다.
+- 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
+  edit·provenance·post-tombstone cleanup 503은 강제 재조회 뒤 자동 재시도하지 않는다.
+  replica 검증은 통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 P1이다.
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
@@ -56,8 +56,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
 - Local Voice는 단일 capture owner, durable reservation/claim, capture-consent fence와
   cross-process attempt lease로 재시작·경쟁·중복 실행을 fail-closed 처리한다.
-- validation GET은 consent 정리 뒤 현재 상태를 반환하고, Runtime Health probe는 manifest timeout을 지킨다.
-  실패한 Discord reconnect는 stale client를 저장하지 않고, 미전달 음성 검색 답변은 연결 복구까지 보존한다.
+- validation GET은 현재 consent를 반환하고 STT validation 로그는 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
+  Discord reconnect/search recovery와 playback callback timeout은 stale client·영구 room-lock을 남기지 않는다.
 - validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반 history에 남기지 않는다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.

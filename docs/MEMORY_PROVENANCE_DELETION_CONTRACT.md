@@ -818,6 +818,9 @@ hot context에는 deletion journal과 chain head 각각의 수정 시각·크기
 - tombstone은 내구성 있게 기록됐지만 파생 정리가 남음:
   HTTP 503, `ok=false`, `error=memory_delete_cleanup_required`,
   `tombstoned=true`, `cleanupErrors=[...]`
+- tombstone 뒤 index/hot-context 정리가 integrity-class 오류를 내더라도 deletion
+  ledger의 최종 재검증이 통과하면 위 cleanup 결과를 유지한다. ledger 자체의 최종
+  재검증이 실패하면 sibling field 없이 아래 exact integrity 503으로 축약한다.
 - deletion-ledger 무결성/내구 commit 실패로 분류되기 전의 예기치 않은 사전
   실패: HTTP 500, `error=memory_delete_failed`
 - 정상 lock 경쟁으로 reader/writer lease를 즉시 획득하지 못함:

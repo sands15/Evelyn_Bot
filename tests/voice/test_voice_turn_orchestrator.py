@@ -1,4 +1,5 @@
 ﻿import sys
+import asyncio
 import unittest
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     prepare_voice_reply_for_delivery,
     run_locked_voice_reply_delivery,
 )
+from evelyn_core.tts_playback import play_audio_source  # noqa: E402
 from evelyn_core.voice_pipeline import (  # noqa: E402
     DeliveryPlan,
     TranscriptResult,
@@ -34,6 +36,108 @@ def split_test_tts_chunks(text: str, *, force: bool = False) -> tuple[list[str],
 
 
 class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_playback_callback_releases_room_lock_and_finalizes_failure(
+        self,
+    ) -> None:
+        class FakeVc:
+            stop_count = 0
+
+            def __init__(self) -> None:
+                self.source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: Any) -> None:
+                self.source = source
+                return None
+
+            def stop(self) -> None:
+                self.stop_count += 1
+
+        vc = FakeVc()
+        lock = asyncio.Lock()
+        finalized: list[dict[str, Any]] = []
+        failures: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        metrics: dict[str, Any] = {"meta": {}}
+        reply = VoiceReplyRequest(
+            transcript=None,
+            segment=None,
+            gate_mode="wake_entry",
+            raw_user_text="이블린",
+            prompt_user_text="이블린",
+            history_user_text="이블린",
+            wake_only_turn=True,
+            turn_type="wake_only",
+            selected_path="canned_wake_reply",
+            reply_source="canned_wake_reply",
+            topic_id="topic-1",
+        )
+
+        async def speak_answer(
+            voice_client: Any,
+            _answer: str,
+            **_kwargs: Any,
+        ) -> None:
+            await play_audio_source(
+                voice_client,
+                object(),
+                timeout_sec=0.01,
+            )
+
+        result = await asyncio.wait_for(
+            run_locked_voice_reply_delivery(
+                room_session_key="room-1",
+                lock=lock,
+                get_voice_client=lambda: vc,
+                member=type(
+                    "Member",
+                    (),
+                    {"id": 42, "display_name": "tester"},
+                )(),
+                voice_reply=reply,
+                canned_wake_reply="응, 듣고 있어.",
+                accepted_turn_id="turn-timeout",
+                session_key="session-1",
+                guild_id=7,
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                metrics=metrics,
+                turn_scope="scope",
+                segment_id=1,
+                gate_mode="wake_entry",
+                on_final_answer=None,
+                speak_answer=speak_answer,
+                ask_llm_and_speak_streaming=lambda *_args, **_kwargs: None,
+                record_voice_pipeline_failure=(
+                    lambda *args, **kwargs: failures.append((args, kwargs))
+                ),
+                finalize_voice_reply_side_effects=(
+                    lambda **kwargs: finalized.append(kwargs)
+                ),
+                log_voice_stage=lambda *_args, **_kwargs: None,
+                strip_omnivoice_tags=lambda text: text,
+                report_waiting_on_lock=None,
+                report_delivery_error=lambda _exc: None,
+            ),
+            timeout=0.5,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(vc.stop_count, 1)
+        self.assertFalse(lock.locked())
+        await asyncio.wait_for(lock.acquire(), timeout=0.1)
+        lock.release()
+        self.assertEqual(len(finalized), 1)
+        self.assertFalse(finalized[0]["delivery_succeeded"])
+        self.assertEqual(finalized[0]["failure_code"], "voice_delivery_failed")
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0][0], "tts_playback_failed")
+
     async def test_missing_voice_connection_durably_routes_unanswered_turn(
         self,
     ) -> None:

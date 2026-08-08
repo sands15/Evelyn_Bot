@@ -2098,13 +2098,21 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
   해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
   실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.
+- Discord playback은 prior source와 `after` callback을 기존 `OMNIVOICE_TIMEOUT_SEC`
+  (기본 180초)로 제한한다. timeout은 같은 source가 current일 때만 voice client를 정지하고
+  기존 failure 경로로 전파되어 room lock과 user-only continuity를 정확히 한 번 정리한다.
+- Local Bridge는 validation 발화를 STT 서비스에 보낼 때 content-free
+  `validation_bound=true`만 전달한다. session/attempt ID는 보내지 않으며 STT 완료
+  로그는 transcript 대신 길이 marker를 기록한다. 일반 발화는 `false`를 명시한다.
 - 변경 파일 집중 80개와 voice 전체 610개(skip 5)가 통과했다. 실행 중 image를
   교체하거나 마이크·Discord를
   시작하지 않았다. 읽기 전용 preflight에서 active validation session 없음, mic physical
   OFF, 24 kHz mono int16 output ready, OmniVoice warmup 완료와 오류 0을 확인했다.
 - search follow-up 22개와 Discord I/O 전체 125개도 통과했다.
+- 최신 offline 경계 검증은 memory 전체 293개(skip 1), voice 전체 615개(skip 5),
+  deletion HTTP/middleware 35개와 Python compile·diff check를 통과했다.
 
-## 2026-08-09 Control Page applied-cleanup 경계
+## 2026-08-09 Memory applied-cleanup 경계
 
 - memory edit, provenance backfill과 correction/undo가 파일 commit 뒤 후처리에서 실패한
   503을 일반 `api_error`로 버리지 않는다. 세 fixed cleanup code만 공개 allowlist에
@@ -2112,4 +2120,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - edit/backfill/manual/correction/undo는 적용된 cleanup code에서 4개 memory snapshot을
   무효화하고 강제 재조회한 뒤 적용 사실과 자동 재시도 금지를 표시한다. busy와
   integrity 503은 적용 성공으로 오인하지 않는다.
+- 삭제 tombstone과 source redaction/unlink 뒤 index 또는 hot-context 정리가
+  integrity-class 오류를 내면, deletion ledger의 최종 재검증이 통과한 경우만
+  `memory_delete_cleanup_required`, `tombstoned=true`를 보존한다. ledger 자체가
+  손상됐으면 기존 exact/content-free integrity 503으로 fail-closed한다.
 - UI 전체 178개와 diff check가 통과했다. 실행 중 Control Page image는 교체하지 않았다.

@@ -8539,10 +8539,10 @@ def delete_memory_vault_user_note(
     try:
         version = sync_memory_vault_index(root=root)
     except MemoryDeletionJournalIntegrityError as exc:
-        return {
-            "ok": False,
-            "error": memory_deletion_journal_error_code(exc),
-        }
+        version = 0
+        cleanup_errors.append(
+            memory_deletion_journal_error_code(exc)
+        )
     except Exception:
         version = 0
         cleanup_errors.append("memory_delete_index_cleanup_failed")
@@ -8560,10 +8560,9 @@ def delete_memory_vault_user_note(
     try:
         refresh_memory_hot_context(root=root)
     except MemoryDeletionJournalIntegrityError as exc:
-        return {
-            "ok": False,
-            "error": memory_deletion_journal_error_code(exc),
-        }
+        cleanup_errors.append(
+            memory_deletion_journal_error_code(exc)
+        )
     except Exception:
         cleanup_errors.append("memory_delete_hot_context_cleanup_failed")
     if cleanup_errors:

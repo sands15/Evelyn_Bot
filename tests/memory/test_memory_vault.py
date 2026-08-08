@@ -23,6 +23,7 @@ from evelyn_core.assistant_contracts import (  # noqa: E402
 from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalBusyError,
+    MemoryDeletionJournalIntegrityError,
 )
 from evelyn_core.conversation_memory_exposure import (  # noqa: E402
     filter_conversation_history_for_memory_exposure,
@@ -2424,6 +2425,68 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertFalse(prompt_block_exists_after_reconcile)
         self.assertNotIn(title, recall.context_text)
         self.assertNotIn(body, recall.context_text)
+
+    def test_post_tombstone_cleanup_integrity_reports_applied_cleanup(
+        self,
+    ) -> None:
+        for cleanup_target in (
+            "_reconcile_memory_derivation_revocations",
+            "refresh_memory_hot_context",
+        ):
+            with self.subTest(cleanup_target=cleanup_target):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    private_detail = (
+                        "PRIVATE post-delete cleanup integrity canary"
+                    )
+                    path = write_memory_vault_note(
+                        note_type="project",
+                        title="Post-delete cleanup integrity result",
+                        body="private body",
+                        source="control-page-user",
+                        root=root,
+                    )
+                    note = parse_memory_note(path)
+                    preview = preview_memory_vault_user_note_deletion(
+                        note.note_id,
+                        reason="privacy_request",
+                        root=root,
+                    )
+
+                    with patch.object(
+                        memory_vault_module,
+                        cleanup_target,
+                        side_effect=MemoryDeletionJournalIntegrityError(
+                            private_detail
+                        ),
+                    ):
+                        result = delete_memory_vault_user_note(
+                            note.note_id,
+                            preview["confirmToken"],
+                            reason="privacy_request",
+                            root=root,
+                        )
+
+                    source_exists = path.exists()
+                    deletion_current = memory_note_was_deleted(
+                        note.note_id,
+                        root=root,
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"],
+                    "memory_delete_cleanup_required",
+                )
+                self.assertTrue(result["tombstoned"])
+                self.assertTrue(result["sourceFileDeleted"])
+                self.assertFalse(source_exists)
+                self.assertTrue(deletion_current)
+                self.assertIn(
+                    "memory_deletion_journal_integrity_failed",
+                    result["cleanupErrors"],
+                )
+                self.assertNotIn(private_detail, str(result))
 
     def test_deleted_daily_note_resumes_with_new_identity(
         self,

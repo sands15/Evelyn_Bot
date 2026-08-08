@@ -34,6 +34,7 @@ from .config import (
     OMNIVOICE_STREAM_FOLLOWUP_STRATEGY,
     OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS,
     OMNIVOICE_STREAM_STRATEGY,
+    OMNIVOICE_TIMEOUT_SEC,
     TTS_CHUNK_TAIL_SILENCE_MS,
 )
 
@@ -1788,11 +1789,34 @@ async def play_audio_source(
     on_play_start: Callable[[], None] | None = None,
     validation_metadata: dict[str, Any] | None = None,
     trace_payload: dict[str, Any] | None = None,
+    timeout_sec: float = OMNIVOICE_TIMEOUT_SEC,
 ) -> bool:
-    await wait_until_not_playing(vc)
-
     payload = dict(trace_payload or {})
     payload.setdefault("source_type", type(source).__name__)
+    timeout_sec = max(0.001, float(timeout_sec))
+    prior_source = getattr(vc, "source", None)
+    try:
+        await asyncio.wait_for(
+            wait_until_not_playing(vc),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        if (
+            prior_source is not None
+            and getattr(vc, "source", None) is prior_source
+        ):
+            with contextlib.suppress(Exception):
+                vc.stop()
+        error = TimeoutError("discord_playback_idle_timeout")
+        _log_turn_event(
+            "discord_playback_exception",
+            **merge_log_event_payload(
+                explicit={"stage": "wait_until_idle", "error": repr(error)},
+                extra=payload,
+            ),
+        )
+        raise error from None
+
     if not validation_attempt_binding_is_current(
         validation_metadata,
         surface="discord",
@@ -1814,7 +1838,20 @@ async def play_audio_source(
             on_play_start()
         _log_turn_event("discord_playback_play_invoked", **payload)
         vc.play(source, after=after_play)
-        await done.wait()
+        await asyncio.wait_for(done.wait(), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        if getattr(vc, "source", None) is source:
+            with contextlib.suppress(Exception):
+                vc.stop()
+        error = TimeoutError("discord_playback_callback_timeout")
+        _log_turn_event(
+            "discord_playback_exception",
+            **merge_log_event_payload(
+                explicit={"stage": "after_play", "error": repr(error)},
+                extra=payload,
+            ),
+        )
+        raise error from None
     except Exception as exc:
         _log_turn_event(
             "discord_playback_exception",

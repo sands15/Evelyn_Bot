@@ -907,6 +907,56 @@ class LocalMicRoutingTests(unittest.TestCase):
                 },
             )
 
+    def test_validation_stt_request_marks_redaction_without_binding_ids(
+        self,
+    ) -> None:
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+            async def json(self, *, content_type=None) -> dict:
+                _ = content_type
+                return {"text": "recognized"}
+
+        class RecordingSession:
+            def __init__(self) -> None:
+                self.payloads: list[dict] = []
+
+            def post(self, _url: str, **kwargs):
+                self.payloads.append(dict(kwargs["json"]))
+                return FakeResponse()
+
+        async def scenario(validation: dict | None) -> dict:
+            bridge = LocalIoBridge()
+            session = RecordingSession()
+            bridge.session = session  # type: ignore[assignment]
+            bridge.active_validation = validation
+            self.assertEqual(
+                await bridge._transcribe(b"\x00\x00" * 320),
+                "recognized",
+            )
+            return session.payloads[0]
+
+        validation_payload = asyncio.run(
+            scenario(
+                {
+                    "validationSessionId": "private-session-id",
+                    "validationAttemptId": "private-attempt-id",
+                }
+            )
+        )
+        ordinary_payload = asyncio.run(scenario(None))
+
+        self.assertIs(validation_payload["validation_bound"], True)
+        self.assertIs(ordinary_payload["validation_bound"], False)
+        self.assertNotIn("validationSessionId", validation_payload)
+        self.assertNotIn("validationAttemptId", validation_payload)
+
     def test_local_mic_short_segments_are_reported_as_rejected(self) -> None:
         captured: list[tuple[bytes, dict]] = []
         service = LocalMicCaptureService(

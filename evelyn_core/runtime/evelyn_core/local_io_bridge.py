@@ -1821,6 +1821,7 @@ class LocalIoBridge:
             "sampling_rate": TARGET_RATE,
             "stage": "local_bridge",
             "language": "Korean",
+            "validation_bound": bool(self.active_validation),
         }
         assert self.session is not None
         async with self.session.post(f"{STT_SERVICE_URL}/v1/stt/transcribe", json=payload, timeout=aiohttp.ClientTimeout(total=45)) as resp:

@@ -1290,6 +1290,110 @@ class TtsPlaybackContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "boom"):
             asyncio.run(runner())
 
+    def test_play_audio_source_stops_stuck_prior_playback_on_timeout(self) -> None:
+        class FakeVc:
+            stop_count = 0
+
+            def __init__(self) -> None:
+                self.source = object()
+
+            def is_playing(self) -> bool:
+                return True
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, _source, *, after) -> None:
+                raise AssertionError("new playback must not start while the prior source is stuck")
+
+            def stop(self) -> None:
+                self.stop_count += 1
+
+        vc = FakeVc()
+        events: list[tuple[str, dict]] = []
+        configure_tts_playback_logging(lambda event, **payload: events.append((event, payload)))
+
+        with self.assertRaisesRegex(TimeoutError, "discord_playback_idle_timeout"):
+            asyncio.run(play_audio_source(vc, object(), timeout_sec=0.01))  # type: ignore[arg-type]
+
+        self.assertEqual(vc.stop_count, 1)
+        self.assertEqual(events[-1][0], "discord_playback_exception")
+        self.assertEqual(events[-1][1]["stage"], "wait_until_idle")
+
+    def test_play_audio_source_stops_when_after_callback_is_lost(self) -> None:
+        class FakeVc:
+            stop_count = 0
+
+            def __init__(self) -> None:
+                self.source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source, *, after) -> None:
+                self.source = source
+                return None
+
+            def stop(self) -> None:
+                self.stop_count += 1
+
+        vc = FakeVc()
+        events: list[tuple[str, dict]] = []
+        configure_tts_playback_logging(lambda event, **payload: events.append((event, payload)))
+
+        with self.assertRaisesRegex(TimeoutError, "discord_playback_callback_timeout"):
+            asyncio.run(play_audio_source(vc, object(), timeout_sec=0.01))  # type: ignore[arg-type]
+
+        self.assertEqual(vc.stop_count, 1)
+        self.assertEqual(events[-1][0], "discord_playback_exception")
+        self.assertEqual(events[-1][1]["stage"], "after_play")
+
+    def test_late_timeout_does_not_stop_newer_playback(self) -> None:
+        replacement = object()
+
+        class FakeVc:
+            stop_count = 0
+
+            def __init__(self) -> None:
+                self.source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source, *, after) -> None:
+                self.source = source
+                asyncio.get_running_loop().call_soon(
+                    setattr,
+                    self,
+                    "source",
+                    replacement,
+                )
+
+            def stop(self) -> None:
+                self.stop_count += 1
+
+        vc = FakeVc()
+        with self.assertRaisesRegex(
+            TimeoutError,
+            "discord_playback_callback_timeout",
+        ):
+            asyncio.run(
+                play_audio_source(
+                    vc,
+                    object(),  # type: ignore[arg-type]
+                    timeout_sec=0.01,
+                )
+            )
+
+        self.assertIs(vc.source, replacement)
+        self.assertEqual(vc.stop_count, 0)
+
     def test_speech_chunker_dispatches_on_natural_sentence_end(self) -> None:
         chunker = SpeechChunker()
 

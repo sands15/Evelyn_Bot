@@ -559,6 +559,13 @@ barge-in과 Discord 채널 E2E다.
 붙인다. 읽기 전용 live preflight는 active session 없음, mic physical OFF, output ready,
 OmniVoice warmup 완료와 오류 0을 확인했지만 실제 재생·캡처는 수행하지 않았다.
 
+같은 source에서 Discord playback의 prior-source 대기와 `after` callback 유실은 기존
+`OMNIVOICE_TIMEOUT_SEC`(기본 180초)로 제한한다. 만료 시 같은 source가 current일 때만
+정지하고 기존 failure finalizer가 room lock과 user-only continuity를 회수한다. Local
+Bridge의 validation STT 요청도 content-free `validation_bound`만 전달해 STT 완료
+로그의 transcript를 길이 marker로 바꾸며 session/attempt ID는 전송하지 않는다. 남은 위험은 source timeout이나
+redaction 경계가 아니라 실제 장치·채널에서의 청취 품질과 장시간 동작 증거다.
+
 2026-08-02 source 경계에서는 Local I/O Bridge가 캡처를 시작하기 전에
 process-lifetime OS file lock을 fail-closed로 획득한다. Windows Supervisor는
 `KILL_ON_JOB_CLOSE` Job Object에 생성한 exact Popen handle을 넣고, 동시에
@@ -948,6 +955,11 @@ busy와 confirm token 작업은 재실행하지 않는다. 2초를 넘는 경합
 고정 public code로 구분해 4개 snapshot을 무효화하고 강제 재조회한 뒤 적용 사실과
 자동 재시도 금지를 표시한다. 남은 공백은 이 busy 전이의 live 확인과 64 MiB journal
 상한의 검증 가능한 rotation이다.
+
+삭제도 tombstone과 source redaction/unlink가 끝난 뒤 index/hot-context cleanup이
+integrity-class 오류를 내면 ledger 최종 재검증이 성공한 경우에만
+`memory_delete_cleanup_required`, `tombstoned=true`로 보고한다. 실제 ledger 손상은
+최종 guard에서 다시 raise되어 sibling field 없는 exact integrity 503으로 유지된다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
