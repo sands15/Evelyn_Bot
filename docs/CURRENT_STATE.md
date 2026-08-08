@@ -1,7 +1,7 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-08-08 KST
+Last reviewed: 2026-08-09 KST
 Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
@@ -2035,9 +2035,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 기본 `voyager` Compose profile과 launcher에서 Codex dependency, token mount와
   credential preflight를 제거했다. legacy Voyager runner도 backend 기본값 `local`을
   따르며 Python client는 HTTP health나 spawn 전에 반환한다.
-- Mindcraft Codex adapter는 enable gate를 token read·fetch보다 먼저 검사한다. transient
-  local memory-summary 실패는 기존 summary를 반환해 잘라낸 history chunk를 계속
-  archive하고, classifier 실패는 exact `ignore`로 닫는다.
+- Mindcraft Codex adapter는 enable gate를 token read·fetch보다 먼저 검사하고,
+  classifier 실패는 exact `ignore`로 닫는다. 2026-08-09 history 경계가 free-text
+  summary와 raw archive 자체를 제거한 현재 상태는 다음 절에 기록한다.
 - 선택적 `codex-gateway` profile만 `auth.json` 단일 read-only mount와 빈 `/workspace`를
   사용한다. custom shell·host-native gateway는 제거했다. pinned image에서 tool registry와
   secret canary가 검증되기 전에는 `toolAccessVerified=false`, `backendReady=false`, action
@@ -2048,3 +2048,40 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   3,136개(skip 22), JavaScript·PowerShell·JSON 구문과 overlay patch 적용 검사가
   통과했다. Node 행동 suite는 다음 Mindcraft image build의 blocking gate로 연결했지만
   이번에는 image build를 실행하지 않았다.
+
+## 2026-08-09 Mindcraft ephemeral history와 process-local sink 경계
+
+- 기본 history는 `mindcraft.history.ephemeral.v1` bounded turn과 process-local monotonic
+  generation만 유지한다. `save()`는 content-free checkpoint 상태만 반환하고 디스크에
+  대화나 summary를 쓰지 않는다. `load_memory=false`이며 Compose의
+  `bot_memory/mindcraft` mount도 제거됐다.
+- 기존 `memory.json`, `histories/*.json`과 legacy log는 현재 runtime이 읽거나 새 generation으로
+  rebase하거나 삭제하지 않는다. 따라서 legacy byte cleanup·이관이나 restart restore를
+  구현한 것으로 간주하지 않는다.
+- `History.getHistory()`는 generation snapshot을 붙인다. outer exposure는
+  `handleMessage`의 첫 await 전부터 LLM, command, history save와 실제 awaited
+  route/action sink가 끝날 때까지 유지된다. inter-agent pause/classifier도 exposure 안에서
+  끝내고 예약 timer/queue는 clear에서 폐기한다. 중간 generation 변경은 stale 결과로
+  버리고, exposure 중 `!clearChat`은 `mindcraft_history_busy`로 닫힌다.
+- 성공한 clear는 turns·summary placeholder·`last_sender`, planner recovery/action-mode와
+  self-prompt, goal-manager의 recent execution/gate/observation 상태를 함께 초기화한 뒤
+  process-local generation을 올린다. goal state/status는 raw command·result·gate reason과
+  observation argument를 저장하지 않고 enum code·count/boolean만 남긴다. runtime status의
+  blocked chat/error도 fixed code이며 legacy raw projection은 재사용하지 않는다.
+- planner recovery persistence 함수는 no-op이고 Compose도 planner state path를 제공하지
+  않는다. recovery outcome correlation은 command code 단위라 같은 command의 서로 다른
+  target을 exact하게 구별하지 못하는 P1이 남는다.
+- Google translation 대신 local identity translator를 사용해 Minecraft chat을 제3자
+  번역 서비스로 보내지 않는다. Python owner는 Node child stdout/stderr를 `DEVNULL`로
+  연결한다. 이는 새 child 원문 log 생성을 막지만 기존 data/log를 삭제했다는 뜻은 아니다.
+- Python status owner와 Node writer는 legacy/free-text 상태를 재사용하지 않고 exact
+  content-free projection만 공개·기록한다. 검증은 Mindcraft 25개, Minecraft 227개(skip 11),
+  Voyager 24개, runtime 782개(skip 4), CI-equivalent 전체 3,138개(skip 22)를 통과했다.
+- 이 증분은 source-level process-local 경계다. Docker image build, image 내부 full Node suite,
+  실제 Minecraft login·action과 live clear는 수행하지 않았다. durable rollback-safe clear,
+  cross-process persistence와 core Evelyn deletion/edit exposure도 구현되지 않았다.
+- 남은 P1은 fixed-route authenticated Bot API broker가 local/router 요청을 기존
+  `memory_exposure_request`에 연결하고 delivery ACK까지 lease를 유지하며, assistant turn을
+  strict compact receipt와 함께 구조화하는 것이다. legacy data/log cleanup은 사용자 승인
+  migration으로만 수행한다. `!clearChat`은 대화 유래 상태 reset이며 자율 목표의 영구 정지는
+  `!endGoal`을 사용한다.

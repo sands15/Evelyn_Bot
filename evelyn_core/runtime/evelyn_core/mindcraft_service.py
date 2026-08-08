@@ -129,7 +129,6 @@ STATUS_PATH = Path(
     or RUNTIME_ARTIFACTS_ROOT / "mindcraft" / "status.json"
 )
 GOAL_STATE_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "voyager_goal_state.json"
-LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "mindcraft.log"
 MINDCRAFT_ROOT = Path(_MINDCRAFT_CONFIG["MINDCRAFT_ROOT"])
 PROFILE_PATH = Path(
     _MINDCRAFT_CONFIG["MINDCRAFT_AGENT_PROFILE"]
@@ -150,6 +149,144 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+_MINDCRAFT_LAST_ERROR_CODES = frozenset(
+    {
+        "minecraft_disconnected",
+        "minecraft_kicked",
+        "minecraft_runtime_error",
+        "mindcraft_auto_restart_failed",
+    }
+)
+_MINDCRAFT_BLOCKED_COMMAND_CODES = frozenset(
+    {
+        "outbound_chat_disabled",
+        "outbound_whisper_disabled",
+        "slash_command_blocked",
+    }
+)
+
+
+def _project_mindcraft_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the small public/status projection, never legacy free text."""
+
+    projected: dict[str, Any] = {}
+    for key in (
+        "position",
+        "health",
+        "hunger",
+        "food_saturation",
+        "inventory",
+        "hostiles_nearby",
+        "last_death_event",
+    ):
+        if key in payload:
+            projected[key] = deepcopy(payload[key])
+    projected["runtime"] = "mindcraft"
+    for key in ("running", "connected"):
+        if isinstance(payload.get(key), bool):
+            projected[key] = payload[key]
+    for key in ("agent_name", "connection_state", "phase"):
+        value = _safe_action_code(payload.get(key), "")
+        if value:
+            projected[key] = value
+    for key in ("updated_at", "last_blocked_command_at"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            projected[key] = value
+    blocked_count = payload.get("blocked_command_count")
+    if (
+        isinstance(blocked_count, int)
+        and not isinstance(blocked_count, bool)
+        and blocked_count >= 0
+    ):
+        projected["blocked_command_count"] = blocked_count
+
+    blocked_code = payload.get("last_blocked_command")
+    projected["last_blocked_command"] = (
+        blocked_code
+        if isinstance(blocked_code, str)
+        and blocked_code in _MINDCRAFT_BLOCKED_COMMAND_CODES
+        else None
+    )
+    error_code = payload.get("last_error")
+    projected["last_error"] = (
+        error_code
+        if isinstance(error_code, str)
+        and error_code in _MINDCRAFT_LAST_ERROR_CODES
+        else None
+    )
+
+    task_contract = payload.get("task_contract")
+    if isinstance(task_contract, dict):
+        mode = task_contract.get("goal_manager_mode")
+        projected["task_contract"] = {
+            "schema": (
+                MINDCRAFT_TASK_CONTRACT_SCHEMA
+                if task_contract.get("schema") == MINDCRAFT_TASK_CONTRACT_SCHEMA
+                else ""
+            ),
+            "ready": task_contract.get("ready") is True,
+            "goal_manager_mode": (
+                mode
+                if isinstance(mode, str) and mode in {"off", "shadow", "gated"}
+                else ""
+            ),
+            "command_gate": (
+                "evelyn_goal_manager"
+                if task_contract.get("command_gate") == "evelyn_goal_manager"
+                else ""
+            ),
+            "effect_verification": (
+                "explicit_postcondition"
+                if task_contract.get("effect_verification")
+                == "explicit_postcondition"
+                else ""
+            ),
+        }
+
+    goal_manager = payload.get("goal_manager")
+    if isinstance(goal_manager, dict):
+        mode = goal_manager.get("mode")
+        autonomy_state = goal_manager.get("autonomy_state")
+        pause_reason = goal_manager.get("manual_pause_reason")
+        subgoal = goal_manager.get("current_subgoal")
+        subgoal_id = (
+            _safe_action_code(subgoal.get("id"), "")
+            if isinstance(subgoal, dict)
+            else ""
+        )
+        projected["goal_manager"] = {
+            "mode": (
+                mode
+                if isinstance(mode, str) and mode in {"off", "shadow", "gated"}
+                else ""
+            ),
+            "autonomy_state": (
+                autonomy_state
+                if isinstance(autonomy_state, str)
+                and autonomy_state in {"active", "manual_pause", "completed"}
+                else ""
+            ),
+            "manual_pause_reason": (
+                pause_reason
+                if isinstance(pause_reason, str)
+                and pause_reason
+                in {"user_end_goal_command", "world_effect_candidate_published"}
+                else None
+            ),
+            "current_subgoal": {"id": subgoal_id} if subgoal_id else None,
+        }
+    return projected
+
+
+def _read_mindcraft_status() -> dict[str, Any]:
+    return _project_mindcraft_telemetry(_read_json(STATUS_PATH))
+
+
+def _write_mindcraft_status(payload: dict[str, Any]) -> None:
+    _write_json(STATUS_PATH, _project_mindcraft_telemetry(payload))
 
 
 def _process_birth_identity(pid: int) -> str | None:
@@ -482,7 +619,6 @@ class MindcraftRuntime:
         process_identity_path: Path | None = None,
     ) -> None:
         self._process: subprocess.Popen[str] | None = None
-        self._log_handle: Any | None = None
         self._lock = threading.RLock()
         self.process_identity_path = Path(
             process_identity_path or MINDCRAFT_PROCESS_IDENTITY_PATH
@@ -695,7 +831,7 @@ class MindcraftRuntime:
             "auto_open_ui": False,
             "base_profile": "survival",
             "profiles": [str(PROFILE_PATH)],
-            "load_memory": True,
+            "load_memory": False,
             "init_message": f"Set and pursue this survival goal: {goal}",
             "only_chat_with": _allowed_players(),
             "speak": False,
@@ -713,6 +849,7 @@ class MindcraftRuntime:
                 "!checkBlueprintLevel",
                 "!getBlueprint",
                 "!getBlueprintLevel",
+                "!searchWiki",
             ],
             "code_timeout_mins": 1,
             "relevant_docs_count": 8,
@@ -808,15 +945,13 @@ class MindcraftRuntime:
                     exc,
                 )
                 raise
-            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._log_handle = LOG_PATH.open("a", encoding="utf-8", buffering=1)
             try:
                 self._process = subprocess.Popen(
                     ["node", "main.js"],
                     cwd=str(MINDCRAFT_ROOT),
                     env=env,
-                    stdout=self._log_handle,
-                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     text=True,
                 )
             except Exception as exc:
@@ -844,13 +979,6 @@ class MindcraftRuntime:
         if process is not None and process.poll() is not None:
             self._last_exit_code = process.returncode
             self._process = None
-            if self._log_handle is not None:
-                try:
-                    self._log_handle.close()
-                except Exception as exc:
-                    self.runtime_errors.record("mindcraft_log_close_failed", exc)
-                finally:
-                    self._log_handle = None
 
     def _ensure_process_running(self) -> None:
         if (
@@ -872,11 +1000,9 @@ class MindcraftRuntime:
                 self.start(self.get_goal())
             except Exception as exc:
                 self.runtime_errors.record("mindcraft_auto_restart_failed", exc)
-                telemetry = _read_json(STATUS_PATH)
-                telemetry["last_error"] = (
-                    f"mindcraft_auto_restart_failed:{type(exc).__name__}"
-                )
-                _write_json(STATUS_PATH, telemetry)
+                telemetry = _read_mindcraft_status()
+                telemetry["last_error"] = "mindcraft_auto_restart_failed"
+                _write_mindcraft_status(telemetry)
 
     def reconcile_world_lease(
         self,
@@ -962,10 +1088,7 @@ class MindcraftRuntime:
                 self._process_birth_identity = ""
                 self._process = None
                 self._world_effect_binding = None
-                if self._log_handle is not None:
-                    self._log_handle.close()
-                    self._log_handle = None
-                telemetry = _read_json(STATUS_PATH)
+                telemetry = _read_mindcraft_status()
                 telemetry.update(
                     {
                         "runtime": "mindcraft",
@@ -976,7 +1099,7 @@ class MindcraftRuntime:
                         "updated_at": time.time(),
                     }
                 )
-                _write_json(STATUS_PATH, telemetry)
+                _write_mindcraft_status(telemetry)
             except Exception as exc:
                 self.runtime_errors.record("mindcraft_stop_failed", exc)
                 raise
@@ -1005,7 +1128,7 @@ class MindcraftRuntime:
         with self._lock:
             if self.process_alive() or not self._manual_stop:
                 self.stop()
-            telemetry = _read_json(STATUS_PATH)
+            telemetry = _read_mindcraft_status()
             telemetry.pop("goal_manager", None)
             telemetry.pop("task_contract", None)
             telemetry.update(
@@ -1018,7 +1141,7 @@ class MindcraftRuntime:
                     "updated_at": time.time(),
                 }
             )
-            _write_json(STATUS_PATH, telemetry)
+            _write_mindcraft_status(telemetry)
             self.start(
                 goal,
                 world_effect_binding=world_effect_binding,
@@ -1038,7 +1161,7 @@ class MindcraftRuntime:
             self._last_exit_code = process.returncode
         self._cleanup_process_state()
         running = self.process_alive()
-        telemetry = _read_json(STATUS_PATH)
+        telemetry = _read_mindcraft_status()
         updated_at = telemetry.get("updated_at")
         telemetry_fresh = isinstance(updated_at, (int, float)) and time.time() - float(updated_at) <= 10
         connected = bool(running and telemetry_fresh and telemetry.get("connected"))

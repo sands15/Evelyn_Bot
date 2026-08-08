@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-08-08
+last_reviewed: 2026-08-09
 ---
 
 # Evelyn — Now
@@ -21,13 +21,15 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
-- 실제 Minecraft 승인 행동과 결과 증거 검증
+- Mindcraft Bot API 기억 전송 broker와 실제 Minecraft 승인 행동·결과 증거 검증
 
 ## 최근 확인
 
-- 2026-08-08 기본 Minecraft planning·recovery·memory summary를 local Qwen으로
-  유지하고 Codex token/network/subprocess를 기본 경로에서 제거했다. 선택적 Gateway는
-  pinned-image tool boundary 검증 전까지 health not-ready·action 503·spawn 0이다.
+- 2026-08-09 기본 Minecraft 판단은 local Qwen, Codex는 off를 유지한다. Mindcraft
+  history는 bounded process-local 상태이며 `load_memory=false`이고 host memory mount가 없다.
+  whole-turn·inter-agent exposure는 final sink까지 clear를 막고 goal/status의
+  execution·gate·observation 원문은 저장하지 않는다.
+  core deletion/edit broker·receipt/ACK, recovery exact correlation과 legacy cleanup은 P1이다.
 - 2026-08-08 memory 삭제는 fresh recall Busy fallback과 mutation 2초 admission을
   유지한다. replica가 anchor bootstrap·strict restart·과거 pair replay와 canonical
   metadata를 검증했지만 host ACL·Docker mount, live UI와 rotation은 남은 P1이다.
@@ -59,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
   서명 상태와 watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,136개(skip 22), 관련 집중 검증과 JS 구문이 통과했다. 현재
+- CI-equivalent 전체 3,138개(skip 22), 관련 집중 검증과 JS 구문이 통과했다. 현재
   마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
 
 ## 작업 원칙
@@ -75,4 +77,4 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[ACTIVE_RISKS]] — 남은 위험과 검증 공백
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
-- [[worklog/2026-08-08]] — OmniVoice 전환, UI 연속성, provenance 수정 근거
+- [[worklog/2026-08-09]] — Mindcraft history 삭제·재시작 경계 근거

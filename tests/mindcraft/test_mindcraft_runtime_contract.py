@@ -319,6 +319,76 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             all(readiness["dependencies"].values())
         )
 
+    def test_status_projection_drops_legacy_raw_content(self) -> None:
+        canary = "PRIVATE_MINDCRAFT_STATUS_CANARY"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            status_path = root / "status.json"
+            goal_path = root / "goal.json"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "runtime": "mindcraft",
+                        "connected": True,
+                        "connection_state": "connected",
+                        "phase": "survival",
+                        "last_error": canary,
+                        "last_blocked_command": "outbound_chat_disabled",
+                        "private_status": canary,
+                        "goal_manager": {
+                            "mode": "gated",
+                            "autonomy_state": "active",
+                            "ultimate_goal": canary,
+                            "current_subgoal": {
+                                "id": "obtain_logs",
+                                "target": canary,
+                            },
+                            "last_execution": {"result": canary},
+                        },
+                        "survival_controller": {
+                            "last_error": canary,
+                            "snapshot": {"private": canary},
+                        },
+                        "task_contract": {
+                            "schema": "mindcraft.task-contract.v1",
+                            "ready": True,
+                            "goal_manager_mode": "gated",
+                            "command_gate": "evelyn_goal_manager",
+                            "effect_verification": "explicit_postcondition",
+                        },
+                        "updated_at": mindcraft_service.time.time(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            goal_path.write_text(json.dumps({"goal": "collect wood"}), encoding="utf-8")
+            runtime = mindcraft_service.MindcraftRuntime(
+                process_identity_path=root / "process-identity.json"
+            )
+            runtime._process = Mock()
+            runtime._process.poll.return_value = None
+
+            with (
+                patch.object(mindcraft_service, "STATUS_PATH", status_path),
+                patch.object(mindcraft_service, "GOAL_STATE_PATH", goal_path),
+                patch.object(runtime, "reconcile_world_lease", return_value=True),
+                patch.object(mindcraft_service, "_effect_observer_ready", return_value=True),
+            ):
+                payload = runtime.build_status()
+                runtime._process = None
+                with patch.object(runtime, "_write_process_identity"):
+                    runtime.stop()
+                persisted = json.loads(status_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(payload["functional_readiness"]["ready"])
+        self.assertEqual(payload["current_subgoal"], {"id": "obtain_logs"})
+        self.assertEqual(payload["last_blocked_command"], "outbound_chat_disabled")
+        self.assertIsNone(payload["last_error"])
+        self.assertIsNone(payload["survival_controller"])
+        self.assertNotIn("survival_controller", persisted)
+        self.assertNotIn(canary, json.dumps(payload, sort_keys=True))
+        self.assertNotIn(canary, json.dumps(persisted, sort_keys=True))
+
     def test_status_blocks_http_only_or_unverified_task_runtime(
         self,
     ) -> None:
@@ -760,6 +830,173 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             "RUN node --test /app/mindcraft/tests/evelyn_planner.test.mjs",
             dockerfile,
         )
+
+    def test_history_boundary_overlay_is_installed_and_fail_closed(self) -> None:
+        overlay_root = REPO_ROOT / "external" / "mindcraft_evelyn"
+        history_source = (overlay_root / "src" / "agent" / "history.js").read_text(
+            encoding="utf-8"
+        )
+        boundary_source = (
+            overlay_root / "src" / "utils" / "evelyn_history_boundary.js"
+        ).read_text(encoding="utf-8")
+        planner_source = (
+            overlay_root / "src" / "models" / "evelyn_planner.js"
+        ).read_text(encoding="utf-8")
+        goal_manager_source = (
+            overlay_root / "src" / "agent" / "evelyn_goal_manager.js"
+        ).read_text(encoding="utf-8")
+        goal_publish_source = goal_manager_source.partition("    publish() {")[2].partition(
+            "    resetHistoryDerivedState()"
+        )[0]
+        patch_source = (overlay_root / "history_boundary.patch").read_text(
+            encoding="utf-8"
+        )
+        sink_patch_source = (overlay_root / "history_sink_boundary.patch").read_text(
+            encoding="utf-8"
+        )
+        translator_source = (
+            overlay_root / "src" / "utils" / "translator.js"
+        ).read_text(encoding="utf-8")
+        runtime_overlay_source = (
+            overlay_root / "src" / "utils" / "evelyn_runtime.js"
+        ).read_text(encoding="utf-8")
+        node_test = (overlay_root / "tests" / "evelyn_planner.test.mjs").read_text(
+            encoding="utf-8"
+        )
+        dockerfile = (REPO_ROOT / "docker" / "Dockerfile.mindcraft").read_text(
+            encoding="utf-8"
+        )
+        compose = (REPO_ROOT / "docker-compose.fast-control.yml").read_text(
+            encoding="utf-8"
+        )
+        voyager = compose.partition("  voyager:")[2].partition("\nvolumes:")[0]
+        runtime_source = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "mindcraft_service.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("mindcraft.history.ephemeral.v1", history_source)
+        self.assertIn("mindcraft_history_persistence_disabled", history_source)
+        self.assertIn("this.activeExposures", history_source)
+        self.assertIn("persistent: false", history_source)
+        self.assertNotIn("writeFileSync", history_source)
+        self.assertNotIn("readFileSync", history_source)
+        self.assertNotIn("renameSync", history_source)
+        self.assertNotIn("summarizeMemories", history_source)
+        self.assertNotIn("appendFullHistory", history_source)
+        self.assertIn("const goalManager = this.agent.goal_manager", history_source)
+        self.assertIn("AsyncLocalStorage", boundary_source)
+        self.assertIn("assertMindcraftHistoryCurrent", planner_source)
+        self.assertIn("withMindcraftHistoryExposure", planner_source)
+        self.assertIn("resetHistoryDerivedState()", planner_source)
+        self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", planner_source)
+        self.assertIn("await this.handleMessage(username, translation)", patch_source)
+        self.assertIn("agent.history.clear()", patch_source)
+        self.assertIn("stale response discarded before delivery", patch_source)
+        self.assertIn("-    async _saveLog", patch_source)
+        self.assertIn("const releaseTurnExposure = directUserClear ? null", sink_patch_source)
+        self.assertIn("this.history.beginExposure(this.history.generation)", sink_patch_source)
+        self.assertIn("releaseTurnExposure?.();", sink_patch_source)
+        self.assertIn("await this.routeResponse", sink_patch_source)
+        self.assertIn("await this.openChat", sink_patch_source)
+        self.assertIn("inheritMindcraftHistorySnapshot", sink_patch_source)
+        self.assertIn("const releaseExposure = agent.history.beginExposure", sink_patch_source)
+        self.assertIn("await _scheduleProcessInMessage", sink_patch_source)
+        self.assertGreaterEqual(
+            sink_patch_source.count("clearTimeout(this.inMessageTimer)"),
+            2,
+        )
+        self.assertIn(
+            "await convoManager.startConversation(player_name, message)",
+            sink_patch_source,
+        )
+        self.assertIn("convoManager.resetHistoryDerivedState()", sink_patch_source)
+        self.assertIn("persistedGoalState", goal_manager_source)
+        self.assertIn("contentFreeCurrentSubgoal", goal_manager_source)
+        self.assertIn("for (const name of OBSERVATION_COMMANDS)", goal_manager_source)
+        self.assertIn("recentActions: []", goal_manager_source)
+        self.assertIn("resetHistoryDerivedState()", goal_manager_source)
+        self.assertIn("this.persist({strict: true})", goal_manager_source)
+        self.assertIn("currentSubgoal.observationCounts = {}", goal_manager_source)
+        self.assertIn("currentSubgoal.observationStreak = 0", goal_manager_source)
+        self.assertIn("currentSubgoal.gateRejects = 0", goal_manager_source)
+        self.assertIn("return String(message || '')", translator_source)
+        self.assertNotIn("async function handleTranslation", translator_source)
+        self.assertNotIn("google-translate", translator_source)
+        self.assertNotIn("readFileSync", runtime_overlay_source)
+        self.assertNotIn("const existing", runtime_overlay_source)
+        self.assertNotIn("state.goal =", runtime_overlay_source)
+        self.assertIn("connected: false", runtime_overlay_source)
+        self.assertIn("connection_state: 'starting'", runtime_overlay_source)
+        self.assertIn("phase: 'starting'", runtime_overlay_source)
+        self.assertIn("contentFreeSurvivalState", runtime_overlay_source)
+        self.assertNotIn("...survivalState", runtime_overlay_source)
+        self.assertIn("survival_action_failed", runtime_overlay_source)
+        self.assertIn("current_subgoal: current", goal_publish_source)
+        self.assertIn("? {id: current.id}", goal_publish_source)
+        self.assertIn("content_free: true", goal_publish_source)
+        self.assertNotIn("ultimate_goal:", goal_publish_source)
+        self.assertNotIn("priority_request", goal_publish_source)
+        self.assertNotIn("minimum_kit", goal_publish_source)
+        self.assertIn(
+            "state.goal_manager = bot.evelynGoalState || null",
+            runtime_overlay_source,
+        )
+        self.assertNotIn(
+            "bot.evelynGoalState || state.goal_manager",
+            runtime_overlay_source,
+        )
+        for status_code in (
+            "slash_command_blocked",
+            "outbound_chat_disabled",
+            "outbound_whisper_disabled",
+            "minecraft_kicked",
+            "minecraft_disconnected",
+            "minecraft_runtime_error",
+        ):
+            self.assertIn(status_code, runtime_overlay_source)
+        self.assertIn("bot.on('kicked', () => {", runtime_overlay_source)
+        self.assertIn("bot.on('error', () => {", runtime_overlay_source)
+        self.assertNotIn("state.last_error = reason", runtime_overlay_source)
+        self.assertNotIn("state.last_error = error", runtime_overlay_source)
+        self.assertIn("planner recovery state is not persisted across restart", node_test)
+        self.assertIn("ephemeral history fences model exposure", node_test)
+        self.assertIn("mindcraft_history_persistence_disabled", node_test)
+        self.assertIn("Agent whole-turn lease fences clear", node_test)
+        self.assertIn("await waitFor(() => prepareStarted)", node_test)
+        self.assertIn("await waitFor(() => routeStarted)", node_test)
+        self.assertIn("await waitFor(() => pauseStarted)", node_test)
+        self.assertIn("await waitFor(() => classifierStarted)", node_test)
+        self.assertIn("scheduledHandleCalls", node_test)
+        self.assertIn("PRIVATE_GOAL_RESULT_CANARY", node_test)
+        self.assertIn("PRIVATE_OBSERVATION_CANARY", node_test)
+        self.assertIn("PRIVATE_HISTORY_USER_CANARY", node_test)
+        self.assertIn("PRIVATE_INTER_AGENT_CANARY", node_test)
+        self.assertIn("assert.match(fetchBodies[0]", node_test)
+        self.assertNotIn("durable clear fences in-flight", node_test)
+        self.assertIn(
+            "patch -p1 < /tmp/evelyn-mindcraft-history-boundary.patch",
+            dockerfile,
+        )
+        self.assertIn(
+            "patch -p1 < /tmp/evelyn-mindcraft-history-sink-boundary.patch",
+            dockerfile,
+        )
+        self.assertIn(
+            "src/agent/history.js /app/mindcraft/src/agent/history.js",
+            dockerfile,
+        )
+        self.assertIn("evelyn_history_boundary.js", dockerfile)
+        self.assertIn("src/utils/translator.js /app/mindcraft/src/utils/translator.js", dockerfile)
+        self.assertIn("container_name: evelyn-mindcraft", voyager)
+        self.assertNotIn("./bot_memory/mindcraft", voyager)
+        self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", voyager)
+        self.assertIn('"load_memory": False', runtime_source)
+        self.assertIn("stdout=subprocess.DEVNULL", runtime_source)
+        self.assertIn("stderr=subprocess.DEVNULL", runtime_source)
 
     def test_goal_manager_overlay_and_container_contract(self) -> None:
         manager_source = (

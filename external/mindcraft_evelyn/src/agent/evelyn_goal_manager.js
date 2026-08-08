@@ -181,6 +181,59 @@ function safeText(value, maximum = 240) {
     return String(value || '').trim().slice(0, maximum);
 }
 
+function contentFreeExecution(execution) {
+    if (!execution || typeof execution !== 'object') return null;
+    const sequence = Number(execution.sequence || 0);
+    return {
+        sequence: Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0,
+        commandCode: commandName(execution.commandCode || execution.command) || '',
+        autonomous: execution.autonomous === true,
+        relevant: execution.relevant === true,
+        failed: execution.failed === true,
+        worldChanged: execution.worldChanged === true,
+        goalProgress: execution.goalProgress === true,
+        recordedAt: Number.isFinite(Number(execution.recordedAt))
+            ? Number(execution.recordedAt)
+            : null,
+        contentFree: true,
+    };
+}
+
+function contentFreeGateDecision(decision) {
+    if (!decision || typeof decision !== 'object') return null;
+    return {
+        mode: ['off', 'shadow', 'gated'].includes(decision.mode)
+            ? decision.mode
+            : 'off',
+        relevant: decision.relevant === true,
+        allowed: decision.allowed === true,
+        decidedAt: Number.isFinite(Number(decision.decidedAt))
+            ? Number(decision.decidedAt)
+            : null,
+        contentFree: true,
+    };
+}
+
+function contentFreeCurrentSubgoal(subgoal) {
+    if (!subgoal || typeof subgoal !== 'object') return subgoal || null;
+    const observationCounts = {};
+    for (const name of OBSERVATION_COMMANDS) {
+        const count = Number(subgoal.observationCounts?.[name] || 0);
+        if (Number.isSafeInteger(count) && count > 0) observationCounts[name] = count;
+    }
+    return {...subgoal, observationCounts};
+}
+
+function persistedGoalState(state) {
+    return {
+        ...state,
+        currentSubgoal: contentFreeCurrentSubgoal(state.currentSubgoal),
+        recentActions: [],
+        lastExecution: contentFreeExecution(state.lastExecution),
+        lastGateDecision: contentFreeGateDecision(state.lastGateDecision),
+    };
+}
+
 function safeId(value, fallback) {
     const normalized = safeText(value, 80)
         .toLowerCase()
@@ -777,10 +830,6 @@ function relocationSearchFailureThreshold(current) {
         : SEARCH_FAILURE_RELOCATION_THRESHOLD;
 }
 
-function normalizedCommand(command) {
-    return safeText(command, 240).replace(/\s+/g, ' ');
-}
-
 function resultFailed(result) {
     return /(?:could not|can't\b|cannot\b|failed|invalid|not enough|missing the following|no [^\n]* nearby|path (?:not found|failed|timed out)|pathfinding stopped|desired goal was not reached)/i
         .test(String(result || ''));
@@ -833,6 +882,7 @@ export class EvelynGoalManager {
             lastGateDecision: null,
             deathCount: 0,
             lastDeathAt: null,
+            lastDragonCombatAt: null,
             ultimateGoalCompletedAt: null,
             updatedAt: nowSeconds()
         };
@@ -846,33 +896,51 @@ export class EvelynGoalManager {
     }
 
     restore() {
+        let saved;
         try {
-            const saved = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
-            if (saved?.version === 1 && saved?.ultimateGoal === this.ultimateGoal) {
-                this.state = {
-                    ...this.state,
-                    ...saved,
-                    mode: this.mode,
-                    ultimateGoal: this.ultimateGoal
-                };
-                if (!['active', 'manual_pause', 'completed'].includes(this.state.autonomyState)) {
-                    this.state.autonomyState = this.state.ultimateGoalCompletedAt ? 'completed' : 'active';
-                }
-                this.state.executionSequence = Number(this.state.executionSequence || 0);
-            }
+            saved = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
         } catch (error) {
-            if (error?.code !== 'ENOENT') {
-                console.warn('[Evelyn Goal] state restore failed:', error?.message || error);
-            }
+            if (error?.code === 'ENOENT') return;
+            console.warn('[Evelyn Goal] invalid state replaced with a content-free projection');
+            this.persist({strict: true});
+            return;
         }
+        if (saved?.version === 1 && saved?.ultimateGoal === this.ultimateGoal) {
+            const restored = {};
+            for (const key of Object.keys(this.state)) {
+                if (Object.prototype.hasOwnProperty.call(saved, key)) restored[key] = saved[key];
+            }
+            this.state = {
+                ...this.state,
+                ...restored,
+                mode: this.mode,
+                ultimateGoal: this.ultimateGoal,
+                currentSubgoal: contentFreeCurrentSubgoal(restored.currentSubgoal),
+                recentActions: [],
+                lastExecution: contentFreeExecution(saved.lastExecution),
+                lastGateDecision: contentFreeGateDecision(saved.lastGateDecision),
+            };
+            if (!['active', 'manual_pause', 'completed'].includes(this.state.autonomyState)) {
+                this.state.autonomyState = this.state.ultimateGoalCompletedAt ? 'completed' : 'active';
+            }
+            this.state.executionSequence = Number(this.state.executionSequence || 0);
+        } else {
+            console.warn('[Evelyn Goal] stale state replaced with a content-free projection');
+        }
+        this.persist({strict: true});
     }
 
-    persist() {
+    persist({strict = false} = {}) {
         this.state.updatedAt = nowSeconds();
         try {
-            atomicWriteJson(this.statePath, this.state);
+            atomicWriteJson(this.statePath, persistedGoalState(this.state));
         } catch (error) {
             console.warn('[Evelyn Goal] state persistence failed:', error?.message || error);
+            if (strict) {
+                const failure = new Error('mindcraft_goal_state_reset_failed');
+                failure.code = 'mindcraft_goal_state_reset_failed';
+                throw failure;
+            }
         }
         this.publish();
     }
@@ -884,40 +952,35 @@ export class EvelynGoalManager {
             mode: this.mode,
             autonomy_state: this.state.autonomyState,
             manual_pause_reason: this.state.manualPauseReason,
-            ultimate_goal: this.ultimateGoal,
             current_subgoal: current
-                ? {
-                    id: current.id,
-                    kind: current.kind,
-                    target: current.target,
-                    quantity: current.quantity,
-                    reason: current.reason,
-                    success: current.success,
-                    attempts: current.attempts,
-                    action_budget: current.actionBudget,
-                    progress_value: current.progressValue,
-                    progress_baseline: current.progressBaseline,
-                    observation_streak: current.observationStreak,
-                    relocation_required: current.relocationRequired,
-                    relocations: current.relocations,
-                    started_at: current.startedAt
-                }
+                ? {id: current.id}
                 : null,
             completed_count: this.state.completedSubgoals.length,
             blocked_count: this.state.blockedSubgoals.length,
             last_progress_at: this.state.lastProgressAt,
-            last_gate_decision: this.state.lastGateDecision,
-            priority_request: this.state.priorityRequest,
-            minimum_kit: minimumKitStatus(this.lastSnapshot),
+            last_gate_decision: contentFreeGateDecision(this.state.lastGateDecision),
             death_count: Number(this.state.deathCount || 0),
             last_death_at: this.state.lastDeathAt,
-            last_execution: this.state.lastExecution,
+            last_execution: contentFreeExecution(this.state.lastExecution),
             postcondition_candidate: this.worldEffectCandidate
                 ? {...this.worldEffectCandidate}
                 : null,
             ultimate_goal_completed_at: this.state.ultimateGoalCompletedAt,
-            updated_at: this.state.updatedAt
+            updated_at: this.state.updatedAt,
+            content_free: true,
         };
+    }
+
+    resetHistoryDerivedState() {
+        this.state.recentActions = [];
+        this.state.lastExecution = null;
+        this.state.lastGateDecision = null;
+        if (this.state.currentSubgoal) {
+            this.state.currentSubgoal.observationCounts = {};
+            this.state.currentSubgoal.observationStreak = 0;
+            this.state.currentSubgoal.gateRejects = 0;
+        }
+        this.persist({strict: true});
     }
 
     publishPostconditionCandidate({
@@ -1025,7 +1088,7 @@ export class EvelynGoalManager {
         });
         this.lastSnapshot = this.captureSnapshot();
         this.verifyCurrentSubgoal(this.lastSnapshot);
-        this.persist();
+        this.persist({strict: true});
     }
 
     verifyCurrentSubgoal(snapshot) {
@@ -1319,7 +1382,7 @@ export class EvelynGoalManager {
                         : 'goal_manager_owns_autonomous_goal_control'
                 );
         } else if (OBSERVATION_COMMANDS.has(name)) {
-            const key = normalizedCommand(command);
+            const key = name;
             const count = Number(current?.observationCounts?.[key] || 0);
             if (!current) {
                 relevant = false;
@@ -1466,7 +1529,7 @@ export class EvelynGoalManager {
             ? predicateProgressMade(current.success, before, after)
             : false;
         if (current && autonomous && OBSERVATION_COMMANDS.has(name)) {
-            const key = normalizedCommand(command);
+            const key = name;
             current.observationStreak = Number(current.observationStreak || 0) + 1;
             current.observationCounts ||= {};
             current.observationCounts[key] = Number(current.observationCounts[key] || 0) + 1;

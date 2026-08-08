@@ -5,4 +5,6 @@ docker/omnivoice-server.LICENSE text eol=lf
 docker/omnivoice_source.sha256 text eol=lf
 docker/omnivoice_model.sha256 text eol=lf
 docker/omnivoice_evelyn.patch text eol=lf -whitespace
+external/mindcraft_evelyn/history_boundary.patch text eol=lf -whitespace
+external/mindcraft_evelyn/history_sink_boundary.patch text eol=lf -whitespace
 docker/run_omnivoice.sh text eol=lf

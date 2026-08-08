@@ -143,6 +143,28 @@ type: decision-log
   `external/mindcraft_evelyn/src/models/codex_gateway.js`,
   `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`,
   `docker-compose.fast-control.yml`, 관련 runtime/Mindcraft 회귀
-- 영향: local planning·recovery·memory summary는 계속 동작하며 기본 Minecraft 시작은
-  Codex credential을 요구하지 않는다. Codex 품질 경로는 verified no-tools boundary나
-  목적 제한 broker가 생길 때까지 의도적으로 사용할 수 없다.
+- 영향: local planning·recovery는 계속 동작하며 기본 Minecraft 시작은 Codex credential을
+  요구하지 않는다. persistent memory summary는 기본 경로에서 로드하거나 새로 만들지
+  않는다. Codex 품질 경로는 verified no-tools boundary나 목적 제한 broker가 생길 때까지
+  의도적으로 사용할 수 없다.
+
+## 2026-08-09 — Mindcraft history를 broker 전까지 process-local로 제한
+
+- 상태: 승인
+- 결정: 기본 Mindcraft는 bounded ephemeral history만 사용하고 `load_memory=false`와
+  no-memory-mount를 유지한다. planner recovery도 저장하지 않으며, process-local
+  generation exposure가 turn 첫 await 전부터 awaited final route/action sink까지 보호한다.
+  inter-agent ingress·timer queue도 같은 generation에 묶고 clear에서 폐기한다. goal/status
+  artifact에는 raw command·result·gate reason 대신 enum code와 count/boolean만 남긴다.
+- 이유: Node direct LLM 경로는 Evelyn core deletion/edit generation과 receipt를 아직
+  공유하지 않는다. 불완전한 durable history를 유지하는 것보다 재시작 시 폐기하는 것이
+  삭제·편집 후 부활과 근거 없는 재사용을 막는 최소 안전 경계다.
+- 근거: [[MINDCRAFT_MIGRATION]], `external/mindcraft_evelyn/src/agent/history.js`,
+  `external/mindcraft_evelyn/src/utils/evelyn_history_boundary.js`,
+  `external/mindcraft_evelyn/history_sink_boundary.patch`,
+  `evelyn_core/runtime/evelyn_core/mindcraft_service.py`, `docker-compose.fast-control.yml`
+- 영향: legacy memory/archive/log는 읽거나 rebase·삭제하지 않으며 cleanup은 사용자 승인
+  migration으로 분리한다. 다음 P1은 fixed-route authenticated Bot API broker가 기존
+  `memory_exposure_request` lease를 delivery ACK까지 유지하고 assistant turn에 strict
+  compact receipt를 결합하는 것이다. `!clearChat`은 대화 유래 상태만 비우며 자율 목표의
+  영구 정지는 `!endGoal` 계약을 사용한다.

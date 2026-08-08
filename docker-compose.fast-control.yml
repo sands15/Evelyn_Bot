@@ -667,7 +667,6 @@ services:
       MINDCRAFT_AGENT_PROFILE: "/app/mindcraft/profiles/evelyn.json"
       MINDCRAFT_STATUS_PATH: "/app/runtime_artifacts/mindcraft/status.json"
       MINDCRAFT_CODEX_ENABLED: "false"
-      MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"
       MINDCRAFT_GOAL_MANAGER_STATE_PATH: "/app/runtime_artifacts/mindcraft/goal_manager_state.json"
       MINDCRAFT_GOAL_MANAGER_MODE: "gated"
       MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"
@@ -698,7 +697,6 @@ services:
       minecraft_llm:
         condition: service_healthy
     volumes:
-      - ./bot_memory/mindcraft:/app/mindcraft/bots/Evelyn_0428
       - ./bot_profiles:/app/bot_profiles
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs

@@ -29,10 +29,14 @@ COPY external/mindcraft_evelyn/combat.patch /tmp/evelyn-mindcraft-combat.patch
 COPY external/mindcraft_evelyn/pathfinder.patch /tmp/evelyn-mindcraft-pathfinder.patch
 COPY external/mindcraft_evelyn/relocation.patch /tmp/evelyn-mindcraft-relocation.patch
 COPY external/mindcraft_evelyn/lint.patch /tmp/evelyn-mindcraft-lint.patch
+COPY external/mindcraft_evelyn/history_boundary.patch /tmp/evelyn-mindcraft-history-boundary.patch
+COPY external/mindcraft_evelyn/history_sink_boundary.patch /tmp/evelyn-mindcraft-history-sink-boundary.patch
 RUN sed -i 's/\r$//' \
       profiles/defaults/survival.json \
       src/agent/action_manager.js \
       src/agent/agent.js \
+      src/agent/commands/actions.js \
+      src/agent/conversation.js \
       src/agent/coder.js \
       src/agent/self_prompter.js \
       src/agent/library/skills.js \
@@ -48,11 +52,16 @@ RUN sed -i 's/\r$//' \
     patch -p1 < /tmp/evelyn-mindcraft-pathfinder.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-relocation.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-lint.patch && \
-    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch /tmp/evelyn-mindcraft-lint.patch
+    patch -p1 < /tmp/evelyn-mindcraft-history-boundary.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-history-sink-boundary.patch && \
+    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch /tmp/evelyn-mindcraft-lint.patch /tmp/evelyn-mindcraft-history-boundary.patch /tmp/evelyn-mindcraft-history-sink-boundary.patch
 
 COPY external/mindcraft_evelyn/src/models/codex_gateway.js /app/mindcraft/src/models/codex_gateway.js
 COPY external/mindcraft_evelyn/src/models/evelyn_planner.js /app/mindcraft/src/models/evelyn_planner.js
+COPY external/mindcraft_evelyn/src/agent/history.js /app/mindcraft/src/agent/history.js
+COPY external/mindcraft_evelyn/src/utils/evelyn_history_boundary.js /app/mindcraft/src/utils/evelyn_history_boundary.js
 COPY external/mindcraft_evelyn/src/utils/evelyn_runtime.js /app/mindcraft/src/utils/evelyn_runtime.js
+COPY external/mindcraft_evelyn/src/utils/translator.js /app/mindcraft/src/utils/translator.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_combat.js /app/mindcraft/src/agent/evelyn_combat.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_escape_controller.js /app/mindcraft/src/agent/evelyn_escape_controller.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_survival_mode.js /app/mindcraft/src/agent/evelyn_survival_mode.js

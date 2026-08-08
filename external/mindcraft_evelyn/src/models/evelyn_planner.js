@@ -1,8 +1,12 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import minecraftData from 'minecraft-data';
 import { getCommand } from '../agent/commands/index.js';
 import { itemMatchesTarget } from '../agent/evelyn_world_state.js';
+import {
+    assertMindcraftHistoryCurrent,
+    isMindcraftHistoryBoundaryError,
+    withMindcraftHistoryExposure,
+} from '../utils/evelyn_history_boundary.js';
 import { CodexGateway } from './codex_gateway.js';
 
 const DEFAULT_LOCAL_URL = 'http://minecraft_llm:9823/v1/chat/completions';
@@ -17,7 +21,7 @@ const RECOVERY_PLAN_TTL_MS = 5 * 60 * 1000;
 const ACTION_MODE_TTL_MS = 15 * 60 * 1000;
 const ALWAYS_ALLOWED_COMMANDS = new Set(['!stop', '!stats', '!inventory', '!nearbyBlocks', '!craftable']);
 const FORBIDDEN_RECOVERY_COMMANDS = new Set(['!goal', '!endGoal']);
-const BLOCKED_ACTION_PATTERN = /!(?:newAction|setMode|attackPlayer|digDown)\b/i;
+const BLOCKED_ACTION_PATTERN = /!(?:newAction|setMode|attackPlayer|digDown|clearChat)\b/i;
 const SLASH_COMMAND_PATTERN = /(^|\s)\/[a-z][a-z0-9_-]*/i;
 const FAILURE_PATTERN = /(?:do not have (?:the )?resources|not enough|no [^\n]* nearby|collected 0|(?:^|\s)failed\b|could not|can't\b|cannot\b|requires a crafting table|was not found|path (?:failed|timed out)|unable to)/i;
 const SEVERE_FAILURE_PATTERN = /(?:invalid (?:block|item|command)|not found on the minecraft wiki|\bundefined\b|unknown command|was given \d+ args|requires \d+ args|incorrectly formatted|param [^\n]* must be)/i;
@@ -71,6 +75,7 @@ function enforceCommandPolicy(content) {
 }
 
 async function postJson(url, body, timeoutSec) {
+    assertMindcraftHistoryCurrent();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
     try {
@@ -81,6 +86,7 @@ async function postJson(url, body, timeoutSec) {
             signal: controller.signal
         });
         const payload = await response.json().catch(() => ({}));
+        assertMindcraftHistoryCurrent();
         if (!response.ok) {
             throw new Error(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
         }
@@ -499,68 +505,22 @@ export class EvelynPlanner {
         this.recoveryPlan = null;
         this.probeIndex = 0;
         this.actionModeUntil = 0;
-        this.statePath = String(process.env.MINDCRAFT_PLANNER_STATE_PATH || '').trim();
-        this.restorePlannerState();
-    }
-
-    restorePlannerState() {
-        if (!this.statePath) return;
-        try {
-            const saved = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
-            this.lastCodexAt = Number(saved?.lastCodexAt || 0);
-            const plan = saved?.recoveryPlan;
-            const policy = readGoalPolicy();
-            const validPlan = (
-                plan &&
-                typeof plan.goalId === 'string' &&
-                policy?.currentSubgoal?.id === plan.goalId &&
-                Array.isArray(plan.steps) &&
-                plan.steps.length >= 1 &&
-                plan.steps.length <= 4 &&
-                plan.steps.every((step) => typeof step === 'string') &&
-                Number.isInteger(plan.stepIndex) &&
-                plan.stepIndex >= 0 &&
-                plan.stepIndex < plan.steps.length &&
-                Number.isFinite(plan.createdAt) &&
-                Date.now() - plan.createdAt <= RECOVERY_PLAN_TTL_MS
-            );
-            if (validPlan) {
-                this.recoveryPlan = plan;
-                console.log(
-                    `[Evelyn Mindcraft] restored recovery plan step=${plan.stepIndex + 1}/${plan.steps.length}`
-                );
-            }
-        } catch (error) {
-            if (error?.code !== 'ENOENT') {
-                console.warn('[Evelyn Mindcraft] Planner state restore failed:', error?.message || error);
-            }
-        }
     }
 
     persistPlannerState() {
-        if (!this.statePath) return;
-        const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
-        try {
-            fs.mkdirSync(path.dirname(this.statePath), {recursive: true});
-            fs.writeFileSync(temporaryPath, JSON.stringify({
-                version: 1,
-                savedAt: Date.now(),
-                lastCodexAt: this.lastCodexAt,
-                recoveryPlan: this.recoveryPlan
-            }, null, 2));
-            fs.renameSync(temporaryPath, this.statePath);
-        } catch (error) {
-            console.warn('[Evelyn Mindcraft] Planner state persistence failed:', error?.message || error);
-            try {
-                fs.rmSync(temporaryPath, {force: true});
-            } catch {
-                // Best-effort cleanup only.
-            }
-        }
+        // History-derived recovery state stays process-local until it can be
+        // bound to the same deletion/edit boundary as the model request.
     }
 
     clearRecoveryPlan() {
         this.recoveryPlan = null;
+        this.persistPlannerState();
+    }
+
+    resetHistoryDerivedState() {
+        this.recoveryPlan = null;
+        this.actionModeUntil = 0;
+        this.probeIndex = 0;
         this.persistPlannerState();
     }
 
@@ -656,6 +616,7 @@ export class EvelynPlanner {
             }, this.routerTimeoutSec);
             return parseRoute(responseContent(payload));
         } catch (error) {
+            if (isMindcraftHistoryBoundaryError(error)) throw error;
             console.warn('[Evelyn Mindcraft] Router unavailable; using local planner:', error?.message || error);
             return 'local';
         }
@@ -693,13 +654,17 @@ export class EvelynPlanner {
         }
         const policy = readGoalPolicy();
         const execution = policy?.lastExecution;
-        if (!plan.lastIssued || !execution?.command) return null;
+        if (!plan.lastIssued || !execution) return null;
         if (Number(execution.sequence || 0) <= Number(plan.lastObservedExecutionSequence || 0)) return null;
-        if (normalizeCommand(execution.command) !== normalizeCommand(plan.lastIssued)) return null;
+        const executionCommandCode = String(
+            execution.commandCode || commandName(execution.command) || ''
+        );
+        if (!executionCommandCode) return null;
+        if (executionCommandCode !== commandName(plan.lastIssued)) return null;
         plan.lastObservedExecutionSequence = Number(execution.sequence || 0);
         if (execution.failed || execution.relevant === false) {
             this.clearRecoveryPlan();
-            return `recovery_step_failed:${execution.command}`;
+            return `recovery_step_failed:${executionCommandCode}`;
         }
 
         plan.stepIndex += 1;
@@ -841,6 +806,7 @@ export class EvelynPlanner {
             }
             return await this.runRecoveryStep(turns, systemMessage, stopSeq);
         } catch (error) {
+            if (isMindcraftHistoryBoundaryError(error)) throw error;
             console.error('[Evelyn Mindcraft] Recovery planning failed:', error?.message || error);
             this.clearRecoveryPlan();
             return this.safeProbe(systemMessage, reason);
@@ -857,6 +823,7 @@ export class EvelynPlanner {
             try {
                 return await this.runRecoveryStep(turns, systemMessage, stopSeq);
             } catch (error) {
+                if (isMindcraftHistoryBoundaryError(error)) throw error;
                 console.warn('[Evelyn Mindcraft] stale recovery plan discarded:', error?.message || error);
                 this.clearRecoveryPlan();
             }
@@ -891,12 +858,20 @@ export class EvelynPlanner {
             console.log('[Evelyn Mindcraft] planner route=local gate=simple model=' + this.localModel);
             return validation.command;
         } catch (error) {
+            if (isMindcraftHistoryBoundaryError(error)) throw error;
             console.error('[Evelyn Mindcraft] Local planner failed; escalating to recovery:', error?.message || error);
             return this.recover(turns, systemMessage, stopSeq, 'local_request_failed');
         }
     }
 
     async sendRequest(turns, systemMessage, stopSeq = '***') {
+        return withMindcraftHistoryExposure(
+            turns,
+            () => this._sendRequest(turns, systemMessage, stopSeq),
+        );
+    }
+
+    async _sendRequest(turns, systemMessage, stopSeq = '***') {
         let kind = classifyRequest(turns, systemMessage);
         const latest = compactTurns(turns, 1, 1200)[0] || null;
         const latestIsUser = latest?.role === 'user';
@@ -924,6 +899,7 @@ export class EvelynPlanner {
             console.log(`[Evelyn Mindcraft] planner route=local gate=utility kind=${kind}`);
             return result;
         } catch (error) {
+            if (isMindcraftHistoryBoundaryError(error)) throw error;
             console.error('[Evelyn Mindcraft] Local utility request failed:', error?.message || error);
             if (kind === 'memory') throw new Error('mindcraft_memory_summary_unavailable');
             if (kind === 'classifier') return 'ignore';

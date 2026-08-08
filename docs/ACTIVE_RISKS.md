@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-08-08 KST
+Last reviewed: 2026-08-09 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -939,11 +939,35 @@ guard caller, raw `urlopen` transport와 welcome/warmup isolated sink를 exact i
 request factory를 0회로 막는 증거는 Main·공용 exposure/JSON·Sub-LLM 동적 회귀가 맡는다.
 
 이 inventory는 범용 HTTP/SDK dataflow 분석이 아니다. alias·새 wrapper·비정형 transport,
-간접 JSON caller와 isolated allowlist의 payload provenance를 자동 증명하지 않으며, 별도
-`bot_memory/mindcraft` history/summary를 local Qwen `fetch`로 보내는 JavaScript 경로도
-포함하지 않는다. 새 Core sink는 canonical wrapper를 사용하고 inventory review를
-거쳐야 한다. Mindcraft 영속 기억에는 별도 삭제·provenance·outbound exposure 계약이
-아직 없으므로, 그 경계와 default-local transport 회귀를 닫는 작업은 P1이다.
+간접 JSON caller와 isolated allowlist의 payload provenance를 자동 증명하지 않는다. 새
+Core sink는 canonical wrapper를 사용하고 inventory review를 거쳐야 한다.
+
+2026-08-09 기본 Mindcraft history는 bounded process-local turn만 사용한다.
+`load_memory=false`이고 Compose가 `bot_memory/mindcraft`를 mount하지 않으므로 재시작
+복구나 cross-process persistence를 제공하지 않는다. 기존 legacy memory/archive 파일은
+읽거나 현재 generation으로 rebase하거나 삭제하지 않는다. planner recovery도 디스크에
+저장하지 않는다. Google translation 경로는 local identity 변환으로 바뀌었고 Node child의
+stdout/stderr는 `DEVNULL`이지만, 이미 존재하는 legacy data와 log는 그대로 남아 있다.
+
+process-local generation exposure는 turn 첫 await 전부터 LLM 요청·결과와 실제 final
+route/action sink까지 clear를 busy로 막는다. inter-agent ingress/outbound pause·classifier와 예약 timer queue도
+같은 경계를 사용하며 성공한 clear는 queue/monitor를 폐기한다. `!clearChat`은 turn,
+summary placeholder, recovery/action-mode, goal-manager의 raw execution/gate 상태와
+self-prompt·`last_sender`를 비운다. goal/status artifact에는 raw command·result·reason이나
+observation argument 대신 enum code와 count/boolean만 기록한다. Node writer와 Python
+status owner는 legacy/free-text 상태를 재사용하지 않고 runtime error도 fixed code로 투영한다.
+이것은 현재 프로세스의 원자적 clear/response 경계일 뿐 durable rollback-safe clear,
+재시작 복구나 core Evelyn deletion/edit exposure를 뜻하지 않는다. Docker image build,
+실제 Minecraft 연결·행동과 live clear도 이 증분에서 검증하지 않았다.
+
+남은 P1은 local/router LLM을 fixed-route authenticated Bot API broker로 모으고 기존
+`memory_exposure_request` lease를 delivery ACK까지 유지하며, assistant turn을 strict
+`bound|not_used|unattributed` receipt와 함께 구조화하는 것이다. legacy memory/archive와
+과거 log의 삭제·이관은 사용자 승인 migration으로만 수행한다.
+
+추가 P1로 recovery outcome은 durable raw command 대신 command code로만 상관하므로,
+겹친 같은-command/different-target 실행을 exact하게 구별하지 못한다. `!clearChat`은 자율
+목표 자체를 영구 중지하지 않으며 그 의도에는 `!endGoal`을 사용한다.
 
 세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
 compact `bound|not_used|unattributed` receipt를 process-local history에만 두지

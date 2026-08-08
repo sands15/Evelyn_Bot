@@ -1,0 +1,238 @@
+diff --git a/src/agent/agent.js b/src/agent/agent.js
+index 0fd7c3a..f079638 100644
+--- a/src/agent/agent.js
++++ b/src/agent/agent.js
+@@ -168,17 +168,17 @@ export class Agent {
+ 
+                 this.shut_up = false;
+ 
+-                console.log(this.name, 'received message from', username, ':', message);
++                console.log(`[Evelyn Mindcraft] chat received chars=${message.length}`);
+ 
+                 if (convoManager.isOtherAgent(username)) {
+                     console.warn('received whisper from other bot??')
+                 }
+                 else {
+                     let translation = await handleEnglishTranslation(message);
+-                    this.handleMessage(username, translation);
++                    await this.handleMessage(username, translation);
+                 }
+             } catch (error) {
+-                console.error('Error handling message:', error);
++                console.error('[Evelyn Mindcraft] chat handling failed code=' + (error?.code || error?.name || 'Error'));
+             }
+         }
+ 
+@@ -263,7 +263,7 @@ export class Agent {
+     async handleMessage(source, message, max_responses=null) {
+         await this.checkTaskDone();
+         if (!source || !message) {
+-            console.warn('Received empty message from', source);
++            console.warn('[Evelyn Mindcraft] empty message ignored');
+             return false;
+         }
+ 
+@@ -306,7 +306,7 @@ export class Agent {
+ 
+         // Now translate the message
+         message = await handleEnglishTranslation(message);
+-        console.log('received message from', source, ':', message);
++        console.log(`[Evelyn Mindcraft] message accepted chars=${message.length}`);
+ 
+         const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+         
+@@ -334,7 +334,12 @@ export class Agent {
+             let history = this.history.getHistory();
+             let res = await this.prompter.promptConvo(history);
+ 
+-            console.log(`${this.name} full response to ${source}: ""${res}""`);
++            if (!this.history.isSnapshotCurrent(history)) {
++                console.warn('[Evelyn Mindcraft] stale response discarded before delivery');
++                break;
++            }
++
++            console.log(`[Evelyn Mindcraft] response ready chars=${res.length}`);
+ 
+             if (res.trim().length === 0) {
+                 console.warn('no response')
+@@ -391,7 +396,7 @@ export class Agent {
+                     res, execute_res, goalBefore, goalAfter, {autonomous: self_prompt}
+                 );
+ 
+-                console.log('Agent executed:', command_name, 'and got:', execute_res);
++                console.log(`[Evelyn Mindcraft] command completed name=${command_name} resultChars=${String(execute_res || '').length}`);
+                 used_command = true;
+ 
+                 if (execute_res)
+@@ -504,7 +509,7 @@ export class Agent {
+         });
+         this.bot.on('messagestr', async (message, _, jsonMsg) => {
+             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
+-                console.log('Agent died: ', message);
++                console.log(`[Evelyn Mindcraft] death event recorded chars=${String(message || '').length}`);
+                 let death_pos = this.bot.entity.position;
+                 this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
+                 let death_pos_text = null;
+@@ -582,7 +587,7 @@ export class Agent {
+                 await this.history.add('system', `Task ended with score : ${res.score}`);
+                 await this.history.save();
+                 // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
+-                console.log('Task finished:', res.message);
++                console.log(`[Evelyn Mindcraft] task finished resultChars=${String(res.message || '').length}`);
+                 this.killAll();
+             }
+         }
+@@ -591,4 +596,4 @@ export class Agent {
+     killAll() {
+         serverProxy.shutdown();
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/agent/commands/actions.js b/src/agent/commands/actions.js
+index f348487..8e25854 100644
+--- a/src/agent/commands/actions.js
++++ b/src/agent/commands/actions.js
+@@ -84,8 +84,15 @@ export const actionsList = [
+         name: '!clearChat',
+         description: 'Clear the chat history.',
+         perform: async function (agent) {
+-            agent.history.clear();
+-            return agent.name + "'s chat history was cleared, starting new conversation from scratch.";
++            try {
++                agent.history.clear();
++            } catch (error) {
++                if (error?.code === 'mindcraft_history_busy') {
++                    return "Chat history is in use. Retry !clearChat after the current response finishes.";
++                }
++                throw error;
++            }
++            return agent.name + "'s active chat memory was cleared and committed. Legacy operational logs remain under retention policy.";
+         }
+     },
+     {
+diff --git a/src/agent/conversation.js b/src/agent/conversation.js
+index 1cd781e..994187a 100644
+--- a/src/agent/conversation.js
++++ b/src/agent/conversation.js
+@@ -323,7 +323,7 @@ function _compileInMessages(convo) {
+ }
+ 
+ function _handleFullInMessage(sender, received) {
+-    console.log(`${agent.name} responding to "${received.message}" from ${sender}`);
++    console.log(`[Evelyn Mindcraft] queued bot message accepted chars=${String(received.message || '').length}`);
+     
+     const convo = convoManager._getConvo(sender);
+     convo.active = true;
+diff --git a/src/models/prompter.js b/src/models/prompter.js
+index 9012ea8..4bbc725 100644
+--- a/src/models/prompter.js
++++ b/src/models/prompter.js
+@@ -5,14 +5,8 @@ import { SkillLibrary } from "../agent/library/skill_library.js";
+ import { stringifyTurns } from '../utils/text.js';
+ import { getCommand } from '../agent/commands/index.js';
+ import settings from '../agent/settings.js';
+-import { promises as fs } from 'fs';
+-import path from 'path';
+-import { fileURLToPath } from 'url';
+ import { selectAPI, createModel } from './_model_map.js';
+ 
+-const __filename = fileURLToPath(import.meta.url);
+-const __dirname = path.dirname(__filename);
+-
+ export class Prompter {
+     constructor(agent, profile) {
+         this.agent = agent;
+@@ -228,14 +228,17 @@ export class Prompter {
+             try {
+                 generation = await this.chat_model.sendRequest(messages, prompt);
+                 if (typeof generation !== 'string') {
+-                    console.error('Error: Generated response is not a string', generation);
++                    console.error('[Evelyn Mindcraft] generated response type invalid');
+                     throw new Error('Generated response is not a string');
+                 }
+-                console.log("Generated response:", generation);
+-                await this._saveLog(prompt, messages, generation, 'conversation');
++                console.log(`[Evelyn Mindcraft] generated response chars=${generation.length}`);
+ 
+             } catch (error) {
+-                console.error('Error during message generation or file writing:', error);
++                if (error?.code === 'mindcraft_history_stale') {
++                    console.warn('[Evelyn Mindcraft] stale generation stopped before response delivery');
++                    return '';
++                }
++                console.error('[Evelyn Mindcraft] message generation failed code=' + (error?.code || error?.name || 'Error'));
+                 continue;
+             }
+ 
+@@ -273,7 +276,6 @@ export class Prompter {
+ 
+         let resp = await this.code_model.sendRequest(messages, prompt);
+         this.awaiting_coding = false;
+-        await this._saveLog(prompt, messages, resp, 'coding');
+         return resp;
+     }
+ 
+@@ -283,13 +285,15 @@ export class Prompter {
+             let prompt = this.profile.saving_memory;
+             prompt = await this.replaceStrings(prompt, null, null, to_summarize);
+             let resp = await this.chat_model.sendRequest([], prompt);
+-            await this._saveLog(prompt, to_summarize, resp, 'memSaving');
+             if (resp?.includes('</think>')) {
+                 const [_, afterThink] = resp.split('</think>')
+                 resp = afterThink;
+             }
+             return resp;
+-        } catch {
++        } catch (error) {
++            if (error?.code === 'mindcraft_history_stale' || error?.code === 'mindcraft_history_busy') {
++                throw error;
++            }
+             console.warn('[Evelyn Mindcraft] Memory summarization failed; keeping previous summary.');
+             return this.agent.history.memory;
+         }
+@@ -301,7 +305,8 @@ export class Prompter {
+         let messages = this.agent.history.getHistory();
+         messages.push({role: 'user', content: new_message});
+         prompt = await this.replaceStrings(prompt, null, null, messages);
+-        let res = await this.chat_model.sendRequest([], prompt);
++        messages.length = 0;
++        let res = await this.chat_model.sendRequest(messages, prompt);
+         return res.trim().toLowerCase() === 'respond';
+     }
+ 
+@@ -338,34 +343,4 @@ export class Prompter {
+         goal.quantity = parseInt(goal.quantity);
+         return goal;
+     }
+-
+-    async _saveLog(prompt, messages, generation, tag) {
+-        if (!settings.log_all_prompts)
+-            return;
+-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+-        let logEntry;
+-        let task_id = this.agent.task.task_id;
+-        if (task_id == null) {
+-            logEntry = `[${timestamp}] \nPrompt:\n${prompt}\n\nConversation:\n${JSON.stringify(messages, null, 2)}\n\nResponse:\n${generation}\n\n`;
+-        } else {
+-            logEntry = `[${timestamp}] Task ID: ${task_id}\nPrompt:\n${prompt}\n\nConversation:\n${JSON.stringify(messages, null, 2)}\n\nResponse:\n${generation}\n\n`;
+-        }
+-        const logFile = `${tag}_${timestamp}.txt`;
+-        await this._saveToFile(logFile, logEntry);
+-    }
+-
+-    async _saveToFile(logFile, logEntry) {
+-        let task_id = this.agent.task.task_id;
+-        let logDir;
+-        if (task_id == null) {
+-            logDir = path.join(__dirname, `../../bots/${this.agent.name}/logs`);
+-        } else {
+-            logDir = path.join(__dirname, `../../bots/${this.agent.name}/logs/${task_id}`);
+-        }
+-
+-        await fs.mkdir(logDir, { recursive: true });
+-
+-        logFile = path.join(logDir, logFile);
+-        await fs.appendFile(logFile, String(logEntry), 'utf-8');
+-    }
+ }

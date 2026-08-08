@@ -330,7 +330,7 @@ class DockerComposeContractTests(unittest.TestCase):
         voyager = source.split("  voyager:\n", 1)[1]
 
         self.assertIn("- ./bot_profiles:/app/bot_profiles", voyager)
-        self.assertIn("- ./bot_memory/mindcraft:/app/mindcraft/bots/Evelyn_0428", voyager)
+        self.assertNotIn("bot_memory/mindcraft", voyager)
         self.assertIn('MINEFLAYER_PROFILES_FOLDER: "/app/bot_profiles"', voyager)
         self.assertIn('MINEFLAYER_AUTH: "microsoft"', voyager)
         self.assertIn('MINECRAFT_VERSION: "1.21.11"', voyager)
@@ -369,10 +369,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', voyager)
         self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', voyager)
         self.assertIn('MINDCRAFT_CODEX_ENABLED: "false"', voyager)
-        self.assertIn(
-            'MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"',
-            voyager,
-        )
+        self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", voyager)
         self.assertIn('MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"', voyager)
         self.assertIn('minecraft_llm:', voyager)
         self.assertIn('router_llm:', voyager)

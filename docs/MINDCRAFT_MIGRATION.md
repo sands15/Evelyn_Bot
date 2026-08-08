@@ -38,16 +38,22 @@ patch and copies the custom runtime modules into the image.
 - local microphone: unrelated to this runtime and remains controlled by the
   existing Evelyn local-I/O settings
 
-## Persistent data
+## Runtime data boundary
 
-- Mindcraft bot memory: `bot_memory/mindcraft`
+- Mindcraft conversation history: bounded and process-local; no
+  `bot_memory/mindcraft` mount
 - profiles: `bot_profiles`
 - runtime telemetry: `runtime_artifacts/mindcraft/status.json`
 - world-action authorization:
   `runtime_artifacts/minecraft_world_lease/status.json`
-- runtime log: `runtime_artifacts/logs/mindcraft.log`
+- legacy runtime log: `runtime_artifacts/logs/mindcraft.log` (not modified or
+  cleaned by the current safety boundary)
 - optional Codex Gateway token: dedicated Compose volume
   `codex_gateway_token` (not mounted into the default Mindcraft service)
+
+Pre-existing Mindcraft memory, archive, and log files are not read, rebased,
+mounted into the default container, or deleted. Their migration or cleanup
+requires explicit user approval.
 
 ## Verification evidence
 
@@ -68,6 +74,32 @@ Current source evidence:
 - Production dependency audit reports no high or critical findings. Fourteen
   moderate findings remain in the upstream Mineflayer authentication/plugin
   chain, with no safe compatible upstream fix currently proven.
+
+## Ephemeral history safety boundary (2026-08-09)
+
+The default profile sets `load_memory=false`, and planner recovery state is not
+persisted. History keeps only the bounded turns needed by the current process.
+Its generation exposure covers the LLM result through the awaited final
+route/action sink and begins before the turn's first await. Inter-agent pause,
+classification, timers, and queued text use the same fence. An in-use clear is
+rejected; a successful clear drops those queues and resets history,
+recovery/action-mode, content-bearing goal-manager transients, self-prompt
+state, and the last sender. Goal/status artifacts retain only command codes,
+counts, booleans, and fixed error codes rather than raw commands or results.
+
+Korean text stays local: the former Google translation path is replaced by an
+identity transform for local Qwen. The Python owner sends the Node child's
+stdout and stderr to `DEVNULL`. This prevents new child output capture but does
+not remove legacy logs or data.
+
+This is not durable, rollback-safe, or integrated with Evelyn's core
+deletion/edit exposure. The remaining P1 is a fixed-route authenticated Bot API
+broker that reuses `memory_exposure_request`, holds its lease through a delivery
+ACK, and carries strict compact receipts on structured assistant turns. No
+Docker image, live Minecraft session, or live clear was validated in this
+increment. Recovery correlation currently uses command codes, so exact
+same-command/different-target correlation remains P1. `!clearChat` is not a
+permanent autonomy stop; use `!endGoal` for that intent.
 
 ## Runtime generated-code lint gate
 

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { mkdirSync, renameSync, writeFileSync } from 'fs';
 import path from 'path';
 import Vec3 from 'vec3';
 
@@ -10,12 +10,36 @@ const HOSTILE_NAMES = new Set([
     'slime', 'spider', 'stray', 'vex', 'vindicator', 'warden', 'witch', 'wither_skeleton',
     'zoglin', 'zombie', 'zombie_villager'
 ]);
+const SURVIVAL_DECISION_CODES = new Set([
+    'bootstrap_tools',
+    'eat_inventory_food',
+    'escape_to_surface',
+    'handle_hostile',
+    'planner_control',
+    'reassess',
+]);
+
+function contentFreeSurvivalState(value) {
+    if (!value || typeof value !== 'object') return null;
+    const phase = SURVIVAL_DECISION_CODES.has(value.phase) ? value.phase : null;
+    const lastDecision = SURVIVAL_DECISION_CODES.has(value.last_decision)
+        ? value.last_decision
+        : null;
+    return {
+        phase,
+        last_decision: lastDecision,
+        last_success: typeof value.last_success === 'boolean' ? value.last_success : null,
+        last_error: value.last_error ? 'survival_action_failed' : null,
+        recovery_progress: value.recovery_progress === true,
+        recovery_handoff_until: Number.isFinite(value.recovery_handoff_until)
+            ? value.recovery_handoff_until
+            : 0,
+        updated_at: Number.isFinite(value.updated_at) ? value.updated_at : null,
+        content_free: true,
+    };
+}
 
 function loadInitialState(agentName) {
-    try {
-        const existing = JSON.parse(readFileSync(STATUS_PATH, 'utf8'));
-        if (existing && typeof existing === 'object') return existing;
-    } catch (_) {}
     return {
         runtime: 'mindcraft',
         agent_name: agentName,
@@ -93,7 +117,6 @@ export function installEvelynRuntime(bot, { agentName }) {
     ).trim().toLowerCase();
     state.runtime = 'mindcraft';
     state.agent_name = agentName;
-    state.goal = process.env.MINDCRAFT_GOAL || state.goal || null;
     state.running = true;
     state.command_policy = 'outbound_chat_disabled_by_default';
     state.task_contract = {
@@ -114,8 +137,8 @@ export function installEvelynRuntime(bot, { agentName }) {
         state.position = position ? { x: position.x, y: position.y, z: position.z } : null;
         state.inventory = inventoryCounts(bot);
         state.hostiles_nearby = nearbyHostiles(bot);
-        state.survival_controller = bot.evelynSurvivalState || state.survival_controller || null;
-        state.goal_manager = bot.evelynGoalState || state.goal_manager || null;
+        state.survival_controller = contentFreeSurvivalState(bot.evelynSurvivalState);
+        state.goal_manager = bot.evelynGoalState || null;
         const directory = path.dirname(STATUS_PATH);
         const temporary = `${STATUS_PATH}.${process.pid}.tmp`;
         try {
@@ -138,12 +161,11 @@ export function installEvelynRuntime(bot, { agentName }) {
             const text = String(message || '');
             if (!outboundChatAllowed() || text.trimStart().startsWith('/')) {
                 state.blocked_command_count = Number(state.blocked_command_count || 0) + 1;
-                state.last_blocked_command = text.slice(0, 120);
+                state.last_blocked_command = text.trimStart().startsWith('/')
+                    ? 'slash_command_blocked'
+                    : 'outbound_chat_disabled';
                 state.last_blocked_command_at = Date.now() / 1000;
-                console.warn(
-                    '[Evelyn Mindcraft] blocked outbound chat:',
-                    text.trimStart().startsWith('/') ? '[slash command]' : text.slice(0, 120)
-                );
+                console.warn(`[Evelyn Mindcraft] blocked outbound chat code=${state.last_blocked_command}`);
                 writeStatus();
                 return;
             }
@@ -154,7 +176,7 @@ export function installEvelynRuntime(bot, { agentName }) {
             bot.whisper = (username, message) => {
                 if (!outboundChatAllowed()) {
                     state.blocked_command_count = Number(state.blocked_command_count || 0) + 1;
-                    state.last_blocked_command = `[whisper:${String(username || '').slice(0, 32)}]`;
+                    state.last_blocked_command = 'outbound_whisper_disabled';
                     state.last_blocked_command_at = Date.now() / 1000;
                     console.warn('[Evelyn Mindcraft] blocked outbound whisper');
                     writeStatus();
@@ -185,15 +207,11 @@ export function installEvelynRuntime(bot, { agentName }) {
         state.last_death_event = { recorded_at: new Date().toISOString(), position: state.position };
         writeStatus();
     });
-    bot.on('kicked', (reason) => {
+    bot.on('kicked', () => {
         state.connected = false;
         state.connection_state = 'kicked';
         state.phase = 'stopped';
-        try {
-            state.last_error = typeof reason === 'string' ? reason : JSON.stringify(reason);
-        } catch {
-            state.last_error = String(reason || 'kicked');
-        }
+        state.last_error = 'minecraft_kicked';
         writeStatus();
     });
     bot.on('end', (reason) => {
@@ -202,16 +220,12 @@ export function installEvelynRuntime(bot, { agentName }) {
         state.connection_state = 'disconnected';
         state.phase = 'stopped';
         if (reason) {
-            try {
-                state.last_error = typeof reason === 'string' ? reason : JSON.stringify(reason);
-            } catch {
-                state.last_error = String(reason);
-            }
+            state.last_error = 'minecraft_disconnected';
         }
         writeStatus();
     });
-    bot.on('error', (error) => {
-        state.last_error = String(error?.message || error);
+    bot.on('error', () => {
+        state.last_error = 'minecraft_runtime_error';
         writeStatus();
     });
 

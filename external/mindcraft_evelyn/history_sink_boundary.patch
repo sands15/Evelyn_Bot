@@ -1,0 +1,279 @@
+diff --git a/src/agent/agent.js b/src/agent/agent.js
+--- a/src/agent/agent.js
++++ b/src/agent/agent.js
+@@ -174,7 +174,7 @@ export class Agent {
+                     console.warn('received whisper from other bot??')
+                 }
+                 else {
+-                    let translation = await handleEnglishTranslation(message);
++                    let translation = handleEnglishTranslation(message);
+                     await this.handleMessage(username, translation);
+                 }
+             } catch (error) {
+@@ -258,9 +258,18 @@ export class Agent {
+             this.self_prompter.stop(false);
+         }
+         convoManager.endAllConversations();
+     }
+ 
++    resetHistoryDerivedState() {
++        convoManager.resetHistoryDerivedState();
++    }
++
+     async handleMessage(source, message, max_responses=null) {
++        const directUserClear = source !== 'system' && source !== this.name &&
++            !convoManager.isOtherAgent(source) &&
++            containsCommand(String(message || '')) === '!clearChat';
++        const releaseTurnExposure = directUserClear ? null : this.history.beginExposure(this.history.generation);
++        try {
+         await this.checkTaskDone();
+         if (!source || !message) {
+             console.warn('[Evelyn Mindcraft] empty message ignored');
+@@ -282,10 +291,10 @@ export class Agent {
+             const user_command_name = containsCommand(message);
+             if (user_command_name) {
+                 if (!commandExists(user_command_name)) {
+-                    this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
++                    await this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
+                     return false;
+                 }
+-                this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
++                await this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
+                 if (user_command_name === '!newAction') {
+                     // all user-initiated commands are ignored by the bot except for this one
+                     // add the preceding message to the history to give context for newAction
+@@ -294,9 +303,11 @@ export class Agent {
+                 const goalBefore = this.goal_manager.captureSnapshot();
+                 let execute_res = await executeCommand(this, message);
+                 const goalAfter = this.goal_manager.captureSnapshot();
+-                await this.goal_manager.recordActionResult(message, execute_res, goalBefore, goalAfter, {autonomous: false});
++                if (user_command_name !== '!clearChat') {
++                    await this.goal_manager.recordActionResult(message, execute_res, goalBefore, goalAfter, {autonomous: false});
++                }
+                 if (execute_res) 
+-                    this.routeResponse(source, execute_res);
++                    await this.routeResponse(source, execute_res);
+                 return true;
+             }
+         }
+@@ -305,7 +316,7 @@ export class Agent {
+             this.last_sender = source;
+ 
+         // Now translate the message
+-        message = await handleEnglishTranslation(message);
++        message = handleEnglishTranslation(message);
+         console.log(`[Evelyn Mindcraft] message accepted chars=${message.length}`);
+ 
+         const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+@@ -362,7 +373,7 @@ export class Agent {
+                 this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
+ 
+                 if (settings.show_command_syntax === "full") {
+-                    this.routeResponse(source, res);
++                    await this.routeResponse(source, res);
+                 }
+                 else if (settings.show_command_syntax === "shortened") {
+                     // show only "used !commandname"
+@@ -370,13 +381,13 @@ export class Agent {
+                     let chat_message = `*used ${command_name.substring(1)}*`;
+                     if (pre_message.length > 0)
+                         chat_message = `${pre_message}  ${chat_message}`;
+-                    this.routeResponse(source, chat_message);
++                    await this.routeResponse(source, chat_message);
+                 }
+                 else {
+                     // no command at all
+                     let pre_message = res.substring(0, res.indexOf(command_name)).trim();
+                     if (pre_message.trim().length > 0)
+-                        this.routeResponse(source, pre_message);
++                        await this.routeResponse(source, pre_message);
+                 }
+ 
+                 const goalGate = this.goal_manager.gateCommand(res, {autonomous: self_prompt});
+@@ -406,7 +417,7 @@ export class Agent {
+             }
+             else { // conversation response
+                 this.history.add(this.name, res);
+-                this.routeResponse(source, res);
++                await this.routeResponse(source, res);
+                 break;
+             }
+             
+@@ -414,4 +425,7 @@ export class Agent {
+         }
+ 
+         return used_command;
++        } finally {
++            releaseTurnExposure?.();
++        }
+     }
+@@ -431,7 +445,7 @@ export class Agent {
+         }
+         else {
+             // otherwise, use open chat
+-            this.openChat(message);
++            await this.openChat(message);
+             // note that to_player could be another bot, but if we get here the conversation has ended
+         }
+     }
+@@ -445,7 +459,7 @@ export class Agent {
+             to_translate = to_translate.substring(0, translate_up_to);
+             remaining = message.substring(translate_up_to);
+         }
+-        message = (await handleTranslation(to_translate)).trim() + " " + remaining;
++        message = handleTranslation(to_translate).trim() + " " + remaining;
+         // newlines are interpreted as separate chats, which triggers spam filters. replace them with spaces
+         message = message.replaceAll('\n', ' ');
+ 
+diff --git a/src/agent/conversation.js b/src/agent/conversation.js
+--- a/src/agent/conversation.js
++++ b/src/agent/conversation.js
+@@ -17,11 +17,13 @@ class Conversation {
+     }
+ 
+     reset() {
++        clearTimeout(this.inMessageTimer);
+         this.active = false;
+         this.ignore_until_start = false;
+         this.in_queue = [];
+         this.inMessageTimer = null;
+     }
+ 
+     end() {
++        clearTimeout(this.inMessageTimer);
+         this.active = false;
+@@ -55,6 +56,15 @@ class ConversationManager {
+         agent = a;
+     }
+ 
++    resetHistoryDerivedState() {
++        this._stopMonitor();
++        for (const convo of Object.values(this.convos)) convo.reset();
++        this.convos = {};
++        this.activeConversation = null;
++        this.awaiting_response = false;
++        this.wait_time_limit = WAIT_TIME_START;
++    }
++
+     _getConvo(name) {
+         if (!this.convos[name])
+             this.convos[name] = new Conversation(name);
+@@ -166,6 +176,8 @@ class ConversationManager {
+     }
+ 
+     async receiveFromBot(sender, received) {
++        const releaseExposure = agent.history.beginExposure(agent.history.generation);
++        try {
+         const convo = this._getConvo(sender);
+ 
+         if (convo.ignore_until_start && !received.start)
+@@ -191,7 +203,10 @@ class ConversationManager {
+             await agent.self_prompter.pause();
+         }
+     
+-        _scheduleProcessInMessage(sender, received, convo);
++        await _scheduleProcessInMessage(sender, received, convo);
++        } finally {
++            releaseExposure();
++        }
+     }
+ 
+     responseScheduledFor(sender) {
+
+diff --git a/src/agent/coder.js b/src/agent/coder.js
+--- a/src/agent/coder.js
++++ b/src/agent/coder.js
+@@ -5,4 +5,5 @@ import * as world from './library/world.js';
+ import { Vec3 } from 'vec3';
+ import {ESLint} from "eslint";
++import { inheritMindcraftHistorySnapshot } from '../utils/evelyn_history_boundary.js';
+ 
+ export class Coder {
+@@ -39,7 +40,10 @@ export class Coder {
+         for (let i=0; i<MAX_ATTEMPTS; i++) {
+             if (this.agent.bot.interrupt_code)
+                 return null;
+-            const messages_copy = JSON.parse(JSON.stringify(messages));
++            const messages_copy = inheritMindcraftHistorySnapshot(
++                messages,
++                JSON.parse(JSON.stringify(messages)),
++            );
+             let res = await this.agent.prompter.promptCoding(messages_copy);
+             if (this.agent.bot.interrupt_code)
+                 return null;
+diff --git a/src/agent/commands/actions.js b/src/agent/commands/actions.js
+--- a/src/agent/commands/actions.js
++++ b/src/agent/commands/actions.js
+@@ -93,7 +93,7 @@ export const actionsList = [
+                 }
+                 throw error;
+             }
+-            return agent.name + "'s active chat memory was cleared and committed. Legacy operational logs remain under retention policy.";
++            return agent.name + "'s active in-process chat was cleared. Persistent history is disabled; legacy files and operational logs were not changed.";
+         }
+     },
+     {
+@@ -427,6 +427,6 @@ export const actionsList = [
+             else if (convoManager.inConversation(player_name))
+                 agent.history.add('system', 'You are already in conversation with ' + player_name + '. Don\'t use this command to talk to them.');
+-            convoManager.startConversation(player_name, message);
++            await convoManager.startConversation(player_name, message);
+         }
+     },
+     {
+diff --git a/src/agent/commands/index.js b/src/agent/commands/index.js
+--- a/src/agent/commands/index.js
++++ b/src/agent/commands/index.js
+@@ -214,7 +214,7 @@ export async function executeCommand(agent, message) {
+     if (typeof parsed === 'string')
+         return parsed; //The command was incorrectly formatted or an invalid input was given.
+     else {
+-        console.log('parsed command:', parsed);
++        console.log(`[Evelyn Mindcraft] parsed command name=${parsed.commandName} args=${parsed.args?.length || 0}`);
+         const command = getCommand(parsed.commandName);
+         let numArgs = 0;
+         if (parsed.args) {
+diff --git a/src/agent/modes.js b/src/agent/modes.js
+--- a/src/agent/modes.js
++++ b/src/agent/modes.js
+@@ -312,7 +312,7 @@ async function execute(mode, agent, func, timeout=-1) {
+         await func();
+     }, { timeout });
+     mode.active = false;
+-    console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
++    console.log(`[Evelyn Mindcraft] mode completed name=${mode.name} resultChars=${String(code_return.message || '').length}`);
+ 
+     let should_reprompt = 
+         interrupted_action && // it interrupted a previous action
+diff --git a/src/mindcraft/mindserver.js b/src/mindcraft/mindserver.js
+--- a/src/mindcraft/mindserver.js
++++ b/src/mindcraft/mindserver.js
+@@ -143,7 +143,7 @@ export class MindServer {
+                 console.warn(`Agent ${agentName} tried to send a message but is not logged in`);
+                 return;
+             }
+-            console.log(`${curAgentName} sending message to ${agentName}: ${json.message}`);
++            console.log(`[Evelyn Mindcraft] inter-agent message forwarded chars=${String(json.message || '').length}`);
+             agent_connections[agentName].socket.emit('chat-message', curAgentName, json);
+         });
+ 
+diff --git a/src/models/prompter.js b/src/models/prompter.js
+--- a/src/models/prompter.js
++++ b/src/models/prompter.js
+@@ -6,4 +6,5 @@ import { getCommand } from '../agent/commands/index.js';
+ import settings from '../agent/settings.js';
+ import { selectAPI, createModel } from './_model_map.js';
++import { inheritMindcraftHistorySnapshot } from '../utils/evelyn_history_boundary.js';
+ 
+ export class Prompter {
+@@ -302,6 +303,9 @@ export class Prompter {
+         user_message += '$LAST_GOALS\n$STATS\n$INVENTORY\n$CONVO'
+         user_message = await this.replaceStrings(user_message, messages, null, null, last_goals);
+-        let user_messages = [{role: 'user', content: user_message}];
++        let user_messages = inheritMindcraftHistorySnapshot(
++            messages,
++            [{role: 'user', content: user_message}],
++        );
+ 
+         let res = await this.chat_model.sendRequest(user_messages, system_message);
+ 
