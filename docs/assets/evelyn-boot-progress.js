@@ -67,11 +67,32 @@
       || hasReadyRuntimeServices(payload);
   }
 
+  function continuityDecision(hasReachedReadyState, payload) {
+    const reason = String((((payload || {}).ui || {}).reason) || "");
+    const transientDegradation = Boolean(
+      payload
+      && payload.ok === false
+      && ["bot_api_unavailable", "bot_api_proxy_pending"].includes(reason)
+    );
+    const ready = !transientDegradation && isReady(payload);
+    return {
+      ready,
+      reached: Boolean(hasReachedReadyState || ready),
+      preserveChat: Boolean(hasReachedReadyState && transientDegradation),
+    };
+  }
+
+  function shouldApplyStateResponse(requestGeneration, currentGeneration, sending) {
+    return requestGeneration === currentGeneration && !sending;
+  }
+
   window.EvelynBootProgress = {
     clampPercent,
+    continuityDecision,
     fromRuntimeServices,
     hasReadyRuntimeServices,
     isReady,
     progressFromPayload,
+    shouldApplyStateResponse,
   };
 }());

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import unittest
@@ -27,7 +28,7 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("let statePollTimer = null;", self.html)
         self.assertIn("let initialStateLoaded = false;", self.html)
         self.assertIn("function scheduleStatePolling()", self.html)
-        self.assertIn("refreshState({ runInitialPanelCommands: false, showConnectionErrors: false });", self.html)
+        self.assertIn("refreshState({ runInitialPanelCommands: false, showConnectionErrors: false })", self.html)
         self.assertIn("if (bootProgressReady(payload))", self.html)
         self.assertIn("scheduleStatePolling();", self.html)
         self.assertIn("applyState(payload, { runInitialPanelCommands });", self.html)
@@ -253,6 +254,73 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("bootProgressPollTimer = window.setTimeout(() =>", self.html)
         self.assertNotIn("const apiConnected = payload.ok !== false;", self.html)
         self.assertNotIn("hide: apiConnected", self.html)
+
+    def test_ready_chat_survives_transient_control_page_degradation(self) -> None:
+        self.assertIn("let hasReachedReadyState = false;", self.html)
+        self.assertIn("const showSplash = visible && !hasReachedReadyState;", self.html)
+        self.assertIn("const continuity = window.EvelynBootProgress.continuityDecision", self.html)
+        self.assertIn("hasReachedReadyState = continuity.reached;", self.html)
+        self.assertIn("if (hasReachedReadyState || bootProgressReady(payload)) return;", self.html)
+        self.assertIn("function shouldPreserveChatHistory(state)", self.html)
+        self.assertIn(".continuityDecision(hasReachedReadyState, state)", self.html)
+        self.assertIn(
+            "if (!preserveChatHistory && state.chat && Array.isArray(state.chat.messages))",
+            self.html,
+        )
+        self.assertIn("const chatHistoryPreserved = applyState(payload.state", self.html)
+        self.assertIn("if (chatHistoryPreserved && payload.reply) setBubble(payload.reply);", self.html)
+
+    def test_state_poll_is_single_flight_and_stale_responses_are_ignored(self) -> None:
+        self.assertIn("let statePollInFlight = false;", self.html)
+        self.assertIn("let stateRefreshGeneration = 0;", self.html)
+        self.assertIn("if (!sending && !statePollInFlight)", self.html)
+        self.assertIn("statePollInFlight = true;", self.html)
+        self.assertIn("statePollInFlight = false;", self.html)
+        self.assertIn("const refreshGeneration = ++stateRefreshGeneration;", self.html)
+        self.assertNotIn("applyState(state);", self.html)
+        self.assertGreaterEqual(self.html.count("shouldApplyStateResponse("), 2)
+        self.assertIn("stateRefreshGeneration += 1;\n      sending = true;", self.html)
+        self.assertIn("stateRefreshGeneration += 1;\n        sending = false;", self.html)
+
+    def test_chat_continuity_transition_table_executes(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        script = f"""
+global.window = {{}};
+require({json.dumps(str(CONTROL_BOOT_PROGRESS_JS))});
+const contract = window.EvelynBootProgress;
+const degraded = {{
+  ok: false,
+  ui: {{ reason: "bot_api_proxy_pending" }},
+  bootProgress: {{ percent: 100, ready: true, componentsReady: true }}
+}};
+const healthy = {{
+  ok: true,
+  ui: {{ reason: "docker_fast_control" }},
+  bootProgress: {{ percent: 100, ready: true, componentsReady: true }}
+}};
+function check(value, message) {{ if (!value) throw new Error(message); }}
+let decision = contract.continuityDecision(false, degraded);
+check(!decision.ready && !decision.reached && !decision.preserveChat, "fresh degraded");
+decision = contract.continuityDecision(decision.reached, healthy);
+check(decision.ready && decision.reached && !decision.preserveChat, "first ready");
+decision = contract.continuityDecision(decision.reached, degraded);
+check(!decision.ready && decision.reached && decision.preserveChat, "ready then degraded");
+decision = contract.continuityDecision(decision.reached, healthy);
+check(decision.ready && decision.reached && !decision.preserveChat, "recovered");
+check(!contract.shouldApplyStateResponse(1, 2, false), "stale generation");
+check(!contract.shouldApplyStateResponse(2, 2, true), "send in flight");
+check(contract.shouldApplyStateResponse(2, 2, false), "current response");
+"""
+        result = subprocess.run(
+            [node, "-e", script],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_runtime_service_health_is_rendered_without_replacing_legacy_services(self) -> None:
         self.assertIn('id="runtimeHealthLine"', self.html)

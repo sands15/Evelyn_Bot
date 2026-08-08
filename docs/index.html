@@ -2542,6 +2542,9 @@
     let csrfToken = "";
     let sending = false;
     let initialStateLoaded = false;
+    let hasReachedReadyState = false;
+    let statePollInFlight = false;
+    let stateRefreshGeneration = 0;
     let suggestionItems = [];
     let selectedSuggestionIndex = 0;
     let renderedChatSignature = "";
@@ -2769,9 +2772,10 @@
 
     function setBootSplashVisible(visible) {
       if (!bootSplash) return;
-      bootSplash.classList.toggle("is-hidden", !visible);
-      bootSplash.setAttribute("aria-hidden", String(!visible));
-      document.body.classList.toggle("is-boot-splash-active", visible);
+      const showSplash = visible && !hasReachedReadyState;
+      bootSplash.classList.toggle("is-hidden", !showSplash);
+      bootSplash.setAttribute("aria-hidden", String(!showSplash));
+      document.body.classList.toggle("is-boot-splash-active", showSplash);
     }
 
     function updateBootSplashSteps(percent) {
@@ -3403,7 +3407,9 @@
       if (!progress || typeof progress !== "object") return false;
       const percent = clampPercent(progress.percent);
       const phase = progress.phase || "Checking boot progress";
-      const ready = bootProgressReady(payload);
+      const continuity = window.EvelynBootProgress.continuityDecision(hasReachedReadyState, payload);
+      const ready = continuity.ready;
+      hasReachedReadyState = continuity.reached;
       setBootProgress(ready ? 100 : percent, ready ? "Control Ready" : phase, { hide: ready });
       return true;
     }
@@ -3866,9 +3872,7 @@
           try {
             const response = await fetch(candidate + "/api/control-page/state", { cache: "no-store" });
             if (!response.ok) continue;
-            const state = await response.json();
             apiBase = candidate;
-            applyState(state);
             break;
           } catch {
             // try next candidate
@@ -3917,9 +3921,16 @@
       return await response.json();
     }
 
+    function shouldPreserveChatHistory(state) {
+      return window.EvelynBootProgress
+        .continuityDecision(hasReachedReadyState, state)
+        .preserveChat;
+    }
+
     function applyState(state, options = {}) {
-      if (!state || typeof state !== "object") return;
+      if (!state || typeof state !== "object") return false;
       applyBootProgressPayload(state);
+      const preserveChatHistory = shouldPreserveChatHistory(state);
       const commands = mergeCommands(commandCatalog, state.commands || [], state.allCommands || []);
       if (commands.length) commandCatalog = commands;
     const runtime = state.runtime || {};
@@ -3936,7 +3947,7 @@
     const minecraft = state.minecraft || {};
     const voicePipeline = runtime.voicePipeline || {};
     const bargeInContinuity = voicePipeline.bargeInContinuity || {};
-    if (state.chat && Array.isArray(state.chat.messages)) {
+    if (!preserveChatHistory && state.chat && Array.isArray(state.chat.messages)) {
       renderChatMessages(state.chat.messages);
     }
       applyControlPanelCommands(state, options);
@@ -3951,6 +3962,7 @@
     }
     renderRuntimeRepairPreview(state);
       if (lines[3]) lines[3].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
+      return preserveChatHistory;
     }
 
     function scheduleBootProgressPolling(payload) {
@@ -3958,7 +3970,7 @@
         clearTimeout(bootProgressPollTimer);
         bootProgressPollTimer = null;
       }
-      if (bootProgressReady(payload)) return;
+      if (hasReachedReadyState || bootProgressReady(payload)) return;
       bootProgressPollTimer = window.setTimeout(() => {
         bootProgressPollTimer = null;
         refreshState({ runInitialPanelCommands: false });
@@ -3968,8 +3980,12 @@
     function scheduleStatePolling() {
       if (statePollTimer) return;
       statePollTimer = window.setInterval(() => {
-        if (!sending) {
-          refreshState({ runInitialPanelCommands: false, showConnectionErrors: false });
+        if (!sending && !statePollInFlight) {
+          statePollInFlight = true;
+          refreshState({ runInitialPanelCommands: false, showConnectionErrors: false })
+            .finally(() => {
+              statePollInFlight = false;
+            });
         }
       }, STATE_POLL_MS);
     }
@@ -3987,8 +4003,14 @@
         }
         return;
       }
+      const refreshGeneration = ++stateRefreshGeneration;
       try {
         const payload = await fetchApi("/api/control-page/state");
+        if (!window.EvelynBootProgress.shouldApplyStateResponse(
+          refreshGeneration,
+          stateRefreshGeneration,
+          sending
+        )) return;
         initialStateLoaded = true;
         applyState(payload, { runInitialPanelCommands });
         scheduleBootProgressPolling(payload);
@@ -3996,6 +4018,11 @@
           scheduleStatePolling();
         }
       } catch (error) {
+        if (!window.EvelynBootProgress.shouldApplyStateResponse(
+          refreshGeneration,
+          stateRefreshGeneration,
+          sending
+        )) return;
         if (showConnectionErrors || !initialStateLoaded) {
           setBootProgress(0, `API 연결 확인 중: ${error.message}`);
           setBubble(`컨트롤 페이지 API 연결 확인 중: ${error.message}`);
@@ -5733,6 +5760,7 @@
         return;
       }
       const pendingChat = pendingChatMessageFor(value);
+      stateRefreshGeneration += 1;
       sending = true;
       sendButton.disabled = true;
       if (!pendingChat.reused) {
@@ -5758,7 +5786,8 @@
         }
         clearPendingChatMessage(pendingChat.requestId);
         if (payload.state) {
-          applyState(payload.state, { runInitialPanelCommands: true });
+          const chatHistoryPreserved = applyState(payload.state, { runInitialPanelCommands: true });
+          if (chatHistoryPreserved && payload.reply) setBubble(payload.reply);
         } else {
           setBubble(payload.reply || "응답을 받았어.");
         }
@@ -5766,6 +5795,7 @@
         if (!composer.value.trim()) composer.value = value;
         setBubble(`전송 실패: ${error.message}`);
       } finally {
+        stateRefreshGeneration += 1;
         sending = false;
         sendButton.disabled = false;
       }

@@ -1,8 +1,8 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-08-01 KST
-Source branch: `codex/dependency-config-hardening`, current conversation memory receipt/deletion-safe delivery increment
+Last reviewed: 2026-08-08 KST
+Source branch: `codex/omnivoice-tts-cutover`, Control Page chat continuity increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -1898,5 +1898,26 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   발화를 만들지 않는다. voice 608개(skip 5), runtime 756개(skip 4)가 통과했다.
 - 실제 마이크·스피커는 사용하지 않았고 Discord·Minecraft도 기동하지 않았다. 따라서
   사용자 청취, local/Discord 10-turn·무음·barge-in과 승인된 세계 행동은 남아 있다.
+
+## 2026-08-08 Control Page 채팅 화면 연속성
+
+- Control Page 채팅 전송은 form navigation이나 page reload를 사용하지 않는다. 사용자
+  증상과 일치하는 확인된 코드 경로는 일시적인 Bot API proxy 실패의 HTTP 200 degraded
+  state가 boot splash를 다시 표시하고 단일 `Control` 진단문으로 기존 채팅 DOM을
+  교체하는 것이었다. 서버의 durable 대화 기록이 삭제되는 경로는 아니었다.
+- page lifetime에서 최초 ready를 단조 latch한다. 이후 정확한
+  `bot_api_unavailable`·`bot_api_proxy_pending` degraded state는 runtime health와 repair
+  상태만 갱신하고 boot splash와 기존 채팅 기록은 유지한다. 정상 또는 다른 상태의
+  실제 Bot API chat history는 계속 렌더링한다.
+- 1.5초 state poll은 single-flight로 제한했다. 모든 refresh에 generation을 부여하고
+  채팅 전송 시작·종료에서 세대를 전진시켜, 오래된 poll 성공·실패가 최신 채팅 응답과
+  연결 상태를 덮지 못한다. 초기 부팅부터 Bot API가 unavailable인 경우에는 기존
+  boot splash와 진단 채팅을 유지한다.
+- 서버 continuity checkpoint·재시작 복구와 브라우저의 14분 stable pending request ID는
+  기존 계약대로 유지된다. UI 전체 176개, proxy/runtime health/continuity 포함 집중
+  60개, fresh degraded→ready→degraded→recovered와 stale generation을 실행하는 Node
+  전이 표, JavaScript 구문 검사가 통과했다. bind-mounted live root와 helper asset은
+  변경 파일과 exact hash가 일치하고 GET health/state가 ready·boot 100%였다. 실제 채팅
+  POST와 장애 유도, 이미지 교체는 하지 않았으므로 전이의 live 재현은 아직 수행하지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.
