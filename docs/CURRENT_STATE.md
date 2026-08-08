@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-08 KST
-Source branch: `codex/omnivoice-tts-cutover`, autonomy source re-audit increment
+Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -407,6 +407,11 @@ Source branch: `codex/omnivoice-tts-cutover`, autonomy source re-audit increment
   - producer가 선언한 `groundingState`는 그대로 신뢰하지 않는다. 제공 note ID와
     legacy evidence ID가 실제 count와 함께 있는지 최종 경계에서 다시 계산하고,
     근거 ID 없이 `attributed`를 주장한 문맥은 `unattributed`로 강등한다.
+  - recall provenance는 exact `memory.provenance.v1` schema, 필수 field type과
+    canonical source type을 cache와 receipt에서 같은 validator로 재검사한다.
+    손상 recall이 정상 pinned hot-context와 섞여도 hot note ID를 빌려 전체 문맥을
+    `attributed`로 승격하지 못하며, supplied ID를 비워 최종 prompt에서 전체
+    기억 본문을 보류한다.
   - memory prompt는 ContextBuilder의 1,800자 제한보다 작은 1,680자로 먼저 제한한다.
     잘림이 발생하면 잘린 본문과 개별 ID의 대응을 증명할 수 없으므로 note/legacy
     귀속을 모두 버리고 본문 전체를 보류한다. receipt와 turn summary에는

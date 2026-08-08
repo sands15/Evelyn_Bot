@@ -18,6 +18,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
+- 자율행동의 raw conversation history에 기억 삭제 exposure guard 적용
 - OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
@@ -25,6 +26,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
+- 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
+  `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
   ready latch·채팅 보존·single-flight/generation fence로 막았다(UI 176·집중 60 통과, live GET 일치).
 - 2026-08-08 기본 `tts:8880`을 실제 `k2-fsa/OmniVoice` container로 교체했다.
@@ -44,8 +47,6 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Windows venv launcher PID와 실제 Bridge PID가 달라 Supervisor readiness가
   실패하던 문제를 실제 base Python 직접 소유 방식으로 수정했다. Supervisor가
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
-- 로컬 기본 재빌드에서 비활성 Discord 이미지의 대형 의존성을 제외했으며,
-  명시적으로 Discord를 유지할 때만 해당 이미지를 빌드한다.
 - Local Voice는 단일 capture owner, durable reservation/claim, capture-consent fence와
   cross-process attempt lease로 재시작·경쟁·중복 실행을 fail-closed 처리한다.
 - validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반
@@ -53,11 +54,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
   서명 상태와 watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- 관련 CI-equivalent 전체 discover 3044개(skip 20), 최종 hardening 묶음 267개
-  (skip 1)가 통과했다.
-  `compileall`, `pip check`, JS 구문, Compose config와 diff check도 통과했다. 실제
-  마이크·스피커·Discord live 검증은 아직 수행하지 않았다. 현재 마이크는 동의
-  경계를 유지해 OFF이며 Discord와 Minecraft도 기동하지 않았다.
+- 관련 CI-equivalent 전체 discover 3044개(skip 20), hardening 267개(skip 1),
+  `compileall`, `pip check`, JS 구문과 Compose config가 통과했다. 현재 마이크는
+  동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
 
 ## 작업 원칙
 
@@ -72,7 +71,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[ACTIVE_RISKS]] — 남은 위험과 검증 공백
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
-- [[worklog/2026-08-08]] — OmniVoice 실제 전환과 live 합성 근거
+- [[worklog/2026-08-08]] — OmniVoice 전환, UI 연속성, provenance 수정 근거
 
 ## 다음 작업 종료 시
 

@@ -86,6 +86,28 @@ class MemoryVaultTests(unittest.TestCase):
         self,
     ) -> None:
         note_id = "concept-0123456789abcdef"
+        minimal_valid = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-minimal-valid-provenance",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [
+                        {
+                            "schema": MEMORY_PROVENANCE_SCHEMA,
+                            "noteId": note_id,
+                            "source": "unknown",
+                            "sourceType": "unknown",
+                            "sourceRefs": [],
+                            "derivedFrom": [],
+                            "evidenceHashes": [],
+                            "confidence": "",
+                        }
+                    ],
+                    "rendered_note_ids": [note_id],
+                },
+            )
+        )
         empty = build_memory_recall_receipt(
             MemoryRecallResult(
                 turn_id="turn-empty-rendered-set",
@@ -116,6 +138,46 @@ class MemoryVaultTests(unittest.TestCase):
                 metadata={
                     "provenance": [{"noteId": note_id}],
                     "rendered_note_ids": [],
+                },
+            )
+        )
+        incomplete_provenance = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-incomplete-provenance",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [{"noteId": note_id}],
+                    "rendered_note_ids": [note_id],
+                },
+            )
+        )
+        oversized_note_ids = [
+            f"concept-{index:016x}"
+            for index in range(
+                memory_vault_module.MEMORY_RECALL_MAX_RENDERED_NOTES + 1
+            )
+        ]
+        oversized_set = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-oversized-provenance-set",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [
+                        {
+                            "schema": MEMORY_PROVENANCE_SCHEMA,
+                            "noteId": item,
+                            "source": "unknown",
+                            "sourceType": "unknown",
+                            "sourceRefs": [],
+                            "derivedFrom": [],
+                            "evidenceHashes": [],
+                            "confidence": "",
+                        }
+                        for item in oversized_note_ids
+                    ],
+                    "rendered_note_ids": oversized_note_ids,
                 },
             )
         )
@@ -160,6 +222,8 @@ class MemoryVaultTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(minimal_valid["groundingState"], "attributed")
+        self.assertEqual(minimal_valid["noteIds"], [note_id])
         self.assertEqual(empty["state"], "empty")
         self.assertEqual(empty["groundingState"], "empty")
         self.assertEqual(empty["noteIds"], [])
@@ -167,6 +231,8 @@ class MemoryVaultTests(unittest.TestCase):
         for receipt in (
             malformed,
             mismatched,
+            incomplete_provenance,
+            oversized_set,
             malformed_source,
             duplicate,
             missing_declared_set,
@@ -177,6 +243,73 @@ class MemoryVaultTests(unittest.TestCase):
             self.assertEqual(receipt["noteCount"], 0)
             self.assertEqual(receipt["provenanceCount"], 0)
         self.assertEqual(malformed_source["memoryVersion"], 0)
+        self.assertFalse(
+            memory_vault_module._retrieval_cache_payload_is_current(
+                {
+                    "schema": memory_vault_module.MEMORY_RETRIEVAL_CACHE_SCHEMA,
+                    "context_text": "memory body",
+                    "facts": ["memory body"],
+                    "sources": ["memory source"],
+                    "retrieval_mode": "scan",
+                    "provenance": [{"noteId": note_id}],
+                    "rendered_note_ids": [note_id],
+                }
+            )
+        )
+
+    def test_unattributed_recall_cannot_borrow_pinned_attribution(
+        self,
+    ) -> None:
+        recall_note_id = "concept-0123456789abcdef"
+        hot_note_id = "core-fedcba9876543210"
+        private_canary = "UNTRUSTED_RECALL_CANARY"
+        result = MemoryRecallResult(
+            turn_id="turn-unattributed-mixed-context",
+            ok=True,
+            context_text=private_canary,
+            metadata={
+                "memory_version": 3,
+                "provenance": [{"noteId": recall_note_id}],
+                "rendered_note_ids": [recall_note_id],
+            },
+        )
+        receipt: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(
+                memory_vault_module,
+                "recall_memory_vault",
+                return_value=result,
+            ), patch.object(
+                memory_vault_module,
+                "_validated_memory_hot_context_payload",
+                return_value=(
+                    {
+                        "content": "verified pinned context",
+                        "note_ids": [hot_note_id],
+                    },
+                    "verified",
+                ),
+            ):
+                context = build_memory_vault_context(
+                    7,
+                    "memory",
+                    root=Path(tmp),
+                    receipt=receipt,
+                )
+
+        self.assertIn(private_canary, context)
+        self.assertEqual(receipt["groundingState"], "unattributed")
+        self.assertEqual(receipt["recallNoteIds"], [])
+        self.assertEqual(receipt["suppliedNoteIds"], [])
+        boundary = prepare_memory_context_for_prompt(
+            context,
+            grounding_state=str(receipt["groundingState"]),
+        )
+        reconcile_memory_receipt_for_prompt(receipt, boundary)
+        self.assertTrue(boundary.evidence_withheld)
+        self.assertNotIn(private_canary, boundary.context)
+        self.assertEqual(receipt["state"], "withheld")
+        self.assertEqual(receipt["suppliedNoteIds"], [])
 
     def test_parse_front_matter_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

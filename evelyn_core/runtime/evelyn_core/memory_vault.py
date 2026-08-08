@@ -1795,6 +1795,57 @@ def _normalized_memory_recall_max_items(value: object) -> int:
     return min(MEMORY_RECALL_MAX_RENDERED_NOTES, max(1, parsed))
 
 
+def _validated_memory_provenance_item(
+    item: object,
+) -> tuple[str, str] | None:
+    if (
+        not isinstance(item, dict)
+        or item.get("schema") != MEMORY_PROVENANCE_SCHEMA
+    ):
+        return None
+    source = item.get("source")
+    source_type = item.get("sourceType")
+    confidence = item.get("confidence")
+    if (
+        not isinstance(source, str)
+        or not clean_text(source)
+        or clean_text(source) != source
+        or not isinstance(source_type, str)
+        or not isinstance(confidence, str)
+        or clean_text(confidence) != confidence
+    ):
+        return None
+    for field_name in ("sourceRefs", "derivedFrom", "evidenceHashes"):
+        values = item.get(field_name)
+        if (
+            not isinstance(values, list)
+            or any(
+                not isinstance(value, str)
+                or not clean_text(value)
+                or clean_text(value) != value
+                for value in values
+            )
+        ):
+            return None
+    note_id = item.get("noteId")
+    if (
+        not isinstance(note_id, str)
+        or not clean_text(note_id)
+        or clean_text(note_id) != note_id
+    ):
+        return None
+    try:
+        canonical_note_id = memory_deletion_ledger_note_id(note_id)
+        canonical_source_type = normalize_memory_deletion_source_type(
+            source_type
+        )
+    except MemoryDeletionJournalIntegrityError:
+        return None
+    if source_type != canonical_source_type:
+        return None
+    return canonical_note_id, canonical_source_type
+
+
 def _retrieval_cache_payload_is_current(payload: dict[str, Any]) -> bool:
     expected_keys = {
         "schema",
@@ -1841,13 +1892,17 @@ def _retrieval_cache_payload_is_current(payload: dict[str, Any]) -> bool:
         )
     ):
         return False
-    try:
-        provenance_note_ids = [
-            memory_deletion_ledger_note_id(item.get("noteId"))
-            for item in provenance
-        ]
-    except MemoryDeletionJournalIntegrityError:
+    validated_provenance = [
+        _validated_memory_provenance_item(item)
+        for item in provenance
+    ]
+    if any(item is None for item in validated_provenance):
         return False
+    provenance_note_ids = [
+        item[0]
+        for item in validated_provenance
+        if item is not None
+    ]
     return provenance_note_ids == rendered_note_ids
 
 
@@ -3474,53 +3529,44 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
         and provenance_input_is_valid
         else []
     )
+    validated_provenance = [
+        _validated_memory_provenance_item(item)
+        for item in provenance
+    ]
     provenance_is_well_formed = (
         provenance_input_is_valid
-        and all(
-            isinstance(item, dict)
-            and bool(clean_text(str(item.get("noteId") or "")))
-            for item in provenance
-        )
+        and all(item is not None for item in validated_provenance)
     )
-    try:
-        note_ids_in_render_order = (
-            [
-                memory_deletion_ledger_note_id(
-                    clean_text(str(item["noteId"]))
-                )
-                for item in provenance
-            ]
-            if provenance_is_well_formed
-            else []
-        )
-    except MemoryDeletionJournalIntegrityError:
-        provenance_is_well_formed = False
-        note_ids_in_render_order = []
+    note_ids_in_render_order = (
+        [
+            item[0]
+            for item in validated_provenance
+            if item is not None
+        ]
+        if provenance_is_well_formed
+        else []
+    )
     declared_rendered_note_ids = metadata.get("rendered_note_ids")
     if (
         not provenance_is_well_formed
+        or len(note_ids_in_render_order) > MEMORY_RECALL_MAX_RENDERED_NOTES
         or len(set(note_ids_in_render_order))
         != len(note_ids_in_render_order)
         or not isinstance(declared_rendered_note_ids, list)
         or declared_rendered_note_ids != note_ids_in_render_order
     ):
         provenance = []
+        validated_provenance = []
         note_ids_in_render_order = []
     note_ids = sorted(note_ids_in_render_order)
     source_type_counts: dict[str, int] = {}
-    try:
-        for item in provenance:
-            source_type = normalize_memory_deletion_source_type(
-                clean_text(str(item.get("sourceType") or "unknown"))
-                or "unknown"
-            )
-            source_type_counts[source_type] = (
-                source_type_counts.get(source_type, 0) + 1
-            )
-    except MemoryDeletionJournalIntegrityError:
-        provenance = []
-        note_ids = []
-        source_type_counts = {}
+    for validated_item in validated_provenance:
+        if validated_item is None:
+            continue
+        source_type = validated_item[1]
+        source_type_counts[source_type] = (
+            source_type_counts.get(source_type, 0) + 1
+        )
     state = (
         "provided"
         if result.ok and has_rendered_context
@@ -3617,9 +3663,18 @@ def build_memory_vault_context(
         parts.append("[Pinned Memory Vault]\n" + hot_context)
     if result.ok and result.context_text:
         parts.append(result.context_text)
-    supplied_note_ids = sorted(
-        set(recall_note_ids)
-        | set(receipt_hot_note_ids if hot_context else [])
+    recall_is_unattributed = bool(
+        result.ok
+        and result.context_text
+        and recall_receipt["groundingState"] != "attributed"
+    )
+    supplied_note_ids = (
+        []
+        if recall_is_unattributed
+        else sorted(
+            set(recall_note_ids)
+            | set(receipt_hot_note_ids if hot_context else [])
+        )
     )
     if receipt is not None:
         receipt.clear()

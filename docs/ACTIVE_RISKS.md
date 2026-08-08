@@ -769,6 +769,13 @@ note ID가 없는 과거 hot-context는 prompt에서 제외한다. Discord/Main 
 summary와 Fast Control 일반·stream 응답은 이 receipt를 노출하며 “제공됨”과
 “모델이 실제 사용함”을 구분한다.
 
+2026-08-08 감사에서 exact note ID만 맞으면 필수 provenance field가 손상돼도
+recall receipt가 `attributed`가 되고, 정상 pinned hot-context의 ID가 손상 recall
+본문까지 귀속시키는 경로를 확인해 닫았다. cache와 receipt가 같은 구조 validator를
+사용하고 mixed context는 supplied ID를 비워 최종 prompt에서 전체 보류한다. 남은
+이 절의 P1은 과거 기억의 근거 누락과 재합성·사용자 확인 품질이지 이 승격 경로가
+아니다.
+
 새로 저장되는 raw 대화 row는 content-free stable evidence ID와 source turn
 ID를 guild/room/person/session scope에 동일하게 보존한다. Prompt에 실제 선택된
 row만 receipt와 turn summary에 기록하므로 이후 턴에서 어느 원문 turn이

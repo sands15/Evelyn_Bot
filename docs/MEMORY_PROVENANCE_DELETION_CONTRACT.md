@@ -11,7 +11,7 @@ Last reviewed: 2026-08-02 KST
 Control Page의 memory card와 recall metadata는
 `memory.provenance.v1`을 사용한다. 각 항목은 최소한 다음 정보를 갖는다.
 
-- `noteId`, `source`, `sourceType`
+- `schema=memory.provenance.v1`, `noteId`, `source`, `sourceType`
 - `sourceRefs`, `derivedFrom`
 - `evidenceHashes`
 - `confidence`
@@ -49,6 +49,12 @@ vault에서 다시 계산한다. retrieval cache schema는 cache key와 payload 
 procedural 추가 note도 삭제 exposure와
 assistant conversation receipt에 항상 결속되고, 해당 note 삭제 뒤 이전 version의
 assistant history는 재사용 전에 제거된다.
+
+`schema`와 위 필수 field의 type, canonical `sourceType`은 retrieval cache 재사용과
+recall receipt 생성 양쪽에서 같은 validator로 검사한다. 이 검사를 통과하지 못한
+recall 본문은 정상 pinned hot-context와 함께 있어도 그 note ID를 빌려 전체 문맥을
+`attributed`로 승격할 수 없다. 이 경우 결합 문맥의 supplied note ID를 비우고 최종
+Main/Fast prompt 경계에서 본문 전체를 보류한다.
 
 ## Legacy provenance backfill audit
 
