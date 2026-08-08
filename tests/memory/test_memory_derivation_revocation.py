@@ -1195,6 +1195,17 @@ class MemoryDerivationRevocationIntegrationTests(
             legacy_revocation_raw = revocation_path.read_text(
                 encoding="utf-8"
             )
+            migrated_entries = (
+                memory_vault_module._read_memory_derivation_revocations(
+                    root
+                )
+            )
+            migrated_revocation_raw = revocation_path.read_text(
+                encoding="utf-8"
+            )
+            migrated_revocation_payload = json.loads(
+                migrated_revocation_raw
+            )
             environment = os.environ.copy()
             environment["PYTHONPATH"] = os.pathsep.join(
                 item
@@ -1229,6 +1240,18 @@ class MemoryDerivationRevocationIntegrationTests(
                 encoding="utf-8"
             )
             revocation_payload = json.loads(revocation_raw)
+            revocation_bytes_before_resync = (
+                revocation_path.read_bytes()
+            )
+            with mock.patch.object(
+                memory_vault_module,
+                "_utc_now_iso",
+                return_value="2099-01-01T00:00:00Z",
+            ):
+                sync_memory_vault_index(root=root)
+            revocation_bytes_after_resync = (
+                revocation_path.read_bytes()
+            )
             source_exists = source_path.exists()
             derived_exists = derived_path.exists()
             multi_exists = multi_path.exists()
@@ -1259,8 +1282,26 @@ class MemoryDerivationRevocationIntegrationTests(
         self.assertTrue(derived_was_deleted)
         self.assertNotIn(private_id, journal_raw)
         self.assertIn(private_id, legacy_revocation_raw)
+        self.assertIn(private_id, str(migrated_entries))
+        self.assertNotIn(private_id, migrated_revocation_raw)
+        self.assertTrue(
+            migrated_revocation_payload["contentFree"]
+        )
+        self.assertEqual(
+            migrated_revocation_raw,
+            json.dumps(
+                migrated_revocation_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+        )
         self.assertNotIn(private_id, revocation_raw)
         self.assertTrue(revocation_payload["contentFree"])
+        self.assertEqual(
+            revocation_bytes_after_resync,
+            revocation_bytes_before_resync,
+        )
         self.assertEqual(
             recovered.returncode,
             0,

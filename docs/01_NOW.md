@@ -26,7 +26,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 ## 최근 확인
 
 - 2026-08-08 자율행동 history와 legacy memory layer를 삭제 guard에 연결하고 receipt 없는
-  파생 재사용·질문 복제·실행 중 reset을 닫았다(core 731·memory 269·Discord I/O 124 통과).
+  파생 재사용·질문 복제·reset 및 파생 철회 재쓰기 비결정성을 닫았다(memory 269·전체 3078 통과).
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을

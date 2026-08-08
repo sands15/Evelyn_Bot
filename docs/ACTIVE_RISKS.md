@@ -713,13 +713,13 @@ hot-context에서 fail-closed quarantine한다. 새 프로세스도 같은 상�
 자동 회상에 사용되지 않는다. 재합성 대기가 남으면 일반 900초 유지보수와
 분리된 60초 retry gate를 기록해 다음 비실시간 유지보수 기회에 다시 시도한다.
 
-2026-08-02 전체 회귀에서 content-free derivation revocation을 canonical rewrite한
-직후 raw source ID와 ledger ID의 정렬 순서 차이 때문에 의미가 같은 state를 한 번
-더 쓰며 `updatedAt`만 바뀌는 기존 비결정성을 확인했다. 삭제·quarantine 판정이나
-private data 제거는 바뀌지 않지만 불필요한 durable write와 hot-context invalidation,
-초 경계 테스트 flake를 만든다. 격리 반복에서도 재현됐고 전체 재실행은 통과했다.
-이번 음성 P0에서는 기억 동작이나 assertion을 약화시키지 않았다. 다음 기억 작업에서
-비교 전 raw ID list를 canonical 정렬하고 exact-byte assertion을 그대로 유지한다.
+2026-08-08 raw source ID와 ledger ID의 정렬 순서 차이로 의미가 같은 derivation
+revocation state를 한 번 더 쓰던 비결정성은 닫혔다. reader의 역매핑 결과와 새
+`directSourceIds`를 모두 raw ID 기준으로 중복 제거·정렬해 비교하고, 반복 sync의
+파일 byte와 `updatedAt`이 그대로임을 고정했다. `contentFree` 없는 과거 raw-ID
+artifact도 첫 read에서 기존 lock과 durable writer로 즉시 canonical content-free
+형식으로 교체하며 실패는 integrity 오류로 닫힌다. 이 절에 남은 P1은 위의 과거
+파생 provenance 누락과 재합성 지연이지 revocation 재쓰기 안정성이 아니다.
 
 Control Page의 근거 감사는 legacy/과거 semantic note의 exact source ref와
 evidence hash만 대조한다. 본문 유사도나 LLM 추측은 사용하지 않으며 교차 검증,

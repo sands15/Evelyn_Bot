@@ -5278,20 +5278,25 @@ def _read_memory_derivation_revocations_locked(
                 raise RuntimeError(
                     "memory_derivation_revocations_corrupt"
                 )
-            projected[key] = list(
-                dict.fromkeys(
+            projected[key] = sorted(
+                {
                     resolve_id(
                         item,
                         allow_unmapped_canonical=True,
                     )
                     for item in values
-                )
+                }
             )
         if raw_note_id in output:
             raise RuntimeError(
                 "memory_derivation_revocations_corrupt"
             )
         output[raw_note_id] = projected
+    if not content_free:
+        _write_memory_derivation_revocations(
+            output,
+            root=root,
+        )
     return output
 
 
@@ -6409,7 +6414,7 @@ def _reconcile_memory_derivation_revocations(
         entries[note_id] = {
             "noteId": note_id,
             "state": "quarantined",
-            "directSourceIds": list(node.derived_from),
+            "directSourceIds": sorted(set(node.derived_from)),
             "revokedSourceIds": list(
                 reason.revoked_source_ids
             ),

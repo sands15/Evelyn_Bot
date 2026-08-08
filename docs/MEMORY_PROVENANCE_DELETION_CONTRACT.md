@@ -621,6 +621,9 @@ graph에 없는 canonical stale target은 reconciliation 동안에만 허용한 
 제거한다. 정상 legacy raw artifact와 duplicate/additional key 또는 비정규 byte
 serialization은 writer lease와 observability lock 아래 canonical content-free 형식으로
 내구성 있게 다시 쓰며, 이 교체가 실패하면 고정 integrity 오류로 fail-closed한다.
+역매핑된 source ID와 새 graph state는 모두 raw ID 기준으로 중복 제거·정렬한 뒤
+비교한다. 따라서 의미가 같은 반복 reconciliation은 artifact byte, `updatedAt`과
+hot-context generation을 변경하지 않는다.
 
 기존 v1 journal은 원본 byte prefix 전체의 SHA-256 domain hash로 고정한다.
 첫 read가 non-empty legacy-only journal을 만나면 writer lease 아래 sequence 0
