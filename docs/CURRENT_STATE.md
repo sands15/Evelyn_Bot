@@ -1879,4 +1879,24 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
 - 이 증거는 server·clone contract의 live 통과다. 사용자 스피커 청취, 실제 마이크와
   Discord의 10-turn·무음·barge-in E2E 완료를 뜻하지 않는다.
 
+## 2026-08-08 정상 실행과 Local Voice 연속성 배포
+
+- 기본 launcher는 Bot API·Control Page image의
+  `EVELYN_IMAGE_SOURCE_REVISION`을 clean Git revision과 exact 비교한다. 둘 중 하나가
+  missing/stale이면 allowlist builder로 Bot API, Control Page와 Vision을 갱신하고,
+  두 control service의 role·image/expected revision과 proxy identity를 `/health`에서
+  확인한 뒤에만 Host Supervisor를 시작하고 준비 완료를 보고한다.
+- 실제 stale `7c4770e` image에서 자동 rebuild가 선택됐다. 첫 실행이 드러낸 optional
+  `BuildContexts` StrictMode 결함을 공통 builder에서 수정한 뒤 정상
+  `start_local.bat --background`가 exit 0으로 완료됐다. 공식 checker는 Control Page,
+  Bot API, Main/Router/Sub LLM, OmniVoice, STT, Vision과 Windows Local Bridge의 필수
+  readiness를 모두 통과했다.
+- Local Bridge는 mic OFF, output ready, OmniVoice clone warmup 564.1 ms, error count 0,
+  playback count 0이었다. HTTP PCM 본문·remainder·tail write는 기존 cancellation-safe
+  writer를 사용해 cancel 중 worker 종료 전 playback owner를 넘기지 않는다. clone의
+  HTTP 200 빈 PCM은 재생 전일 때만 기존 `auto` 후보로 넘어가며 부분 재생 뒤에는 중복
+  발화를 만들지 않는다. voice 608개(skip 5), runtime 756개(skip 4)가 통과했다.
+- 실제 마이크·스피커는 사용하지 않았고 Discord·Minecraft도 기동하지 않았다. 따라서
+  사용자 청취, local/Discord 10-turn·무음·barge-in과 승인된 세계 행동은 남아 있다.
+
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

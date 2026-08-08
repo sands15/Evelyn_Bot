@@ -436,29 +436,24 @@ wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포
 내리는 제안이라 적용하지 않았다. 다음 조치: 강제 audit fix는 금지하고,
 Microsoft/Xbox 인증 체인과 Mineflayer 플러그인의 호환 릴리스를 추적한다.
 
-## P1 — Runtime Health 공개 projection 배포 대기
+## P1 — Runtime Health 공개 projection 잔여 실사용 검증
 
 소스와 새 검증 이미지에서는 Runtime Health의 raw probe evidence를 서비스·
 capability 판정에만 사용하고 `runtime_health.public.v1` 폐쇄형 projection을
 거친 결과만 Control Page에 제공한다. artifact 경로, probe target/payload/error,
 host 설정, PID, 출력 장치명과 임의 legacy/observability 확장 필드는 제거된다.
 
-이번 작업은 실행 중인 Bot API와 Control Page를 의도적으로 교체하지 않았다.
-따라서 현재 `127.0.0.1:8799`의 기존 컨테이너는 다음 계획된 배포 전까지 이전
-응답 형식을 계속 제공한다. 이는 loopback 경계 안의 로컬 정보 노출이지만 새
-계약이 live 상태라는 뜻은 아니다.
+2026-08-08 정상 launcher가 stale Bot API·Control Page image를 current source로
+자동 rebuild했다. 두 service의 image/expected revision과 Control Page의 Bot proxy
+identity가 exact `/health`를 통과했고 공식 runtime checker도 core readiness를
+통과했다. 실제 `/api/control-page/runtime-health`는
+`runtime_health.public.v1`, `ok=true`, `coreState=up`이며 재귀 검사한 금지 key
+`defaultHost/error/host/hostEnv/payload/portEnv/target`은 0개였다. privacy 표시는 raw
+probe payload와 filesystem path를 모두 `false`로 보고했다.
 
-새 소스에는 이미지/실행 source revision 일치 게이트도 추가됐다. Bot API,
-Control Page와 Discord가 같은 clean Git revision으로 빌드·기동되지 않으면
-state/chat/voice readiness와 Control Page proxy/health가 닫힌다. 직접 Compose를
-실행해 revision이 `unversioned`인 경우도 정상처럼 표시하지 않는다. 다만 현재
-실행 중인 두 컨테이너는 이 게이트 이전 이미지이므로, 게이트 자체의 live 배포
-증거는 아직 없다.
-
-다음 조치: 사용자가 서비스 교체를 허용한 유지보수 세션에서 새 Bot API와
-Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/state`와
-`/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
-readiness와 복구 preview가 배포 전과 같은지 확인한다.
+Discord와 Minecraft/Codex는 의도적으로 deferred라 public health 전체는 optional
+degraded다. 다음 조치는 사용자가 각 surface를 승인해 기동할 때도 같은 공개 projection과
+exact source identity가 유지되는지 확인하는 것이다.
 
 ## P0 source 완료 — Control Page capture owner 배포·live 경합 미검증
 
@@ -536,7 +531,9 @@ read-only mount의 live 증거를 확인했다.
 client disconnect가 in-flight generation과 concurrency slot을 확실히 취소한다는 live
 증거가 없으므로 비활성 상태다. 서버 source는 operational log의 text/path/session
 identifier를 제거하고 profile API의 `ref_text`를 숨긴다. 새 image의 실제 profile 응답과
-합성 후 로그 검사도 통과했다. 남은 공백은 사용자 스피커 청취, 실제 마이크 10-turn·무음,
+합성 후 로그 검사도 통과했다. Local Bridge의 direct HTTP PCM write는 cancellation-safe
+worker와 단일 playback owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다.
+mock 회귀는 통과했지만 남은 공백은 사용자 스피커 청취, 실제 마이크 10-turn·무음,
 barge-in과 Discord 채널 E2E다.
 
 2026-08-02 source 경계에서는 Local I/O Bridge가 캡처를 시작하기 전에

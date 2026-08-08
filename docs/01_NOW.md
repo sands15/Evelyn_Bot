@@ -32,10 +32,10 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   728 ms에 반환했다. profile API는 `ref_text`를 숨겼고 운영 로그에서도 합성 원문,
   경로, session/turn 식별자가 검출되지 않았다. PCM은 메모리에서 검사 후 폐기했다.
   사용자 스피커 청취와 local/Discord 10-turn·무음 E2E는 아직 남아 있다.
-- 현재 저장소의 revision-gated launcher로 Docker local core와 Windows Host
-  Supervisor/Local I/O Bridge를 실제 기동했다. Bot API, Control Page, LLM 3개,
-  당시 VoxCPM 기반 TTS, STT, Vision ingress/runtime가 모두 healthy이며 공식 runtime checker가
-  Local Bridge 포함 전체 필수 항목을 통과했다.
+- 현재 저장소의 정상 launcher가 stale Bot API·Control Page image를 exact source
+  revision으로 감지해 재빌드한다. 2026-08-08 실제 `start_local.bat --background`에서
+  Control Page, Bot API, LLM 3개, OmniVoice, STT, Vision과 Local Bridge가 공식 checker를
+  통과했다. Bridge는 mic OFF, output ready, clone warmup 564.1 ms, error/play count 0이었다.
 - 오래된 `C:\Evelyn` Compose에는 `vision_runtime`이 없어 현재 Vision ingress와
   결합하면 DNS/502가 반복됐다. 현재 저장소 Compose로 재생성해 ingress와 runtime을
   함께 띄웠고 Vision health가 통과했다.
