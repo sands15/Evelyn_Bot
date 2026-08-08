@@ -133,6 +133,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 
 정상 기준:
 
+- Docker daemon·Compose config·service status 명령 중 하나라도 nonzero이면 기존
+  HTTP 서비스가 응답해도 전체 검사는 실패한다.
 - 모든 핵심 HTTP health가 응답한다.
 - TTS health가 `status=healthy`, `ready=true`, `model_loaded=true`,
   `model_id=k2-fsa/OmniVoice`,

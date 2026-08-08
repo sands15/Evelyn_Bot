@@ -21,7 +21,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
-- Mindcraft Bot API 기억 전송 broker와 실제 Minecraft 승인 행동·결과 증거 검증
+- Docker/runtime 검사 fail-closed와 local/Discord 음성 실환경 연속성 검증
 
 ## 최근 확인
 

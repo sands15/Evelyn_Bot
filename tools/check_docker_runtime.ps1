@@ -106,29 +106,39 @@ else {
 }
 
 try {
-    $dockerVersion = docker version --format "{{.Server.Os}}/{{.Server.Arch}}"
+    $dockerVersion = docker version --format "{{.Server.Os}}/{{.Server.Arch}}" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker_version_failed"
+    }
     Add-Ok "Docker daemon: $dockerVersion"
 }
 catch {
-    Add-Failure "Docker daemon is not available ($($_.Exception.Message))"
+    Add-Failure "Docker daemon is not available (docker_version_failed)"
 }
 
 try {
     $composeArgs = Get-ComposeArgs
-    docker compose @composeArgs config | Out-Null
+    docker compose @composeArgs config 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker_compose_config_failed"
+    }
     Add-Ok "Compose config is valid"
 }
 catch {
-    Add-Failure "Compose config failed ($($_.Exception.Message))"
+    Add-Failure "Compose config failed (docker_compose_config_failed)"
 }
 
 Write-Section "Compose Services"
 try {
     $composeArgs = Get-ComposeArgs
-    docker compose @composeArgs ps
+    $composeStatus = docker compose @composeArgs ps 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker_compose_ps_failed"
+    }
+    $composeStatus | Write-Host
 }
 catch {
-    Add-Failure "Could not read compose service status ($($_.Exception.Message))"
+    Add-Failure "Could not read compose service status (docker_compose_ps_failed)"
 }
 
 Write-Section "HTTP Health"
@@ -371,10 +381,14 @@ else {
 
 Write-Section "GPU"
 try {
-    nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader
+    $gpuStatus = nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "nvidia_smi_failed"
+    }
+    $gpuStatus | Write-Host
 }
 catch {
-    Add-Warn "nvidia-smi is not available ($($_.Exception.Message))"
+    Add-Warn "nvidia-smi is not available (nvidia_smi_failed)"
 }
 
 Write-Section "Result"
