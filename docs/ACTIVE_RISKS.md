@@ -563,7 +563,9 @@ read-only mount의 live 증거를 확인했다.
 client disconnect가 in-flight generation과 concurrency slot을 확실히 취소한다는 live
 증거가 없으므로 비활성 상태다. 서버 source는 operational log의 text/path/session
 identifier를 제거하고 profile API의 `ref_text`를 숨긴다. 새 image의 실제 profile 응답과
-합성 후 로그 검사도 통과했다. Local Bridge의 direct HTTP PCM write는 cancellation-safe
+합성 후 로그 검사도 통과했다. client fallback/final failure도 upstream HTTP 오류 본문과
+clone profile 대신 고정 `tts_request_failed`·`omnivoice_request_failed`만 남긴다.
+Local Bridge의 direct HTTP PCM write는 cancellation-safe
 worker와 단일 playback owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다.
 mock 회귀는 통과했지만 남은 공백은 사용자 스피커 청취, 실제 마이크 10-turn·무음,
 barge-in과 Discord 채널 E2E다.

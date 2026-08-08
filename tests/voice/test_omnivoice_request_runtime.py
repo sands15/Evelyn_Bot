@@ -133,10 +133,11 @@ class OmniVoiceFallbackRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_clone_failure_retries_auto_and_logs(self) -> None:
         calls: list[str] = []
         logs: list[str] = []
+        private_error = "PRIVATE_TTS_UPSTREAM_BODY_CANARY"
 
         async def stream(voice: str):
             calls.append(voice)
-            return SimpleNamespace(ok=voice == "auto", error_text="clone missing")
+            return SimpleNamespace(ok=voice == "auto", error_text=private_error)
 
         result = await run_omnivoice_tts_with_fallback_from_runtime(
             primary_voice="clone:evelyn",
@@ -147,16 +148,25 @@ class OmniVoiceFallbackRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(calls, ["clone:evelyn", "auto"])
         self.assertIn("clone voice 실패", logs[0])
+        self.assertIn("errorCode=tts_request_failed", logs[0])
+        self.assertNotIn(private_error, logs[0])
+        self.assertNotIn("clone:evelyn", logs[0])
 
     async def test_raises_when_final_result_fails(self) -> None:
-        async def stream(_voice: str):
-            return SimpleNamespace(ok=False, error_text="server down")
+        private_error = "PRIVATE_TTS_UPSTREAM_BODY_CANARY"
 
-        with self.assertRaisesRegex(RuntimeError, "OmniVoice 서버 오류"):
+        async def stream(_voice: str):
+            return SimpleNamespace(ok=False, error_text=private_error)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^omnivoice_request_failed$",
+        ) as raised:
             await run_omnivoice_tts_with_fallback_from_runtime(
                 primary_voice="auto",
                 stream_with_voice=stream,
             )
+        self.assertNotIn(private_error, repr(raised.exception))
 
 
 if __name__ == "__main__":

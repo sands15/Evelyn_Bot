@@ -104,9 +104,11 @@ async def run_omnivoice_tts_with_fallback_from_runtime(
     tts_result = await stream_with_voice(primary_voice)
     if not tts_result.ok:
         if primary_voice.startswith("clone:"):
-            error_text = tts_result.error_text or ""
-            log(f"[TTS FALLBACK] clone voice 실패 -> auto 사용 | voice={primary_voice} err={error_text[:200]}")
+            log(
+                "[TTS FALLBACK] clone voice 실패 -> auto 사용 | "
+                "errorCode=tts_request_failed"
+            )
             tts_result = await stream_with_voice("auto")
         if not tts_result.ok:
-            raise RuntimeError(f"OmniVoice 서버 오류: {(tts_result.error_text or '')[:300]}")
+            raise RuntimeError("omnivoice_request_failed")
     return tts_result

@@ -1930,7 +1930,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 서버 patch는 operational log에서 합성 text, 경로, session/turn 식별자를 제거하고
   profile API와 request validation 오류 응답에서 입력 원문을 숨긴다. Compose는 TTS image를 `pull_policy: never`로
   외부에서 받지 않는다. path-safe builder가 missing/fresh image를 만들며 standalone TTS
-  launcher도 image가 없으면 이를 호출한다. Supervisor
+  launcher도 image가 없으면 이를 호출한다. client의 clone fallback 로그와 최종
+  실패 예외도 upstream HTTP 오류 본문·voice profile을 복사하지 않고 고정
+  `tts_request_failed`·`omnivoice_request_failed`만 남긴다. Supervisor
   repair는 existing image만 재사용한다.
 - 최종 변경 집중 149개와 기존 OmniVoice request/source·VoxCPM profile 계약 17개가 통과했다.
   Local Bridge의 기본 경로 변경 뒤 voice 전체 606개(skip 5)도 통과했다.
