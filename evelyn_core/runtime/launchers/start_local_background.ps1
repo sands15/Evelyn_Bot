@@ -160,7 +160,7 @@ function Wait-HttpReady {
     param(
         [string]$Url,
         [string]$Label,
-        [ValidateSet('ready', 'vision', 'omnivoice')]
+        [ValidateSet('ready', 'vision', 'omnivoice', 'bot_api', 'control_page')]
         [string]$Contract = 'ready'
     )
 
@@ -182,6 +182,22 @@ function Wait-HttpReady {
                     [string]$health.model_revision -eq 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'
             } elseif ($Contract -eq 'vision') {
                 [bool]$health.ok -and [bool]$health.models.smol.loaded
+            } elseif ($Contract -eq 'bot_api') {
+                $health.ok -eq $true -and
+                    [string]$health.role -ceq 'fast-control-bot-api' -and
+                    $health.sourceIdentity.ready -eq $true -and
+                    [string]$health.sourceIdentity.imageSourceRevision -ceq $sourceRevision -and
+                    [string]$health.sourceIdentity.expectedSourceRevision -ceq $sourceRevision
+            } elseif ($Contract -eq 'control_page') {
+                $health.ok -eq $true -and
+                    [string]$health.role -ceq 'control-page' -and
+                    $health.botProxyReady -eq $true -and
+                    $health.sourceIdentity.ready -eq $true -and
+                    [string]$health.sourceIdentity.imageSourceRevision -ceq $sourceRevision -and
+                    [string]$health.sourceIdentity.expectedSourceRevision -ceq $sourceRevision -and
+                    $health.botSourceIdentity.ready -eq $true -and
+                    [string]$health.botSourceIdentity.imageSourceRevision -ceq $sourceRevision -and
+                    [string]$health.botSourceIdentity.expectedSourceRevision -ceq $sourceRevision
             } else {
                 [bool]$health.ok -and [bool]$health.ready
             }
@@ -493,6 +509,38 @@ function Test-DockerImageExists {
     return $exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$imageId)
 }
 
+function Test-DockerImageSourceRevision {
+    param(
+        [string]$Image,
+        [string]$ExpectedRevision
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $imageEnvironment = @(
+            & docker image inspect `
+                --format '{{range .Config.Env}}{{println .}}{{end}}' `
+                $Image 2>$null
+        )
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        return $false
+    }
+
+    $prefix = 'EVELYN_IMAGE_SOURCE_REVISION='
+    $revisions = @(
+        $imageEnvironment |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
+            ForEach-Object { $_.Substring($prefix.Length) }
+    )
+    return $revisions.Count -eq 1 -and $revisions[0] -ceq $ExpectedRevision
+}
+
 function Stop-BotApiForImageRefresh {
     Write-Host '[Evelyn] Stopping the current Bot API cleanly before replacing its image.'
     Invoke-DockerCommand -Arguments @(
@@ -539,19 +587,33 @@ function Start-DockerCore {
 
     $keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
+    $botApiImage = 'evelyn-fast-control-bot_api:latest'
+    $controlPageImage = 'evelyn-fast-control-control_page:latest'
+    $discordBotImage = 'evelyn-fast-control-discord_bot:latest'
     $ttsImage = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
     $ttsImageMissing = -not (Test-DockerImageExists -Image $ttsImage)
+    $coreAppImagesNeedBuild = $buildEnabled -or
+        -not (Test-DockerImageSourceRevision -Image $botApiImage -ExpectedRevision $sourceRevision) -or
+        -not (Test-DockerImageSourceRevision -Image $controlPageImage -ExpectedRevision $sourceRevision)
+    $discordImageNeedsBuild = $keepDiscordBot -and (
+        $buildEnabled -or
+        -not (Test-DockerImageSourceRevision -Image $discordBotImage -ExpectedRevision $sourceRevision)
+    )
     $dockerBuildServices = @()
-    if ($buildEnabled) {
-        Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
+    if ($coreAppImagesNeedBuild) {
+        if ($buildEnabled) {
+            Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
+        } else {
+            Write-Host '[Evelyn] Rebuilding missing or stale source-gated Docker app images.'
+        }
         $dockerBuildServices += @(
             'bot_api',
             'control_page',
             'vision'
         )
-        if ($keepDiscordBot) {
-            $dockerBuildServices += 'discord_bot'
-        }
+    }
+    if ($discordImageNeedsBuild) {
+        $dockerBuildServices += 'discord_bot'
     }
     if ($buildEnabled -or $ttsImageMissing) {
         $dockerBuildServices += 'tts'
@@ -564,7 +626,7 @@ function Start-DockerCore {
             Write-Host '[Evelyn] Building the missing source-gated OmniVoice TTS image.'
         }
         & $dockerImageBuilder -ProjectRoot $projectRoot -Services $dockerBuildServices
-        if ($buildEnabled) {
+        if ($dockerBuildServices -contains 'bot_api') {
             Stop-BotApiForImageRefresh
         }
     } else {
@@ -741,8 +803,8 @@ try {
     Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS' -Contract 'omnivoice'
     Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'
     Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'
-    Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'
-    Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'
+    Wait-HttpReady -Url "http://127.0.0.1:$botApiPort/health" -Label 'Docker Bot API' -Contract 'bot_api'
+    Wait-HttpReady -Url "http://127.0.0.1:$controlPagePublicPort/health" -Label 'Docker Control Page' -Contract 'control_page'
 
     Start-HostSupervisor
 

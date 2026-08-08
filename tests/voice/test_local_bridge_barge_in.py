@@ -1054,6 +1054,138 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertTrue(websocket_closed)
         self.assertTrue(worker_exited)
 
+    def test_http_pcm_cancellation_holds_owner_until_blocking_write_exits(self):
+        class FakeRawOutputStream:
+            def __init__(self, sound_device) -> None:
+                self.sound_device = sound_device
+                self.exited = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                self.exited = True
+
+            def abort(self) -> None:
+                self.sound_device.abort_called.set()
+
+            def write(self, _payload: bytes) -> None:
+                self.sound_device.write_started.set()
+                self.sound_device.allow_write_exit.wait(timeout=2.0)
+                self.sound_device.write_exited.set()
+
+        class FakeSoundDevice:
+            def __init__(self) -> None:
+                self.write_started = threading.Event()
+                self.abort_called = threading.Event()
+                self.allow_write_exit = threading.Event()
+                self.write_exited = threading.Event()
+                self.stream: FakeRawOutputStream | None = None
+
+            def RawOutputStream(self, **_kwargs):
+                self.stream = FakeRawOutputStream(self)
+                return self.stream
+
+        class OneChunkContent:
+            def __init__(self) -> None:
+                self.sent = False
+
+            def iter_chunked(self, _size: int):
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return b"\x01\x02"
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self) -> None:
+                self.content = OneChunkContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+        class FakeSession:
+            def post(self, _url, *, json, timeout):
+                del json, timeout
+                return FakeResponse()
+
+        async def runner() -> tuple[bool, bool, bool, bool]:
+            bridge = make_active_voice_bridge()
+            bridge.session = FakeSession()
+            bridge._post_status = AsyncMock()
+            sound_device = FakeSoundDevice()
+            safety_release = threading.Timer(
+                1.0,
+                sound_device.allow_write_exit.set,
+            )
+            safety_release.start()
+            try:
+                with patch.object(local_io_bridge, "sd", sound_device):
+                    parent = asyncio.create_task(
+                        bridge._speak_with_payload(
+                            {"input": "hello", "voice": "auto"}
+                        )
+                    )
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            sound_device.write_started.wait,
+                            1.0,
+                        )
+                    )
+                    self.assertTrue(
+                        bridge.playback_controller.request_cancel()
+                    )
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            sound_device.abort_called.wait,
+                            1.0,
+                        )
+                    )
+                    claimed_during_write = (
+                        bridge.playback_controller.claim(
+                            "replacement",
+                            lambda: None,
+                        )
+                    )
+                    sound_device.allow_write_exit.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await parent
+                    claimed_after_write = bridge.playback_controller.claim(
+                        "replacement",
+                        lambda: None,
+                    )
+            finally:
+                sound_device.allow_write_exit.set()
+                safety_release.cancel()
+
+            assert sound_device.stream is not None
+            return (
+                claimed_during_write,
+                claimed_after_write,
+                sound_device.abort_called.is_set(),
+                sound_device.write_exited.is_set()
+                and sound_device.stream.exited,
+            )
+
+        claimed_during, claimed_after, aborted, writer_exited = asyncio.run(
+            runner()
+        )
+
+        self.assertFalse(claimed_during)
+        self.assertTrue(claimed_after)
+        self.assertTrue(aborted)
+        self.assertTrue(writer_exited)
+
     def test_stream_write_attempt_marks_playback_before_partial_write_failure(self):
         class FailingStream:
             def __enter__(self):

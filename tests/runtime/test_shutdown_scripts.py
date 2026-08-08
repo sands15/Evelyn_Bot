@@ -101,8 +101,16 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'bot_api'", script)
         self.assertIn("'control_page'", script)
         self.assertIn("LOCAL_BRIDGE_BOT_API_BASE = 'http://127.0.0.1:$botApiPort'", script)
-        self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'", script)
-        self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'", script)
+        self.assertIn(
+            'Wait-HttpReady -Url "http://127.0.0.1:$botApiPort/health" '
+            "-Label 'Docker Bot API' -Contract 'bot_api'",
+            script,
+        )
+        self.assertIn(
+            'Wait-HttpReady -Url "http://127.0.0.1:$controlPagePublicPort/health" '
+            "-Label 'Docker Control Page' -Contract 'control_page'",
+            script,
+        )
         self.assertNotIn("function Start-LocalControlService", script)
 
     def test_local_launcher_defers_minecraft_services_until_explicit_start(self) -> None:
@@ -130,8 +138,14 @@ class ShutdownScriptContractTests(unittest.TestCase):
         script = self.read_script("start_local_background.ps1")
 
         start_index = script.index("Start-DockerCore")
-        bot_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'")
-        page_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'")
+        bot_wait_index = script.index(
+            'Wait-HttpReady -Url "http://127.0.0.1:$botApiPort/health" '
+            "-Label 'Docker Bot API' -Contract 'bot_api'"
+        )
+        page_wait_index = script.index(
+            'Wait-HttpReady -Url "http://127.0.0.1:$controlPagePublicPort/health" '
+            "-Label 'Docker Control Page' -Contract 'control_page'"
+        )
         supervisor_index = script.index("Start-HostSupervisor", page_wait_index)
         ready_index = script.index('Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"')
 
@@ -253,11 +267,44 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'",
             script,
         )
+        self.assertIn(
+            "[ValidateSet('ready', 'vision', 'omnivoice', 'bot_api', 'control_page')]",
+            script,
+        )
+        self.assertIn("[string]$health.role -ceq 'fast-control-bot-api'", script)
+        self.assertIn("[string]$health.role -ceq 'control-page'", script)
+        self.assertIn("$health.botProxyReady -eq $true", script)
+        self.assertIn(
+            "[string]$health.sourceIdentity.imageSourceRevision -ceq $sourceRevision",
+            script,
+        )
+        self.assertIn(
+            "[string]$health.botSourceIdentity.imageSourceRevision -ceq $sourceRevision",
+            script,
+        )
         vision_wait = script.index(
             "Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'"
         )
-        supervisor_start = script.index("Start-HostSupervisor", vision_wait)
-        self.assertLess(vision_wait, supervisor_start)
+        bot_wait = script.index(
+            'Wait-HttpReady -Url "http://127.0.0.1:$botApiPort/health" '
+            "-Label 'Docker Bot API' -Contract 'bot_api'"
+        )
+        control_wait = script.index(
+            'Wait-HttpReady -Url "http://127.0.0.1:$controlPagePublicPort/health" '
+            "-Label 'Docker Control Page' -Contract 'control_page'"
+        )
+        supervisor_start = script.index("Start-HostSupervisor", control_wait)
+        self.assertLess(vision_wait, bot_wait)
+        self.assertLess(bot_wait, control_wait)
+        self.assertLess(control_wait, supervisor_start)
+        self.assertNotIn(
+            "Wait-Port -HostName '127.0.0.1' -Port $botApiPort",
+            script,
+        )
+        self.assertNotIn(
+            "Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort",
+            script,
+        )
         self.assertIn("VISION_SERVICE_URL = 'http://127.0.0.1:8891'", script)
         self.assertIn("from PIL import ImageGrab", script)
 
@@ -389,22 +436,59 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("$dockerBuildServices += 'discord_bot'", launcher)
         self.assertIn("$dockerBuildServices += 'tts'", launcher)
         self.assertIn("Test-DockerImageExists -Image $ttsImage", launcher)
+        self.assertNotIn(
+            "Test-DockerImageSourceRevision -Image $ttsImage",
+            launcher,
+        )
         self.assertIn("@('up', '-d', '--no-build')", launcher)
         self.assertIn(
             "& $dockerImageBuilder -ProjectRoot $projectRoot "
             "-Services $dockerBuildServices",
             launcher,
         )
-        build_services = launcher[
-            launcher.index("$dockerBuildServices = @(") : launcher.index(
-                "if ($keepDiscordBot)", launcher.index("$dockerBuildServices = @(")
-            )
+        self.assertIn("function Test-DockerImageSourceRevision", launcher)
+        revision_probe = launcher[
+            launcher.index("function Test-DockerImageSourceRevision") :
+            launcher.index("function Stop-BotApiForImageRefresh")
         ]
-        self.assertIn("'bot_api'", build_services)
-        self.assertIn("'control_page'", build_services)
-        self.assertIn("'vision'", build_services)
-        self.assertNotIn("'discord_bot'", build_services)
+        self.assertIn("docker image inspect", revision_probe)
+        self.assertIn("EVELYN_IMAGE_SOURCE_REVISION=", revision_probe)
+        self.assertIn("$revisions.Count -eq 1", revision_probe)
+        self.assertIn("$revisions[0] -ceq $ExpectedRevision", revision_probe)
+
+        self.assertIn(
+            "Test-DockerImageSourceRevision -Image $botApiImage "
+            "-ExpectedRevision $sourceRevision",
+            launcher,
+        )
+        self.assertIn(
+            "Test-DockerImageSourceRevision -Image $controlPageImage "
+            "-ExpectedRevision $sourceRevision",
+            launcher,
+        )
+        self.assertIn(
+            "Test-DockerImageSourceRevision -Image $discordBotImage "
+            "-ExpectedRevision $sourceRevision",
+            launcher,
+        )
+        core_build = launcher[
+            launcher.index("if ($coreAppImagesNeedBuild)") :
+            launcher.index("if ($discordImageNeedsBuild)")
+        ]
+        self.assertIn("'bot_api'", core_build)
+        self.assertIn("'control_page'", core_build)
+        self.assertIn("'vision'", core_build)
+        self.assertNotIn("'discord_bot'", core_build)
+        discord_build = launcher[
+            launcher.index("if ($discordImageNeedsBuild)") :
+            launcher.index("if ($buildEnabled -or $ttsImageMissing)")
+        ]
+        self.assertIn("$dockerBuildServices += 'discord_bot'", discord_build)
         self.assertIn("Stop-BotApiForImageRefresh", launcher)
+        self.assertIn(
+            "if ($dockerBuildServices -contains 'bot_api')",
+            launcher,
+        )
         self.assertIn("'--timeout', '60'", launcher)
         self.assertIn("$minecraftOwnerClaim", launcher)
         refresh = launcher[

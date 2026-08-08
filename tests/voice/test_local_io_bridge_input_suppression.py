@@ -146,6 +146,64 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge.speaking)
         self.assertEqual(bridge.playback_controller.owner_id, "")
 
+    async def test_clone_fallback_requires_zero_audio_and_no_playback(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.payloads: list[dict] = []
+
+            def post(self, _url, *, json, timeout):
+                del timeout
+                self.payloads.append(dict(json))
+                return FakeResponse()
+
+        bridge = LocalIoBridge()
+        session = FakeSession()
+        bridge.session = session  # type: ignore[assignment]
+        bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+        bridge._play_streaming_pcm_response = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[(0, 0, None), (1024, 1024, 12.5)]
+        )
+
+        await bridge._speak_with_payload(
+            {"input": "hello", "voice": "clone:evelyn"}
+        )
+
+        self.assertEqual(
+            [payload["voice"] for payload in session.payloads],
+            ["clone:evelyn", "auto"],
+        )
+        self.assertEqual(
+            bridge._play_streaming_pcm_response.await_count,  # type: ignore[union-attr]
+            2,
+        )
+        self.assertEqual(bridge.last_tts_playback["voice"], "auto")
+        self.assertEqual(bridge.play_count, 1)
+        self.assertEqual(bridge.playback_controller.owner_id, "")
+
+        session.payloads.clear()
+        bridge._play_streaming_pcm_response = AsyncMock(  # type: ignore[method-assign]
+            return_value=(1024, 512, 12.5)
+        )
+
+        await bridge._speak_with_payload(
+            {"input": "hello", "voice": "clone:evelyn"}
+        )
+
+        self.assertEqual(
+            [payload["voice"] for payload in session.payloads],
+            ["clone:evelyn"],
+        )
+        self.assertEqual(bridge.last_tts_playback["voice"], "clone:evelyn")
+
 
 if __name__ == "__main__":
     unittest.main()

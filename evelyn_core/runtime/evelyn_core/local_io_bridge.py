@@ -2613,6 +2613,13 @@ class LocalIoBridge:
                             started_at=request_started,
                         )
                     )
+                    if (
+                        audio_bytes <= 0
+                        and played_bytes <= 0
+                        and first_playback_ms is None
+                        and index + 1 < len(candidate_payloads)
+                    ):
+                        continue
                     break
             if audio_bytes <= 0:
                 raise RuntimeError(
@@ -2672,8 +2679,7 @@ class LocalIoBridge:
                     if first_playback_ms is None:
                         first_playback_ms = (time.perf_counter() - started_at) * 1000.0
                         self._mark_playback_started_once()
-                    self._ensure_validation_attempt_current()
-                    stream.write(playable)
+                    await self._write_delta_stream_chunk(stream, playable)
                     played_bytes += len(playable)
                 remainder = data[aligned_len:]
             if remainder:
@@ -2681,12 +2687,13 @@ class LocalIoBridge:
                 if first_playback_ms is None:
                     first_playback_ms = (time.perf_counter() - started_at) * 1000.0
                     self._mark_playback_started_once()
-                self._ensure_validation_attempt_current()
-                stream.write(padded)
+                await self._write_delta_stream_chunk(stream, padded)
                 played_bytes += len(padded)
             if played_bytes > 0:
-                self._ensure_validation_attempt_current()
-                stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
+                await self._write_delta_stream_chunk(
+                    stream,
+                    b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18),
+                )
         return audio_bytes, played_bytes, first_playback_ms
 
     def _play_pcm(self, chunks: list[bytes]) -> int:
