@@ -1625,7 +1625,11 @@ def _needs_repair(snapshot: _JournalSnapshot) -> bool:
 
 
 @contextlib.contextmanager
-def _validated_reader_guard(paths: _JournalPaths):
+def _validated_reader_guard(
+    paths: _JournalPaths,
+    *,
+    allow_repair: bool = True,
+):
     while True:
         with _reader_guard(paths.index_dir):
             with _process_lock:
@@ -1633,6 +1637,8 @@ def _validated_reader_guard(paths: _JournalPaths):
             if not _needs_repair(snapshot):
                 yield snapshot
                 return
+            if not allow_repair:
+                raise _integrity_failure()
         with _writer_guard(paths.index_dir):
             with _process_lock:
                 snapshot = _journal_snapshot(paths)
@@ -1748,11 +1754,15 @@ def memory_deletion_journal_read_guard(
     *,
     expected_position: MemoryDeletionPosition | None = None,
     require_stable: bool = True,
+    allow_repair: bool = True,
 ):
-    """Hold a shared deletion lease across a memory exposure boundary."""
+    """Hold a shared deletion lease; optionally reject repairable state."""
 
     paths = _paths(index_dir)
-    with _validated_reader_guard(paths) as snapshot:
+    with _validated_reader_guard(
+        paths,
+        allow_repair=allow_repair,
+    ) as snapshot:
         initial_position = _snapshot_position(snapshot)
         public_position = _public_position(paths, snapshot)
         if expected_position is not None and not _positions_match(

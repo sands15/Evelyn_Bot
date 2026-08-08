@@ -903,16 +903,23 @@ shared reader lease를 사용한다. Windows는 `LockFileEx` shared byte-range, 
 fail-fast한다. 정상 lock 경합은 무결성 손상과 분리된 고정
 `memory_deletion_journal_busy` 503으로 8798·8799와 Control Page에 전달한다.
 
-남은 두 번째 위험은 index sync, retrieval-cache migration/write, cognitive·memory
-artifact commit처럼 실제 쓰기가 섞인 snapshot/recall 경로다. 이 경로를 무리하게
-shared로 바꾸면 reader→writer upgrade나 동시 파일 쓰기 경쟁이 생기므로 exclusive
-lease를 사용한다. 따라서 이미 materialize된 exposure·outbound response reader끼리는
-공존하지만 fresh write-backed recall/index/cache는 active reader와 retryable busy가
-될 수 있다. semantic consolidation과 derivation recomposition의 Sub-LLM 구간은
-shared reader로 바뀌어 일반 조회와 공존한다. 다만 삭제·편집 writer는 호출당 최대
-45초 동안 retryable busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다.
-bounded 자동 재시도와 64 MiB journal 상한의 검증 가능한 compaction/rotation도
-아직 없다.
+index sync, retrieval-cache migration/write, cognitive·memory artifact commit처럼
+실제 쓰기가 섞인 경로는 계속 exclusive lease를 사용한다. fresh recall은 정상일 때
+그 writer 경로를 유지하되, 진입 전 exact busy만 no-repair shared reader로 전환한다.
+fallback은 immutable read-only SQLite와 현재 Markdown을 다시 대조하고 cache,
+FTS/vector/graph/hot/legacy/disk cognitive를 사용하지 않는다. 따라서 이미
+materialize된 response뿐 아니라 fresh Main/Fast recall도 reader와 공존하지만,
+그 turn은 `indexFresh=false`이며 아직 index되지 않은 외부 note 또는 note ID 정렬 기준
+500개 read-only 후보 밖의 indexed note를 잠시 놓칠 수 있다.
+DB가 없거나 손상·구버전이고 journal repair가 필요하면 복구 쓰기를 하지 않고
+content-free unavailable로 닫는다.
+
+semantic consolidation과 derivation recomposition의 Sub-LLM 구간은 shared reader로
+일반 조회와 공존한다. 다만 삭제·편집 writer는 호출당 최대 45초 동안 retryable
+busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. confirm token을 가진
+mutation을 generic하게 재전송하는 것은 멱등하지 않으므로 자동 재시도는 아직
+추가하지 않았다. bounded admission retry의 live 전이와 64 MiB journal 상한의
+검증 가능한 rotation도 남아 있다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
@@ -956,19 +963,18 @@ browser `prepare` 직전에 exposure를 다시 검증한다. state 재직렬화�
 exposure의 state/version/note ID 불일치를 assistant persistence·continuity·TTS
 전에 거부한다.
 
-따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation이나 materialize된 response의
-exclusive lease가 아니라, 위에 기록한 fresh write-backed recall/index/cache busy,
-Sub-LLM shared phase 중 삭제·편집 writer의 bounded-retry 공백과 64 MiB journal
-rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
+따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation, materialize된 response의
+exclusive lease나 fresh recall busy가 아니라, fallback turn의 일시적인
+`indexFresh=false`, Sub-LLM shared phase 중 삭제·편집 writer의 bounded-retry 공백과
+64 MiB journal rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
 계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
 계속 남는다.
 
 다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
-one-shot bootstrap과 pair replay를 먼저 검증한다. write-backed recall은 sync/cache
-mutation과 stable read 단계를 분리하거나 별도 atomic serializer를 둔 뒤에만 shared로
-옮긴다. Sub-LLM shared phase의 bounded busy 재시도를 실제 UI 전이로 검증하고,
-chain과 외부 anchor를 잃지
-않는 checkpointed rotation도 함께 설계한다.
+one-shot bootstrap과 pair replay를 먼저 검증한다. Sub-LLM shared phase의 bounded
+busy 재시도를 실제 UI 전이로 검증하고, chain과 외부 anchor를 잃지 않는
+checkpointed rotation도 함께 설계한다. fallback 빈도와 `indexFresh=false`가 실제
+사용자 recall 품질에 미치는 영향은 live telemetry 없이 추정하지 않는다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 

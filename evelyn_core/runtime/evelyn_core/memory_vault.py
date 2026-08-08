@@ -28,6 +28,7 @@ from .memory_derivation_revocation import (
 )
 from .memory_deletion_journal import (
     MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
     append_memory_deletion_tombstone,
     memory_deletion_journal_error_code,
@@ -198,36 +199,6 @@ def _memory_deletion_journal_mutation_linearized(
 
     return wrapped
 
-
-def _memory_deletion_linearized_recall(
-    operation: Callable[..., MemoryRecallResult],
-) -> Callable[..., MemoryRecallResult]:
-    """Recall variant that preserves its content-free result contract."""
-
-    @functools.wraps(operation)
-    def wrapped(
-        request: MemoryRecallRequest,
-        *args: Any,
-        **kwargs: Any,
-    ) -> MemoryRecallResult:
-        started = time.monotonic()
-        try:
-            root = kwargs.get("root")
-            index_dir = memory_index_dir(root)
-            with memory_deletion_journal_guard(index_dir):
-                result = operation(request, *args, **kwargs)
-                read_memory_deletion_tombstones(index_dir)
-                return result
-        except MemoryDeletionJournalIntegrityError as exc:
-            return MemoryRecallResult(
-                turn_id=request.turn_id,
-                ok=False,
-                context_text="",
-                latency_ms=(time.monotonic() - started) * 1000.0,
-                error_text=memory_deletion_journal_error_code(exc),
-            )
-
-    return wrapped
 
 BOOTSTRAP_NOTES: tuple[dict[str, Any], ...] = (
     {
@@ -504,6 +475,62 @@ def _open_index(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def _open_index_read_only(
+    db_path: Path,
+) -> Iterator[sqlite3.Connection]:
+    """Open an existing index without creating or migrating artifacts."""
+
+    try:
+        lexical = db_path.absolute()
+        current = lexical
+        while True:
+            if current.is_symlink() or bool(
+                getattr(current, "is_junction", lambda: False)()
+            ):
+                raise MemoryDeletionJournalIntegrityError()
+            if current.parent == current:
+                break
+            current = current.parent
+        resolved = db_path.resolve(strict=True)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = lexical.with_name(lexical.name + suffix)
+            if (
+                sidecar.is_symlink()
+                or bool(
+                    getattr(
+                        sidecar,
+                        "is_junction",
+                        lambda: False,
+                    )()
+                )
+                or sidecar.exists()
+            ):
+                raise MemoryDeletionJournalIntegrityError()
+    except OSError:
+        raise MemoryDeletionJournalIntegrityError() from None
+    if resolved != lexical or not resolved.is_file():
+        raise MemoryDeletionJournalIntegrityError()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            resolved.as_uri() + "?mode=ro&immutable=1",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA temp_store=MEMORY")
+    except (OSError, sqlite3.Error):
+        if conn is not None:
+            conn.close()
+        raise MemoryDeletionJournalIntegrityError() from None
+    assert conn is not None
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -607,6 +634,41 @@ def _get_metadata_int(conn: sqlite3.Connection, key: str, default: int = 0) -> i
         return int(row["value"])
     except Exception:
         return default
+
+
+def _get_read_only_metadata_int(
+    conn: sqlite3.Connection,
+    key: str,
+) -> int:
+    """Read one canonical nonnegative SQLite integer without defaults."""
+
+    try:
+        rows = conn.execute(
+            "SELECT value FROM metadata WHERE key = ? LIMIT 2",
+            (key,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise MemoryDeletionJournalIntegrityError()
+        raw = rows[0][0]
+    except MemoryDeletionJournalIntegrityError:
+        raise
+    except (IndexError, KeyError, sqlite3.Error, TypeError):
+        raise MemoryDeletionJournalIntegrityError() from None
+    if type(raw) is int:
+        encoded = str(raw)
+    elif type(raw) is str:
+        encoded = raw
+    else:
+        raise MemoryDeletionJournalIntegrityError()
+    if (
+        len(encoded) > 19
+        or re.fullmatch(r"0|[1-9][0-9]*", encoded) is None
+    ):
+        raise MemoryDeletionJournalIntegrityError()
+    value = int(encoded)
+    if value > (1 << 63) - 1:
+        raise MemoryDeletionJournalIntegrityError()
+    return value
 
 
 def _set_metadata(conn: sqlite3.Connection, key: str, value: str | int) -> None:
@@ -1729,6 +1791,19 @@ def _fetch_candidate_rows(
         (max(limit, 500),),
     ).fetchall()
     return rows, "scan"
+
+
+def _fetch_read_only_candidate_rows(
+    conn: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Read the bounded note table without trusting derived rank artifacts."""
+
+    try:
+        return conn.execute(
+            "SELECT *, 0.0 AS fts_rank FROM notes ORDER BY note_id LIMIT 500"
+        ).fetchall()
+    except sqlite3.Error:
+        raise MemoryDeletionJournalIntegrityError() from None
 
 
 def _fetch_vector_scores(
@@ -3509,17 +3584,16 @@ def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None
     }
 
 
-@_memory_deletion_linearized_recall
-def recall_memory_vault(
+def _recall_memory_vault_impl(
     request: MemoryRecallRequest,
     *,
     root: Path | None = None,
     db_path: Path | None = None,
+    read_only_fallback: bool = False,
 ) -> MemoryRecallResult:
     started = time.monotonic()
     try:
         _read_memory_deletion_tombstones(root)
-        version = sync_memory_vault_index(root=root, db_path=db_path)
         index_path = db_path or memory_index_db_path(root)
         metadata = request.metadata if isinstance(request.metadata, dict) else {}
         active_project = clean_text(str(metadata.get("active_project") or DEFAULT_PROJECT)).lower()
@@ -3527,11 +3601,47 @@ def recall_memory_vault(
         allow_internal_memory = _allows_internal_memory_recall(request, focus_items)
         query_tokens = _tokenize(request.user_text)
         focus_tokens = _tokenize(" ".join(clean_text(str(item)) for item in focus_items))
-        cache_key = _cache_key(request, version)
+        deleted_note_ids: set[str] = set()
+        quarantined_note_ids: set[str] = set()
 
-        with _open_index(index_path) as conn:
-            _ensure_schema(conn)
-            cached = _read_retrieval_cache(conn, cache_key, version)
+        if read_only_fallback:
+            deleted_note_ids = _memory_deleted_note_ids(root)
+            quarantined_note_ids = (
+                _read_quarantined_note_ids_read_only(root)
+            )
+            open_index = _open_index_read_only
+        else:
+            sync_memory_vault_index(root=root, db_path=db_path)
+            open_index = _open_index
+
+        with open_index(index_path) as conn:
+            if read_only_fallback:
+                if _get_read_only_metadata_int(
+                    conn,
+                    "schema_version",
+                ) != 6:
+                    raise MemoryDeletionJournalIntegrityError()
+                version = _get_read_only_metadata_int(
+                    conn,
+                    "memory_version",
+                )
+            else:
+                _ensure_schema(conn)
+                version = _get_metadata_int(
+                    conn,
+                    "memory_version",
+                    0,
+                )
+            cache_key = _cache_key(request, version)
+            cached = (
+                None
+                if read_only_fallback
+                else _read_retrieval_cache(
+                    conn,
+                    cache_key,
+                    version,
+                )
+            )
             if cached is not None:
                 context_text = str(
                     cached.get("context_text") or ""
@@ -3553,18 +3663,30 @@ def recall_memory_vault(
                         "rendered_note_ids": list(
                             cached.get("rendered_note_ids") or []
                         ),
+                        "index_fresh": True,
+                        "read_only_fallback": False,
                     },
                 )
 
             requested_max_items = _normalized_memory_recall_max_items(
                 request.max_items
             )
-            rows, retrieval_mode = _fetch_candidate_rows(
-                conn,
-                query_tokens=query_tokens,
-                focus_tokens=focus_tokens,
-                limit=max(80, requested_max_items * 20),
-            )
+            if read_only_fallback:
+                rows = _fetch_read_only_candidate_rows(conn)
+                rows = _trusted_read_only_recall_rows(
+                    rows,
+                    root=root,
+                    deleted_note_ids=deleted_note_ids,
+                    quarantined_note_ids=quarantined_note_ids,
+                )
+                retrieval_mode = "scan"
+            else:
+                rows, retrieval_mode = _fetch_candidate_rows(
+                    conn,
+                    query_tokens=query_tokens,
+                    focus_tokens=focus_tokens,
+                    limit=max(80, requested_max_items * 20),
+                )
             rows = [
                 row
                 for row in rows
@@ -3572,16 +3694,24 @@ def recall_memory_vault(
             ]
             if not allow_internal_memory:
                 rows = [row for row in rows if not _is_internal_memory_note(row)]
-            vector_scores = _fetch_vector_scores(
-                conn,
-                " ".join([request.user_text, " ".join(clean_text(str(item)) for item in focus_items)]),
-                limit=max(20, requested_max_items * 8),
+            vector_scores = (
+                {}
+                if read_only_fallback
+                else _fetch_vector_scores(
+                    conn,
+                    " ".join([request.user_text, " ".join(clean_text(str(item)) for item in focus_items)]),
+                    limit=max(20, requested_max_items * 8),
+                )
             )
             if vector_scores:
                 existing_note_ids = {clean_text(str(row["note_id"])) for row in rows}
                 missing_vector_ids = [note_id for note_id in vector_scores if note_id not in existing_note_ids]
                 if missing_vector_ids:
-                    rows.extend(_fetch_notes_by_ids(conn, missing_vector_ids))
+                    missing_rows = _fetch_notes_by_ids(
+                        conn,
+                        missing_vector_ids,
+                    )
+                    rows.extend(missing_rows)
                 rows = [
                     row
                     for row in rows
@@ -3610,10 +3740,14 @@ def recall_memory_vault(
             selected = [
                 row for _, _, row in scored[:requested_max_items]
             ]
-            graph_neighbors = _expand_graph_neighbors(
-                conn,
-                selected,
-                max_extra=max(0, requested_max_items - len(selected)),
+            graph_neighbors = (
+                []
+                if read_only_fallback
+                else _expand_graph_neighbors(
+                    conn,
+                    selected,
+                    max_extra=max(0, requested_max_items - len(selected)),
+                )
             )
             graph_neighbors = [
                 row
@@ -3680,6 +3814,12 @@ def recall_memory_vault(
                 memory_deletion_ledger_note_id(row["note_id"])
                 for row in rendered_rows
             ]
+            if read_only_fallback and (
+                len(set(rendered_note_ids))
+                != len(rendered_note_ids)
+                or len(set(sources)) != len(sources)
+            ):
+                raise MemoryDeletionJournalIntegrityError()
 
             context_parts: list[str] = []
             if note_snippets:
@@ -3706,7 +3846,13 @@ def recall_memory_vault(
                 "provenance": provenance,
                 "rendered_note_ids": rendered_note_ids,
             }
-            _write_retrieval_cache(conn, cache_key, version, payload)
+            if not read_only_fallback:
+                _write_retrieval_cache(
+                    conn,
+                    cache_key,
+                    version,
+                    payload,
+                )
 
         return MemoryRecallResult(
             turn_id=request.turn_id,
@@ -3721,6 +3867,8 @@ def recall_memory_vault(
                 "retrieval_mode": retrieval_mode,
                 "provenance": provenance,
                 "rendered_note_ids": rendered_note_ids,
+                "index_fresh": not read_only_fallback,
+                "read_only_fallback": read_only_fallback,
             },
         )
     except MemoryDeletionJournalIntegrityError as exc:
@@ -3730,6 +3878,14 @@ def recall_memory_vault(
             context_text="",
             latency_ms=(time.monotonic() - started) * 1000.0,
             error_text=memory_deletion_journal_error_code(exc),
+            metadata=(
+                {
+                    "index_fresh": False,
+                    "read_only_fallback": True,
+                }
+                if read_only_fallback
+                else {}
+            ),
         )
     except Exception as exc:
         return MemoryRecallResult(
@@ -3737,7 +3893,72 @@ def recall_memory_vault(
             ok=False,
             context_text="",
             latency_ms=(time.monotonic() - started) * 1000.0,
-            error_text=clean_text(repr(exc))[:300],
+            error_text=(
+                "memory_recall_read_only_unavailable"
+                if read_only_fallback
+                else clean_text(repr(exc))[:300]
+            ),
+            metadata=(
+                {
+                    "index_fresh": False,
+                    "read_only_fallback": True,
+                }
+                if read_only_fallback
+                else {}
+            ),
+        )
+
+
+def recall_memory_vault(
+    request: MemoryRecallRequest,
+    *,
+    root: Path | None = None,
+    db_path: Path | None = None,
+) -> MemoryRecallResult:
+    """Return fresh recall, or a validated no-cache view during reader contention."""
+
+    index_dir = memory_index_dir(root)
+    entered = False
+    read_only_fallback = False
+    try:
+        try:
+            with memory_deletion_journal_guard(index_dir):
+                entered = True
+                result = _recall_memory_vault_impl(
+                    request,
+                    root=root,
+                    db_path=db_path,
+                )
+                read_memory_deletion_tombstones(index_dir)
+                return result
+        except MemoryDeletionJournalBusyError:
+            if entered:
+                raise
+            read_only_fallback = True
+            with memory_deletion_journal_read_guard(
+                index_dir,
+                allow_repair=False,
+            ):
+                return _recall_memory_vault_impl(
+                    request,
+                    root=root,
+                    db_path=db_path,
+                    read_only_fallback=True,
+                )
+    except MemoryDeletionJournalIntegrityError as exc:
+        return MemoryRecallResult(
+            turn_id=request.turn_id,
+            ok=False,
+            context_text="",
+            error_text=memory_deletion_journal_error_code(exc),
+            metadata=(
+                {
+                    "index_fresh": False,
+                    "read_only_fallback": True,
+                }
+                if read_only_fallback
+                else {}
+            ),
         )
 
 
@@ -3822,6 +4043,14 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
             metadata.get("retrieval_mode")
         ),
         "cacheHit": bool(metadata.get("cache_hit")) if result.ok else False,
+        "indexFresh": (
+            metadata.get("index_fresh") is True
+            if result.ok
+            else False
+        ),
+        "readOnlyFallback": (
+            metadata.get("read_only_fallback") is True
+        ),
         "noteIds": note_ids,
         "noteCount": len(note_ids),
         "provenanceCount": len(provenance),
@@ -3830,8 +4059,7 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
     }
 
 
-@_memory_deletion_linearized
-def build_memory_vault_context(
+def _build_memory_vault_context_impl(
     guild_id: int,
     user_text: str,
     *,
@@ -3859,10 +4087,17 @@ def build_memory_vault_context(
     result = recall_memory_vault(request, root=root)
     recall_receipt = build_memory_recall_receipt(result)
     version = int(recall_receipt["memoryVersion"])
-    if result.ok:
+    if result.ok and not result.metadata.get(
+        "read_only_fallback"
+    ):
         hot_payload, hot_validation_state = _validated_memory_hot_context_payload(
             root=root,
             expected_memory_version=version,
+        )
+    elif result.ok:
+        hot_payload, hot_validation_state = (
+            {},
+            "read_only_fallback_skipped",
         )
     else:
         hot_payload, hot_validation_state = {}, "recall_unavailable"
@@ -3917,6 +4152,10 @@ def build_memory_vault_context(
                 "memoryVersion": version,
                 "retrievalMode": recall_receipt["retrievalMode"],
                 "cacheHit": recall_receipt["cacheHit"],
+                "indexFresh": recall_receipt["indexFresh"],
+                "readOnlyFallback": recall_receipt[
+                    "readOnlyFallback"
+                ],
                 "recallState": recall_receipt["state"],
                 "recallNoteIds": recall_note_ids,
                 "recallProvenanceCount": recall_receipt["provenanceCount"],
@@ -3941,6 +4180,58 @@ def build_memory_vault_context(
     if result.ok and result.context_text:
         parts.append(f"[Memory Cache]\n- retrieval_cache: {cache_label}\n- retrieval_mode: {mode}\n- memory_version: {version}")
     return "\n\n".join(parts)
+
+
+def build_memory_vault_context(
+    guild_id: int,
+    user_text: str,
+    *,
+    session_key: str | None = None,
+    topic_id: str | None = None,
+    source: str = "context",
+    context_focus: list[str] | None = None,
+    max_items: int = 5,
+    root: Path | None = None,
+    receipt: dict[str, Any] | None = None,
+) -> str:
+    """Build one vault context at a single fresh or read-only position."""
+
+    index_dir = memory_index_dir(root)
+    entered = False
+    try:
+        with memory_deletion_journal_guard(index_dir):
+            entered = True
+            context = _build_memory_vault_context_impl(
+                guild_id,
+                user_text,
+                session_key=session_key,
+                topic_id=topic_id,
+                source=source,
+                context_focus=context_focus,
+                max_items=max_items,
+                root=root,
+                receipt=receipt,
+            )
+            read_memory_deletion_tombstones(index_dir)
+            return context
+    except MemoryDeletionJournalBusyError:
+        if entered:
+            raise
+        with memory_deletion_journal_read_guard(
+            index_dir,
+            allow_repair=False,
+        ):
+            return _build_memory_vault_context_impl(
+                guild_id,
+                user_text,
+                session_key=session_key,
+                topic_id=topic_id,
+                source=source,
+                context_focus=context_focus,
+                max_items=max_items,
+                root=root,
+                receipt=receipt,
+            )
 
 
 @_memory_deletion_linearized
@@ -5288,6 +5579,263 @@ def _canonical_memory_derivation_revocations_payload(
             for note_id in sorted(canonical_entries)
         },
     }
+
+
+def _read_quarantined_note_ids_read_only(
+    root: Path | None = None,
+) -> set[str]:
+    """Read an already-canonical quarantine artifact without migrating it."""
+
+    path = _memory_derivation_revocations_path(root)
+    if path.is_symlink():
+        raise MemoryDeletionJournalIntegrityError()
+    if not path.exists():
+        return set()
+    try:
+        if not path.is_file():
+            raise MemoryDeletionJournalIntegrityError()
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except MemoryDeletionJournalIntegrityError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise MemoryDeletionJournalIntegrityError() from None
+    canonical = _canonical_memory_derivation_revocations_payload(
+        payload
+    )
+    if canonical is None or raw != json.dumps(
+        canonical,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ):
+        raise MemoryDeletionJournalIntegrityError()
+    return set(canonical["entries"])
+
+
+def _trusted_read_only_recall_row(
+    row: sqlite3.Row | dict[str, Any],
+    *,
+    root: Path | None,
+    deleted_note_ids: set[str],
+    quarantined_note_ids: set[str],
+) -> dict[str, Any] | None:
+    """Bind one rebuildable index candidate back to its current Markdown."""
+
+    rel_path = clean_text(str(row["rel_path"]))
+    relative = Path(rel_path)
+    if (
+        not rel_path
+        or relative.is_absolute()
+        or bool(relative.anchor)
+        or bool(relative.drive)
+        or ".." in relative.parts
+        or relative.suffix.lower() != ".md"
+    ):
+        return None
+    vault = memory_vault_root(root)
+    try:
+        if vault.is_symlink() or bool(
+            getattr(vault, "is_junction", lambda: False)()
+        ):
+            raise MemoryDeletionJournalIntegrityError()
+        resolved_vault = vault.resolve(strict=True)
+        candidate = vault / relative
+        current = candidate
+        while current != vault:
+            if current.is_symlink() or bool(
+                getattr(current, "is_junction", lambda: False)()
+            ):
+                return None
+            if current.parent == current:
+                return None
+            current = current.parent
+        resolved = candidate.resolve(strict=True)
+        if (
+            not resolved.is_relative_to(resolved_vault)
+            or not resolved.is_file()
+        ):
+            return None
+        raw = resolved.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+        note = parse_memory_note(resolved, raw)
+        state = resolved.stat()
+    except MemoryDeletionJournalIntegrityError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+    row_note_id = clean_text(str(row["note_id"]))
+    row_hash = clean_text(str(row["source_hash"]))
+    if (
+        not row_note_id
+        or note.note_id != row_note_id
+        or not re.fullmatch(r"[0-9a-f]{64}", row_hash)
+        or not secrets.compare_digest(note.source_hash, row_hash)
+        or note.status in {"archived", "superseded"}
+        or _memory_note_is_deleted(note, deleted_note_ids)
+        or memory_deletion_ledger_note_id(note.note_id)
+        in quarantined_note_ids
+        or _user_confirmed_memory_integrity_state(note, raw=raw)
+        == "invalid"
+        or bool(_as_list(note.metadata.get("derived_from")))
+    ):
+        return None
+    source = clean_text(str(note.metadata.get("source") or ""))
+    if _memory_source_type(source, note.note_type) not in {
+        "system",
+        "user",
+    }:
+        return None
+
+    trusted = dict(row)
+    trusted.update(
+        {
+            "note_id": note.note_id,
+            "rel_path": rel_path,
+            "note_type": note.note_type,
+            "title": note.title,
+            "body": note.body,
+            "tags": json.dumps(note.tags, ensure_ascii=False),
+            "projects": json.dumps(
+                note.projects,
+                ensure_ascii=False,
+            ),
+            "links": json.dumps(note.links, ensure_ascii=False),
+            "status": note.status,
+            "created_at": clean_text(
+                str(note.metadata.get("created_at") or "")
+            ),
+            "updated_at": clean_text(
+                str(
+                    note.metadata.get("updated_at")
+                    or note.updated_at
+                    or ""
+                )
+            ),
+            "importance": _front_matter_float(
+                note.metadata,
+                "importance",
+                0.5,
+            ),
+            "confidence": clean_text(
+                str(note.metadata.get("confidence") or "")
+            ),
+            "source": source,
+            "source_refs": json.dumps(
+                _as_list(
+                    note.metadata.get("source_refs")
+                    or note.metadata.get("source_ref")
+                ),
+                ensure_ascii=False,
+            ),
+            "derived_from": json.dumps(
+                _as_list(note.metadata.get("derived_from")),
+                ensure_ascii=False,
+            ),
+            "origin_derived_from": json.dumps(
+                _as_list(note.metadata.get("origin_derived_from")),
+                ensure_ascii=False,
+            ),
+            "evidence_hashes": json.dumps(
+                _as_list(
+                    note.metadata.get("evidence_hashes")
+                    or note.metadata.get("source_hash")
+                ),
+                ensure_ascii=False,
+            ),
+            "origin_source": clean_text(
+                str(note.metadata.get("origin_source") or "")
+            ),
+            "origin_source_refs": json.dumps(
+                _as_list(note.metadata.get("origin_source_refs")),
+                ensure_ascii=False,
+            ),
+            "revision": max(
+                0,
+                _front_matter_int(
+                    note.metadata,
+                    "revision",
+                    0,
+                ),
+            ),
+            "revised_from_evidence_hashes": json.dumps(
+                _as_list(
+                    note.metadata.get(
+                        "revised_from_evidence_hashes"
+                    )
+                ),
+                ensure_ascii=False,
+            ),
+            "mtime_ns": state.st_mtime_ns,
+            "source_hash": note.source_hash,
+        }
+    )
+    return trusted
+
+
+def _trusted_read_only_recall_rows(
+    rows: list[sqlite3.Row] | list[dict[str, Any]],
+    *,
+    root: Path | None,
+    deleted_note_ids: set[str],
+    quarantined_note_ids: set[str],
+) -> list[dict[str, Any]]:
+    trusted: list[dict[str, Any]] = []
+    seen_note_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for row in rows:
+        current = _trusted_read_only_recall_row(
+            row,
+            root=root,
+            deleted_note_ids=deleted_note_ids,
+            quarantined_note_ids=quarantined_note_ids,
+        )
+        if current is None:
+            continue
+        note_id = clean_text(str(current["note_id"]))
+        rel_path = clean_text(str(current["rel_path"]))
+        if note_id in seen_note_ids or rel_path in seen_paths:
+            raise MemoryDeletionJournalIntegrityError()
+        seen_note_ids.add(note_id)
+        seen_paths.add(rel_path)
+        trusted.append(current)
+    if not trusted:
+        return []
+
+    target_ids = set(seen_note_ids)
+    counts = {note_id: 0 for note_id in target_ids}
+    vault = memory_vault_root(root)
+    try:
+        resolved_vault = vault.resolve(strict=True)
+        for path in vault.rglob("*.md"):
+            if path.is_symlink() or bool(
+                getattr(path, "is_junction", lambda: False)()
+            ):
+                raise MemoryDeletionJournalIntegrityError()
+            resolved = path.resolve(strict=True)
+            if not resolved.is_relative_to(resolved_vault):
+                raise MemoryDeletionJournalIntegrityError()
+            note = parse_memory_note(
+                resolved,
+                resolved.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                ),
+            )
+            if note.note_id in counts:
+                counts[note.note_id] += 1
+    except MemoryDeletionJournalIntegrityError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        raise MemoryDeletionJournalIntegrityError() from None
+    return [
+        row
+        for row in trusted
+        if counts.get(clean_text(str(row["note_id"]))) == 1
+    ]
 
 
 def _durably_write_memory_derivation_revocation_payload(
@@ -8309,23 +8857,30 @@ def _validated_memory_hot_context_payload(
     return payload, "verified"
 
 
-@_memory_deletion_linearized
 def read_memory_hot_context(
     *,
     root: Path | None = None,
     max_chars: int = HOT_CONTEXT_MAX_CHARS,
     expected_memory_version: int | None = None,
 ) -> str:
-    payload, validation_state = _validated_memory_hot_context_payload(
-        root=root,
-        expected_memory_version=expected_memory_version,
-    )
-    if validation_state != "verified":
-        return ""
-    content = clean_text(str(payload.get("content") or ""))
-    if len(content) > max_chars:
-        return content[: max(0, max_chars - 3)].rstrip() + "..."
-    return content
+    with memory_deletion_journal_read_guard(
+        memory_index_dir(root)
+    ):
+        payload, validation_state = (
+            _validated_memory_hot_context_payload(
+                root=root,
+                expected_memory_version=expected_memory_version,
+            )
+        )
+        if validation_state != "verified":
+            return ""
+        content = clean_text(str(payload.get("content") or ""))
+        if len(content) > max_chars:
+            return (
+                content[: max(0, max_chars - 3)].rstrip()
+                + "..."
+            )
+        return content
 
 
 def probe_sub_llm_dependency(

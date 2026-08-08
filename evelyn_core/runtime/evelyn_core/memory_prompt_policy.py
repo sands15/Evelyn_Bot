@@ -56,6 +56,8 @@ _MEMORY_CONTEXT_RECEIPT_FIELDS = frozenset(
         "memoryVersion",
         "retrievalMode",
         "cacheHit",
+        "indexFresh",
+        "readOnlyFallback",
         "hotContextState",
         "suppliedNoteIds",
         "suppliedNoteCount",
@@ -287,6 +289,13 @@ def _finalize_memory_receipt(receipt: dict[str, Any]) -> None:
     receipt["contentFree"] = True
     receipt["retrievalMode"] = normalize_memory_retrieval_mode(
         receipt.get("retrievalMode")
+    )
+    receipt["readOnlyFallback"] = (
+        receipt.get("readOnlyFallback") is True
+    )
+    receipt["indexFresh"] = bool(
+        receipt.get("indexFresh") is True
+        and not receipt["readOnlyFallback"]
     )
     raw_note_ids = receipt.get("suppliedNoteIds")
     canonical_note_ids: set[str] = set()

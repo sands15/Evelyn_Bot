@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -13,6 +15,8 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core import fast_context_contract as fast_contract  # noqa: E402
+from evelyn_core.assistant_contracts import MemoryRecallResult  # noqa: E402
 from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_log_context,
     build_fast_control_context,
@@ -23,6 +27,7 @@ from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
 from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
 from evelyn_core.memory_prompt_policy import memory_deletion_boundary_from_position  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
     memory_deletion_ledger_note_id,
@@ -368,6 +373,89 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.memory_receipt["promptMemoryWithheld"])
         self.assertEqual(context.memory_receipt["withheldItemCount"], 1)
         self.assertTrue(context.memory_receipt["contentFree"])
+
+    async def test_default_memory_busy_before_entry_uses_shared_position(
+        self,
+    ) -> None:
+        @contextlib.contextmanager
+        def busy_guard(*_args, **_kwargs):
+            raise MemoryDeletionJournalBusyError()
+            yield
+
+        @contextlib.contextmanager
+        def shared_guard(*_args, **_kwargs):
+            yield TEST_DELETION_POSITION
+
+        result = MemoryRecallResult(
+            turn_id="fast-shared",
+            ok=True,
+            context_text="trusted fast shared context",
+            metadata={
+                "index_fresh": False,
+                "read_only_fallback": True,
+            },
+        )
+        recall_receipt = {
+            "state": "provided",
+            "groundingState": "attributed",
+            "noteIds": ["note-fast-shared"],
+            "indexFresh": False,
+            "readOnlyFallback": True,
+        }
+        with patch.object(
+            fast_contract,
+            "memory_deletion_journal_guard",
+            side_effect=busy_guard,
+        ), patch.object(
+            fast_contract,
+            "memory_deletion_journal_read_guard",
+            side_effect=shared_guard,
+        ) as shared, patch(
+            "evelyn_core.memory_vault.recall_memory_vault",
+            return_value=result,
+        ), patch(
+            "evelyn_core.memory_vault.build_memory_recall_receipt",
+            return_value=recall_receipt,
+        ):
+            context, receipt = (
+                await fast_contract._default_memory_provider_result(
+                    "memory shared fallback"
+                )
+            )
+
+        self.assertEqual(context, "trusted fast shared context")
+        self.assertFalse(receipt["indexFresh"])
+        self.assertTrue(receipt["readOnlyFallback"])
+        self.assertEqual(
+            receipt["deletionBoundary"]["sequence"],
+            TEST_DELETION_POSITION.sequence,
+        )
+        shared.assert_called_once()
+
+    async def test_default_memory_busy_after_entry_does_not_retry_shared(
+        self,
+    ) -> None:
+        @contextlib.contextmanager
+        def writer_guard(*_args, **_kwargs):
+            yield TEST_DELETION_POSITION
+
+        with patch.object(
+            fast_contract,
+            "memory_deletion_journal_guard",
+            side_effect=writer_guard,
+        ), patch.object(
+            fast_contract,
+            "memory_deletion_journal_read_guard",
+        ) as shared, patch(
+            "evelyn_core.memory_vault.recall_memory_vault",
+            side_effect=MemoryDeletionJournalBusyError(),
+        ):
+            with self.assertRaises(MemoryDeletionJournalBusyError):
+                await fast_contract._default_memory_provider_result(
+                    "memory busy body"
+                )
+
+        shared.assert_not_called()
 
     async def test_fast_memory_receipt_keeps_note_ids_without_memory_text(self) -> None:
         canonical_note_id = "opaque-" + ("a" * 64)

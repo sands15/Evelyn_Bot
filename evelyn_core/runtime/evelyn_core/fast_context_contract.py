@@ -30,10 +30,12 @@ from .fast_action_runtime import compact_local_bridge_context
 from .fast_tool_planner import render_fast_tool_registry_context
 from .host_vision_client import HostVisionResult, request_host_vision
 from .memory_deletion_journal import (
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
     memory_deletion_ledger_note_id,
     memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
     memory_deletion_note_id_is_canonical,
 )
 from .memory_deletion_outbound import (
@@ -309,6 +311,10 @@ def _fast_memory_context_receipt(
             source.get("retrievalMode")
         ),
         "cacheHit": bool(source.get("cacheHit")),
+        "indexFresh": source.get("indexFresh") is True,
+        "readOnlyFallback": (
+            source.get("readOnlyFallback") is True
+        ),
         "hotContextState": "not_requested",
         "suppliedNoteIds": note_ids,
         "suppliedNoteCount": len(note_ids),
@@ -347,10 +353,13 @@ async def _default_memory_provider_result(
         dict[str, Any],
         MemoryDeletionPosition | None,
     ]:
-        with memory_deletion_journal_guard(
-            MEMORY_ROOT / "memory_index",
-            require_stable=True,
-        ) as position:
+        def recall_at_position(
+            position: MemoryDeletionPosition,
+        ) -> tuple[
+            str,
+            dict[str, Any],
+            MemoryDeletionPosition | None,
+        ]:
             result = recall_memory_vault(request)
             context = clean_text(result.context_text) if result.ok else ""
             receipt = build_memory_recall_receipt(result)
@@ -360,6 +369,24 @@ async def _default_memory_provider_result(
                 else memory_deletion_boundary_not_required()
             )
             return context, receipt, position if context else None
+
+        entered = False
+        try:
+            with memory_deletion_journal_guard(
+                MEMORY_ROOT / "memory_index",
+                require_stable=True,
+            ) as position:
+                entered = True
+                return recall_at_position(position)
+        except MemoryDeletionJournalBusyError:
+            if entered:
+                raise
+            with memory_deletion_journal_read_guard(
+                MEMORY_ROOT / "memory_index",
+                require_stable=True,
+                allow_repair=False,
+            ) as position:
+                return recall_at_position(position)
 
     context, recall_receipt, position = await asyncio.to_thread(
         recall_at_verified_position

@@ -409,7 +409,11 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertTrue(first.ok)
         self.assertIn("Stone Tools", first.context_text)
         self.assertFalse(first.metadata["cache_hit"])
+        self.assertTrue(first.metadata["index_fresh"])
+        self.assertFalse(first.metadata["read_only_fallback"])
         self.assertTrue(second.metadata["cache_hit"])
+        self.assertTrue(second.metadata["index_fresh"])
+        self.assertFalse(second.metadata["read_only_fallback"])
 
     def test_sync_purges_only_unreceipted_proactive_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

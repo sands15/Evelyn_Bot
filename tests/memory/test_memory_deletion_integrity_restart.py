@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import textwrap
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -33,6 +35,7 @@ from evelyn_core.memory_deletion_journal import (  # noqa: E402
 from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
 from evelyn_core import memory_vault  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
+    build_memory_recall_receipt,
     build_memory_vault_context,
     delete_memory_vault_user_note,
     memory_index_db_path,
@@ -485,6 +488,398 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
             after = recall_memory_vault(request, root=root)
             self.assertTrue(after.ok, after.error_text)
             self.assertNotIn(body, after.context_text)
+
+    def test_busy_recall_uses_current_markdown_without_cache_or_rank_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _path, note, title, body = self.write_confirmed_note(
+                root,
+                suffix="shared-read-only",
+            )
+            request = MemoryRecallRequest(
+                turn_id="shared-read-only",
+                session_key="shared-read-only",
+                guild_id=None,
+                user_text=title,
+                topic_id=None,
+                source="test",
+                max_items=3,
+            )
+            seeded = recall_memory_vault(request, root=root)
+            self.assertTrue(seeded.ok, seeded.error_text)
+            self.assertIn(body, seeded.context_text)
+            with closing(
+                sqlite3.connect(memory_index_db_path(root))
+            ) as connection:
+                connection.execute(
+                    "UPDATE notes SET title = ?, body = ?, source = ? "
+                    "WHERE note_id = ?",
+                    (
+                        "TAMPERED DB TITLE",
+                        "TAMPERED DB BODY",
+                        "conversation-turn-log",
+                        note.note_id,
+                    ),
+                )
+                connection.commit()
+
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            entered = threading.Event()
+            release = threading.Event()
+            outcome: dict[str, Any] = {}
+            original_trust = memory_vault._trusted_read_only_recall_row
+
+            def paused_trust(*args: Any, **kwargs: Any) -> Any:
+                trusted = original_trust(*args, **kwargs)
+                entered.set()
+                release.wait(timeout=5)
+                return trusted
+
+            def worker() -> None:
+                try:
+                    outcome["result"] = recall_memory_vault(
+                        request,
+                        root=root,
+                    )
+                except BaseException as exc:
+                    outcome["error"] = exc
+
+            forbidden = AssertionError("read-only fallback used a derived artifact")
+            thread = threading.Thread(target=worker)
+            try:
+                with deletion_journal.memory_deletion_journal_read_guard(
+                    memory_vault.memory_index_dir(root)
+                ):
+                    with patch.object(
+                        memory_vault,
+                        "_trusted_read_only_recall_row",
+                        side_effect=paused_trust,
+                    ), patch.object(
+                        memory_vault,
+                        "_read_retrieval_cache",
+                        side_effect=forbidden,
+                    ), patch.object(
+                        memory_vault,
+                        "_write_retrieval_cache",
+                        side_effect=forbidden,
+                    ), patch.object(
+                        memory_vault,
+                        "_fetch_candidate_rows",
+                        side_effect=forbidden,
+                    ), patch.object(
+                        memory_vault,
+                        "_fetch_vector_scores",
+                        side_effect=forbidden,
+                    ), patch.object(
+                        memory_vault,
+                        "_expand_graph_neighbors",
+                        side_effect=forbidden,
+                    ):
+                        thread.start()
+                        self.assertTrue(entered.wait(timeout=5))
+                        with self.assertRaises(
+                            MemoryDeletionJournalBusyError
+                        ):
+                            delete_memory_vault_user_note(
+                                note.note_id,
+                                preview["confirmToken"],
+                                reason="privacy_request",
+                                root=root,
+                            )
+                        release.set()
+                        thread.join(timeout=5)
+            finally:
+                release.set()
+                thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            result = outcome["result"]
+            self.assertTrue(result.ok, result.error_text)
+            self.assertIn(title, result.context_text)
+            self.assertIn(body, result.context_text)
+            self.assertNotIn("TAMPERED DB", result.context_text)
+            self.assertFalse(result.metadata["cache_hit"])
+            self.assertFalse(result.metadata["index_fresh"])
+            self.assertTrue(result.metadata["read_only_fallback"])
+            after = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
+            deleted = delete_memory_vault_user_note(
+                note.note_id,
+                preview["confirmToken"],
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(deleted.get("ok"), deleted)
+
+    def test_busy_context_skips_hot_context_and_derived_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _path, source_note, _title, _body = self.write_confirmed_note(
+                root,
+                suffix="shared-source",
+            )
+            derived_path = write_memory_vault_note(
+                note_type="project",
+                title="Shared derived target",
+                body="DERIVED BODY MUST NOT ENTER BUSY FALLBACK",
+                source="control-page-user",
+                derived_from=[source_note.note_id],
+                root=root,
+            )
+            derived_note = parse_memory_note(derived_path)
+            update_memory_vault_user_note(
+                derived_note.note_id,
+                "confirm",
+                expected_content_hash=derived_note.source_hash,
+                root=root,
+            )
+            write_memory_vault_note(
+                note_type="project",
+                title="Shared runtime target",
+                body="RUNTIME BODY MUST NOT ENTER BUSY FALLBACK",
+                source="runtime",
+                root=root,
+            )
+            recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="seed-derived",
+                    session_key="seed-derived",
+                    guild_id=None,
+                    user_text="Shared derived target",
+                    topic_id=None,
+                    source="test",
+                ),
+                root=root,
+            )
+
+            receipt: dict[str, Any] = {}
+            with patch.object(
+                memory_vault,
+                "memory_deletion_journal_guard",
+                side_effect=MemoryDeletionJournalBusyError(),
+            ), patch.object(
+                memory_vault,
+                "_validated_memory_hot_context_payload",
+                side_effect=AssertionError("hot context must be skipped"),
+            ):
+                context = build_memory_vault_context(
+                    1,
+                    "Shared derived target",
+                    root=root,
+                    receipt=receipt,
+                )
+
+            self.assertNotIn("DERIVED BODY", context)
+            self.assertNotIn("RUNTIME BODY", context)
+            self.assertEqual(
+                receipt["hotContextState"],
+                "read_only_fallback_skipped",
+            )
+            self.assertFalse(receipt["indexFresh"])
+            self.assertTrue(receipt["readOnlyFallback"])
+
+    def test_busy_recall_reports_unavailable_for_unusable_index(self) -> None:
+        for variant in (
+            "missing",
+            "corrupt",
+            "old_schema",
+            "wal_sidecar",
+        ):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _path, _note, title, _body = self.write_confirmed_note(
+                    root,
+                    suffix=f"fallback-{variant}",
+                )
+                index_path = memory_index_db_path(root)
+                if variant == "missing":
+                    index_path.unlink()
+                elif variant == "corrupt":
+                    index_path.write_bytes(b"not-a-sqlite-index")
+                else:
+                    if variant == "wal_sidecar":
+                        index_path.with_name(
+                            index_path.name + "-wal"
+                        ).write_bytes(b"stale-wal-sidecar")
+                    else:
+                        with closing(
+                            sqlite3.connect(index_path)
+                        ) as connection:
+                            connection.execute(
+                                "UPDATE metadata SET value = '5' "
+                                "WHERE key = 'schema_version'"
+                            )
+                            connection.commit()
+
+                before = {
+                    path.relative_to(root).as_posix(): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+
+                with patch.object(
+                    memory_vault,
+                    "memory_deletion_journal_guard",
+                    side_effect=MemoryDeletionJournalBusyError(),
+                ):
+                    result = recall_memory_vault(
+                        MemoryRecallRequest(
+                            turn_id=f"fallback-{variant}",
+                            session_key="fallback-unavailable",
+                            guild_id=None,
+                            user_text=title,
+                            topic_id=None,
+                            source="test",
+                        ),
+                        root=root,
+                    )
+
+                after = {
+                    path.relative_to(root).as_posix(): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+
+                receipt = build_memory_recall_receipt(result)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.context_text, "")
+                self.assertFalse(result.metadata["index_fresh"])
+                self.assertTrue(result.metadata["read_only_fallback"])
+                self.assertEqual(receipt["state"], "unavailable")
+                self.assertFalse(receipt["indexFresh"])
+                self.assertTrue(receipt["readOnlyFallback"])
+                self.assertEqual(after, before)
+
+    def test_busy_recall_rejects_restored_tombstoned_source_and_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = self.seed_deleted_note_with_stale_derived_state(
+                root,
+                suffix="busy-stale-source",
+            )
+            with patch.object(
+                memory_vault,
+                "memory_deletion_journal_guard",
+                side_effect=MemoryDeletionJournalBusyError(),
+            ):
+                result = recall_memory_vault(
+                    MemoryRecallRequest(
+                        turn_id="busy-stale-source",
+                        session_key="busy-stale-source",
+                        guild_id=None,
+                        user_text=state["title"],
+                        topic_id=None,
+                        source="test",
+                    ),
+                    root=root,
+                )
+
+            self.assertTrue(result.ok, result.error_text)
+            self.assertEqual(result.context_text, "")
+            self.assertNotIn(state["title"], str(result))
+            self.assertNotIn(state["body"], str(result))
+            self.assertFalse(result.metadata["index_fresh"])
+            self.assertTrue(result.metadata["read_only_fallback"])
+
+    def test_read_only_index_rejects_symlinked_parent_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_confirmed_note(root, suffix="symlink-parent")
+            index_path = memory_index_db_path(root)
+            real_is_symlink = Path.is_symlink
+
+            def fake_is_symlink(path: Path) -> bool:
+                return (
+                    path == index_path.parent
+                    or real_is_symlink(path)
+                )
+
+            with patch.object(
+                Path,
+                "is_symlink",
+                side_effect=fake_is_symlink,
+                autospec=True,
+            ):
+                with self.assertRaises(
+                    MemoryDeletionJournalIntegrityError
+                ):
+                    with memory_vault._open_index_read_only(index_path):
+                        self.fail("symlinked parent index opened")
+
+    def test_busy_recall_does_not_repair_lagging_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _first_path, first_note, _first_title, _first_body = (
+                self.write_confirmed_note(root, suffix="busy-lag-first")
+            )
+            self.delete_note(root, first_note.note_id)
+            head_path = (
+                root
+                / "memory_index"
+                / MEMORY_DELETE_TOMBSTONE_CHAIN_HEAD_NAME
+            )
+            first_head = head_path.read_bytes()
+
+            _second_path, second_note, second_title, second_body = (
+                self.write_confirmed_note(root, suffix="busy-lag-second")
+            )
+            self.delete_note(root, second_note.note_id)
+            head_path.write_bytes(first_head)
+            before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+
+            with patch.object(
+                memory_vault,
+                "memory_deletion_journal_guard",
+                side_effect=MemoryDeletionJournalBusyError(),
+            ):
+                result = recall_memory_vault(
+                    MemoryRecallRequest(
+                        turn_id="busy-lagging-head",
+                        session_key="busy-lagging-head",
+                        guild_id=None,
+                        user_text=second_title,
+                        topic_id=None,
+                        source="test",
+                    ),
+                    root=root,
+                )
+
+            after = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_text, INTEGRITY_ERROR)
+            self.assertEqual(result.context_text, "")
+            self.assertNotIn(second_title, str(result))
+            self.assertNotIn(second_body, str(result))
+            self.assertFalse(result.metadata["index_fresh"])
+            self.assertTrue(result.metadata["read_only_fallback"])
+            self.assertEqual(after, before)
 
     def test_snapshot_rejects_valid_out_of_band_position_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

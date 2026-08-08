@@ -19,7 +19,10 @@ from evelyn_core.memory_context_state import (  # noqa: E402
 from evelyn_core.memory_content_free_ids import (  # noqa: E402
     memory_content_free_id,
 )
-from evelyn_core.memory_deletion_journal import MemoryDeletionPosition  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
+    MemoryDeletionPosition,
+)
 from evelyn_core.memory_deletion_outbound import (  # noqa: E402
     current_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
@@ -473,6 +476,131 @@ class MemoryContextStateTests(unittest.TestCase):
             receipt["deletionBoundary"]["state"],
             "not_required",
         )
+        self.assertIsNone(current_memory_deletion_outbound_position())
+
+    def test_shared_fallback_skips_write_backed_legacy_reads(self) -> None:
+        @contextlib.contextmanager
+        def busy_guard(*_args, **_kwargs):
+            raise MemoryDeletionJournalBusyError()
+            yield
+
+        @contextlib.contextmanager
+        def shared_guard(*_args, **_kwargs):
+            yield self.deletion_position
+
+        def vault(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "suppliedNoteIds": ["note-shared"],
+                    "indexFresh": False,
+                    "readOnlyFallback": True,
+                    "hotContextState": "read_only_fallback_skipped",
+                }
+            )
+            return "trusted shared vault context"
+
+        receipt: dict[str, object] = {}
+        with patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_guard",
+            side_effect=busy_guard,
+        ), patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_read_guard",
+            side_effect=shared_guard,
+        ) as shared, patch(
+            "evelyn_core.memory_context_state.collect_memory_layers",
+            side_effect=AssertionError("legacy layers must be skipped"),
+        ), patch(
+            "evelyn_core.memory_context_state.read_layered_cognitive_state",
+            side_effect=AssertionError("disk cognitive state must be skipped"),
+        ), patch(
+            "evelyn_core.memory_context_state.build_memory_vault_context",
+            side_effect=vault,
+        ), patch.object(
+            Path,
+            "mkdir",
+            side_effect=AssertionError("shared fallback must not mkdir"),
+        ):
+            context = build_memory_context(
+                123,
+                "shared recall",
+                cognitive_state={"action": "answer"},
+                receipt=receipt,
+            )
+
+        self.assertIn("trusted shared vault context", context)
+        self.assertEqual(receipt["legacyItemCount"], 0)
+        self.assertFalse(receipt["indexFresh"])
+        self.assertTrue(receipt["readOnlyFallback"])
+        self.assertIs(
+            current_memory_deletion_outbound_position(),
+            self.deletion_position,
+        )
+        shared.assert_called_once()
+
+    def test_shared_fallback_preserves_unavailable_state(self) -> None:
+        @contextlib.contextmanager
+        def busy_guard(*_args, **_kwargs):
+            raise MemoryDeletionJournalBusyError()
+            yield
+
+        @contextlib.contextmanager
+        def shared_guard(*_args, **_kwargs):
+            yield self.deletion_position
+
+        def unavailable_vault(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "unavailable",
+                    "indexFresh": False,
+                    "readOnlyFallback": True,
+                }
+            )
+            return ""
+
+        receipt: dict[str, object] = {}
+        with patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_guard",
+            side_effect=busy_guard,
+        ), patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_read_guard",
+            side_effect=shared_guard,
+        ), patch(
+            "evelyn_core.memory_context_state.collect_memory_layers",
+            side_effect=AssertionError("legacy layers must be skipped"),
+        ), patch(
+            "evelyn_core.memory_context_state.read_layered_cognitive_state",
+            side_effect=AssertionError("disk cognitive state must be skipped"),
+        ), patch(
+            "evelyn_core.memory_context_state.build_memory_vault_context",
+            side_effect=unavailable_vault,
+        ):
+            context = build_memory_context(
+                123,
+                "shared recall",
+                cognitive_state={},
+                receipt=receipt,
+            )
+
+        self.assertEqual(context, "")
+        self.assertEqual(receipt["state"], "unavailable")
+        self.assertEqual(receipt["groundingState"], "empty")
+        self.assertFalse(receipt["indexFresh"])
+        self.assertTrue(receipt["readOnlyFallback"])
+        self.assertIsNone(current_memory_deletion_outbound_position())
+
+    def test_busy_after_writer_entry_does_not_retry_shared(self) -> None:
+        with patch(
+            "evelyn_core.memory_context_state._build_memory_context_at_position",
+            side_effect=MemoryDeletionJournalBusyError(),
+        ), patch(
+            "evelyn_core.memory_context_state.memory_deletion_journal_read_guard",
+        ) as shared:
+            with self.assertRaises(MemoryDeletionJournalBusyError):
+                build_memory_context(123, "busy in body")
+
+        shared.assert_not_called()
         self.assertIsNone(current_memory_deletion_outbound_position())
 
 

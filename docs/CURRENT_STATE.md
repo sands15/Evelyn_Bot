@@ -1980,10 +1980,18 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 정상 경합은 `memory_deletion_journal_busy`로 무결성 손상과 분리했다. 8798과 8799는
   exact no-store 503의 두 필드만 반환하고 Control Page는 잠시 뒤 재시도를 안내한다.
   OS 오류, lock owner, path, note ID와 원문은 응답에 포함하지 않는다.
-- repair가 필요한 snapshot은 shared lease를 놓고 writer에서 재검증·repair한 뒤 reader를
-  다시 얻는다. index sync, retrieval-cache migration/write와 실제 cognitive·memory
-  artifact commit은 writer로 유지했다. fresh write-backed recall/index/cache는 active
-  reader와 busy가 될 수 있다.
+- 일반 reader는 repair가 필요한 snapshot을 shared lease 밖의 writer에서 재검증·repair한
+  뒤 다시 진입한다. fresh recall의 Busy fallback은 `allow_repair=false`라 chain head를
+  쓰지 않고 unavailable로 닫는다. index sync, retrieval-cache migration/write와 실제
+  cognitive·memory artifact commit은 writer로 유지했다.
+- 정상 recall은 기존 writer sync/cache를 유지하고 진입 전 exact busy만 shared no-cache
+  fallback으로 전환한다. fallback은 SQLite sidecar·symlink, `schema_version != 6`,
+  비정규 `memory_version`과 필수 metadata/notes query 실패를 거부하고
+  `mode=ro&immutable=1`에서 최대 500개 후보를 현재 Markdown hash·ID·path,
+  tombstone·quarantine·confirmation에 다시 결합한다. cache/FTS/vector/graph/hot,
+  legacy layer와 disk cognitive state는 사용하지 않고 explicit user/system note만
+  렌더링한다. Main과 Fast는 같은 shared deletion position을 receipt와 outbound에
+  결합하며 `indexFresh=false`, `readOnlyFallback=true`를 남긴다.
 - semantic consolidation은 shared phase에서 current source tombstone과 full hash를
   확인하고 Sub-LLM 응답을 받은 뒤, fresh writer에서 source hash를 다시 확인해 note
   batch와 index sync를 적용한다. derivation recomposition은 짧은 writer snapshot에서
@@ -1999,6 +2007,6 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   동시 response 소비와 8798·8799/API/UI privacy projection을 synthetic data로 검증했다.
   paused Sub-LLM 중 reader 공존·삭제 Busy, shared→writer handoff의 source 삭제와 target
   user-edit 우선, stale model canary 전 파일 비저장도 실제 thread race로 검증했다.
-- memory 282개(skip 1), core 732개(skip 1), runtime 762개(skip 4)와 CI-equivalent
-  전체 3,100개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
+- memory 288개(skip 1), core 736개(skip 1), runtime 764개(skip 4)와 CI-equivalent
+  전체 3,112개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
   Docker 서비스는 사용하거나 변경하지 않았다.

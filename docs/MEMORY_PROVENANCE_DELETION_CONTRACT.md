@@ -665,11 +665,26 @@ journal을 검증하고 결과가 경계를 벗어나기 직전에 다시 검증
 필요하면 shared lease를 놓고 writer lease에서 상태를 다시 검사·복구한 뒤 shared
 lease를 새로 얻는다.
 
-recall, 전체 vault context 조립, graph/snapshot/detail, hot context, provenance
-preview/apply, index/cache rebuild와 memory write처럼 동기화·cache·artifact write를
-포함하는 경로는 deletion writer lease를 유지한다. 정상 삭제는 노출 전 또는 노출
-후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로 그 본문을 반환할 수
-없다.
+정상 recall은 deletion writer lease에서 index sync와 retrieval cache read/write를
+기존대로 수행한다. writer 진입 전 exact lock busy인 경우에만 fresh shared reader
+lease로 전환하며, repair가 필요한 journal state는 쓰지 않고 fixed integrity failure로
+닫는다. 이 fallback은 SQLite를 `mode=ro&immutable=1`로 열고 WAL/SHM/journal sidecar,
+symlink/junction, `schema_version != 6`, 비정규 `memory_version`과 필수
+metadata/notes query 실패를 거부한다. retrieval cache,
+FTS/vector/graph rank, hot context, legacy/layered memory와 disk cognitive state는 읽지
+않는다. 최대 500개 index 후보를 현재 Markdown의 exact path·note ID·전체 hash,
+tombstone, canonical quarantine와 confirmation state에 다시 결합하고, 명시적
+user/system note 중 `derived_from`이 없는 항목만 렌더링한다. 실패나 unavailable은
+본문 없이 `indexFresh=false`, `readOnlyFallback=true`로 관측한다.
+
+Main 전체 context와 Fast memory provider는 fallback의 같은
+`memory.deletion.position.v1`을 receipt와 outbound guard에 결합한다. shared fallback은
+파일·SQLite·chain head를 만들거나 복구하지 않는다. 정상 writer/cache 경로는
+`indexFresh=true`, `readOnlyFallback=false`를 명시한다. graph/snapshot/detail,
+provenance preview/apply, index/cache rebuild와 memory write처럼 실제 artifact write를
+포함하는 나머지 경로는 deletion writer lease를 유지한다. 정상 삭제는 노출 전 또는
+노출 후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로 그 본문을 반환할
+수 없다.
 
 semantic consolidation은 fresh shared reader lease 안에서 현재 source의 tombstone과
 전체 content hash를 확인하고 Sub-LLM 요청·전체 응답을 수행한다. shared lease를 완전히
@@ -873,6 +888,13 @@ prompt block과 user state가 의도적으로 남아 있다.
 - fresh-process torn/missing/lag 상태와 same-ID resurrection 차단
 - cached recall, 전체 vault context, semantic Sub-LLM, derivation recomposition
   경계의 concurrent delete 선형화
+- active shared reader 때문에 normal recall writer가 busy일 때 immutable SQLite와
+  current Markdown을 사용한 no-cache fallback, cache/FTS/vector/graph/hot/legacy
+  비사용, 동일 deletion position의 Main/Fast receipt·outbound 결합
+- fallback 중 delete writer의 exact busy와 confirm token 비소모, lagging head,
+  missing/corrupt/old-schema DB와 SQLite sidecar의 byte-stable unavailable 처리
+- tombstone 뒤 stale source·SQLite·cache를 복원해도 삭제 본문 비회상,
+  tampered DB body 비노출과 `derived_from` note의 보수적 제외
 - `max_items=1`에서 selected concept 밖 procedural note가 추가되어도 렌더링,
   provenance, cache와 receipt note 집합이 정확히 같고 selected procedure는 한 번만
   렌더링되는 계약

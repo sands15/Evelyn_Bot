@@ -11,7 +11,12 @@ from .config import (
 )
 from .memory import merge_memory_rows, normalize_cognitive_state, select_relevant_memory_rows
 from .memory_content_free_ids import memory_content_free_id
-from .memory_deletion_journal import memory_deletion_journal_guard
+from .memory_deletion_journal import (
+    MemoryDeletionJournalBusyError,
+    MemoryDeletionPosition,
+    memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
+)
 from .memory_deletion_outbound import (
     capture_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
@@ -295,35 +300,45 @@ def _build_memory_context_at_position(
     person_key: str | None = None,
     session_memory_key: str | None = None,
     receipt: dict[str, Any] | None = None,
+    read_only_fallback: bool = False,
 ) -> str:
-    layers = collect_memory_layers(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-    )
-    facts = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["facts"] for layer in layers.values())),
-        MEMORY_RETRIEVE_LIMIT,
-    )
-    questions = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["questions"] for layer in layers.values())),
-        4,
-    )
-    vault_raw_rows = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["vault_raw"] for layer in layers.values())),
-        MEMORY_VAULT_RAW_RETRIEVE_LIMIT,
-    )
-    state = read_layered_cognitive_state(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-    )
-    state = normalize_cognitive_state(state if cognitive_state is None else cognitive_state)
+    if read_only_fallback:
+        layers: dict[str, dict[str, Any]] = {}
+        facts: list[dict[str, Any]] = []
+        questions: list[dict[str, Any]] = []
+        vault_raw_rows: list[dict[str, Any]] = []
+        state = normalize_cognitive_state(cognitive_state or {})
+    else:
+        layers = collect_memory_layers(
+            guild_id,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+        facts = select_relevant_memory_rows(
+            user_text,
+            merge_memory_rows(*(layer["facts"] for layer in layers.values())),
+            MEMORY_RETRIEVE_LIMIT,
+        )
+        questions = select_relevant_memory_rows(
+            user_text,
+            merge_memory_rows(*(layer["questions"] for layer in layers.values())),
+            4,
+        )
+        vault_raw_rows = select_relevant_memory_rows(
+            user_text,
+            merge_memory_rows(*(layer["vault_raw"] for layer in layers.values())),
+            MEMORY_VAULT_RAW_RETRIEVE_LIMIT,
+        )
+        state = read_layered_cognitive_state(
+            guild_id,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+        state = normalize_cognitive_state(
+            state if cognitive_state is None else cognitive_state
+        )
     active_session_state = dict(session_state or {})
     vault_receipt: dict[str, Any] = {}
     vault_context = build_memory_vault_context(
@@ -502,6 +517,9 @@ def _build_memory_context_at_position(
     confirm_only_item_count = (
         legacy_unattributed_item_count + (1 if vault_confirm_only else 0)
     )
+    vault_state = clean_text(
+        str(vault_receipt.get("state") or "unknown")
+    )
     if not context:
         grounding_state = "empty"
     elif attributed_component_count and unattributed_component_count:
@@ -515,7 +533,13 @@ def _build_memory_context_at_position(
         receipt.update(
             {
                 "schema": "memory.context-receipt.v1",
-                "state": "provided" if context else "empty",
+                "state": (
+                    "provided"
+                    if context
+                    else "unavailable"
+                    if vault_state == "unavailable"
+                    else "empty"
+                ),
                 "groundingState": grounding_state,
                 "usePolicy": MEMORY_CONTEXT_USE_POLICY,
                 "confirmOnlyItemCount": confirm_only_item_count,
@@ -528,11 +552,17 @@ def _build_memory_context_at_position(
                 "preTruncationLegacyItemCount": 0,
                 "preTruncationNoteCount": 0,
                 "opaqueConfirmOnlyComponentCount": 0,
-                "vaultState": clean_text(str(vault_receipt.get("state") or "unknown")),
+                "vaultState": vault_state,
                 "vaultConfirmOnly": vault_confirm_only,
                 "memoryVersion": int(vault_receipt.get("memoryVersion") or 0),
                 "retrievalMode": clean_text(str(vault_receipt.get("retrievalMode") or "unknown"))[:40],
                 "cacheHit": bool(vault_receipt.get("cacheHit")),
+                "indexFresh": (
+                    vault_receipt.get("indexFresh") is True
+                ),
+                "readOnlyFallback": (
+                    vault_receipt.get("readOnlyFallback") is True
+                ),
                 "hotContextState": clean_text(str(vault_receipt.get("hotContextState") or "unknown")),
                 "suppliedNoteIds": supplied_note_ids,
                 "suppliedNoteCount": len(supplied_note_ids),
@@ -566,38 +596,62 @@ def build_memory_context(
     """Build all legacy and vault memory at one verified deletion position."""
 
     reset_memory_deletion_outbound_position()
-    try:
-        with memory_deletion_journal_guard(
-            MEMORY_ROOT / "memory_index",
-            require_stable=True,
-        ) as deletion_position:
-            context = _build_memory_context_at_position(
-                guild_id,
-                user_text,
-                cognitive_state,
-                session_key=session_key,
-                session_state=session_state,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                receipt=receipt,
+
+    def build_at_position(
+        deletion_position: MemoryDeletionPosition,
+        *,
+        read_only_fallback: bool = False,
+    ) -> str:
+        context = _build_memory_context_at_position(
+            guild_id,
+            user_text,
+            cognitive_state,
+            session_key=session_key,
+            session_state=session_state,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            receipt=receipt,
+            read_only_fallback=read_only_fallback,
+        )
+        if context:
+            capture_memory_deletion_outbound_position(
+                deletion_position
             )
-            if context:
-                capture_memory_deletion_outbound_position(
+            deletion_boundary = (
+                memory_deletion_boundary_from_position(
                     deletion_position
                 )
-                deletion_boundary = (
-                    memory_deletion_boundary_from_position(
-                        deletion_position
-                    )
+            )
+        else:
+            deletion_boundary = (
+                memory_deletion_boundary_not_required()
+            )
+        if receipt is not None:
+            receipt["deletionBoundary"] = deletion_boundary
+        return context
+
+    entered = False
+    try:
+        try:
+            with memory_deletion_journal_guard(
+                MEMORY_ROOT / "memory_index",
+                require_stable=True,
+            ) as deletion_position:
+                entered = True
+                return build_at_position(deletion_position)
+        except MemoryDeletionJournalBusyError:
+            if entered:
+                raise
+            with memory_deletion_journal_read_guard(
+                MEMORY_ROOT / "memory_index",
+                require_stable=True,
+                allow_repair=False,
+            ) as deletion_position:
+                return build_at_position(
+                    deletion_position,
+                    read_only_fallback=True,
                 )
-            else:
-                deletion_boundary = (
-                    memory_deletion_boundary_not_required()
-                )
-            if receipt is not None:
-                receipt["deletionBoundary"] = deletion_boundary
-            return context
     except Exception:
         reset_memory_deletion_outbound_position()
         raise

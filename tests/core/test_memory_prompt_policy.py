@@ -68,6 +68,35 @@ class MemoryPromptPolicyTests(unittest.TestCase):
         self.assertEqual(receipt["retrievalMode"], "unknown")
         self.assertNotIn(private_canary, str(receipt))
 
+    def test_receipt_preserves_read_only_fallback_markers(self) -> None:
+        receipt = {
+            "state": "empty",
+            "indexFresh": True,
+            "readOnlyFallback": True,
+        }
+
+        reconcile_memory_receipt_for_prompt(
+            receipt,
+            prepare_memory_context_for_prompt(
+                "",
+                grounding_state="empty",
+            ),
+        )
+
+        self.assertTrue(receipt["readOnlyFallback"])
+        self.assertFalse(receipt["indexFresh"])
+
+        missing = {"state": "empty"}
+        reconcile_memory_receipt_for_prompt(
+            missing,
+            prepare_memory_context_for_prompt(
+                "",
+                grounding_state="empty",
+            ),
+        )
+        self.assertFalse(missing["readOnlyFallback"])
+        self.assertFalse(missing["indexFresh"])
+
     def test_receipt_projects_legacy_identifiers_content_free(
         self,
     ) -> None:
