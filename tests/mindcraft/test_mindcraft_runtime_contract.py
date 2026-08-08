@@ -821,7 +821,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("invalid_registry_name", source)
         self.assertIn("requestBroker(\n            'recovery'", source)
         self.assertIn("gate=recovery", source)
-        self.assertIn("lastObservedExecutionSequence", source)
+        self.assertIn("pendingIssuance", source)
         self.assertIn("FORBIDDEN_RECOVERY_COMMANDS", source)
         self.assertIn("readGoalPolicy", source)
         self.assertIn("Local planner failed; escalating to recovery", source)
@@ -854,6 +854,9 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             "    resetHistoryDerivedState()"
         )[0]
         patch_source = (overlay_root / "history_boundary.patch").read_text(
+            encoding="utf-8"
+        )
+        agent_patch_source = (overlay_root / "evelyn.patch").read_text(
             encoding="utf-8"
         )
         sink_patch_source = (overlay_root / "history_sink_boundary.patch").read_text(
@@ -895,8 +898,13 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("appendFullHistory", history_source)
         self.assertIn("const goalManager = this.agent.goal_manager", history_source)
         self.assertIn("AsyncLocalStorage", boundary_source)
+        self.assertIn("bindMindcraftRecoveryIssuance", boundary_source)
+        self.assertIn("claimMindcraftRecoveryIssuance", boundary_source)
+        self.assertIn("discardMindcraftRecoveryIssuance", boundary_source)
         self.assertIn("assertMindcraftHistoryCurrent", planner_source)
         self.assertIn("withMindcraftHistoryExposure", planner_source)
+        self.assertIn("pendingExecution", planner_source)
+        self.assertNotIn("lastObservedExecutionSequence", planner_source)
         self.assertIn("resetHistoryDerivedState()", planner_source)
         self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", planner_source)
         self.assertIn("await this.handleMessage(username, translation)", patch_source)
@@ -929,6 +937,13 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("currentSubgoal.observationCounts = {}", goal_manager_source)
         self.assertIn("currentSubgoal.observationStreak = 0", goal_manager_source)
         self.assertIn("currentSubgoal.gateRejects = 0", goal_manager_source)
+        self.assertIn("return contentFreeExecution(execution)", goal_manager_source)
+        self.assertNotIn("commandBinding", goal_manager_source)
+        self.assertIn("const recoveryIssuance = claimMindcraftRecoveryIssuance", agent_patch_source)
+        self.assertIn("discardMindcraftRecoveryIssuance(history)", agent_patch_source)
+        self.assertIn("recoveryIssuance?.complete(goalExecution)", agent_patch_source)
+        self.assertIn("recoveryIssuance?.discard()", agent_patch_source)
+        self.assertIn("recoveryPlanInFlight", planner_source)
         self.assertIn("return String(message || '')", translator_source)
         self.assertNotIn("async function handleTranslation", translator_source)
         self.assertNotIn("google-translate", translator_source)

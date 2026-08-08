@@ -1516,7 +1516,9 @@ export class EvelynGoalManager {
         const hasResultText = String(result || '').trim().length > 0;
         const failed = name === '!moveAway'
             ? !moveAwayProgressed
-            : resultFailed(result);
+            : resultFailed(result) || (
+                !hasResultText && (ACTION_COMMANDS.has(name) || SAFETY_COMMANDS.has(name))
+            );
         const beforeMeasure = current ? predicateMeasure(current.success, before) : null;
         const afterMeasure = current ? predicateMeasure(current.success, after) : null;
         const beforeSatisfied = current
@@ -1655,6 +1657,7 @@ export class EvelynGoalManager {
             this.blockCurrentSubgoal('action_budget_exhausted');
         }
         this.persist();
+        return contentFreeExecution(execution);
     }
 
     async update() {

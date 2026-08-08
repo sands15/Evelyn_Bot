@@ -28,8 +28,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 2026-08-09 Mindcraft history는 bounded process-local·no-mount이며 Codex는 off다.
   Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다.
   broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final
-  route/action sink까지 유지한다. durable bound-receipt history, recovery exact correlation,
-  legacy cleanup과 Docker·Minecraft live 검증은 남아 있다.
+  route/action sink까지 유지한다. recovery step은 exact history snapshot의 process-local
+  one-shot issuance만 소비한다. durable bound-receipt history, legacy cleanup과 Docker·Minecraft live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
   edit·provenance·post-tombstone cleanup 503은 강제 재조회 뒤 자동 재시도하지 않는다.
   replica 검증은 통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 P1이다.

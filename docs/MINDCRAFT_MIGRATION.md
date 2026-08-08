@@ -104,8 +104,10 @@ generation fence separately continues through the awaited final route/action sin
 
 This is still not durable or rollback-safe and does not provide bound-receipt
 restart history or legacy cleanup. No Docker image, live Minecraft session, or
-live clear was validated in this increment. Recovery correlation currently uses
-command codes, so exact same-command/different-target correlation remains P1.
+live clear was validated in this increment. Recovery steps consume only a
+process-local one-shot issuance keyed by the exact history snapshot; other targets,
+manual commands, concurrent turns, and reused receipts cannot advance the plan.
+The token and raw command are not persisted, so this is not a restart contract.
 `!clearChat` is not a permanent autonomy stop; use `!endGoal` for that intent.
 
 ## Runtime generated-code lint gate

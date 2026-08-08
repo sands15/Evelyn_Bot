@@ -157,7 +157,8 @@ type: decision-log
   broker가 fixed local/router upstream과 core conversation filter를 소유하고
   `memory_exposure_request`를 frame consumer의 exact ACK까지 유지한다. process-local
   generation exposure는 turn 첫 await 전부터 awaited final route/action sink까지 보호한다.
-  inter-agent ingress·timer queue도 같은 generation에 묶고 clear에서 폐기한다.
+  inter-agent ingress·timer queue도 같은 generation에 묶고 clear에서 폐기한다. recovery
+  step은 exact history snapshot의 process-local one-shot issuance만 실행 결과로 소비한다.
 - 이유: core outbound/deletion primitive는 Python broker에서 재사용하되, 불완전한 durable
   history를 새로 만들지 않는 것이 삭제·편집 후 부활과 근거 없는 재사용을 막는 최소 경계다.
 - 근거: [[MINDCRAFT_MIGRATION]], `external/mindcraft_evelyn/src/agent/history.js`,
@@ -168,6 +169,6 @@ type: decision-log
 - 영향: legacy memory/archive/log는 읽거나 rebase·삭제하지 않으며 cleanup은 사용자 승인
   migration으로 분리한다. 현재 core memory 입력이 없는 broker request projection은 strict
   `not_used` receipt를 쓰며 ACK는 frame 소비까지만 증명한다. durable bound-receipt history는
-  별도 계약으로 남긴다.
+  별도 계약으로 남긴다. recovery token과 raw command는 저장하지 않으며 restart 후 이어 쓰지 않는다.
   goal/status artifact는 enum code·count/boolean만 남긴다. `!clearChat`은 대화 유래 상태만
   비우며 자율 목표의 영구 정지는 `!endGoal` 계약을 사용한다.

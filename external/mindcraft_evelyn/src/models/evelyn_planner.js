@@ -6,6 +6,7 @@ import { getCommand } from '../agent/commands/index.js';
 import { itemMatchesTarget } from '../agent/evelyn_world_state.js';
 import {
     assertMindcraftHistoryCurrent,
+    bindMindcraftRecoveryIssuance,
     isMindcraftHistoryBoundaryError,
     withMindcraftHistoryExposure,
 } from '../utils/evelyn_history_boundary.js';
@@ -742,6 +743,7 @@ export class EvelynPlanner {
         this.codexCooldownMs = positiveNumber(process.env.MINDCRAFT_CODEX_COOLDOWN_SEC, 30) * 1000;
         this.lastCodexAt = 0;
         this.recoveryPlan = null;
+        this.recoveryPlanInFlight = false;
         this.probeIndex = 0;
         this.actionModeUntil = 0;
     }
@@ -877,16 +879,17 @@ export class EvelynPlanner {
             this.clearRecoveryPlan();
             return 'recovery_plan_expired';
         }
-        const policy = readGoalPolicy();
-        const execution = policy?.lastExecution;
+        const execution = plan.pendingExecution;
         if (!plan.lastIssued || !execution) return null;
-        if (Number(execution.sequence || 0) <= Number(plan.lastObservedExecutionSequence || 0)) return null;
         const executionCommandCode = String(
             execution.commandCode || commandName(execution.command) || ''
         );
-        if (!executionCommandCode) return null;
-        if (executionCommandCode !== commandName(plan.lastIssued)) return null;
-        plan.lastObservedExecutionSequence = Number(execution.sequence || 0);
+        plan.pendingExecution = null;
+        plan.pendingIssuance = null;
+        if (!executionCommandCode || executionCommandCode !== commandName(plan.lastIssued)) {
+            this.clearRecoveryPlan();
+            return 'recovery_step_failed:invalid_execution';
+        }
         if (execution.failed || execution.relevant === false) {
             this.clearRecoveryPlan();
             return `recovery_step_failed:${executionCommandCode}`;
@@ -951,7 +954,8 @@ export class EvelynPlanner {
             stepIndex: 0,
             lastIssued: null,
             lastIssuedAt: null,
-            lastObservedExecutionSequence: policy.executionSequence
+            pendingIssuance: null,
+            pendingExecution: null,
         };
         this.persistPlannerState();
         console.log(
@@ -1005,10 +1009,18 @@ export class EvelynPlanner {
         }
         plan.lastIssued = validation.command;
         plan.lastIssuedAt = Date.now();
-        plan.lastObservedExecutionSequence = Math.max(
-            Number(plan.lastObservedExecutionSequence || 0),
-            Number(policy.executionSequence || 0)
-        );
+        plan.pendingExecution = null;
+        let token;
+        token = bindMindcraftRecoveryIssuance(turns, validation.command, (execution) => {
+            if (this.recoveryPlan !== plan || plan.pendingIssuance !== token) return false;
+            if (!execution) {
+                this.clearRecoveryPlan();
+                return true;
+            }
+            plan.pendingExecution = execution;
+            return true;
+        });
+        plan.pendingIssuance = token;
         this.persistPlannerState();
         console.log(
             `[Evelyn Mindcraft] planner route=local gate=recovery step=${plan.stepIndex + 1}/${plan.steps.length}`
@@ -1027,7 +1039,13 @@ export class EvelynPlanner {
         }
         try {
             if (!this.recoveryPlan) {
-                await this.createRecoveryPlan(turns, systemMessage, reason);
+                if (this.recoveryPlanInFlight) return '';
+                this.recoveryPlanInFlight = true;
+                try {
+                    await this.createRecoveryPlan(turns, systemMessage, reason);
+                } finally {
+                    this.recoveryPlanInFlight = false;
+                }
             }
             return await this.runRecoveryStep(turns, systemMessage, stopSeq);
         } catch (error) {
@@ -1045,6 +1063,7 @@ export class EvelynPlanner {
             return this.recover(turns, systemMessage, stopSeq, recoveryUpdate);
         }
         if (this.recoveryPlan) {
+            if (this.recoveryPlan.pendingIssuance) return '';
             try {
                 return await this.runRecoveryStep(turns, systemMessage, stopSeq);
             } catch (error) {

@@ -5,6 +5,11 @@ export const MINDCRAFT_HISTORY_STALE = 'mindcraft_history_stale';
 
 const HISTORY_SNAPSHOT = Symbol('evelyn.mindcraft.history-snapshot.v1');
 const exposureContext = new AsyncLocalStorage();
+const recoveryIssuances = new WeakMap();
+
+function normalizedCommand(command) {
+    return String(command || '').replace(/\s+/g, ' ').trim();
+}
 
 export function mindcraftHistoryBoundaryError(code) {
     const error = new Error(code);
@@ -47,6 +52,42 @@ export function inheritMindcraftHistorySnapshot(source, target) {
         value: snapshot,
     });
     return target;
+}
+
+export function bindMindcraftRecoveryIssuance(turns, command, complete) {
+    const normalized = normalizedCommand(command);
+    if (!Array.isArray(turns) || !normalized || typeof complete !== 'function') {
+        throw new TypeError('mindcraft_recovery_issuance_invalid');
+    }
+    if (recoveryIssuances.has(turns)) {
+        throw new Error('mindcraft_recovery_issuance_pending');
+    }
+    const token = Symbol('mindcraft.recovery-issuance');
+    recoveryIssuances.set(turns, {command: normalized, complete});
+    return token;
+}
+
+export function claimMindcraftRecoveryIssuance(turns, command) {
+    const issuance = Array.isArray(turns) ? recoveryIssuances.get(turns) : null;
+    if (!issuance || issuance.command !== normalizedCommand(command)) return null;
+    recoveryIssuances.delete(turns);
+    let finished = false;
+    const finish = (execution) => {
+        if (finished) return false;
+        finished = true;
+        return issuance.complete(execution);
+    };
+    return Object.freeze({
+        complete: (execution) => finish(execution),
+        discard: () => finish(null),
+    });
+}
+
+export function discardMindcraftRecoveryIssuance(turns) {
+    const issuance = Array.isArray(turns) ? recoveryIssuances.get(turns) : null;
+    if (!issuance) return false;
+    recoveryIssuances.delete(turns);
+    return issuance.complete(null);
 }
 
 export function assertMindcraftHistoryCurrent() {

@@ -17,6 +17,10 @@ import convoManager from '/app/mindcraft/src/agent/conversation.js';
 import { EvelynGoalManager } from '/app/mindcraft/src/agent/evelyn_goal_manager.js';
 import { History } from '/app/mindcraft/src/agent/history.js';
 import { setSettings } from '/app/mindcraft/src/agent/settings.js';
+import {
+    claimMindcraftRecoveryIssuance,
+    discardMindcraftRecoveryIssuance,
+} from '/app/mindcraft/src/utils/evelyn_history_boundary.js';
 
 setSettings({max_messages: 8});
 
@@ -746,35 +750,128 @@ test('failed broker recovery enters cooldown instead of retrying every planner t
     }
 });
 
-test('recovery steps advance only after a matching structured execution outcome', () => {
+test('recovery steps consume only their exact one-shot execution issuance', async () => {
     const fixture = goalPolicyFixture();
     try {
     const planner = new EvelynPlanner();
+    const issued = '!searchForBlock("oak_log", 32)';
+    const turns = [selfPrompt()];
     planner.recoveryPlan = {
         reason: 'test',
-        steps: ['!inventory'],
+        goalId: 'obtain_logs',
+        steps: [issued],
         createdAt: Date.now(),
         stepIndex: 0,
-        lastIssued: '!inventory',
-        lastObservedExecutionSequence: 0
+        lastIssued: null,
+        lastIssuedAt: null,
+        pendingIssuance: null,
+        pendingExecution: null,
     };
 
+    assert.equal(await planner.runRecoveryStep(turns, ACTION_SYSTEM), issued);
     assert.equal(planner.updateRecoveryPlan(), null);
     assert.notEqual(planner.recoveryPlan, null);
-
+    assert.equal(
+        claimMindcraftRecoveryIssuance(
+            turns,
+            '!searchForBlock("birch_log", 32)',
+        ),
+        null,
+    );
+    assert.equal(claimMindcraftRecoveryIssuance([...turns], issued), null);
     fixture.state.executionSequence = 1;
     fixture.state.lastExecution = {
         sequence: 1,
-        commandCode: '!inventory',
+        commandCode: '!searchForBlock',
+        autonomous: false,
+        contentFree: true,
+        relevant: true,
+        failed: false,
+    };
+    fixture.write();
+    assert.equal(planner.updateRecoveryPlan(), null);
+    assert.equal(await planner.sendActionRequest([...turns], ACTION_SYSTEM), '');
+
+    const receipt = claimMindcraftRecoveryIssuance(turns, issued);
+    assert.ok(receipt);
+    const execution = Object.freeze({
+        sequence: 1,
+        commandCode: '!searchForBlock',
+        autonomous: true,
         contentFree: true,
         relevant: true,
         failed: false,
         goalProgress: false
-    };
-    fixture.write();
+    });
+    assert.equal(receipt.complete(execution), true);
+    assert.equal(receipt.complete(execution), false);
     assert.equal(planner.updateRecoveryPlan(), 'recovery_plan_completed');
     assert.equal(planner.recoveryPlan, null);
+    assert.equal(planner.updateRecoveryPlan(), null);
+
+    const staleTurns = [selfPrompt()];
+    planner.recoveryPlan = {
+        reason: 'clear invalidation',
+        goalId: 'obtain_logs',
+        steps: [issued],
+        createdAt: Date.now(),
+        stepIndex: 0,
+        lastIssued: null,
+        lastIssuedAt: null,
+        pendingIssuance: null,
+        pendingExecution: null,
+    };
+    assert.equal(await planner.runRecoveryStep(staleTurns, ACTION_SYSTEM), issued);
+    planner.clearRecoveryPlan();
+    const staleReceipt = claimMindcraftRecoveryIssuance(staleTurns, issued);
+    assert.ok(staleReceipt);
+    assert.equal(staleReceipt.complete(execution), false);
+    assert.equal(planner.recoveryPlan, null);
+
+    const abandonedTurns = [selfPrompt()];
+    planner.recoveryPlan = {
+        reason: 'discarded before execution',
+        goalId: 'obtain_logs',
+        steps: [issued],
+        createdAt: Date.now(),
+        stepIndex: 0,
+        lastIssued: null,
+        lastIssuedAt: null,
+        pendingIssuance: null,
+        pendingExecution: null,
+    };
+    assert.equal(await planner.runRecoveryStep(abandonedTurns, ACTION_SYSTEM), issued);
+    assert.equal(discardMindcraftRecoveryIssuance(abandonedTurns), true);
+    assert.equal(discardMindcraftRecoveryIssuance(abandonedTurns), false);
+    assert.equal(planner.recoveryPlan, null);
     } finally {
+        fixture.cleanup();
+    }
+});
+
+test('concurrent recovery planning has one in-flight owner', async () => {
+    const fixture = goalPolicyFixture();
+    const broker = brokerFetchFixture();
+    try {
+        const planner = new EvelynPlanner();
+        const firstTurns = [selfPrompt()];
+        const secondTurns = [selfPrompt()];
+        const first = planner.recover(firstTurns, ACTION_SYSTEM, '***', 'first');
+        await broker.waitForPending();
+        assert.equal(
+            await planner.recover(secondTurns, ACTION_SYSTEM, '***', 'second'),
+            '',
+        );
+        assert.equal(broker.requests.length, 1);
+        broker.releaseNext(JSON.stringify({
+            reason: 'single owner',
+            steps: ['!inventory'],
+        }));
+        assert.equal(await first, '!inventory');
+        assert.equal(discardMindcraftRecoveryIssuance(firstTurns), true);
+        assert.equal(planner.recoveryPlan, null);
+    } finally {
+        broker.cleanup();
         fixture.cleanup();
     }
 });
@@ -1078,6 +1175,26 @@ test('Agent whole-turn lease fences clear and goal state persists content-free',
         assert.equal('reason' in durable.lastGateDecision, false);
         assert.deepEqual(durable.currentSubgoal.observationCounts, {'!inventory': 2});
         assert.deepEqual(goalManager.state.currentSubgoal.observationCounts, {'!inventory': 2});
+
+        const recorded = await goalManager.recordActionResult(
+            rawCommand,
+            rawResult,
+            {},
+            {},
+            {autonomous: true},
+        );
+        assert.equal(recorded.commandCode, '!collectBlocks');
+        assert.equal(recorded.contentFree, true);
+        assert.equal('command' in recorded, false);
+        assert.equal('result' in recorded, false);
+        const interrupted = await goalManager.recordActionResult(
+            rawCommand,
+            undefined,
+            {},
+            {},
+            {autonomous: true},
+        );
+        assert.equal(interrupted.failed, true);
 
         goalManager.state.recentActions = [execution];
         goalManager.state.lastExecution = execution;

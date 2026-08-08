@@ -2092,8 +2092,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   observation argument를 저장하지 않고 enum code·count/boolean만 남긴다. runtime status의
   blocked chat/error도 fixed code이며 legacy raw projection은 재사용하지 않는다.
 - planner recovery persistence 함수는 no-op이고 Compose도 planner state path를 제공하지
-  않는다. recovery outcome correlation은 command code 단위라 같은 command의 서로 다른
-  target을 exact하게 구별하지 못하는 P1이 남는다.
+  않는다. recovery step은 exact history snapshot을 key로 한 process-local one-shot issuance만
+  소비한다. 다른 target, 수동 명령, 다른 concurrent turn과 재사용된 receipt는 plan을 진행하지
+  못하며 token과 raw command는 durable goal/status projection에 남지 않는다.
 - Google translation 대신 local identity translator를 사용해 Minecraft chat을 제3자
   번역 서비스로 보내지 않는다. Python owner는 Node child stdout/stderr를 `DEVNULL`로
   연결한다. 이는 새 child 원문 log 생성을 막지만 기존 data/log를 삭제했다는 뜻은 아니다.
@@ -2115,8 +2116,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 이 증분은 source-level 경계다. Docker image build, image 내부 full Node suite, 실제
   Minecraft login·action과 live clear는 수행하지 않았다. durable rollback-safe history와
   bound-receipt restart restore는 없고 legacy data/log cleanup은 사용자 승인 migration으로만
-  수행한다. recovery same-command/different-target exact correlation도 P1이다. `!clearChat`은
-  대화 유래 상태 reset이며 자율 목표의 영구 정지는 `!endGoal`을 사용한다.
+  수행한다. recovery issuance correlation은 process-local이며 restart restore 계약은 아니다.
+  `!clearChat`은 대화 유래 상태 reset이며 자율 목표의 영구 정지는 `!endGoal`을 사용한다.
 
 ## 2026-08-09 비-Minecraft 음성·Runtime Health 경계
 

@@ -1020,9 +1020,10 @@ history append·chat route·world action 성공 증거가 아니며, process-loc
 않는다. 기존 memory/archive와 과거 log의 삭제·이관은 사용자 승인 migration으로만
 수행한다. Docker image build, 실제 Minecraft 연결·행동과 live clear도 검증하지 않았다.
 
-추가 P1로 recovery outcome은 durable raw command 대신 command code로만 상관하므로,
-겹친 같은-command/different-target 실행을 exact하게 구별하지 못한다. `!clearChat`은 자율
-목표 자체를 영구 중지하지 않으며 그 의도에는 `!endGoal`을 사용한다.
+recovery outcome은 exact history snapshot을 key로 한 process-local one-shot issuance로만
+소비한다. 다른 target, 수동 명령, concurrent turn과 재사용 receipt는 plan을 진행하지 못하고
+token·raw command는 durable projection에 남지 않는다. 이는 restart restore 계약은 아니다.
+`!clearChat`은 자율 목표 자체를 영구 중지하지 않으며 그 의도에는 `!endGoal`을 사용한다.
 
 세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
 compact `bound|not_used|unattributed` receipt를 process-local history에만 두지

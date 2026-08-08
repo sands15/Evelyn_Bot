@@ -22,11 +22,12 @@ diff --git a/src/agent/agent.js b/src/agent/agent.js
 index f5a8e3d..af937fb 100644
 --- a/src/agent/agent.js
 +++ b/src/agent/agent.js
-@@ -9,6 +9,7 @@ import { NPCContoller } from './npc/controller.js';
+@@ -9,6 +9,8 @@ import { NPCContoller } from './npc/controller.js';
  import { MemoryBank } from './memory_bank.js';
  import { SelfPrompter } from './self_prompter.js';
  import convoManager from './conversation.js';
 +import { EvelynGoalManager } from './evelyn_goal_manager.js';
++import { claimMindcraftRecoveryIssuance, discardMindcraftRecoveryIssuance } from '../utils/evelyn_history_boundary.js';
  import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
  import { addBrowserViewer } from './vision/browser_viewer.js';
  import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
@@ -109,7 +110,7 @@ index f5a8e3d..af937fb 100644
                  if (execute_res) 
                      this.routeResponse(source, execute_res);
                  return true;
-@@ -317,5 +324,8 @@ export class Agent {
+@@ -317,5 +324,11 @@ export class Agent {
          for (let i=0; i<max_responses; i++) {
              if (checkInterrupt()) break;
 +            if (self_prompt) {
@@ -117,8 +118,11 @@ index f5a8e3d..af937fb 100644
 +            }
              let history = this.history.getHistory();
              let res = await this.prompter.promptConvo(history);
++            const recoveryIssuance = claimMindcraftRecoveryIssuance(history, res);
++            if (!recoveryIssuance) discardMindcraftRecoveryIssuance(history);
++            try {
  
-@@ -359,7 +369,22 @@ export class Agent {
+@@ -359,7 +372,23 @@ export class Agent {
                          this.routeResponse(source, pre_message);
                  }
  
@@ -135,20 +139,27 @@ index f5a8e3d..af937fb 100644
 +                const goalBefore = this.goal_manager.captureSnapshot();
                  let execute_res = await executeCommand(this, res);
 +                const goalAfter = this.goal_manager.captureSnapshot();
-+                await this.goal_manager.recordActionResult(
++                const goalExecution = await this.goal_manager.recordActionResult(
 +                    res, execute_res, goalBefore, goalAfter, {autonomous: self_prompt}
 +                );
++                recoveryIssuance?.complete(goalExecution);
  
                  console.log('Agent executed:', command_name, 'and got:', execute_res);
                  used_command = true;
-@@ -519,5 +540,6 @@ export class Agent {
+@@ -378,2 +407,5 @@ export class Agent {
+             this.history.save();
++            } finally {
++                recoveryIssuance?.discard();
++            }
+         }
+@@ -519,5 +546,6 @@ export class Agent {
      async update(delta) {
          await this.bot.modes.update();
 +        await this.goal_manager.update(delta);
          this.self_prompter.update(delta);
          await this.checkTaskDone();
      }
-@@ -531,7 +553,17 @@ export class Agent {
+@@ -531,7 +559,17 @@ export class Agent {
  
      cleanKill(msg='Killing agent process...', code=1) {
          this.history.add('system', msg);
