@@ -890,6 +890,12 @@ head를 함께 같은 과거 상태로 되돌리는 관리자 공격은 로컬 �
 보호된 영구 삭제로 오인하지 않는다. 실제 사용자 memory root에는 비파괴 원칙상
 key/anchor bootstrap이나 삭제를 실행하지 않았다.
 
+disposable-replica verifier는 실제 memory root를 받지 않고, 별도 빈 scratch/anchor에서
+unsigned 이력의 strict 거부→one-shot bootstrap→strict fresh process→signed 과거 pair
+replay 거부→정상 pair 복원을 검증한다. 다만 loader와 이 검증기는 경로 분리까지만
+검사한다. POSIX mode/uid, Windows DACL/owner와 Docker secret·bind mount의 실제 권한은
+아직 증거가 없으므로 replica 결과도 `operationallyVerified=false`다.
+
 빈 deletion ledger는 재시작이나 read만으로 signed head/anchor를 생성하지 않는다.
 첫 승인 삭제가 signed `memory-deletions.initialized.json` witness를 anchor보다 먼저
 내구 기록하고 ledger를 초기화한다. 기존 unsigned 이력 채택만 one-shot bootstrap을
@@ -966,16 +972,17 @@ exposure의 state/version/note ID 불일치를 assistant persistence·continuity
 
 따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation, materialize된 response의
 exclusive lease나 fresh recall busy가 아니라, fallback turn의 일시적인
-`indexFresh=false`, 2초 admission을 넘는 Sub-LLM shared phase의 삭제·편집 writer
-경합과 64 MiB journal rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
-계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
-계속 남는다.
+`indexFresh=false`, external anchor host 권한 미검증, 2초 admission을 넘는 Sub-LLM
+shared phase의 삭제·편집 writer 경합과 64 MiB journal rotation이다. 실제
+마이크·스피커·Discord 10턴 재생은 이 정적 계약의 완료 증거가 아니며, 별도의 실제
+음성 하드웨어 E2E 위험으로 계속 남는다.
 
-다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
-one-shot bootstrap과 pair replay를 먼저 검증한다. Sub-LLM shared phase의 2초
-admission과 timeout 503을 실제 UI 전이로 검증하고, chain과 외부 anchor를 잃지 않는
-checkpointed rotation도 함께 설계한다. fallback 빈도와 `indexFresh=false`가 실제
-사용자 recall 품질에 미치는 영향은 live telemetry 없이 추정하지 않는다.
+다음 조치: 별도 service identity의 host ACL/owner와 Docker key read-only·anchor
+read-write mount를 실제 복제 배포에서 확인해 `operationallyVerified` 공백을 닫는다.
+Sub-LLM shared phase의 2초 admission과 timeout 503을 실제 UI 전이로 검증하고,
+chain과 외부 anchor를 잃지 않는 checkpointed rotation도 함께 설계한다. fallback
+빈도와 `indexFresh=false`가 실제 사용자 recall 품질에 미치는 영향은 live telemetry
+없이 추정하지 않는다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 

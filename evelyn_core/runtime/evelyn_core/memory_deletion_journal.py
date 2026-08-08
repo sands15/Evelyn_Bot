@@ -322,6 +322,15 @@ def _canonical_json(payload: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_artifact_json(payload: Mapping[str, Any]) -> str:
+    return json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def _strict_json_object(
     pairs: list[tuple[str, Any]],
 ) -> dict[str, Any]:
@@ -772,7 +781,8 @@ def _read_head(
             raise _integrity_failure()
         if path.stat().st_size > MEMORY_DELETE_TOMBSTONE_MAX_HEAD_BYTES:
             raise _integrity_failure()
-        payload = _strict_json_loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        payload = _strict_json_loads(raw)
     except MemoryDeletionJournalIntegrityError:
         raise
     except (
@@ -789,6 +799,8 @@ def _read_head(
         or payload.get("contentFree") is not True
         or not _valid_timestamp(payload.get("updatedAt"))
     ):
+        raise _integrity_failure()
+    if raw != _canonical_artifact_json(payload):
         raise _integrity_failure()
     auth_state = _verify_head_authenticity(payload, authenticity)
     sequence = payload.get("sequence")
@@ -842,7 +854,8 @@ def _read_external_initialization(
             or path.stat().st_size > _MAX_ANCHOR_BYTES
         ):
             raise _integrity_failure()
-        payload = _strict_json_loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        payload = _strict_json_loads(raw)
     except MemoryDeletionJournalIntegrityError:
         raise
     except (
@@ -874,6 +887,8 @@ def _read_external_initialization(
         or not math.isfinite(float(initialized_at))
         or float(initialized_at) < 0.0
     ):
+        raise _integrity_failure()
+    if raw != _canonical_artifact_json(payload):
         raise _integrity_failure()
     supplied = _valid_hash(payload.get("authTag"))
     unsigned = {
@@ -907,7 +922,8 @@ def _read_external_anchor(
             or path.stat().st_size > _MAX_ANCHOR_BYTES
         ):
             raise _integrity_failure()
-        payload = _strict_json_loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        payload = _strict_json_loads(raw)
     except MemoryDeletionJournalIntegrityError:
         raise
     except (
@@ -941,6 +957,8 @@ def _read_external_anchor(
         or not math.isfinite(float(updated_at))
         or float(updated_at) < 0.0
     ):
+        raise _integrity_failure()
+    if raw != _canonical_artifact_json(payload):
         raise _integrity_failure()
     supplied = _valid_hash(payload.get("authTag"))
     unsigned = {

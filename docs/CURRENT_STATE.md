@@ -836,10 +836,19 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - `memory.deletion.integrity.v1.rollbackProtected`는 signed head와 외부 anchor가
     모두 검증된 경우에만 true다. 기본 또는 key-only 상태는 journal+head 과거
     쌍 replay를 탐지하지 못한다.
+  - disposable-replica verifier는 unsigned 이력의 bootstrap=false 거부, true인
+    fresh child 한 번의 채택, false인 새 child strict 상태와 signed 과거 pair
+    replay 거부, 정상 pair 복원을 실제 subprocess에서 확인한다. 실제 memory root를
+    받지 않으며 출력에는 note/event/key/path 원문이 없다.
+  - replica contract와 path isolation은 검증됐지만 실제 host key/anchor의 ACL·owner,
+    Docker secret/bind mount effective permission은 검증하지 않는다. 따라서 verifier는
+    `permissionState=not_verified`, `operationallyVerified=false`를 유지한다.
   - 공유 anchor에 다른 journal만 있고 deletion ledger가 전혀 없는 상태는
     `uninitialized`로 읽을 수 있다. 첫 승인 삭제는 서명된 content-free
     `memory-deletions.initialized.json` witness를 먼저 기록하며, 그 뒤
     journal/head/anchor가 사라져도 미초기화로 오인하지 않는다.
+  - unsigned/signed local head, initialization witness와 external anchor는 writer의
+    canonical JSON bytes와 exact 비교해 key order나 공백만 바꾼 artifact도 거부한다.
   - 예외와 반환형 양쪽의 integrity 오류는 HTTP 최외곽에서 exact 503 본문으로
     축약하고 `Cache-Control: no-store`를 적용한다.
   - cognitive-state, 경량 route planner와 장기 memory writeback은 기억을 읽기
@@ -2011,6 +2020,6 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   동시 response 소비와 8798·8799/API/UI privacy projection을 synthetic data로 검증했다.
   paused Sub-LLM 중 reader 공존·삭제 Busy, shared→writer handoff의 source 삭제와 target
   user-edit 우선, stale model canary 전 파일 비저장도 실제 thread race로 검증했다.
-- memory 288개(skip 1), core 736개(skip 1), runtime 771개(skip 4)와 CI-equivalent
-  전체 3,119개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
+- memory 292개(skip 1), core 736개(skip 1), runtime 771개(skip 4)와 CI-equivalent
+  전체 3,123개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
   Docker 서비스는 사용하거나 변경하지 않았다.

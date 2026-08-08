@@ -1007,6 +1007,105 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
                             )
                         )
 
+    def test_metadata_requires_canonical_artifact_json(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as memory_tmp,
+            tempfile.TemporaryDirectory() as key_tmp,
+            tempfile.TemporaryDirectory() as anchor_tmp,
+            tempfile.TemporaryDirectory() as unsigned_tmp,
+        ):
+            key_path = Path(key_tmp) / "integrity.key"
+            key_path.write_bytes(
+                b"deletion-integrity-key-material!" * 2
+            )
+            index_dir = Path(memory_tmp) / "memory_root" / "memory_index"
+            unsigned_index_dir = Path(unsigned_tmp) / "memory_index"
+            anchor_root = Path(anchor_tmp)
+            configured = {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: str(key_path),
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: anchor_tmp,
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "1",
+            }
+            unconfigured = {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            }
+            with patch.dict(
+                os.environ,
+                configured,
+            ):
+                journal.append_memory_deletion_tombstone(
+                    index_dir,
+                    self.tombstone("concept-canonical-metadata"),
+                )
+            with patch.dict(os.environ, unconfigured):
+                journal.append_memory_deletion_tombstone(
+                    unsigned_index_dir,
+                    self.tombstone("concept-canonical-unsigned-head"),
+                )
+            artifacts = (
+                (
+                    "signed-head",
+                    index_dir
+                    / journal.MEMORY_DELETE_TOMBSTONE_CHAIN_HEAD_NAME,
+                    index_dir,
+                    configured,
+                ),
+                (
+                    "anchor",
+                    anchor_root
+                    / journal.MEMORY_DELETE_TOMBSTONE_EXTERNAL_ANCHOR_NAME,
+                    index_dir,
+                    configured,
+                ),
+                (
+                    "witness",
+                    anchor_root
+                    / journal.MEMORY_DELETE_TOMBSTONE_EXTERNAL_INITIALIZATION_NAME,
+                    index_dir,
+                    configured,
+                ),
+                (
+                    "unsigned-head",
+                    unsigned_index_dir
+                    / journal.MEMORY_DELETE_TOMBSTONE_CHAIN_HEAD_NAME,
+                    unsigned_index_dir,
+                    unconfigured,
+                ),
+            )
+            for target, target_path, read_index_dir, environment in artifacts:
+                canonical = target_path.read_text(encoding="utf-8")
+                payload = json.loads(canonical)
+                mutations = {
+                    "whitespace": " " + canonical,
+                    "key-order": json.dumps(
+                        {
+                            key: payload[key]
+                            for key in reversed(payload)
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                }
+                for mutation, raw in mutations.items():
+                    with (
+                        self.subTest(target=target, mutation=mutation),
+                        patch.dict(os.environ, environment),
+                    ):
+                        try:
+                            target_path.write_text(raw, encoding="utf-8")
+                            self.assert_integrity_failure(
+                                lambda: journal.read_memory_deletion_tombstones(
+                                    read_index_dir
+                                )
+                            )
+                        finally:
+                            target_path.write_text(
+                                canonical,
+                                encoding="utf-8",
+                            )
+
     def test_competing_process_writer_fails_closed(self) -> None:
         with self.unconfigured_authenticity():
             with tempfile.TemporaryDirectory() as tmp:

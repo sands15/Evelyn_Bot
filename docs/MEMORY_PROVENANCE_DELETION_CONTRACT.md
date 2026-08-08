@@ -428,10 +428,10 @@ v1 row는 raw byte를 다시 쓰지 않고 immutable prefix anchor로만 사용�
 writer lease 아래 head를 복구한다. journal과 head가 모두 비어 있는 최초
 상태는 정상이다.
 
-local head와 signed external anchor도 strict duplicate-key parser, exact schema와
-canonical artifact JSON byte 검사를 통과해야 한다. 기존 event hash나 HMAC을
-그대로 둔 채 숨은 중복 field를 추가한 artifact는 유효한 head/anchor로 인정하지
-않는다.
+local head, deletion initialization witness와 signed external anchor도 strict
+duplicate-key parser, exact schema와 canonical artifact JSON byte 검사를 통과해야
+한다. 기존 event hash나 HMAC을 그대로 둔 채 숨은 중복 field, key 순서나 공백을
+바꾼 artifact는 유효한 head/anchor/witness로 인정하지 않는다.
 
 correction 전체는 Windows byte-range lock 또는 POSIX `flock`과 프로세스 내부
 owner table을 함께 사용한다. 임의 명령이나 경로를 받는 lease API는 없으며,
@@ -468,6 +468,20 @@ sequence/hash와 HMAC만 가지며 기억 내용은 저장하지 않는다. jour
 `journalRollbackProtected=true`를 보고하면 즉시 false로 되돌린다. 외부 anchor
 디렉터리가 설정됐는데 record가 없고 bootstrap이 꺼져 있으면 자동으로 새
 신뢰 기준을 만들지 않는다.
+
+`tools/verify_memory_deletion_integrity.py`는 실제 memory root를 받거나 자동
+탐색하지 않는다. repository 밖의 기존 빈 scratch/anchor와 별도 key만 받아
+disposable deletion ledger를 만들고, bootstrap=false 거부, bootstrap=true인 짧은
+자식 프로세스 한 번, bootstrap=false인 새 프로세스의 strict 검증, signed 과거
+journal+head pair replay 거부와 정상 pair 복원을 순서대로 확인한다. 출력은 고정
+상태·오류·sequence만 포함하며 note/event/key/path 원문은 포함하지 않는다.
+
+이 도구의 `replicaContractVerified=true`는 path isolation과 anchor 계약만 뜻한다.
+현재 자동 검증은 POSIX owner/mode, Windows owner/DACL, Docker host secret·bind
+mount의 effective permission을 증명하지 않으므로 항상
+`permissionState=not_verified`, `operationallyVerified=false`를 반환한다. 이 별도
+권한 증거 없이 `rollbackProtected=true`만으로 운영 권한 분리까지 완료됐다고
+판정하지 않는다.
 
 프로세스가 1번 뒤 2번 전에 종료되면 적용되지 않은 `prepared`는 현재 note와
 일치하지 않아 committed로 승격되지 않는다. 2번 뒤 3번 전에 종료되면 다음
@@ -889,6 +903,10 @@ prompt block과 user state가 의도적으로 남아 있다.
   journal+head pair replay와 journal/head/anchor 전체 삭제 거부
 - 공유 anchor에 correction journal만 있는 진짜 미초기화 deletion ledger 허용,
   첫 승인 삭제의 signed initialization witness 생성과 기존 anchor marker migration
+- unsigned replica의 bootstrap=false 거부, true인 fresh child 한 번의 채택,
+  false인 새 child strict 검증과 signed 과거 pair replay 거부 뒤 정상 pair 복원
+- local head, initialization witness와 external anchor의 duplicate key뿐 아니라
+  non-canonical whitespace/key order도 고정 integrity 오류로 거부
 - exact 1-event crash recovery와 그 이상의 lag 거부
 - signed head와 외부 anchor의 과거 journal+head replay 탐지
 - writer allowlist가 아니라 OS single-writer lease를 무시한 경쟁 append 거부

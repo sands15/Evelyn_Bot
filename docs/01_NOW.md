@@ -25,9 +25,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
-- 2026-08-08 fresh recall은 정상 writer sync/cache를 유지하고, 진입 전 Busy만
-  no-repair shared·immutable SQLite·no-cache/current-Markdown fallback으로 처리한다.
-  Control Page mutation은 pre-entry Busy만 2초 기다리고 본문·token은 한 번만 실행하며, 긴 Sub-LLM 경합의 live UI 전이·외부 anchor·rotation은 남은 P1이다.
+- 2026-08-08 memory 삭제는 fresh recall Busy fallback과 mutation 2초 admission을
+  유지한다. replica가 anchor bootstrap·strict restart·과거 pair replay와 canonical
+  metadata를 검증했지만 host ACL·Docker mount, live UI와 rotation은 남은 P1이다.
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
@@ -56,7 +56,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
   서명 상태와 watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,119개(skip 21), 관련 집중 검증과 JS 구문이 통과했다. 현재
+- CI-equivalent 전체 3,123개(skip 21), 관련 집중 검증과 JS 구문이 통과했다. 현재
   마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
 
 ## 작업 원칙
