@@ -121,6 +121,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - checkpoint commit 뒤 head commit 전 crash만 정확한 한 generation
     chain으로 복구하며, v1 checkpoint는 raw JSON hash로 generation 0에
     고정한 뒤 다음 변경에서 v2로 연결한다.
+  - awaiting follow-up도 `active_until`을 넘으면 실행 중 text/voice admission에서
+    inactive다. 따라서 unanswered 질문이 ambient 입력을 무기한 여는 경로가 없고,
+    fresh restart의 TTL 복구 판정과 같은 결과를 낸다.
   - 외부 전달이 끝난 완료 턴은 1초 periodic writer를 기다리지 않고 즉시
     durable commit한다. Discord text는 commit 뒤 선택적 TTS를 실행하므로
     TTS 실패가 이미 전달된 답변을 history에서 잃게 하지 않는다.

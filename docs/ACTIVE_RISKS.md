@@ -235,6 +235,10 @@ Minecraft lease도 따르도록 하드코딩 경로를 제거했다. 같은 임�
 `main.py`를 기동·강제 종료·재기동하고 두 번의 restore와 repository 기본
 checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 
+awaiting follow-up의 `active_until` 만료를 실행 중에도 강제한다. 만료된 질문
+세션은 restart 여부와 무관하게 ambient text/voice admission을 열지 않으며,
+명시적 호출·reply만 기존 정책으로 처리한다. 실제 Discord 검증은 아직 남아 있다.
+
 완료 턴이 1초 periodic writer를 기다리던 crash-loss 창도 닫았다. Discord
 text는 실제 전송 뒤 완료 상태와 checkpoint를 먼저 durable commit하고
 선택적 TTS를 실행한다. Control Page 일반·검색, 검색 후속, 자율 후속,

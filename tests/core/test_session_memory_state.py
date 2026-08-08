@@ -233,7 +233,8 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertTrue(store.awaiting_user_reply["s1"])
         self.assertEqual(store.topic_ids["s1"], build_topic_id("hello", "world"))
         self.assertTrue(store.snapshot("s1")["turn_id"])
-        self.assertTrue(store.is_active_for_user("s1", 10, now_monotonic=221.0))
+        self.assertTrue(store.is_active_for_user("s1", 10, now_monotonic=219.0))
+        self.assertFalse(store.is_active_for_user("s1", 10, now_monotonic=221.0))
         self.assertFalse(store.is_active_for_user("s1", 11, now_monotonic=101.0))
 
         store.update_session_state(

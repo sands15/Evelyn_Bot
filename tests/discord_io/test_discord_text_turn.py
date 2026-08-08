@@ -27,6 +27,7 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     unattributed_memory_receipt_ref,
 )
 from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -237,6 +238,39 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         self.assertIn(("summary", "text_turn_summary"), calls)
         self.assertEqual(calls[-1], ("process_commands", "Evelyn hi"))
         self.assertEqual(message.channel.typing_count, 1)
+
+    def test_expired_awaiting_session_does_not_admit_ambient_text(self) -> None:
+        calls: list[tuple[str, object]] = []
+        store = SessionStateStore.create_empty()
+        session_key = "guild:1:text:2:user:3"
+        store.mark_active(
+            session_key,
+            user_id=3,
+            ttl_sec=120.0,
+            awaiting_user_reply=True,
+            active_conversation_awaiting_reply_sec=120.0,
+            now_monotonic=100.0,
+        )
+        deps = make_deps(
+            calls,
+            is_session_active_for_user=lambda key, user_id: (
+                store.is_active_for_user(
+                    key,
+                    user_id,
+                    now_monotonic=221.0,
+                )
+            ),
+        )
+        message = make_message(
+            content="ambient message",
+            guild=SimpleNamespace(id=1, name="Guild"),
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertNotIn("stream", [name for name, _value in calls])
+        self.assertIn(("log_turn", "text_gate_not_open"), calls)
+        self.assertEqual(calls[-1], ("process_commands", "ambient message"))
 
     def test_explicit_memory_confirmation_bypasses_llm_and_keeps_continuity(self) -> None:
         calls: list[tuple[str, object]] = []

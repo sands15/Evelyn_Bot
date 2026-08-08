@@ -58,10 +58,10 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   cross-process attempt lease로 재시작·경쟁·중복 실행을 fail-closed 처리한다.
 - validation GET은 현재 consent를 반환하고 STT validation·Bridge turn·router failure 로그는 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
   Discord 재연결·검색 복구와 playback timeout, Discord·local speaker·검색 후속의 무재생 거부, late-turn fence가 stale 완료를 막는다.
-- validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반 history에 남기지 않는다.
+- validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션도 `active_until` 뒤 text/voice admission에서 만료된다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,190개(skip 22), continuity 87개, Mindcraft 56개,
+- CI-equivalent 전체 3,191개(skip 22), continuity 87개, Mindcraft 56개,
   voice 633개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

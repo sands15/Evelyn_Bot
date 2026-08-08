@@ -394,9 +394,8 @@ class SessionStateStore:
         now_monotonic: float | None = None,
     ) -> bool:
         expires_at = self.active_until.get(session_key, 0.0)
-        awaiting_user_reply = self.awaiting_user_reply.get(session_key, False)
         now_mono = time.monotonic() if now_monotonic is None else float(now_monotonic)
-        if expires_at <= now_mono and not awaiting_user_reply:
+        if expires_at <= now_mono:
             return False
         remembered_user = self.active_user_ids.get(session_key)
         if remembered_user is not None and user_id is not None and remembered_user != user_id:
