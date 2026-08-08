@@ -932,9 +932,18 @@ generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory �
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
 typed deletion position을 캡처해 primary/compact retry와 실제 HTTP sink까지
 명시적으로 전달하고, 파생 상태 write 전에도 같은 position을 재검증한다.
-search/tool 전용 sink는 vault memory context를 입력으로 받지 않는다. 앞으로
-다른 호출자가 저장 기억을 새로 주입할 때 required boundary를 빠뜨리지 않도록
-정적 architecture test를 전체 LLM sink로 넓히는 작업은 P1이다.
+search/tool 전용 sink는 vault memory context를 입력으로 받지 않는다. Core Python의
+recognized transport syntax는 보호된 memory-capable call site, 두 Sub-LLM shared
+guard caller, raw `urlopen` transport와 welcome/warmup isolated sink를 exact inventory로
+고정한다. 이 검사는 aiohttp가 없어도 실행되는 drift alarm이며, 실제 stale boundary가
+request factory를 0회로 막는 증거는 Main·공용 exposure/JSON·Sub-LLM 동적 회귀가 맡는다.
+
+이 inventory는 범용 HTTP/SDK dataflow 분석이 아니다. alias·새 wrapper·비정형 transport,
+간접 JSON caller와 isolated allowlist의 payload provenance를 자동 증명하지 않으며, 별도
+`bot_memory/mindcraft` history/summary를 local Qwen `fetch`로 보내는 JavaScript 경로도
+포함하지 않는다. 새 Core sink는 canonical wrapper를 사용하고 inventory review를
+거쳐야 한다. Mindcraft 영속 기억에는 별도 삭제·provenance·outbound exposure 계약이
+아직 없으므로, 그 경계와 default-local transport 회귀를 닫는 작업은 P1이다.
 
 세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
 compact `bound|not_used|unattributed` receipt를 process-local history에만 두지
