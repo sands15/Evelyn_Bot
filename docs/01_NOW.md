@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-08-03
+last_reviewed: 2026-08-08
 ---
 
 # Evelyn — Now
@@ -18,22 +18,20 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
-- 기본 TTS의 OmniVoice 이미지 build/recreate와 clone-stream live smoke
-- 로컬 마이크 동의 후 실제 장치 음성 E2E 검증
+- OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
+- 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
 - 실제 Minecraft 승인 행동과 결과 증거 검증
 
 ## 최근 확인
 
-- 기본 `tts:8880`은 `k2-fsa/OmniVoice`다. 서버 Python 소스 20개와 필수 model
-  snapshot 경로 13개를 SHA-256으로 고정하고 offline model revision
-  `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`과 read-only cache를 요구한다.
-  readiness는 model ID와 revision까지 exact 비교한다. 기본은 sentence streaming이고
-  blockwise 실험 경로는 disconnect cancellation이 안전해질 때까지 꺼져 있다.
-  운영 로그는 text/path/session identifier를 남기지 않고 profile API와 검증 오류 응답은
-  입력 원문을 숨긴다. 최종 집중 149개, runtime 전체 756개(skip 4), voice 전체 606개(skip 5)가
-  실패 없이 통과했지만 권한 사용량
-  제한 때문에 이미지 build/recreate와 실제 합성은 아직 수행하지 않았다.
+- 2026-08-08 기본 `tts:8880`을 실제 `k2-fsa/OmniVoice` container로 교체했다.
+  recipe `7cfc51e96088`, source revision `485c81d`, 서버 Python 20개와 model snapshot
+  13개 SHA-256, read-only profile/cache, exact model ID/revision health가 모두 통과했다.
+  실제 Evelyn clone sentence stream은 24 kHz mono 16-bit PCM 101,280 bytes를
+  728 ms에 반환했다. profile API는 `ref_text`를 숨겼고 운영 로그에서도 합성 원문,
+  경로, session/turn 식별자가 검출되지 않았다. PCM은 메모리에서 검사 후 폐기했다.
+  사용자 스피커 청취와 local/Discord 10-turn·무음 E2E는 아직 남아 있다.
 - 현재 저장소의 revision-gated launcher로 Docker local core와 Windows Host
   Supervisor/Local I/O Bridge를 실제 기동했다. Bot API, Control Page, LLM 3개,
   당시 VoxCPM 기반 TTS, STT, Vision ingress/runtime가 모두 healthy이며 공식 runtime checker가
@@ -72,7 +70,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[ACTIVE_RISKS]] — 남은 위험과 검증 공백
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
-- [[worklog/2026-08-03]] — 로컬 실행 복구와 live readiness 근거
+- [[worklog/2026-08-08]] — OmniVoice 실제 전환과 live 합성 근거
 
 ## 다음 작업 종료 시
 

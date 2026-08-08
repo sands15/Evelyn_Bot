@@ -1858,8 +1858,25 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   repair는 existing image만 재사용한다.
 - 최종 변경 집중 149개와 기존 OmniVoice request/source·VoxCPM profile 계약 17개가 통과했다.
   Local Bridge의 기본 경로 변경 뒤 voice 전체 606개(skip 5)도 통과했다.
-  최종 runtime 전체 756개(skip 4)도 실패 없이 통과했다. Docker
-  Compose config/build/recreate는 권한 승인 사용량 제한으로 실행하지 못했으므로 실제
-  model load/revision, clone-stream, privacy 응답과 청취 E2E 완료를 주장하지 않는다.
+  최종 runtime 전체 756개(skip 4)도 실패 없이 통과했다.
+
+## 2026-08-08 기본 TTS OmniVoice live 전환
+
+- recipe `evelyn-omnivoice-tts:recipe-7cfc51e96088`을 source revision
+  `485c81d480f45dba4935a26ebb874d11e2f5931a`에서 build하고, 종료된 VoxCPM2
+  `evelyn-tts`를 같은 서비스명·host port 8880의 OmniVoice container로 recreate했다.
+- container 시작 시 model snapshot 13개 SHA-256이 통과했다. runtime health는
+  `healthy`, `ready=true`, `model_loaded=true`, `model_id=k2-fsa/OmniVoice`, exact
+  `model_revision=c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 반환했고 Docker health도
+  `healthy`다. profile과 Hugging Face hub mount는 실제로 read-only이며 CUDA는
+  RTX 5090에서 사용 가능하다.
+- 직접 `/v1/audio/speech` clone sentence stream은 HTTP 200, 24 kHz mono 16-bit
+  little-endian PCM 101,280 bytes(약 2.11초)를 728 ms에 반환했다. PCM은 메모리에서
+  contract만 확인하고 즉시 폐기했으며 파일·재생·transcript를 남기지 않았다.
+  `/v1/models`는 OmniVoice root를, Evelyn profile API는 `has_ref_text=true`와
+  `ref_text` 미노출을 반환했다. 실제 합성 후 로그에도 probe text, reference path,
+  session/turn 식별자가 없었다.
+- 이 증거는 server·clone contract의 live 통과다. 사용자 스피커 청취, 실제 마이크와
+  Discord의 10-turn·무음·barge-in E2E 완료를 뜻하지 않는다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.
