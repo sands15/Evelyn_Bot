@@ -56,8 +56,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
 - Local Voice는 단일 capture owner, durable reservation/claim, capture-consent fence와
   cross-process attempt lease로 재시작·경쟁·중복 실행을 fail-closed 처리한다.
-- validation GET은 consent 정리 뒤 현재 상태를 반환하고, Runtime Health probe는 manifest
-  timeout을 지킨다. 실패한 Discord reconnect는 stale client를 성공으로 저장하지 않는다.
+- validation GET은 consent 정리 뒤 현재 상태를 반환하고, Runtime Health probe는 manifest timeout을 지킨다.
+  실패한 Discord reconnect는 stale client를 저장하지 않고, 미전달 음성 검색 답변은 연결 복구까지 보존한다.
 - validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반 history에 남기지 않는다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.

@@ -178,6 +178,31 @@ class DiscordAppComposition:
         if runtime_status is not None:
             runtime_status.record_error(code, exc)
 
+    async def _recover_search_followups(self) -> None:
+        deps = self.deps.events
+        if deps.recover_search_followups is None:
+            return
+        try:
+            recovery = await deps.recover_search_followups()
+            if int(recovery.get("pending", 0)):
+                deps.log(
+                    "[SEARCH] recovery_complete "
+                    f"pending={int(recovery.get('pending', 0))} "
+                    f"resumed={int(recovery.get('resumed', 0))} "
+                    f"verified={int(recovery.get('verified', 0))} "
+                    f"redelivered={int(recovery.get('redelivered', 0))} "
+                    f"uncertain={int(recovery.get('uncertain', 0))}"
+                )
+        except Exception as exc:
+            self._record_runtime_error(
+                "search_followup_recovery_failed",
+                exc,
+            )
+            deps.log(
+                "[SEARCH] recovery_start_failed "
+                f"errorType={type(exc).__name__}"
+            )
+
     def _command_context(self, ctx: Any) -> Any:
         if isinstance(ctx, ContinuityRecordingCommandContext):
             return ctx
@@ -242,27 +267,7 @@ class DiscordAppComposition:
                     f"[AUTONOMY] guild={guild.id} "
                     "available approval_required=true"
                 )
-        if deps.recover_search_followups is not None:
-            try:
-                recovery = await deps.recover_search_followups()
-                if int(recovery.get("pending", 0)):
-                    deps.log(
-                        "[SEARCH] recovery_complete "
-                        f"pending={int(recovery.get('pending', 0))} "
-                        f"resumed={int(recovery.get('resumed', 0))} "
-                        f"verified={int(recovery.get('verified', 0))} "
-                        f"redelivered={int(recovery.get('redelivered', 0))} "
-                        f"uncertain={int(recovery.get('uncertain', 0))}"
-                    )
-            except Exception as exc:
-                self._record_runtime_error(
-                    "search_followup_recovery_failed",
-                    exc,
-                )
-                deps.log(
-                    "[SEARCH] recovery_start_failed "
-                    f"errorType={type(exc).__name__}"
-                )
+        await self._recover_search_followups()
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:
         _ = before
@@ -282,11 +287,21 @@ class DiscordAppComposition:
         if target_channel is None:
             return
         try:
-            await deps.ensure_listening_voice_client(guild, target_channel)
+            rearmed_client = await deps.ensure_listening_voice_client(
+                guild,
+                target_channel,
+            )
+            if not (
+                isinstance(rearmed_client, deps.voice_client_type)
+                and rearmed_client.is_connected()
+            ):
+                return
             deps.log(
                 f"[VOICE STATE REARM] guild={guild.id} "
-                f"channel={getattr(target_channel, 'name', None)} listening={voice_client.is_listening()}"
+                f"channel={getattr(target_channel, 'name', None)} "
+                f"listening={rearmed_client.is_listening()}"
             )
+            await self._recover_search_followups()
         except Exception as exc:
             self._record_runtime_error("voice_state_rearm_failed", exc)
             deps.log(f"[VOICE STATE REARM FAIL] guild={guild.id} err={exc!r}")

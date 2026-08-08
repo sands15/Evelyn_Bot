@@ -298,6 +298,12 @@ Discord voice 재무장도 내부 reconnect wait가 client를 반환하지 못�
 client를 성공으로 저장·반환하지 않는다. 실제 `is_connected()`가 true인 client만
 listener callback, warmup과 last-channel success를 갱신한다.
 
+재시작 때 아직 재생을 시도하지 않은 voice search follow-up은 음성 연결이 없다는
+이유만으로 `delivery_uncertain`에 고정하지 않는다. recovery claim만 해제하고
+`delivery_ready`를 유지하며, 실제 connected client 재무장 직후 같은 recovery를 다시
+실행한다. 재생 직전 `delivery_attempted` 전이는 그대로라 모호한 재생 실패는 자동
+재시도하지 않는다.
+
 다음 조치: 사용자가 별도 Discord 검증 세션을 시작할 때 개인 scope를 설정하고
 Control Page→Discord, Discord text→Control Page, Discord voice→Control Page를
 각각 실행한다. 다른 사용자와 다른 guild가 섞이지 않는지, reset 직후 이전

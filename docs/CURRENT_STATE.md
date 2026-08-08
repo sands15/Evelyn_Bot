@@ -2095,7 +2095,11 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   content-free `timeout` 결과로 끝나며 required service readiness를 얻지 못한다.
 - Discord voice reconnect wait가 client를 반환하지 못하면 stale client를 rearm·warmup·
   저장·반환하지 않는다. 실제 connected client만 성공 경계를 통과한다.
+- 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
+  해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
+  실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.
 - 변경 파일 집중 80개와 voice 전체 610개(skip 5)가 통과했다. 실행 중 image를
   교체하거나 마이크·Discord를
   시작하지 않았다. 읽기 전용 preflight에서 active validation session 없음, mic physical
   OFF, 24 kHz mono int16 output ready, OmniVoice warmup 완료와 오류 0을 확인했다.
+- search follow-up 22개와 Discord I/O 전체 125개도 통과했다.

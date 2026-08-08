@@ -287,6 +287,56 @@ class DiscordAppCompositionTests(unittest.TestCase):
             )
         )
 
+    def test_voice_state_recovery_runs_only_after_connected_rearm(self) -> None:
+        class VoiceClient:
+            def __init__(self, *, connected: bool) -> None:
+                self.channel = SimpleNamespace(name="General")
+                self.connected = connected
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            @staticmethod
+            def is_listening() -> bool:
+                return True
+
+        async def run_case(rearmed_client):
+            recover = AsyncMock(return_value={"pending": 0})
+            ensure = AsyncMock(return_value=rearmed_client)
+            guild = SimpleNamespace(
+                id=7,
+                voice_client=VoiceClient(connected=True),
+            )
+            member = SimpleNamespace(id=99, guild=guild)
+            events = make_event_deps(
+                voice_client_type=VoiceClient,
+                ensure_listening_voice_client=ensure,
+                recover_search_followups=recover,
+            )
+
+            await make_composition(events=events).on_voice_state_update(
+                member,
+                SimpleNamespace(channel=None),
+                SimpleNamespace(channel=guild.voice_client.channel),
+            )
+            return ensure, recover
+
+        ensure, recover = asyncio.run(run_case(None))
+        ensure.assert_awaited_once()
+        recover.assert_not_awaited()
+
+        ensure, recover = asyncio.run(
+            run_case(VoiceClient(connected=False))
+        )
+        ensure.assert_awaited_once()
+        recover.assert_not_awaited()
+
+        ensure, recover = asyncio.run(
+            run_case(VoiceClient(connected=True))
+        )
+        ensure.assert_awaited_once()
+        recover.assert_awaited_once_with()
+
     def test_on_message_resolves_fresh_handler_dependencies(self) -> None:
         handler_deps = object()
         events = make_event_deps(text_message_handler=Mock(return_value=handler_deps))

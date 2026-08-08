@@ -650,6 +650,12 @@ async def recover_search_followups_from_runtime(
                 recovery.complete(intent_id)
                 counts["redelivered"] += 1
                 continue
+            if (
+                entry["phase"] == "delivery_ready"
+                and entry["source"] == "voice"
+            ):
+                recovery.release_recovery_claim(intent_id)
+                continue
             recovery.mark_delivery_uncertain(
                 intent_id,
                 error_code="search_followup_delivery_unverifiable",
