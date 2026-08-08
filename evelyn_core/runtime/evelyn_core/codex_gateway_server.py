@@ -30,6 +30,7 @@ from evelyn_core.runtime_error_observability import RuntimeErrorCounter
 
 REPO_ROOT = get_repo_root()
 RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+SOURCE_IMAGE_ROOT = Path(__file__).resolve().parents[3]
 _GATEWAY_CONFIG = load_runtime_settings("codex_gateway", CODEX_GATEWAY_SETTINGS)
 _RUNTIME_ERRORS = RuntimeErrorCounter()
 _CREDENTIAL_STATUS: dict[str, Any] = {
@@ -44,13 +45,20 @@ DEFAULT_PORT = int(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_PORT"])
 DEFAULT_MODEL = str(_GATEWAY_CONFIG["VOYAGER_CODEX_MODEL"])
 DEFAULT_TIMEOUT_SEC = float(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_TIMEOUT_SEC"])
 DEFAULT_WORKDIR = str(
-    _GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_WORKDIR"] or REPO_ROOT
+    _GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_WORKDIR"]
+    or (Path(tempfile.gettempdir()) / "evelyn-codex-action-workspace")
+)
+ISOLATED_RUNTIME_ENABLED = str(
+    os.getenv("EVELYN_CODEX_GATEWAY_ISOLATED_RUNTIME") or ""
+).strip().lower() in {"1", "true", "yes", "on"}
+TOOLLESS_RUNTIME_VERIFIED = bool(
+    _GATEWAY_CONFIG["EVELYN_CODEX_GATEWAY_TOOLLESS_RUNTIME_VERIFIED"]
 )
 DEFAULT_BACKEND_MODE = str(
     _GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_BACKEND"]
 ).strip().lower()
 LAST_REQUEST_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
-GATEWAY_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "codex_gateway_errors.log"
+GATEWAY_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "errors.log"
 _GATEWAY_STATUS_LINE_LENGTH = 0
 _VT_MODE_ENABLED: bool | None = None
 _ALT_SCREEN_ENABLED = False
@@ -211,9 +219,6 @@ def _backend_mode(env: dict[str, str] | None = None) -> str:
 
 
 def _backend_label(env: dict[str, str] | None = None) -> str:
-    command = _backend_command()
-    if command:
-        return "shell-command"
     return _backend_mode(env)
 
 
@@ -298,16 +303,49 @@ def initialize_codex_credentials() -> dict[str, Any]:
     return dict(_CREDENTIAL_STATUS)
 
 
-def _resolve_request_workdir(value: Any) -> str:
-    allowed_root = Path(DEFAULT_WORKDIR).expanduser().resolve()
-    requested = Path(str(value or allowed_root)).expanduser().resolve()
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+def _isolated_action_workdir(value: Any = None) -> str:
+    if value not in (None, ""):
+        raise ValueError("codex_workdir_override_forbidden")
+    if not ISOLATED_RUNTIME_ENABLED:
+        raise RuntimeError("codex_isolated_runtime_required")
+
+    configured = Path(DEFAULT_WORKDIR).expanduser()
+    if not configured.is_absolute() or configured.is_symlink():
+        raise RuntimeError("codex_isolated_workspace_unavailable")
     try:
-        requested.relative_to(allowed_root)
-    except ValueError as exc:
-        raise ValueError("codex_workdir_outside_allowed_root") from exc
-    if not requested.is_dir():
-        raise ValueError("codex_workdir_unavailable")
-    return str(requested)
+        workspace = configured.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("codex_isolated_workspace_unavailable") from exc
+    if not workspace.is_dir():
+        raise RuntimeError("codex_isolated_workspace_unavailable")
+    try:
+        if any(workspace.iterdir()):
+            raise RuntimeError("codex_isolated_workspace_not_empty")
+    except OSError as exc:
+        raise RuntimeError("codex_isolated_workspace_unavailable") from exc
+
+    protected_roots = (
+        SOURCE_IMAGE_ROOT.resolve(),
+        RUNTIME_ARTIFACTS_ROOT.resolve(),
+        Path(os.getenv("EVELYN_CODEX_CREDENTIALS_DIR") or ".").expanduser().resolve(),
+        Path(os.getenv("CODEX_HOME") or ".").expanduser().resolve(),
+    )
+    if any(_paths_overlap(workspace, root) for root in protected_roots):
+        raise RuntimeError("codex_isolated_workspace_overlaps_private_root")
+    if any(
+        (SOURCE_IMAGE_ROOT / name).exists()
+        for name in (".git", ".env", "bot_memory", "docs", "runtime_artifacts")
+    ):
+        raise RuntimeError("codex_isolated_runtime_required")
+    return str(workspace)
+
+
+def _resolve_request_workdir(value: Any) -> str:
+    return _isolated_action_workdir(value)
 
 
 def _write_last_request_status(payload: dict[str, Any]) -> None:
@@ -356,6 +394,8 @@ def _gateway_status() -> dict[str, Any]:
         "backend": _backend_label(),
         "backendReady": bool(backend_status.get("ready")),
         "backendStatus": backend_status,
+        "isolatedRuntime": bool(ISOLATED_RUNTIME_ENABLED),
+        "toolAccessVerified": bool(TOOLLESS_RUNTIME_VERIFIED),
         "credentials": dict(_CREDENTIAL_STATUS),
         "configuration": _GATEWAY_CONFIG.public_summary(),
         "lastActionReady": last_action_ready,
@@ -402,9 +442,17 @@ def _backend_readiness() -> dict[str, Any]:
     command = _backend_command()
     if command:
         return {
-            "ready": True,
-            "backend": "shell-command",
+            "ready": False,
+            "backend": _backend_mode(),
             "commandConfigured": True,
+            "errorCode": "codex_custom_backend_forbidden",
+        }
+    if not TOOLLESS_RUNTIME_VERIFIED:
+        return {
+            "ready": False,
+            "backend": _backend_mode(),
+            "commandConfigured": False,
+            "errorCode": "codex_toolless_runtime_unverified",
         }
     if not _CREDENTIAL_STATUS.get("ready"):
         return {
@@ -415,6 +463,15 @@ def _backend_readiness() -> dict[str, Any]:
                 _CREDENTIAL_STATUS.get("errorCode")
                 or "codex_credentials_unavailable"
             ),
+        }
+    try:
+        _isolated_action_workdir()
+    except RuntimeError as exc:
+        return {
+            "ready": False,
+            "backend": _backend_mode(),
+            "commandConfigured": False,
+            "errorCode": str(exc),
         }
     try:
         _resolve_codex_cli()
@@ -456,13 +513,31 @@ def _strip_outer_fence(text: str) -> str:
 
 async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) -> str:
     command = _backend_command()
-    if not command and not _CREDENTIAL_STATUS.get("ready"):
+    if command:
+        raise RuntimeError("codex_custom_backend_forbidden")
+    if not TOOLLESS_RUNTIME_VERIFIED:
+        raise RuntimeError("codex_toolless_runtime_unverified")
+    if not _CREDENTIAL_STATUS.get("ready"):
         raise RuntimeError("codex_credentials_unavailable")
-    env = os.environ.copy()
-    _backend_mode(env)
-    env["VOYAGER_CODEX_MODEL"] = model
-    env["VOYAGER_CODEX_TIMEOUT_SEC"] = str(timeout_sec)
-    env["VOYAGER_CODEX_CWD"] = cwd
+    isolated_cwd = _isolated_action_workdir()
+    if Path(cwd).resolve() != Path(isolated_cwd):
+        raise RuntimeError("codex_workdir_override_forbidden")
+    env = {
+        name: os.environ[name]
+        for name in (
+            "CODEX_HOME",
+            "HOME",
+            "LANG",
+            "PATH",
+            "SSL_CERT_FILE",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "USERPROFILE",
+        )
+        if os.environ.get(name)
+    }
     started_at = time.time()
     status_payload = {
         "started_at": started_at,
@@ -474,40 +549,38 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
     }
     _write_last_request_status(status_payload)
 
-    if command:
-        prompt_file = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".prompt.txt", delete=False)
-        prompt_path = Path(prompt_file.name)
-        prompt_file.write(prompt)
-        prompt_file.flush()
-        prompt_file.close()
-        env["VOYAGER_CODEX_PROMPT_FILE"] = str(prompt_path)
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=cwd,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdin_data = None
-    else:
-        prompt_path = None
-        codex_cli = _resolve_codex_cli()
-        proc = await asyncio.create_subprocess_exec(
-            codex_cli,
-            "exec",
-            "-m",
-            model,
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "-",
-            cwd=cwd,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdin_data = prompt.encode("utf-8")
+    codex_cli = _resolve_codex_cli()
+    proc = await asyncio.create_subprocess_exec(
+        codex_cli,
+        "exec",
+        "-m",
+        model,
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-",
+        cwd=isolated_cwd,
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdin_data = prompt.encode("utf-8")
 
     status_payload.update({
         "phase": "backend_running",
@@ -516,58 +589,51 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
     _write_last_request_status(status_payload)
 
     try:
-        try:
-            stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(stdin_data),
-                timeout=max(1.0, timeout_sec),
-            )
-        except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.communicate()
-            status_payload.update({
-                "phase": "timeout",
-                "finished_at": time.time(),
-                "elapsed_sec": round(time.time() - started_at, 3),
-            })
-            _write_last_request_status(status_payload)
-            raise RuntimeError(f"Codex gateway backend timed out after {timeout_sec:.0f}s") from exc
-
-        output = stdout.decode("utf-8", errors="replace").strip()
-
-        if proc.returncode != 0:
-            status_payload.update({
-                "phase": "error",
-                "finished_at": time.time(),
-                "elapsed_sec": round(time.time() - started_at, 3),
-                "returncode": proc.returncode,
-            })
-            _write_last_request_status(status_payload)
-            raise RuntimeError("codex_backend_process_failed")
-        if not output:
-            status_payload.update({
-                "phase": "empty_output",
-                "finished_at": time.time(),
-                "elapsed_sec": round(time.time() - started_at, 3),
-                "returncode": proc.returncode,
-            })
-            _write_last_request_status(status_payload)
-            raise RuntimeError("codex_backend_empty_output")
-        cleaned = _strip_outer_fence(output)
+        stdout, _stderr = await asyncio.wait_for(
+            proc.communicate(stdin_data),
+            timeout=max(1.0, timeout_sec),
+        )
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.communicate()
         status_payload.update({
-            "phase": "success",
+            "phase": "timeout",
+            "finished_at": time.time(),
+            "elapsed_sec": round(time.time() - started_at, 3),
+        })
+        _write_last_request_status(status_payload)
+        raise RuntimeError(f"Codex gateway backend timed out after {timeout_sec:.0f}s") from exc
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+
+    if proc.returncode != 0:
+        status_payload.update({
+            "phase": "error",
             "finished_at": time.time(),
             "elapsed_sec": round(time.time() - started_at, 3),
             "returncode": proc.returncode,
-            "output_chars": len(cleaned),
         })
         _write_last_request_status(status_payload)
-        return cleaned
-    finally:
-        if prompt_path is not None:
-            try:
-                prompt_path.unlink(missing_ok=True)
-            except Exception as exc:
-                _RUNTIME_ERRORS.record("codex_prompt_cleanup_failed", exc)
+        raise RuntimeError("codex_backend_process_failed")
+    if not output:
+        status_payload.update({
+            "phase": "empty_output",
+            "finished_at": time.time(),
+            "elapsed_sec": round(time.time() - started_at, 3),
+            "returncode": proc.returncode,
+        })
+        _write_last_request_status(status_payload)
+        raise RuntimeError("codex_backend_empty_output")
+    cleaned = _strip_outer_fence(output)
+    status_payload.update({
+        "phase": "success",
+        "finished_at": time.time(),
+        "elapsed_sec": round(time.time() - started_at, 3),
+        "returncode": proc.returncode,
+        "output_chars": len(cleaned),
+    })
+    _write_last_request_status(status_payload)
+    return cleaned
 
 
 async def _queue_worker() -> None:
@@ -666,6 +732,11 @@ async def status(_: web.Request) -> web.Response:
 async def codex_action(request: web.Request) -> web.Response:
     if not gateway_request_authorized(request.headers.get(AUTHORIZATION_HEADER), request.app[ACTION_TOKEN_KEY]):
         return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    if not TOOLLESS_RUNTIME_VERIFIED:
+        return web.json_response(
+            {"ok": False, "error": "codex_toolless_runtime_unverified"},
+            status=503,
+        )
 
     try:
         payload = await request.json() if request.can_read_body else {}
@@ -696,6 +767,11 @@ async def codex_action(request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": False, "error": str(exc)},
             status=400,
+        )
+    except RuntimeError:
+        return web.json_response(
+            {"ok": False, "error": "codex_isolated_runtime_unavailable"},
+            status=503,
         )
     source = _safe_request_label(
         (payload or {}).get("source")

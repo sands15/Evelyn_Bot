@@ -338,13 +338,13 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('MINEFLAYER_USERNAME", "Evelyn_0428"', (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "config.py").read_text(encoding="utf-8"))
         self.assertIn('MINEFLAYER_USERNAME=Evelyn_0428', (REPO_ROOT / "evelyn_core" / "start_env.bat").read_text(encoding="utf-8"))
 
-    def test_mindcraft_uses_authenticated_codex_gateway(self) -> None:
+    def test_mindcraft_defaults_to_local_planner_without_codex_gateway(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
-        voyager = source.split("  voyager:\n", 1)[1]
+        voyager = source.split("  voyager:\n", 1)[1].split("\nvolumes:", 1)[0]
 
-        self.assertIn('MINDCRAFT_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"', voyager)
-        self.assertIn('MINDCRAFT_CODEX_MODEL: "gpt-5.5"', voyager)
-        self.assertIn('VOYAGER_CODEX_GATEWAY_TOKEN_FILE: "/app/runtime_artifacts/secrets/codex_gateway.token"', voyager)
+        self.assertIn('MINDCRAFT_CODEX_ENABLED: "false"', voyager)
+        self.assertNotIn("codex_gateway:", voyager)
+        self.assertNotIn("codex_gateway_token:/gateway-token", voyager)
         self.assertIn('MINDCRAFT_ENABLE_SKIN_COMMANDS: "false"', voyager)
         self.assertIn('dockerfile: docker/Dockerfile.mindcraft', voyager)
         self.assertIn('evelyn_core.mindcraft_service', voyager)
@@ -357,6 +357,7 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertIn('profiles: ["llm", "voyager"]', source)
         self.assertIn('container_name: evelyn-minecraft-llm', minecraft_llm)
+        self.assertIn('profiles: ["voyager"]', minecraft_llm)
         self.assertIn('/llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf', minecraft_llm)
         self.assertIn('-c 6144', minecraft_llm)
         self.assertIn('-np 1', minecraft_llm)
@@ -367,7 +368,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('LLAMA_CHAT_TEMPLATE_KWARGS: \'{"enable_thinking":false}\'', minecraft_llm)
         self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', voyager)
         self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', voyager)
-        self.assertIn('MINDCRAFT_CODEX_COOLDOWN_SEC: "30"', voyager)
+        self.assertIn('MINDCRAFT_CODEX_ENABLED: "false"', voyager)
         self.assertIn(
             'MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"',
             voyager,
@@ -432,41 +433,79 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("await deps.to_thread(deps.get_stt_model)", lifecycle_source)
         self.assertIn("await deps.to_thread(deps.warmup_stt_sync)", lifecycle_source)
 
-    def test_codex_gateway_reports_backend_readiness(self) -> None:
+    def test_codex_gateway_stays_unavailable_until_tool_access_is_verified(self) -> None:
         source = CODEX_GATEWAY.read_text(encoding="utf-8")
         compose = COMPOSE.read_text(encoding="utf-8")
+        service = compose.split("  codex_gateway:\n", 1)[1].split("\n  voyager:\n", 1)[0]
         check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("npm install -g @openai/codex@0.128.0", (DOCKER_DIR / "Dockerfile.voyager").read_text(encoding="utf-8"))
         self.assertIn(
             "${EVELYN_CODEX_CREDENTIALS_DIR:-./runtime_artifacts/secrets/codex_device_home}"
-            ":/run/secrets/evelyn-codex:ro",
-            compose,
+            "/auth.json:/run/secrets/evelyn-codex/auth.json:ro",
+            service,
         )
-        self.assertNotIn("${USERPROFILE}/.codex/auth.json", compose)
-        self.assertIn("CODEX_HOME: \"/tmp/evelyn-codex-home\"", compose)
-        self.assertIn("read_only: true", compose)
-        self.assertIn("no-new-privileges:true", compose)
-        self.assertIn("/tmp/evelyn-codex-home:mode=0700", compose)
+        self.assertNotIn("${USERPROFILE}/.codex/auth.json", service)
+        self.assertIn('VOYAGER_CODEX_GATEWAY_WORKDIR: "/workspace"', service)
+        self.assertIn('EVELYN_CODEX_GATEWAY_ISOLATED_RUNTIME: "true"', service)
+        self.assertIn('EVELYN_CODEX_GATEWAY_TOOLLESS_RUNTIME_VERIFIED: "false"', service)
+        self.assertIn('profiles: ["codex-gateway"]', service)
+        self.assertIn('EVELYN_RUNTIME_ARTIFACTS_DIR: "/gateway-state"', service)
+        self.assertIn('CODEX_HOME: "/tmp/evelyn-codex-home"', service)
+        self.assertIn('HOME: "/tmp/evelyn-codex-home"', service)
+        self.assertIn("read_only: true", service)
+        self.assertIn("no-new-privileges:true", service)
+        self.assertIn("/workspace:mode=0700", service)
+        self.assertIn("/gateway-state:mode=0700", service)
+        self.assertNotIn("./runtime_artifacts:/app/runtime_artifacts", service)
+        self.assertNotIn("./logs:/app/logs", service)
+        self.assertNotIn("bot_memory", service)
+        self.assertIn("codex_gateway_token:/gateway-token", service)
         self.assertIn("backendReady", source)
+        self.assertIn("isolatedRuntime", source)
+        self.assertIn("toolAccessVerified", source)
+        self.assertIn("codex_toolless_runtime_unverified", source)
         self.assertIn("lastActionReady", source)
         self.assertIn("actionAuthRequired", source)
         self.assertIn("gateway_request_authorized", source)
         self.assertIn("gateway_auth_headers", (REPO_ROOT / "third_party" / "Voyager" / "voyager" / "agents" / "codex_gateway_llm.py").read_text(encoding="utf-8"))
         self.assertIn("Authorization = \"Bearer $token\"", check_script)
+        self.assertIn("docker exec evelyn-codex-gateway", check_script)
+        self.assertNotIn('cwd = "/app"', check_script)
         self.assertIn("_backend_readiness", source)
-        self.assertIn('"exec",\n            "-m",\n            model,', source)
+        self.assertIn('"exec",\n        "-m",\n        model,', source)
+        self.assertIn('"--ephemeral"', source)
+        self.assertIn('"features.shell_tool=false"', source)
+        self.assertIn('"features.unified_exec=false"', source)
+        self.assertIn('"features.apps=false"', source)
+        self.assertIn('"features.multi_agent=false"', source)
         self.assertIn("$json.backendReady -eq $true", check_script)
+        self.assertIn("$json.isolatedRuntime -eq $true", check_script)
         self.assertIn("IncludeCodexAction", check_script)
+        for client_path in (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "codex_gateway_client.py",
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "minecraft_autonomy_client.py",
+        ):
+            client_source = client_path.read_text(encoding="utf-8")
+            self.assertNotIn('"evelyn_core.codex_gateway_server"', client_source)
+            self.assertIn("codex_gateway_isolated_runtime_required", client_source)
+            self.assertIn('get("isolatedRuntime")', client_source)
+            self.assertIn('get("toolAccessVerified")', client_source)
 
     def test_runtime_checker_matches_deferred_minecraft_contract(self) -> None:
         check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("[switch]$IncludeMinecraftStack", check_script)
         self.assertIn(
-            'if ($IncludeMinecraftStack -or $IncludeCodexAction)',
+            'if ($IncludeMinecraftStack)',
             check_script,
         )
+        self.assertIn(
+            'if ($IncludeCodexAction)',
+            check_script,
+        )
+        self.assertIn('$script:ComposeProfiles += "voyager"', check_script)
+        self.assertIn('$script:ComposeProfiles += "codex-gateway"', check_script)
         self.assertIn(
             '$env:DISCORD_BOT_TOKEN = "runtime-check-disabled"',
             check_script,
@@ -476,7 +515,22 @@ class DockerComposeContractTests(unittest.TestCase):
             check_script,
         )
         self.assertIn(
+            "Codex Gateway health check skipped; use -IncludeCodexAction",
+            check_script,
+        )
+        self.assertIn(
             'Add-Failure "$flag is not true for the requested Minecraft stack"',
+            check_script,
+        )
+        self.assertIn('foreach ($flag in @("voyagerReady"))', check_script)
+        self.assertEqual(
+            check_script.count(
+                'foreach ($flag in @("voyagerReady", "codexReady"))'
+            ),
+            1,
+        )
+        self.assertIn(
+            'codexReady=false or unavailable (not required for the local Minecraft stack)',
             check_script,
         )
         self.assertNotIn(
@@ -600,7 +654,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("build_local_docker_images.ps1", docker_helper)
         self.assertIn("-Services $pathSafeBuildServices", docker_helper)
         self.assertIn("$serviceArgs | Where-Object", docker_helper)
-        self.assertIn("$normalizedServices -contains 'voyager'", docker_helper)
+        self.assertIn("$normalizedServices -contains 'codex_gateway'", docker_helper)
         self.assertIn("$credentialDirectory.StartsWith(", docker_helper)
         self.assertIn("$liveCodexPrefix", docker_helper)
         self.assertIn("EVELYN_ALLOW_LEGACY_HOST_START", core_start + local_start)
@@ -617,9 +671,9 @@ class DockerComposeContractTests(unittest.TestCase):
         native_gateway = (
             LAUNCHERS / "start_codex_gateway.ps1"
         ).read_text(encoding="utf-8")
-        self.assertIn("evelyn-codex-gateway-$PID", native_gateway)
-        self.assertIn("$env:CODEX_HOME = $codexEphemeralHome", native_gateway)
-        self.assertIn(".evelyn-ephemeral-codex-home", native_gateway)
+        self.assertIn("start_docker_compose_services.ps1", native_gateway)
+        self.assertIn("-Services codex_gateway", native_gateway)
+        self.assertNotIn("evelyn_core.codex_gateway_server", native_gateway)
 
     def test_individual_service_batches_do_not_start_host_processes_by_default(self) -> None:
         service_batches = {
@@ -628,9 +682,9 @@ class DockerComposeContractTests(unittest.TestCase):
             "start_sub_llm.bat": ("-Profiles llm", "-Services sub_llm"),
             "start_tts.bat": ("-Profiles tts", "-Services tts"),
             "start_vision.bat": ("-Profiles vision", "-Services vision"),
-            "start_codex_gateway.bat": ("-Profiles voyager", "-Services codex_gateway"),
+            "start_codex_gateway.bat": ("-Profiles codex-gateway", "-Services codex_gateway"),
             "start_voyager_service.bat": ("-Profiles voyager", "-Services voyager"),
-            "start_voyager.bat": ("-Profiles voyager", "-Services router_llm,minecraft_llm,codex_gateway,voyager"),
+            "start_voyager.bat": ("-Profiles voyager", "-Services router_llm,minecraft_llm,voyager"),
             "start_bot.bat": ("-Profiles llm,tts,stt,vision,voyager,discord", "-Services discord_bot"),
         }
 
@@ -640,7 +694,10 @@ class DockerComposeContractTests(unittest.TestCase):
                 self.assertIn("start_docker_compose_services.ps1", source)
                 self.assertIn(expected[0], source)
                 self.assertIn(expected[1], source)
-                self.assertIn("EVELYN_ALLOW_LEGACY_HOST_START", source)
+                if name == "start_codex_gateway.bat":
+                    self.assertNotIn("evelyn_core.codex_gateway_server", source)
+                else:
+                    self.assertIn("EVELYN_ALLOW_LEGACY_HOST_START", source)
 
 
 if __name__ == "__main__":

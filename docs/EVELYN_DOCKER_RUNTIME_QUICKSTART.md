@@ -18,7 +18,7 @@
 - `vision`: credential-free Vision ingress, `8891`
 - `vision_runtime`: isolated SmolVLM2/Falcon-OCR GPU runtime
 - `voyager`: Minecraft/Voyager HTTP service, `8765`
-- `codex_gateway`: Voyager Codex Gateway HTTP service, `8787`
+- `codex_gateway`: optional verified-only Codex Gateway profile, `8787`
 
 Discord bot loop는 `discord` profile의 `discord_bot` 서비스로 분리한다. Control-Page/Bot API는 빠른 부팅과 상태 표시를 담당하고, 실제 Discord Gateway 접속과 음성 루프는 `discord_bot`이 담당한다.
 
@@ -111,7 +111,7 @@ Discord bot까지 포함:
 powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -IncludeDiscordBot
 ```
 
-명시적으로 시작한 Minecraft/Codex stack까지 포함:
+명시적으로 시작한 Minecraft stack까지 포함:
 
 ```powershell
 powershell -ExecutionPolicy Bypass `
@@ -138,10 +138,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
   `model_id=k2-fsa/OmniVoice`,
   `model_revision=c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 모두 만족한다.
 - `controlReady`, `botReady`, `mainReady`, `routerReady`, `subReady`, `ttsReady`, `sttReady`, `chatReady`, `voiceReady`, `visionReady`가 `true`다.
-- 기본 local core 검사에서는 지연 시작되는 `voyagerReady`, `codexReady`가
-  경고일 수 있다.
-- `-IncludeMinecraftStack` 사용 시 `voyagerReady`, `codexReady`가 모두
-  `true`여야 한다.
+- 기본 local core 검사에서는 지연 시작되는 `voyagerReady`가 경고일 수 있고,
+  local backend인 동안 `codexReady`는 필수 상태에서 제외된다.
+- `-IncludeMinecraftStack` 사용 시 `voyagerReady=true`여야 한다. 기본
+  Minecraft planner는 local Qwen이며 Codex Gateway를 시작하거나 요구하지 않는다.
 - `-IncludeDiscordBot` 사용 시 `evelyn-discord-bot` 상태가 `running`이고 restart loop가 없어야 한다.
 - `-IncludeCodexAction` 사용 시 `/codex/action`이 실제 응답까지 반환해야 한다.
 
@@ -190,18 +190,23 @@ code에는 인터넷이나 다른 Evelyn 서비스로 향하는 route를 주지 
 
 ## Codex Gateway
 
-`codex_gateway` 컨테이너는 Linux용 `@openai/codex` CLI를 설치하고 `/health`에 `backendReady`를 노출한다.
+`codex_gateway`는 기본 Minecraft stack과 분리된 선택적 Compose profile이다.
+현재는 pinned image의 tool 접근 비활성화가 실제로 검증되지 않았으므로
+`toolAccessVerified=false`, `backendReady=false`이고 `/codex/action`은 Codex
+process를 만들기 전에 고정 503으로 거부한다.
 
 현재 구성:
 
 - CLI: `/usr/local/bin/codex`
-- host credential directory:
-  `runtime_artifacts/secrets/codex_device_home`
-- container secret mount: `/run/secrets/evelyn-codex:ro`
+- host credential file:
+  `runtime_artifacts/secrets/codex_device_home/auth.json`
+- container secret mount: `/run/secrets/evelyn-codex/auth.json:ro`
 - ephemeral CLI home: `/tmp/evelyn-codex-home`
+- fixed empty workspace: `/workspace`
 - root filesystem: read-only
 - Linux capabilities: all dropped
-- custom shell backend: disabled by default
+- custom shell backend: disabled
+- default Compose profile: `codex-gateway` only
 
 사용자의 live `.codex` 디렉터리를 직접 마운트하지 않는다. 최초 실행 전 전용 사본을
 명시적으로 만든다.
@@ -211,12 +216,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\evelyn_core\runtime\launchers\provision_codex_credentials.ps1
 ```
 
-기본 명령은 `auth.json`만 복사한다. Gateway에 사용자 설정이 꼭 필요할 때만
-`-IncludeConfig`를 사용한다.
+Provisioner는 `auth.json`만 복사하며 기존 `config.toml` 사본은 제거한다.
+Gateway도 user config와 repository rules를 읽지 않는다.
 
-주의: `backendReady=true`는 CLI와 전용 인증 사본이 준비됐다는 뜻이다. 실제
-`/codex/action` 호출도 별도로 통과해야 한다. `lastActionReady=false`는 HTTP
-서버가 살아 있어도 마지막 실제 action 실행이 실패했다는 뜻이다.
+주의: `backendReady=true`로 바꾸기 전에는 pinned image에서 실제 tool registry와
+secret canary가 shell/file/network tool 0개임을 증명해야 한다. source option 문자열이나
+HTTP liveness만으로 이 값을 활성화하지 않는다.
 
 ## GPU 배치
 
@@ -239,7 +244,8 @@ nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader
 docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager --profile discord ps
 docker logs --tail 200 evelyn-discord-bot
 docker compose -f docker-compose.fast-control.yml logs --tail=120 control_page bot_api
-docker compose -f docker-compose.fast-control.yml --profile voyager logs --tail=120 voyager codex_gateway
+docker compose -f docker-compose.fast-control.yml --profile voyager logs --tail=120 voyager
+docker compose -f docker-compose.fast-control.yml --profile codex-gateway logs --tail=120 codex_gateway
 ```
 
 ## 남은 판단 기준
@@ -247,6 +253,7 @@ docker compose -f docker-compose.fast-control.yml --profile voyager logs --tail=
 Docker 전환 완료 판단은 다음 기준으로 한다.
 
 - Control-Page/Bot API/Discord bot loop가 모두 Docker에서 동작한다.
-- LLM/TTS/STT/Vision/Voyager/Codex Gateway가 Docker health와 실제 호출 smoke test를 통과한다.
-- Codex Gateway는 `/health`뿐 아니라 `/codex/action` 실제 호출까지 통과해야 완전 완료로 본다.
+- LLM/TTS/STT/Vision/Voyager가 Docker health와 실제 호출 smoke test를 통과한다.
+- Codex Gateway는 선택적으로 다시 활성화할 때만 tool-access canary와
+  `/codex/action` 실제 호출을 모두 통과해야 한다.
 - 호스트에 남는 것은 Docker Desktop, GPU driver, Docker volume/bind mount, Discord/Codex 인증 파일뿐이어야 한다.

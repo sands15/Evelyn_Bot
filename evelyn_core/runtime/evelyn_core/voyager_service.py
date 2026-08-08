@@ -1238,15 +1238,19 @@ class UpstreamDirectBridge:
                 "stability_signals": stability_signals,
             },
             "agent_models": {
-                "action": os.environ.get("VOYAGER_CODEX_MODEL") or None,
+                "action": (
+                    os.environ.get("VOYAGER_CODEX_MODEL")
+                    if os.environ.get("VOYAGER_ACTION_BACKEND", "local").lower() == "codex-gateway"
+                    else os.environ.get("MINDCRAFT_LOCAL_MODEL", "Qwen3-14B-Q4_K_M.gguf")
+                ),
                 "curriculum": os.environ.get("VOYAGER_CURRICULUM_MODEL_NAME") or None,
                 "critic": os.environ.get("VOYAGER_CRITIC_MODEL_NAME") or None,
                 "skill": os.environ.get("VOYAGER_SKILL_MODEL_NAME") or None,
             },
             "curriculum_last_llm_task": None,
             "codex_gateway": {
-                "enabled": True,
-                "backend": os.environ.get("VOYAGER_ACTION_BACKEND", "codex-gateway"),
+                "enabled": os.environ.get("VOYAGER_ACTION_BACKEND", "local").lower() == "codex-gateway",
+                "backend": os.environ.get("VOYAGER_ACTION_BACKEND", "local"),
                 "url": os.environ.get("VOYAGER_CODEX_GATEWAY_URL") or None,
                 "model": os.environ.get("VOYAGER_CODEX_MODEL") or None,
             },

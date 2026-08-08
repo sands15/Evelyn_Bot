@@ -127,3 +127,22 @@ type: decision-log
   요청된 image를 만든다. Supervisor 복구는 이미 있는 image만 사용한다. 8881 서비스를
   시작해도 기존 client는 `tts:8880`에서 reroute되지 않는다. image build/recreate와 실제
   clone-stream smoke 전에는 live 전환 완료로 보고하지 않는다.
+
+## 2026-08-08 — Minecraft 기본 판단은 local, Codex는 검증 전 비활성
+
+- 상태: 승인
+- 결정: Mindcraft와 legacy Voyager의 기본 action backend는 local Qwen으로 유지한다.
+  Codex Gateway는 별도 Docker profile에만 두고, pinned image에서 tool registry와
+  secret canary가 검증되기 전에는 health not-ready, action 503, subprocess 0을
+  강제한다. host-native/custom shell gateway는 지원하지 않는다.
+- 이유: Minecraft chat과 recovery context는 신뢰할 수 없는 입력을 포함한다.
+  `read-only` sandbox는 같은 principal의 credential·runtime file 읽기를 차단하지
+  않으므로 filesystem-capable Codex CLI를 기본 경로에 두면 관계 연속성을 위한 기억과
+  자격증명을 외부 model output으로 노출할 수 있다.
+- 근거: `external/mindcraft_evelyn/src/models/evelyn_planner.js`,
+  `external/mindcraft_evelyn/src/models/codex_gateway.js`,
+  `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`,
+  `docker-compose.fast-control.yml`, 관련 runtime/Mindcraft 회귀
+- 영향: local planning·recovery·memory summary는 계속 동작하며 기본 Minecraft 시작은
+  Codex credential을 요구하지 않는다. Codex 품질 경로는 verified no-tools boundary나
+  목적 제한 broker가 생길 때까지 의도적으로 사용할 수 없다.

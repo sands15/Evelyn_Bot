@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 REPO_ROOT = next(
@@ -75,6 +75,20 @@ class MinecraftAutonomyClientOutcomeTests(
                 "worldLease": proof,
             },
         )
+
+    async def test_local_backend_never_checks_or_starts_codex(self) -> None:
+        client = object.__new__(MinecraftAutonomyClient)
+        client.is_codex_gateway_alive = AsyncMock()
+        client._spawn_codex_gateway_process = AsyncMock()
+
+        with patch(
+            "evelyn_core.minecraft_autonomy_client.VOYAGER_ACTION_BACKEND",
+            "local",
+        ):
+            await client.ensure_codex_gateway()
+
+        client.is_codex_gateway_alive.assert_not_awaited()
+        client._spawn_codex_gateway_process.assert_not_awaited()
 
     async def test_functional_readiness_requires_exact_contract(
         self,

@@ -12,8 +12,11 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ComposeFile = Join-Path $ProjectRoot "docker-compose.fast-control.yml"
 $script:Failures = 0
 $script:ComposeProfiles = @("llm", "tts", "vision", "stt")
-if ($IncludeMinecraftStack -or $IncludeCodexAction) {
+if ($IncludeMinecraftStack) {
     $script:ComposeProfiles += "voyager"
+}
+if ($IncludeCodexAction) {
+    $script:ComposeProfiles += "codex-gateway"
 }
 if ($IncludeDiscordBot) {
     $script:ComposeProfiles += "discord"
@@ -191,29 +194,39 @@ else {
     Add-Warn "Voyager health check skipped; use -IncludeMinecraftStack when the deferred stack is running"
 }
 
-if ($IncludeMinecraftStack -or $IncludeCodexAction) {
+if ($IncludeCodexAction) {
     Invoke-RequiredHttp "Codex Gateway" "http://127.0.0.1:8787/health" {
         param($json, $content)
-        return $null -ne $json -and $json.ok -eq $true -and $json.backendReady -eq $true
+        return (
+            $null -ne $json -and
+            $json.ok -eq $true -and
+            $json.backendReady -eq $true -and
+            $json.isolatedRuntime -eq $true -and
+            $json.toolAccessVerified -eq $true
+        )
     } | Out-Null
 }
 else {
-    Add-Warn "Codex Gateway health check skipped; use -IncludeMinecraftStack or -IncludeCodexAction"
+    Add-Warn "Codex Gateway health check skipped; use -IncludeCodexAction"
 }
 
 if ($IncludeCodexAction) {
     Write-Section "Codex Action"
     try {
-        $tokenPath = if ($env:VOYAGER_CODEX_GATEWAY_TOKEN_FILE) { $env:VOYAGER_CODEX_GATEWAY_TOKEN_FILE } else { Join-Path $PSScriptRoot '..\runtime_artifacts\secrets\codex_gateway.token' }
-        $token = if ($env:VOYAGER_CODEX_GATEWAY_TOKEN) { $env:VOYAGER_CODEX_GATEWAY_TOKEN.Trim() } elseif (Test-Path -LiteralPath $tokenPath) { (Get-Content -LiteralPath $tokenPath -Raw).Trim() } else { '' }
+        $token = if ($env:VOYAGER_CODEX_GATEWAY_TOKEN) {
+            $env:VOYAGER_CODEX_GATEWAY_TOKEN.Trim()
+        }
+        else {
+            $value = [string](& docker exec evelyn-codex-gateway python -c "from pathlib import Path; print(Path('/gateway-token/codex_gateway.token').read_text(encoding='utf-8').strip())" 2>$null)
+            if ($LASTEXITCODE -eq 0) { $value.Trim() } else { '' }
+        }
         if (-not $token) {
-            throw "Codex gateway token is unavailable at $tokenPath"
+            throw "Codex gateway token is unavailable"
         }
         $body = @{
             prompt = "Return exactly OK."
             model = "gpt-5.5"
             timeout_sec = 60
-            cwd = "/app"
             source = "docker-runtime-check"
             priority = 0
         } | ConvertTo-Json
@@ -300,13 +313,27 @@ if ($controlState -and $controlState.runtime -and $controlState.runtime.services
     }
 
     if ($IncludeMinecraftStack) {
-        foreach ($flag in @("voyagerReady", "codexReady")) {
+        foreach ($flag in @("voyagerReady")) {
             if ($services.$flag -eq $true) {
                 Add-Ok "$flag=true"
             }
             else {
                 Add-Failure "$flag is not true for the requested Minecraft stack"
             }
+        }
+        if ($IncludeCodexAction) {
+            if ($services.codexReady -eq $true) {
+                Add-Ok "codexReady=true"
+            }
+            else {
+                Add-Failure "codexReady is not true for the requested Codex action check"
+            }
+        }
+        elseif ($services.codexReady -eq $true) {
+            Add-Ok "codexReady=true"
+        }
+        else {
+            Add-Warn "codexReady=false or unavailable (not required for the local Minecraft stack)"
         }
     }
     elseif ($IncludeCodexAction) {

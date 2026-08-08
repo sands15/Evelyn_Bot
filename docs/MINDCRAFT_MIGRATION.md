@@ -24,7 +24,11 @@ patch and copies the custom runtime modules into the image.
   and `/goal`
 - mutating endpoint boundary: `/start` and `/goal` require an exact fresh
   `minecraft_world_lease.proof.v1`; `/stop` is always allowed
-- planner: `GPT-5.5` through the authenticated Codex Gateway
+- planner: local `Qwen3-14B-Q4_K_M.gguf`; planning, code-model requests, hash
+  embedding, and recovery stay on the local planner by default
+- Codex escalation: disabled before token or network access; its separate
+  Compose profile remains unavailable until pinned-image tool access is
+  verified
 - Minecraft version: `1.21.11`
 - account authentication: Microsoft
 - default mode: normal survival player, not operator
@@ -42,17 +46,25 @@ patch and copies the custom runtime modules into the image.
 - world-action authorization:
   `runtime_artifacts/minecraft_world_lease/status.json`
 - runtime log: `runtime_artifacts/logs/mindcraft.log`
-- Codex Gateway token: `runtime_artifacts/secrets/codex_gateway.token`
+- optional Codex Gateway token: dedicated Compose volume
+  `codex_gateway_token` (not mounted into the default Mindcraft service)
 
-## Verification completed
+## Verification evidence
 
-- Docker image builds successfully on Node.js 22.
-- The four custom JavaScript entry points pass `node --check` in the image.
-- An isolated container returns a healthy Mindcraft service contract without
+The following image evidence is from the 2026-07-31 pinned Mindcraft build,
+before the 2026-08-08 local-default/Codex-boundary source change:
+
+- The Docker image built successfully on Node.js 22.
+- The four custom JavaScript entry points passed `node --check` in the image.
+- An isolated container returned a healthy Mindcraft service contract without
   starting the Minecraft child process.
-- Contract and regression suite passes 45 tests, including the Codex Gateway
-  authentication sequence: missing token `401`, wrong token `401`, valid
-  Bearer token `200`.
+
+Current source evidence:
+
+- Contract tests verify that default Mindcraft startup has no Codex dependency
+  or token mount, and that an unverified gateway returns a fixed `503` without
+  spawning Codex. This is source-level evidence, not a live Minecraft or Docker
+  tool-isolation verification.
 - Production dependency audit reports no high or critical findings. Fourteen
   moderate findings remain in the upstream Mineflayer authentication/plugin
   chain, with no safe compatible upstream fix currently proven.

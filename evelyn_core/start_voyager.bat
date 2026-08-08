@@ -24,12 +24,6 @@ if /I "%~1"=="--no-autostart" set "VOYAGER_NO_AUTOSTART=1"
 echo [Evelyn] start_voyager.bat only launches Voyager-specific services.
 echo [Evelyn] Start the base Evelyn stack separately with start.bat if needed.
 
-if /I "%VOYAGER_ACTION_BACKEND%"=="codex-gateway" (
-    call "%~dp0start_codex_gateway.bat"
-) else (
-    echo [Evelyn] Skipping Codex-Gateway because VOYAGER_ACTION_BACKEND=%VOYAGER_ACTION_BACKEND%
-)
-
 set "VOYAGER_SERVICE_ALREADY_RUNNING="
 call :port_ready %MINECRAFT_AUTONOMY_SERVICE_PORT% "Voyager-Service"
 if %ERRORLEVEL%==2 set "VOYAGER_SERVICE_ALREADY_RUNNING=1"
@@ -94,6 +88,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).Add
 exit /b %ERRORLEVEL%
 
 :run_docker
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services router_llm,minecraft_llm,codex_gateway,voyager
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services router_llm,minecraft_llm,voyager
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%

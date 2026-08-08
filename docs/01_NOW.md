@@ -25,6 +25,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
+- 2026-08-08 기본 Minecraft planning·recovery·memory summary를 local Qwen으로
+  유지하고 Codex token/network/subprocess를 기본 경로에서 제거했다. 선택적 Gateway는
+  pinned-image tool boundary 검증 전까지 health not-ready·action 503·spawn 0이다.
 - 2026-08-08 memory 삭제는 fresh recall Busy fallback과 mutation 2초 admission을
   유지한다. replica가 anchor bootstrap·strict restart·과거 pair replay와 canonical
   metadata를 검증했지만 host ACL·Docker mount, live UI와 rotation은 남은 P1이다.
@@ -56,7 +59,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
   서명 상태와 watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,123개(skip 21), 관련 집중 검증과 JS 구문이 통과했다. 현재
+- CI-equivalent 전체 3,136개(skip 22), 관련 집중 검증과 JS 구문이 통과했다. 현재
   마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
 
 ## 작업 원칙
@@ -73,8 +76,3 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
 - [[worklog/2026-08-08]] — OmniVoice 전환, UI 연속성, provenance 수정 근거
-
-## 다음 작업 종료 시
-
-- 현재 초점·차단점·다음 행동이 달라졌을 때만 이 문서를 짧게 갱신한다.
-- 상세 결과는 `worklog/YYYY-MM-DD.md`에 기록하고 여기에는 링크만 남긴다.

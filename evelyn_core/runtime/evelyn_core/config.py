@@ -193,6 +193,14 @@ VOYAGER_CODEX_GATEWAY_PYTHON_EXE = os.getenv("VOYAGER_CODEX_GATEWAY_PYTHON_EXE",
 VOYAGER_CODEX_GATEWAY_URL = os.getenv("VOYAGER_CODEX_GATEWAY_URL", "http://127.0.0.1:8787/codex/action")
 # Codex gateway에서 쓸 기본 모델 이름.
 VOYAGER_CODEX_MODEL = os.getenv("VOYAGER_CODEX_MODEL", "gpt-5.5")
+MINDCRAFT_LOCAL_LLM_URL = os.getenv(
+    "MINDCRAFT_LOCAL_LLM_URL",
+    "http://127.0.0.1:9823/v1/chat/completions",
+)
+MINDCRAFT_LOCAL_MODEL = os.getenv(
+    "MINDCRAFT_LOCAL_MODEL",
+    "Qwen3-14B-Q4_K_M.gguf",
+)
 # Codex gateway 서비스 포트.
 VOYAGER_CODEX_GATEWAY_PORT = int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787"))
 # OpenAI 호환 nano API. `openai_api`라는 소문자 환경변수도 지원한다.
@@ -214,8 +222,8 @@ VOYAGER_CRITIC_RULE_FIRST = _env_flag("VOYAGER_CRITIC_RULE_FIRST", "true")
 VOYAGER_SKILL_LLM_URL = os.getenv("VOYAGER_SKILL_LLM_URL", LLM_SERVER_URL)
 # SkillManager가 쓸 모델 이름.
 VOYAGER_SKILL_MODEL_NAME = os.getenv("VOYAGER_SKILL_MODEL_NAME", MODEL_NAME)
-# ActionAgent의 백엔드 종류. 현재 codex-gateway 사용.
-VOYAGER_ACTION_BACKEND = os.getenv("VOYAGER_ACTION_BACKEND", "codex-gateway")
+# Legacy Voyager ActionAgent도 기본적으로 로컬 Minecraft LLM을 사용한다.
+VOYAGER_ACTION_BACKEND = os.getenv("VOYAGER_ACTION_BACKEND", "local")
 # 작업 메모리 파일에 유지할 durable facts 최대 개수.
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 # open loop / 질문성 메모리 최대 개수.

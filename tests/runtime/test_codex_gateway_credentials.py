@@ -28,7 +28,7 @@ class CodexGatewayCredentialTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
 
-    def test_only_known_files_are_staged_into_marked_ephemeral_home(self) -> None:
+    def test_only_auth_is_staged_into_marked_ephemeral_home(self) -> None:
         source = self.root / "source"
         target = self.root / "target"
         source.mkdir()
@@ -43,7 +43,8 @@ class CodexGatewayCredentialTests(unittest.TestCase):
 
         self.assertTrue(result["ready"])
         self.assertTrue((target / "auth.json").is_file())
-        self.assertTrue((target / "config.toml").is_file())
+        self.assertFalse((target / "config.toml").exists())
+        self.assertFalse(result["configPresent"])
         self.assertTrue((target / EPHEMERAL_HOME_MARKER).is_file())
         self.assertFalse((target / "unrelated.txt").exists())
         self.assertNotIn("secret", json.dumps(result))

@@ -1116,10 +1116,14 @@ class MindcraftRuntime:
             "agent_models": {
                 "planner": str(_MINDCRAFT_CONFIG["MINDCRAFT_LOCAL_MODEL"]),
                 "router": str(_MINDCRAFT_CONFIG["MINDCRAFT_ROUTER_MODEL"]),
-                "escalation": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_MODEL"]),
+                "escalation": (
+                    str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_MODEL"])
+                    if _MINDCRAFT_CONFIG["MINDCRAFT_CODEX_ENABLED"]
+                    else str(_MINDCRAFT_CONFIG["MINDCRAFT_LOCAL_MODEL"])
+                ),
             },
             "codex_gateway": {
-                "enabled": True,
+                "enabled": bool(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_ENABLED"]),
                 "url": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_GATEWAY_URL"]),
                 "model": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_MODEL"]),
             },

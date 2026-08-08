@@ -74,7 +74,7 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertIn("main_llm", service_ids)
         self.assertIn("tts", service_ids)
         self.assertIn("voyager", service_ids)
-        self.assertIn("codex_gateway", service_ids)
+        self.assertNotIn("codex_gateway", service_ids)
 
     def test_down_allowed_service_returns_dry_run_command_preview(self) -> None:
         manifest = load_service_manifest(force=True)
@@ -165,13 +165,10 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertFalse(voyager["required"])
         self.assertFalse(voyager["safety"]["willExecute"])
 
-        self.assertTrue(codex["ok"])
-        self.assertTrue(codex["eligible"])
-        self.assertEqual(codex["planStatus"], "ready")
+        self.assertFalse(codex["ok"])
+        self.assertFalse(codex["eligible"])
         self.assertEqual(codex["serviceId"], "codex_gateway")
-        self.assertIn("start_codex_gateway.ps1", codex["launcherPath"])
-        self.assertFalse(codex["required"])
-        self.assertFalse(codex["safety"]["willExecute"])
+        self.assertEqual(codex["error"], "repair_not_allowed")
 
     def test_unknown_and_unsupported_actions_are_rejected(self) -> None:
         manifest = load_service_manifest(force=True)

@@ -58,8 +58,7 @@ foreach ($service in $Services) {
 function Initialize-CodexCredentialMount {
     $needsGateway = (
         $normalizedServices -contains 'codex_gateway' -or
-        $normalizedServices -contains 'voyager' -or
-        ($normalizedServices.Count -eq 0 -and $normalizedProfiles -contains 'voyager')
+        ($normalizedServices.Count -eq 0 -and $normalizedProfiles -contains 'codex-gateway')
     )
     if (-not $needsGateway) {
         return

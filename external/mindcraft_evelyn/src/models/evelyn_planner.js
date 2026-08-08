@@ -490,6 +490,9 @@ export class EvelynPlanner {
         this.routerUrl = process.env.MINDCRAFT_ROUTER_URL || DEFAULT_ROUTER_URL;
         this.routerModel = process.env.MINDCRAFT_ROUTER_MODEL || DEFAULT_ROUTER_MODEL;
         this.routerTimeoutSec = positiveNumber(process.env.MINDCRAFT_ROUTER_TIMEOUT_SEC, 4);
+        this.codexEnabled = /^(?:1|true|yes|on)$/i.test(
+            String(process.env.MINDCRAFT_CODEX_ENABLED || '')
+        );
         this.codexCooldownMs = positiveNumber(process.env.MINDCRAFT_CODEX_COOLDOWN_SEC, 30) * 1000;
         this.codex = new CodexGateway(process.env.MINDCRAFT_CODEX_MODEL);
         this.lastCodexAt = 0;
@@ -603,6 +606,7 @@ export class EvelynPlanner {
     }
 
     async proposeStrategicSubgoals(context, reason = 'local_subgoal_exhausted') {
+        if (!this.codexEnabled) return this.proposeSubgoals(context);
         if (Date.now() - this.lastCodexAt < this.codexCooldownMs) return [];
         const prompt = [
             'You are the strategic Minecraft survival goal planner for Evelyn.',
@@ -629,6 +633,7 @@ export class EvelynPlanner {
     }
 
     async chooseRoute(turns) {
+        if (!this.codexEnabled) return 'local';
         const recent = compactTurns(turns, 5, 900);
         try {
             const payload = await postJson(this.routerUrl, {
@@ -672,7 +677,11 @@ export class EvelynPlanner {
             stop: stopSeq ? [stopSeq] : undefined,
             chat_template_kwargs: {enable_thinking: false}
         }, this.localTimeoutSec);
-        return enforceCommandPolicy(responseContent(payload));
+        const content = enforceCommandPolicy(responseContent(payload));
+        if (kind === 'memory' && content === '!stop') {
+            throw new Error('mindcraft_memory_summary_unavailable');
+        }
+        return content;
     }
 
     updateRecoveryPlan() {
@@ -731,10 +740,19 @@ export class EvelynPlanner {
 
         this.lastCodexAt = Date.now();
         this.persistPlannerState();
-        const raw = await this.codex.sendPrompt(prompt, 'mindcraft-recovery-plan');
+        const raw = this.codexEnabled
+            ? await this.codex.sendPrompt(prompt, 'mindcraft-recovery-plan')
+            : responseContent(await postJson(this.localUrl, {
+                model: this.localModel,
+                messages: [{role: 'system', content: prompt}],
+                temperature: 0.05,
+                top_p: 0.8,
+                max_tokens: SUBGOAL_TOKEN_LIMIT,
+                chat_template_kwargs: {enable_thinking: false}
+            }, this.localTimeoutSec));
         const parsed = parseRecoveryPlan(raw, systemMessage, policy);
         if (!parsed) {
-            throw new Error('Codex recovery response did not contain a valid documented command plan');
+            throw new Error('Recovery response did not contain a valid documented command plan');
         }
         this.recoveryPlan = {
             ...parsed,
@@ -747,7 +765,7 @@ export class EvelynPlanner {
         };
         this.persistPlannerState();
         console.log(
-            `[Evelyn Mindcraft] planner route=codex reason=${reason} recovery_steps=${parsed.steps.length}`
+            `[Evelyn Mindcraft] planner route=${this.codexEnabled ? 'codex' : 'local'} reason=${reason} recovery_steps=${parsed.steps.length}`
         );
         return this.recoveryPlan;
     }
@@ -906,8 +924,11 @@ export class EvelynPlanner {
             console.log(`[Evelyn Mindcraft] planner route=local gate=utility kind=${kind}`);
             return result;
         } catch (error) {
-            console.error('[Evelyn Mindcraft] Local utility request failed; falling back to Codex:', error?.message || error);
-            return this.codex.sendRequest(turns, systemMessage);
+            console.error('[Evelyn Mindcraft] Local utility request failed:', error?.message || error);
+            if (kind === 'memory') throw new Error('mindcraft_memory_summary_unavailable');
+            if (kind === 'classifier') return 'ignore';
+            if (this.codexEnabled) return this.codex.sendRequest(turns, systemMessage);
+            return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
         }
     }
 

@@ -243,7 +243,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - legacy 영속 상태를 읽을 때와 다시 쓸 때 raw `last_error` 및
     `executor_errors`를 정규화하며, Discord와 Control Page 최종 출력도 같은
     exact allowlist를 다시 검사한다.
-- Codex Gateway의 `/codex/action`은 bearer token을 요구한다. `/health`는 읽기 전용으로 유지한다.
+- Codex Gateway는 bearer token 외에도 Docker 격리와 verified tool-access gate를
+  요구한다. 기본 Minecraft 경로에서는 시작·token 조회·network 호출이 0이며,
+  미검증 `/codex/action`은 subprocess 생성 전에 고정 503으로 닫힌다.
 - 사용되지 않던 `docs/assets/evelyn-page.js`는 삭제했고, UI 테스트는 실제 `docs/index.html` 인라인 컨트롤러를 검사한다.
 - Docker Compose의 사용자별 `C:/Users/Admin/...` 경로는 환경변수와 `USERPROFILE` 기반으로 바꿨다.
 - Windows Host Vision Bridge가 Docker Bot API의 화면 요청을 실제 호스트
@@ -602,8 +604,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   fresh였고 bridge는 `ready=true`, TTS warmup 완료, Host Vision
   `running`이었다.
 - 개인정보 보호 기본값에 따라 로컬 마이크는 비활성 상태다.
-- Minecraft/Voyager와 Codex Gateway는 기본 local core에서 지연 시작되며 현재
-  실행하지 않는다. Discord bot도 사용자 요청 없이 시작하지 않았다.
+- Minecraft/Mindcraft는 기본 local Qwen planner로 지연 시작되며 Codex Gateway를
+  요구하지 않는다. 선택적 Gateway와 Discord bot도 사용자 요청 없이 시작하지 않았다.
 
 ## Last runtime evidence
 
@@ -1694,7 +1696,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 
 - Bot API: `127.0.0.1:8798`
 - Control-Page: `127.0.0.1:8799`
-- Codex Gateway: `127.0.0.1:8787`
+- Optional Codex Gateway: `127.0.0.1:8787` (`codex-gateway` profile,
+  tool-access 검증 전 not-ready)
 - Control-Page 변경성 요청은 CSRF 세션 계약을 사용한다.
 - 런타임 repair는 preview와 apply를 분리하며, preview만으로 프로세스를 시작하지 않는다.
 - Host Vision 요청은 `runtime_artifacts/host_vision/`의 exact-schema queue만
@@ -2023,3 +2026,25 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - memory 292개(skip 1), core 736개(skip 1), runtime 771개(skip 4)와 CI-equivalent
   전체 3,123개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
   Docker 서비스는 사용하거나 변경하지 않았다.
+
+## 2026-08-08 Minecraft local planner와 Codex 실행 경계
+
+- 기본 Mindcraft profile의 conversation·code model은 local
+  `Qwen3-14B-Q4_K_M.gguf`, embedding은 local hash다. 전략 subgoal, router,
+  recovery와 utility도 `MINDCRAFT_CODEX_ENABLED=false`일 때 local 경로를 유지한다.
+- 기본 `voyager` Compose profile과 launcher에서 Codex dependency, token mount와
+  credential preflight를 제거했다. legacy Voyager runner도 backend 기본값 `local`을
+  따르며 Python client는 HTTP health나 spawn 전에 반환한다.
+- Mindcraft Codex adapter는 enable gate를 token read·fetch보다 먼저 검사한다. transient
+  local memory-summary 실패는 기존 summary를 반환해 잘라낸 history chunk를 계속
+  archive하고, classifier 실패는 exact `ignore`로 닫는다.
+- 선택적 `codex-gateway` profile만 `auth.json` 단일 read-only mount와 빈 `/workspace`를
+  사용한다. custom shell·host-native gateway는 제거했다. pinned image에서 tool registry와
+  secret canary가 검증되기 전에는 `toolAccessVerified=false`, `backendReady=false`, action
+  503, subprocess 0을 유지한다. HTTP 200만으로 Runtime Health ready가 되지 않는다.
+- 이는 source·합성 회귀 증거다. 이번 변경에서 Docker image를 rebuild하거나 Minecraft,
+  Codex CLI, 계정 로그인과 실제 world action을 실행하지 않았다.
+- 관련 집중 157개(skip 10), 별도 local-backend zero-call 회귀, CI-equivalent 전체
+  3,136개(skip 22), JavaScript·PowerShell·JSON 구문과 overlay patch 적용 검사가
+  통과했다. Node 행동 suite는 다음 Mindcraft image build의 blocking gate로 연결했지만
+  이번에는 image build를 실행하지 않았다.

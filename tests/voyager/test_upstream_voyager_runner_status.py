@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -17,9 +18,36 @@ from evelyn_core.upstream_voyager_runner import (  # noqa: E402
     _copy_task_status_from_voyager,
     _derive_last_success,
 )
+from evelyn_core import upstream_voyager_runner as runner  # noqa: E402
 
 
 class UpstreamVoyagerRunnerStatusTests(unittest.TestCase):
+    def test_local_action_backend_never_selects_codex_gateway(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeVoyager:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        with (
+            patch.dict(sys.modules, {"voyager": SimpleNamespace(Voyager=FakeVoyager)}),
+            patch.object(runner, "VOYAGER_ACTION_BACKEND", "local"),
+            patch.object(runner, "MINDCRAFT_LOCAL_MODEL", "local-model"),
+            patch.object(
+                runner,
+                "MINDCRAFT_LOCAL_LLM_URL",
+                "http://127.0.0.1:9823/v1/chat/completions",
+            ),
+            patch.object(runner, "inspect_resume_checkpoint", return_value={}),
+        ):
+            runner.build_voyager("survive")
+
+        self.assertEqual(captured["action_agent_model_name"], "local-model")
+        self.assertEqual(
+            captured["action_agent_llm_url"],
+            "http://127.0.0.1:9823/v1/chat/completions",
+        )
+
     def test_derive_last_success_prefers_explicit_top_level_value(self) -> None:
         self.assertFalse(
             _derive_last_success(

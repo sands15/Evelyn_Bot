@@ -11,6 +11,8 @@ import {
     parseRecoveryPlan,
     validateActionResponse,
 } from '/app/mindcraft/src/models/evelyn_planner.js';
+import { CodexGateway } from '/app/mindcraft/src/models/codex_gateway.js';
+import { Prompter } from '/app/mindcraft/src/models/prompter.js';
 
 const ACTION_SYSTEM = [
     'Available documented commands:',
@@ -130,6 +132,7 @@ test('subgoal candidate parser accepts strict JSON and caps the candidate count'
 
 test('strategic subgoal escalation uses one Codex JSON proposal', async () => {
     const planner = new EvelynPlanner();
+    planner.codexEnabled = true;
     let calls = 0;
     planner.lastCodexAt = 0;
     planner.codex.sendPrompt = async (_prompt, label) => {
@@ -151,6 +154,36 @@ test('strategic subgoal escalation uses one Codex JSON proposal', async () => {
     });
     assert.equal(calls, 1);
     assert.equal(result[0].id, 'obtain_blaze_rods');
+});
+
+test('Codex is disabled before token lookup or network access by default', async () => {
+    const previous = process.env.MINDCRAFT_CODEX_ENABLED;
+    const previousFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    delete process.env.MINDCRAFT_CODEX_ENABLED;
+    globalThis.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error('network must not be reached');
+    };
+    try {
+        await assert.rejects(
+            new CodexGateway().sendPrompt('untrusted chat'),
+            /mindcraft_codex_disabled/
+        );
+        assert.equal(fetchCalls, 0);
+
+        const planner = new EvelynPlanner();
+        planner.codex.sendPrompt = async () => {
+            throw new Error('Codex must not be called');
+        };
+        planner.proposeSubgoals = async () => [{id: 'local_subgoal'}];
+        assert.equal(await planner.chooseRoute([{role: 'user', content: 'complex strategy'}]), 'local');
+        assert.equal((await planner.proposeStrategicSubgoals({}))[0].id, 'local_subgoal');
+    } finally {
+        globalThis.fetch = previousFetch;
+        if (previous === undefined) delete process.env.MINDCRAFT_CODEX_ENABLED;
+        else process.env.MINDCRAFT_CODEX_ENABLED = previous;
+    }
 });
 
 test('repeated failed action families force escalation', () => {
@@ -278,6 +311,68 @@ test('simple action bypasses Router and uses local Qwen directly', async () => {
     assert.equal(routerCalls, 0);
 });
 
+test('local utility failures preserve memory and ignore bot chatter', async () => {
+    const planner = new EvelynPlanner();
+    planner.codexEnabled = true;
+    let codexCalls = 0;
+    planner.codex.sendRequest = async () => {
+        codexCalls += 1;
+        return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
+    };
+    planner.requestLocal = async () => {
+        throw new Error('local unavailable');
+    };
+
+    await assert.rejects(
+        planner.sendRequest([], 'Update your memory by summarizing and respond only with the unwrapped memory text'),
+        /mindcraft_memory_summary_unavailable/
+    );
+    assert.equal(
+        await planner.sendRequest([], "Decide by outputting only 'respond' or 'ignore'"),
+        'ignore'
+    );
+    assert.equal(codexCalls, 0);
+
+    const prompter = Object.create(Prompter.prototype);
+    prompter.agent = {history: {memory: 'keep-me'}};
+    prompter.profile = {saving_memory: 'save'};
+    prompter.chat_model = {sendRequest: async () => { throw new Error('local unavailable'); }};
+    prompter.checkCooldown = async () => {};
+    prompter.replaceStrings = async () => 'save';
+    prompter._saveLog = async () => {};
+    assert.equal(await prompter.promptMemSaving([]), 'keep-me');
+});
+
+test('policy-violating memory summaries keep the previous summary', async () => {
+    const previousFetch = globalThis.fetch;
+    const planner = new EvelynPlanner();
+    planner.codexEnabled = true;
+    let codexCalls = 0;
+    planner.codex.sendRequest = async () => {
+        codexCalls += 1;
+        return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
+    };
+    globalThis.fetch = async () => ({
+        ok: true,
+        json: async () => ({
+            choices: [{message: {content: 'Never run /kill while remembering this turn.'}}]
+        })
+    });
+    try {
+        const prompter = Object.create(Prompter.prototype);
+        prompter.agent = {history: {memory: 'keep-me'}};
+        prompter.profile = {saving_memory: 'Update your memory by summarizing'};
+        prompter.chat_model = planner;
+        prompter.checkCooldown = async () => {};
+        prompter.replaceStrings = async () => 'Update your memory by summarizing';
+        prompter._saveLog = async () => {};
+        assert.equal(await prompter.promptMemSaving([]), 'keep-me');
+        assert.equal(codexCalls, 0);
+    } finally {
+        globalThis.fetch = previousFetch;
+    }
+});
+
 test('self-prompt action mode remains active across query-command followups', async () => {
     const planner = new EvelynPlanner();
     planner.requestLocal = async (_turns, _system, _stop, kind) => {
@@ -323,6 +418,7 @@ test('stuck action requests one Codex plan and lets Qwen execute its first step'
     const fixture = goalPolicyFixture();
     try {
     const planner = new EvelynPlanner();
+    planner.codexEnabled = true;
     let codexCalls = 0;
     planner.codex.sendPrompt = async () => {
         codexCalls += 1;
@@ -355,6 +451,7 @@ test('failed Codex recovery enters cooldown instead of retrying every planner ti
     const fixture = goalPolicyFixture();
     try {
     const planner = new EvelynPlanner();
+    planner.codexEnabled = true;
     let codexCalls = 0;
     planner.codex.sendPrompt = async () => {
         codexCalls += 1;

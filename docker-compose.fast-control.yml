@@ -609,7 +609,7 @@ services:
 
   codex_gateway:
     container_name: evelyn-codex-gateway
-    profiles: ["voyager"]
+    profiles: ["codex-gateway"]
     build:
       context: .
       dockerfile: docker/Dockerfile.voyager
@@ -619,10 +619,15 @@ services:
       VOYAGER_CODEX_GATEWAY_PORT: "8787"
       VOYAGER_CODEX_MODEL: "gpt-5.5"
       VOYAGER_CODEX_GATEWAY_BACKEND: "codex-exec"
-      VOYAGER_CODEX_GATEWAY_WORKDIR: "/app"
+      VOYAGER_CODEX_GATEWAY_WORKDIR: "/workspace"
+      VOYAGER_CODEX_GATEWAY_TOKEN_FILE: "/gateway-token/codex_gateway.token"
       EVELYN_ALLOW_CUSTOM_GATEWAY_COMMAND: "false"
+      EVELYN_CODEX_GATEWAY_ISOLATED_RUNTIME: "true"
+      EVELYN_CODEX_GATEWAY_TOOLLESS_RUNTIME_VERIFIED: "false"
       EVELYN_CODEX_CREDENTIALS_DIR: "/run/secrets/evelyn-codex"
+      EVELYN_RUNTIME_ARTIFACTS_DIR: "/gateway-state"
       CODEX_HOME: "/tmp/evelyn-codex-home"
+      HOME: "/tmp/evelyn-codex-home"
       EVELYN_PROJECT_ROOT: /app
       EVELYN_CORE_ROOT: /app/evelyn_core
       EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
@@ -633,15 +638,16 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp/evelyn-codex-home:mode=0700,uid=0,gid=0
+      - /workspace:mode=0700,uid=0,gid=0
+      - /gateway-state:mode=0700,uid=0,gid=0
     volumes:
-      - ./runtime_artifacts:/app/runtime_artifacts
-      - ./logs:/app/logs
-      - ${EVELYN_CODEX_CREDENTIALS_DIR:-./runtime_artifacts/secrets/codex_device_home}:/run/secrets/evelyn-codex:ro
+      - ${EVELYN_CODEX_CREDENTIALS_DIR:-./runtime_artifacts/secrets/codex_device_home}/auth.json:/run/secrets/evelyn-codex/auth.json:ro
+      - codex_gateway_token:/gateway-token
     ports:
       - "127.0.0.1:8787:8787"
     command: ["python", "-m", "evelyn_core.codex_gateway_server", "--host", "0.0.0.0", "--port", "8787"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') else 1)"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') and payload.get('backendReady') and payload.get('isolatedRuntime') and payload.get('toolAccessVerified') else 1)"]
       interval: 20s
       timeout: 8s
       retries: 8
@@ -660,10 +666,7 @@ services:
       MINDCRAFT_ROOT: "/app/mindcraft"
       MINDCRAFT_AGENT_PROFILE: "/app/mindcraft/profiles/evelyn.json"
       MINDCRAFT_STATUS_PATH: "/app/runtime_artifacts/mindcraft/status.json"
-      MINDCRAFT_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
-      MINDCRAFT_CODEX_MODEL: "gpt-5.5"
-      MINDCRAFT_CODEX_TIMEOUT_SEC: "240"
-      MINDCRAFT_CODEX_COOLDOWN_SEC: "30"
+      MINDCRAFT_CODEX_ENABLED: "false"
       MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"
       MINDCRAFT_GOAL_MANAGER_STATE_PATH: "/app/runtime_artifacts/mindcraft/goal_manager_state.json"
       MINDCRAFT_GOAL_MANAGER_MODE: "gated"
@@ -684,7 +687,6 @@ services:
       MINECRAFT_USERNAME: "${MINEFLAYER_USERNAME:-Evelyn_0428}"
       MINEFLAYER_PROFILES_FOLDER: "/app/bot_profiles"
       MINDCRAFT_ENABLE_SKIN_COMMANDS: "false"
-      VOYAGER_CODEX_GATEWAY_TOKEN_FILE: "/app/runtime_artifacts/secrets/codex_gateway.token"
       EVELYN_PROJECT_ROOT: /app
       EVELYN_CORE_ROOT: /app/evelyn_core
       EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
@@ -694,8 +696,6 @@ services:
       router_llm:
         condition: service_healthy
       minecraft_llm:
-        condition: service_healthy
-      codex_gateway:
         condition: service_healthy
     volumes:
       - ./bot_memory/mindcraft:/app/mindcraft/bots/Evelyn_0428
@@ -711,6 +711,9 @@ services:
       timeout: 8s
       retries: 8
       start_period: 20s
+
+volumes:
+  codex_gateway_token:
 
 networks:
   vision_isolated:

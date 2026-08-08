@@ -270,6 +270,11 @@ CODEX_GATEWAY_SETTINGS = (
         kind="bool",
         default=False,
     ),
+    SettingSpec(
+        "EVELYN_CODEX_GATEWAY_TOOLLESS_RUNTIME_VERIFIED",
+        kind="bool",
+        default=False,
+    ),
     SettingSpec("EVELYN_CODEX_CREDENTIALS_DIR", kind="path", default=None),
     SettingSpec("CODEX_HOME", kind="path", default=None),
 )
@@ -310,6 +315,7 @@ MINDCRAFT_SERVICE_SETTINGS = (
     ),
     SettingSpec("MINDCRAFT_LOCAL_MODEL", default="Qwen3-14B-Q4_K_M.gguf"),
     SettingSpec("MINDCRAFT_ROUTER_MODEL", default="gemma-4-E2B-it-Q4_K_M.gguf"),
+    SettingSpec("MINDCRAFT_CODEX_ENABLED", kind="bool", default=False),
     SettingSpec("MINDCRAFT_CODEX_MODEL", default="gpt-5.5"),
     SettingSpec(
         "MINDCRAFT_CODEX_GATEWAY_URL",

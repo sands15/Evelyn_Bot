@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -10,13 +9,12 @@ import subprocess
 
 import aiohttp
 
-from .config import VOYAGER_CODEX_GATEWAY_PORT, VOYAGER_CODEX_GATEWAY_PYTHON_EXE, VOYAGER_CODEX_GATEWAY_URL
+from .config import VOYAGER_CODEX_GATEWAY_PORT, VOYAGER_CODEX_GATEWAY_URL
 from .paths import get_repo_root
 
 
 REPO_ROOT = get_repo_root()
 START_GATEWAY_PS1 = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_codex_gateway.ps1"
-START_GATEWAY_BAT = REPO_ROOT / "evelyn_core" / "start_codex_gateway.bat"
 
 
 class CodexGatewayClient:
@@ -31,7 +29,6 @@ class CodexGatewayClient:
         self._log_handle = None
         self._startup_lock = asyncio.Lock()
         self._cwd = REPO_ROOT
-        self._python_exe = self._resolve_python_exe()
         self._launcher_env = os.environ.copy()
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -71,7 +68,12 @@ class CodexGatewayClient:
 
     async def is_alive(self) -> bool:
         status = await self.health()
-        return bool(status.get("alive"))
+        return bool(
+            status.get("alive")
+            and status.get("backendReady")
+            and status.get("isolatedRuntime")
+            and status.get("toolAccessVerified")
+        )
 
     async def ensure_service(self, timeout_sec: float = 15.0) -> None:
         if await self.is_alive():
@@ -85,16 +87,10 @@ class CodexGatewayClient:
             while loop.time() < deadline:
                 if await self.is_alive():
                     return
-                if self._proc is not None and self._proc.returncode is not None:
-                    raise RuntimeError(f"Codex gateway exited early with code {self._proc.returncode}")
+                if self._proc is not None and self._proc.returncode not in (None, 0):
+                    raise RuntimeError("codex_gateway_isolated_runtime_failed")
                 await asyncio.sleep(0.25)
             raise RuntimeError("Codex gateway did not become ready in time")
-
-    def _resolve_python_exe(self) -> str:
-        configured = Path(str(VOYAGER_CODEX_GATEWAY_PYTHON_EXE or "")).expanduser()
-        if configured.exists():
-            return str(configured)
-        return sys.executable
 
     async def _spawn_service_process(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
@@ -103,36 +99,23 @@ class CodexGatewayClient:
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         env = self._launcher_env.copy()
-        env["VOYAGER_CODEX_GATEWAY_PYTHON_EXE"] = self._python_exe
         env.setdefault("VOYAGER_CODEX_GATEWAY_HOST", self.host)
         env.setdefault("VOYAGER_CODEX_GATEWAY_PORT", str(self.port))
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
-        if os.name == "nt" and START_GATEWAY_PS1.exists():
-            self._proc = await asyncio.create_subprocess_exec(
-                "powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(START_GATEWAY_PS1),
-                cwd=str(self._cwd),
-                env=env,
-                creationflags=creationflags,
-            )
-            return
+        if os.name != "nt" or not START_GATEWAY_PS1.exists():
+            raise RuntimeError("codex_gateway_isolated_runtime_required")
         self._proc = await asyncio.create_subprocess_exec(
-            self._python_exe,
-            "-m",
-            "evelyn_core.codex_gateway_server",
-            "--host",
-            self.host,
-            "--port",
-            str(self.port),
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(START_GATEWAY_PS1),
             cwd=str(self._cwd),
             env=env,
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
+            creationflags=creationflags,
         )
 
     async def close(self) -> None:

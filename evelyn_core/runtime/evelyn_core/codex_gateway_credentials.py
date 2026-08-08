@@ -46,9 +46,7 @@ def stage_codex_credentials(
     if source == target:
         raise RuntimeError("codex_credentials_source_matches_target")
     auth_source = source / "auth.json"
-    config_source = source / "config.toml"
     _safe_file(auth_source, required=True)
-    has_config = _safe_file(config_source, required=False)
     try:
         auth_payload = json.loads(auth_source.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -71,17 +69,14 @@ def stage_codex_credentials(
         pass
     marker.write_text("ephemeral\n", encoding="utf-8")
     _copy_secret(auth_source, target / "auth.json")
-    if has_config:
-        _copy_secret(config_source, target / "config.toml")
-    else:
-        stale_config = target / "config.toml"
-        if stale_config.exists() and stale_config.is_file():
-            stale_config.unlink()
+    stale_config = target / "config.toml"
+    if stale_config.exists() and stale_config.is_file():
+        stale_config.unlink()
     return {
         "ready": True,
         "mode": "ephemeral-copy",
         "authPresent": True,
-        "configPresent": has_config,
+        "configPresent": False,
     }
 
 

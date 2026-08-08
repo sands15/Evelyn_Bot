@@ -76,6 +76,22 @@ class ServiceManifestTests(unittest.TestCase):
             },
         )
 
+    def test_codex_health_requires_the_verified_tool_boundary(self) -> None:
+        manifest = load_service_manifest(force=True)
+        service = get_service(manifest, "codex_gateway")
+
+        self.assertIsNotNone(service)
+        assert service is not None
+        health = next(check for check in service.checks if check.kind == "http")
+        self.assertEqual(
+            health.expect_json,
+            {
+                "backendReady": True,
+                "isolatedRuntime": True,
+                "toolAccessVerified": True,
+            },
+        )
+
     def test_environment_override_is_reflected_in_effective_port(self) -> None:
         original = os.environ.get("CONTROL_PAGE_BOT_API_PORT")
         os.environ["CONTROL_PAGE_BOT_API_PORT"] = "18098"

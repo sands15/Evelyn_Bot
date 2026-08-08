@@ -1,40 +1,40 @@
 # CURRENT_EVELYN_ARCHITECTURE.md
 
-Status note, 2026-06-01:
+Status note, 2026-08-08:
 
-- This file is the current Minecraft/Voyager architecture snapshot.
+- This file is the current Minecraft/Mindcraft architecture snapshot plus the
+  legacy Voyager compatibility path.
 - It is not the authoritative full Evelyn assistant voice/LLM pipeline map.
 - For the current assistant pipeline, router/main/sub LLM conditions,
   `VoiceTurnOrchestrator`, route policy, delivery, and memory write-behind, see
   `CURRENT_EVELYN_PIPELINE.md`.
 - For documentation status, see `docs/DOCUMENTATION_INDEX.md`.
 
-Last updated: 2026-07-30
+Last updated: 2026-08-08
 Branch baseline: `structural-change`
 
 ## 1. High-level shape
 
 Evelyn의 현재 Minecraft autonomy stack은 **하나의 봇 프로세스**가 아니라 **3층 브리지 구조**다.
 
-1. **Action adapter layer**
-   - Upstream Voyager `ActionAgent`
-   - `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`
-   - Codex CLI / configured action backend
-   - Primary port: `8787`
+1. **Local action-planning layer**
+   - `external/mindcraft_evelyn/src/models/evelyn_planner.js`
+   - local Minecraft Qwen endpoint and shared local router
+   - optional Codex adapter is default-off and not part of normal startup
 
-2. **Voyager orchestration layer**
-   - `evelyn_core/runtime/evelyn_core/voyager_service.py`
-   - `evelyn_core/runtime/evelyn_core/upstream_voyager_runner.py`
-   - Upstream runtime in `third_party/Voyager`
+2. **Mindcraft orchestration layer**
+   - `evelyn_core/runtime/evelyn_core/mindcraft_service.py`
+   - pinned `external/mindcraft` plus `external/mindcraft_evelyn` overlay
    - Primary port: `8765`
 
 3. **Minecraft control plane**
-   - Upstream Voyager env -> mineflayer HTTP bridge
+   - Mindcraft child -> Mineflayer
    - Minecraft server / bot session
-   - Primary ports: `3000` (bridge), `25565` (Minecraft server)
+   - Primary port: `25565`
 
 핵심은 **세 레이어가 독립적으로 고장날 수 있다**는 점이다.  
-Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, runner가 살아 있어도 Minecraft control plane이 정상이라는 뜻은 아니다.
+HTTP service가 살아 있어도 local planner나 Minecraft control plane이 functional-ready라는
+뜻은 아니다. Optional Codex health도 기본 Mindcraft readiness를 대신하지 않는다.
 
 ## 2. Current startup / runtime flow
 
@@ -47,23 +47,25 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
   `evelyn_core/runtime/launchers/start_voyager_task.ps1` (fails closed and
   directs the operator to an authorized lease entry point)
 
-### Runtime sequence
+### Active Compose runtime sequence
 
-1. Visible launcher starts the Voyager service host.
-2. `voyager_service.py` opens the HTTP control surface on `8765`.
+1. Visible launcher starts `router_llm`, `minecraft_llm`, and Compose service
+   `voyager` only.
+2. `mindcraft_service.py` opens the HTTP control surface on `8765`.
 3. An authorized Discord or monolithic Control Page action issues a
    process-owned world lease.
-4. `/start` accepts only an exact proof of that fresh lease, then spawns
-   `upstream_voyager_runner.py` in the Voyager venv.
-5. The runner boots upstream Voyager from `third_party/Voyager`.
-6. Voyager action generation routes through the Codex gateway.
-7. Voyager executes against the mineflayer bridge / Minecraft runtime.
-8. Runner writes status to `runtime_artifacts/voyager/upstream_bridge_status.json`.
-9. Service serves `/health`, `/status`, and `/observe` from runner state plus live bridge telemetry.
+4. `/start` accepts only an exact proof of that fresh lease, then starts the
+   Mindcraft child.
+5. Mindcraft uses local Qwen for conversation, code requests, planning and
+   recovery; hash embedding stays local.
+6. Mineflayer connects to the authorized Minecraft world and executes only the
+   gated normal-player command set.
+7. Service serves `/health`, `/status`, and `/observe` from fresh child and
+   world telemetry.
 
-The active Compose runtime has migrated to Mindcraft; see
-`docs/MINDCRAFT_MIGRATION.md`. Both Mindcraft and this legacy Voyager service
-apply the same lease proof and service-side stale-heartbeat stop contract.
+The legacy `voyager_service.py` + `upstream_voyager_runner.py` path remains a
+compatibility implementation and also defaults to the local action model. Both
+paths apply the same lease proof and service-side stale-heartbeat stop contract.
 
 ## 3. Core local ownership boundaries
 
@@ -71,11 +73,13 @@ apply the same lease proof and service-side stale-heartbeat stop contract.
 
 - `evelyn_core/runtime/evelyn_core/voyager_service.py`
 - `evelyn_core/runtime/evelyn_core/upstream_voyager_runner.py`
+- `evelyn_core/runtime/evelyn_core/mindcraft_service.py`
 - `evelyn_core/runtime/evelyn_core/minecraft_autonomy_client.py`
 - `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`
+- `external/mindcraft_evelyn/`
 - `main.py` (status merge / bot-facing integration)
 
-### Upstream Voyager files still in the live runtime contract
+### Legacy Voyager compatibility files
 
 - `third_party/Voyager/voyager/voyager.py`
 - `third_party/Voyager/voyager/agents/action.py`
@@ -83,12 +87,14 @@ apply the same lease proof and service-side stale-heartbeat stop contract.
 - `third_party/Voyager/voyager/agents/curriculum.py`
 - `third_party/Voyager/voyager/utils/record_utils.py`
 
-즉, 지금 구조에서는 upstream 쪽 파일도 단순 vendor reference가 아니라 **실운영 contract 일부**다.
+이 파일들은 default Compose Mindcraft path가 아니라 legacy compatibility contract다.
 
 ## 4. State and checkpoint files
 
 ### Live status / logs
 
+- `runtime_artifacts/mindcraft/status.json`
+- `bot_memory/mindcraft/`
 - `runtime_artifacts/voyager/upstream_bridge_status.json`
 - `runtime_artifacts/logs/upstream_bridge_errors.log`
 - `runtime_artifacts/logs/voyager_service_errors.log`
@@ -108,7 +114,10 @@ apply the same lease proof and service-side stale-heartbeat stop contract.
 
 ### What is already working
 
-- Codex gateway request path is live.
+- Local Minecraft planning and action generation remain available without the
+  Codex gateway.
+- The optional Codex gateway is Docker-only, default-off, and reports not ready
+  without an explicit tool-access verification gate.
 - Voyager service/runner can reach the Minecraft runtime.
 - Observation flow (inventory / position / health / hunger) has been seen live.
 - Generated in-world action execution has at least one confirmed success trace.

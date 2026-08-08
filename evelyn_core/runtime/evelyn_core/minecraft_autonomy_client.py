@@ -17,7 +17,6 @@ from .config import (
     MINECRAFT_AUTONOMY_SERVICE_PORT,
     VOYAGER_ACTION_BACKEND,
     VOYAGER_CODEX_GATEWAY_PORT,
-    VOYAGER_CODEX_GATEWAY_PYTHON_EXE,
     VOYAGER_PYTHON_EXE,
 )
 from .paths import get_repo_root, get_runtime_artifacts_root
@@ -47,7 +46,6 @@ class MinecraftAutonomyClient:
         self._startup_lock = asyncio.Lock()
         self._gateway_startup_lock = asyncio.Lock()
         self._python_exe = self._resolve_python_exe()
-        self._gateway_python_exe = self._resolve_gateway_python_exe()
         self._startup_lock_path = Path(self._cwd) / ".voyager_service.start.lock"
         self._goal_state_path = get_runtime_artifacts_root() / "voyager" / "voyager_goal_state.json"
         self._launcher_env = os.environ.copy()
@@ -179,12 +177,6 @@ class MinecraftAutonomyClient:
             return str(configured)
         return sys.executable
 
-    def _resolve_gateway_python_exe(self) -> str:
-        configured = Path(str(VOYAGER_CODEX_GATEWAY_PYTHON_EXE or "")).expanduser()
-        if configured.exists():
-            return str(configured)
-        return self._python_exe
-
     def _iter_existing_service_processes(self):
         wanted_port = int(self.port)
         seen_pids: set[int] = set()
@@ -314,7 +306,14 @@ class MinecraftAutonomyClient:
             session = await self._get_session()
             timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_sec)))
             async with session.get(gateway_url, timeout=timeout) as resp:
-                return resp.status == 200
+                payload = await resp.json(content_type=None)
+                return bool(
+                    resp.status == 200
+                    and isinstance(payload, dict)
+                    and payload.get("backendReady")
+                    and payload.get("isolatedRuntime")
+                    and payload.get("toolAccessVerified")
+                )
         except Exception:
             return False
 
@@ -325,32 +324,19 @@ class MinecraftAutonomyClient:
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         env = self._launcher_env.copy()
-        env["VOYAGER_CODEX_GATEWAY_PYTHON_EXE"] = self._gateway_python_exe
         env.setdefault("VOYAGER_CODEX_GATEWAY_PORT", str(int(VOYAGER_CODEX_GATEWAY_PORT)))
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
-        if os.name == "nt" and START_CODEX_GATEWAY_PS1.exists():
-            self._gateway_proc = await asyncio.create_subprocess_exec(
-                "powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(START_CODEX_GATEWAY_PS1),
-                cwd=self._cwd,
-                env=env,
-                creationflags=creationflags,
-            )
-            return
+        if os.name != "nt" or not START_CODEX_GATEWAY_PS1.exists():
+            raise RuntimeError("codex_gateway_isolated_runtime_required")
         self._gateway_proc = await asyncio.create_subprocess_exec(
-            self._gateway_python_exe,
-            "-m",
-            "evelyn_core.codex_gateway_server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(int(VOYAGER_CODEX_GATEWAY_PORT)),
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(START_CODEX_GATEWAY_PS1),
             cwd=self._cwd,
             env=env,
             creationflags=creationflags,
@@ -370,8 +356,8 @@ class MinecraftAutonomyClient:
             while loop.time() < deadline:
                 if await self.is_codex_gateway_alive():
                     return
-                if self._gateway_proc is not None and self._gateway_proc.returncode is not None:
-                    raise RuntimeError(f"Codex gateway exited early with code {self._gateway_proc.returncode}")
+                if self._gateway_proc is not None and self._gateway_proc.returncode not in (None, 0):
+                    raise RuntimeError("codex_gateway_isolated_runtime_failed")
                 await asyncio.sleep(0.25)
             raise RuntimeError("Codex gateway did not become ready in time")
 

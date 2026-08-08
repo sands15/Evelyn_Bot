@@ -629,9 +629,9 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         )
         self.assertEqual(
             profile["code_model"],
-            {"api": "codex-gateway", "model": "gpt-5.5"},
+            {"api": "evelyn-planner", "model": "Qwen3-14B-Q4_K_M.gguf"},
         )
-        self.assertEqual(profile["embedding"], {"api": "codex-gateway", "model": "hash-v1"})
+        self.assertEqual(profile["embedding"], {"api": "evelyn-planner", "model": "hash-v1"})
         self.assertTrue(profile["modes"]["evelyn_survival"])
         self.assertFalse(profile["modes"]["cowardice"])
         self.assertFalse(profile["modes"]["self_defense"])
@@ -718,12 +718,24 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("mindcraft-planner", source)
         self.assertIn("gpt-5.5", source)
 
-    def test_hybrid_planner_routes_between_local_qwen_and_codex(self) -> None:
+    def test_planner_defaults_to_local_qwen_and_gates_codex(self) -> None:
         source = (
             REPO_ROOT / "external" / "mindcraft_evelyn" / "src" / "models" / "evelyn_planner.js"
         ).read_text(encoding="utf-8")
 
         self.assertIn("static prefix = 'evelyn-planner'", source)
+        self.assertIn("MINDCRAFT_CODEX_ENABLED", source)
+        self.assertIn("if (!this.codexEnabled) return 'local'", source)
+        self.assertIn(
+            "if (kind === 'memory') throw new Error('mindcraft_memory_summary_unavailable');\n"
+            "            if (kind === 'classifier') return 'ignore';\n"
+            "            if (this.codexEnabled) return this.codex.sendRequest(turns, systemMessage);",
+            source,
+        )
+        self.assertIn(
+            "if (kind === 'memory' && content === '!stop')",
+            source,
+        )
         self.assertIn("http://router_llm:9822/v1/chat/completions", source)
         self.assertIn("http://minecraft_llm:9823/v1/chat/completions", source)
         self.assertIn("Qwen3-14B-Q4_K_M.gguf", source)
@@ -741,6 +753,13 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("proposeSubgoals", source)
         self.assertIn("parseSubgoalCandidates", source)
         self.assertIn("['BlockName', 'ItemName', 'BlockOrItemName']", source)
+        dockerfile = (
+            REPO_ROOT / "docker" / "Dockerfile.mindcraft"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "RUN node --test /app/mindcraft/tests/evelyn_planner.test.mjs",
+            dockerfile,
+        )
 
     def test_goal_manager_overlay_and_container_contract(self) -> None:
         manager_source = (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import unittest
 from pathlib import Path
 from typing import Any
@@ -413,6 +414,8 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         )
 
         public = public_runtime_health_snapshot(health)
+        self.assertFalse(public["legacyServices"]["codexRequired"])
+        self.assertEqual(public["legacyServices"]["codexBackend"], "local")
         voyager = next(
             service
             for service in public["services"]
@@ -464,6 +467,9 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health["legacyServices"]["subReady"])
         self.assertTrue(health["legacyServices"]["ttsReady"])
         self.assertTrue(health["legacyServices"]["sttReady"])
+        self.assertFalse(health["legacyServices"]["codexRequired"])
+        self.assertEqual(health["legacyServices"]["codexBackend"], "local")
+        self.assertNotIn("codex_gateway", {item["id"] for item in health["services"]})
         self.assertEqual(health["legacyServices"]["summary"], "Control-Page and Evelyn runtime are ready.")
 
     async def test_legacy_summary_uses_operator_facing_language(self) -> None:
@@ -543,19 +549,40 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_codex_gateway_action_failure_is_warning_diagnostic(self) -> None:
         manifest = load_service_manifest(force=True)
-        health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"codex_gateway": "action_failed"}))
+        with patch.dict(os.environ, {"VOYAGER_ACTION_BACKEND": "codex-gateway"}):
+            health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"codex_gateway": "action_failed"}))
         services = {service["id"]: service for service in health["services"]}
         codes = {diagnostic["code"] for diagnostic in health["diagnostics"]}
 
         self.assertTrue(services["codex_gateway"]["ready"])
         self.assertIn("CODEX_GATEWAY_ACTION_FAILED", codes)
 
+    async def test_mindcraft_codex_opt_in_requires_the_gateway(self) -> None:
+        manifest = load_service_manifest(force=True)
+        with patch.dict(
+            os.environ,
+            {
+                "VOYAGER_ACTION_BACKEND": "local",
+                "MINDCRAFT_CODEX_ENABLED": "true",
+            },
+        ):
+            health = await collect_runtime_health(
+                manifest=manifest,
+                probe_runner=fake_probe({"codex_gateway": "down"}),
+            )
+        services = {service["id"]: service for service in health["services"]}
+
+        self.assertIn("codex_gateway", services)
+        self.assertEqual(services["codex_gateway"]["state"], "down")
+        self.assertTrue(health["legacyServices"]["codexRequired"])
+
     async def test_optional_voyager_stack_failures_are_warning_diagnostics(self) -> None:
         manifest = load_service_manifest(force=True)
-        health = await collect_runtime_health(
-            manifest=manifest,
-            probe_runner=fake_probe({"voyager": "down", "codex_gateway": "down"}),
-        )
+        with patch.dict(os.environ, {"VOYAGER_ACTION_BACKEND": "codex-gateway"}):
+            health = await collect_runtime_health(
+                manifest=manifest,
+                probe_runner=fake_probe({"voyager": "down", "codex_gateway": "down"}),
+            )
         services = {service["id"]: service for service in health["services"]}
         diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
 
@@ -567,7 +594,7 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Minecraft autonomy", diagnostics["VOYAGER_DOWN"]["message"])
         self.assertIn("Voyager code execution", diagnostics["CODEX_GATEWAY_DOWN"]["message"])
         self.assertEqual(diagnostics["VOYAGER_DOWN"]["suggestedActions"][0]["id"], "start_voyager")
-        self.assertEqual(diagnostics["CODEX_GATEWAY_DOWN"]["suggestedActions"][0]["id"], "start_codex_gateway")
+        self.assertEqual(diagnostics["CODEX_GATEWAY_DOWN"]["suggestedActions"], [])
 
     async def test_voyager_status_contract_unverified_is_warning_diagnostic(self) -> None:
         manifest = load_service_manifest(force=True)

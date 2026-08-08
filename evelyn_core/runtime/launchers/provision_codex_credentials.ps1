@@ -1,8 +1,6 @@
 param(
     [string]$SourceAuthFile = '',
-    [string]$SourceConfigFile = '',
-    [string]$Destination = '',
-    [switch]$IncludeConfig
+    [string]$Destination = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,36 +53,13 @@ try {
     throw 'Codex auth.json is not valid JSON.'
 }
 
-$configSource = ''
-if ($IncludeConfig) {
-    $configSource = if ($SourceConfigFile) {
-        [System.IO.Path]::GetFullPath($SourceConfigFile)
-    } elseif ($env:EVELYN_CODEX_CONFIG_FILE) {
-        [System.IO.Path]::GetFullPath($env:EVELYN_CODEX_CONFIG_FILE)
-    } else {
-        Join-Path $env:USERPROFILE '.codex\config.toml'
-    }
-    if (-not (Test-Path -LiteralPath $configSource -PathType Leaf)) {
-        throw 'Codex config.toml source is missing.'
-    }
-    if ((Get-Item -LiteralPath $configSource).Length -gt 1MB) {
-        throw 'Codex config.toml exceeds the 1 MiB safety limit.'
-    }
-}
-
 New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
 Copy-Item -LiteralPath $authSource -Destination (
     Join-Path $destinationPath 'auth.json'
 ) -Force
-if ($IncludeConfig) {
-    Copy-Item -LiteralPath $configSource -Destination (
-        Join-Path $destinationPath 'config.toml'
-    ) -Force
-} else {
-    $staleConfig = Join-Path $destinationPath 'config.toml'
-    if (Test-Path -LiteralPath $staleConfig -PathType Leaf) {
-        Remove-Item -LiteralPath $staleConfig -Force
-    }
+$staleConfig = Join-Path $destinationPath 'config.toml'
+if (Test-Path -LiteralPath $staleConfig -PathType Leaf) {
+    Remove-Item -LiteralPath $staleConfig -Force
 }
 
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -116,7 +91,4 @@ Get-ChildItem -LiteralPath $destinationPath -File |
 
 Write-Output '[Evelyn] Dedicated Codex credentials are provisioned.'
 Write-Output "[Evelyn] Directory: $destinationPath"
-Write-Output (
-    '[Evelyn] config.toml copied: ' +
-    $(if ($IncludeConfig) { 'yes' } else { 'no' })
-)
+Write-Output '[Evelyn] config.toml copied: no'

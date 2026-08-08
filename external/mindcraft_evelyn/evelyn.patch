@@ -194,6 +194,35 @@ index 2e57ada..213ca6b 100644
          }
          if (prompt.includes('$LAST_GOALS')) {
              let goal_text = '';
+@@ -279,12 +280,17 @@ export class Prompter {
+     async promptMemSaving(to_summarize) {
+-        await this.checkCooldown();
+-        let prompt = this.profile.saving_memory;
+-        prompt = await this.replaceStrings(prompt, null, null, to_summarize);
+-        let resp = await this.chat_model.sendRequest([], prompt);
+-        await this._saveLog(prompt, to_summarize, resp, 'memSaving');
+-        if (resp?.includes('</think>')) {
+-            const [_, afterThink] = resp.split('</think>')
+-            resp = afterThink;
++        try {
++            await this.checkCooldown();
++            let prompt = this.profile.saving_memory;
++            prompt = await this.replaceStrings(prompt, null, null, to_summarize);
++            let resp = await this.chat_model.sendRequest([], prompt);
++            await this._saveLog(prompt, to_summarize, resp, 'memSaving');
++            if (resp?.includes('</think>')) {
++                const [_, afterThink] = resp.split('</think>')
++                resp = afterThink;
++            }
++            return resp;
++        } catch {
++            console.warn('[Evelyn Mindcraft] Memory summarization failed; keeping previous summary.');
++            return this.agent.history.memory;
+         }
+-        return resp;
+     }
+
+     async promptShouldRespondToBot(new_message) {
 diff --git a/src/utils/mcdata.js b/src/utils/mcdata.js
 index 2dd2ea5..90b79b3 100644
 --- a/src/utils/mcdata.js

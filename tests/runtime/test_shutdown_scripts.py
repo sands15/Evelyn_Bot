@@ -130,7 +130,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("Minecraft services are deferred", docker_core)
         self.assertIn("-Profiles voyager", voyager_start)
         self.assertIn(
-            "-Services router_llm,minecraft_llm,codex_gateway,voyager",
+            "-Services router_llm,minecraft_llm,voyager",
             voyager_start,
         )
 

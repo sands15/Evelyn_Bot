@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -835,8 +836,8 @@ def _public_legacy_services(value: Any) -> dict[str, Any]:
             result[key] = bool(value[key])
     if isinstance(value.get("codexRequired"), bool):
         result["codexRequired"] = bool(value["codexRequired"])
-    if value.get("codexBackend") == "codex-gateway":
-        result["codexBackend"] = "codex-gateway"
+    if value.get("codexBackend") in {"local", "codex-gateway"}:
+        result["codexBackend"] = value["codexBackend"]
     required_keys = {
         "botReady",
         "mainReady",
@@ -1463,12 +1464,17 @@ async def collect_runtime_health(
     probe_runner: ProbeRunner | None = None,
 ) -> dict[str, Any]:
     manifest = manifest or load_service_manifest()
+    active_services = tuple(
+        service
+        for service in manifest.services
+        if service.id != "codex_gateway" or _codex_gateway_required()
+    )
     checked = await asyncio.gather(
-        *(check_service(service, probe_runner=probe_runner) for service in manifest.services),
+        *(check_service(service, probe_runner=probe_runner) for service in active_services),
         return_exceptions=True,
     )
     services: dict[str, dict[str, Any]] = {}
-    for service, result in zip(manifest.services, checked):
+    for service, result in zip(active_services, checked):
         if isinstance(result, Exception):
             services[service.id] = {
                 "id": service.id,
@@ -1524,6 +1530,14 @@ async def collect_runtime_health(
     })
 
 
+def _codex_gateway_required() -> bool:
+    return (
+        str(os.environ.get("VOYAGER_ACTION_BACKEND") or "local").strip().lower() == "codex-gateway"
+        or str(os.environ.get("MINDCRAFT_CODEX_ENABLED") or "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
 def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str, Any]:
     legacy: dict[str, Any] = {}
     for service_id, key in LEGACY_SERVICE_READY_KEYS.items():
@@ -1537,8 +1551,8 @@ def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str
                 legacy[key] = runtime_ready
             else:
                 legacy[key] = service.get("state") == "up"
-    legacy["codexRequired"] = "codex_gateway" in services
-    legacy["codexBackend"] = "codex-gateway"
+    legacy["codexRequired"] = _codex_gateway_required()
+    legacy["codexBackend"] = "codex-gateway" if legacy["codexRequired"] else "local"
     required_keys = {"botReady", "mainReady", "routerReady", "subReady", "ttsReady", "sttReady"}
     if required_keys.issubset(legacy):
         if not legacy.get("botReady"):

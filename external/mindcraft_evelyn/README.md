@@ -6,7 +6,11 @@ This directory overlays the pinned `external/mindcraft` submodule without modify
 - Pinned commit: `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`
 - Runtime: Minecraft Java 1.21.11, Microsoft authentication, non-operator survival
 - Policy: arbitrary code generation disabled; slash commands blocked at the Mineflayer boundary
-- Planner: Evelyn Codex Gateway with Bearer token from `runtime_artifacts/secrets/codex_gateway.token`
+- Planner: local Qwen by default; the Codex adapter is disabled before token or network access
 
 The Docker build copies upstream, applies `evelyn.patch`, and then copies the new Evelyn model,
 profile, and telemetry plugin. Do not patch the submodule directly.
+
+The separate `codex-gateway` Compose profile remains fail-closed until the
+pinned image's effective tool registry is verified; normal Minecraft startup
+does not start or depend on it.

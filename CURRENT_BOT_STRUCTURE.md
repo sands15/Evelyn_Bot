@@ -1,6 +1,6 @@
 # Current Bot Structure
 
-Last reviewed: 2026-06-02
+Last reviewed: 2026-08-08
 Status: compact overview
 
 Authoritative current pipeline map:
@@ -199,27 +199,33 @@ Current rule of thumb:
 - memory writeback is coordinated from `main.py`, with lower-level helpers in
   `evelyn_core/runtime/evelyn_core/memory.py` and `memory_vault.py`.
 
-## Minecraft / Voyager Stack
+## Minecraft / Mindcraft Stack
 
 Minecraft automation is not a single bot process. It is a layered bridge:
 
 ```text
 main.py / user command
 -> minecraft_autonomy_client.py
--> voyager_service.py on port 8765
--> upstream_voyager_runner.py
--> third_party/Voyager
--> Codex gateway on port 8787 for action generation
--> mineflayer bridge on port 3000
+-> mindcraft_service.py on port 8765 (Compose service key: voyager)
+-> external/mindcraft + external/mindcraft_evelyn
+-> local Minecraft Qwen planner / shared local router
+-> Mineflayer
 -> Minecraft server on port 25565
 ```
+
+The Codex gateway is not part of the default Minecraft path. It is isolated in
+its own Compose profile and cannot execute until the pinned image's tool-access
+boundary is explicitly verified. The legacy Voyager runner remains a
+compatibility path and also selects the local planner by default.
 
 Important files:
 
 - `evelyn_core/runtime/evelyn_core/minecraft_autonomy_client.py`
+- `evelyn_core/runtime/evelyn_core/mindcraft_service.py`
 - `evelyn_core/runtime/evelyn_core/voyager_service.py`
 - `evelyn_core/runtime/evelyn_core/upstream_voyager_runner.py`
 - `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`
+- `external/mindcraft_evelyn/`
 - `third_party/Voyager/`
 
 Important runtime state:

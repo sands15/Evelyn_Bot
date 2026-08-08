@@ -197,16 +197,19 @@ Autonomy의 실패 문맥은 별도 exact 계약만 사용한다.
 Compose no longer mounts the user's live `~/.codex/auth.json` or
 `~/.codex/config.toml`.
 
-The gateway now:
+The optional Docker gateway now:
 
-- accepts one dedicated read-only credential directory;
-- copies only `auth.json` and optional `config.toml` into an ephemeral tmpfs;
+- accepts one dedicated read-only `auth.json` mount;
+- copies only `auth.json` into an ephemeral tmpfs and removes stale
+  `config.toml`;
 - rejects `CODEX_HOME` alone as an authentication source;
 - rejects unmarked non-empty target homes;
 - runs with a read-only root filesystem, all Linux capabilities dropped, and
   `no-new-privileges`;
-- disables the custom shell-command backend by default;
-- confines request working directories to the configured gateway work root.
+- permanently rejects the custom shell-command backend;
+- uses one fixed empty `/workspace` and rejects request workdir overrides;
+- remains `backendReady=false` and spawns no Codex process until a pinned-image
+  tool-access verification explicitly enables the boundary.
 
 Provision the dedicated credential copy explicitly:
 
@@ -215,16 +218,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\evelyn_core\runtime\launchers\provision_codex_credentials.ps1
 ```
 
-`config.toml` is not copied by default. Add `-IncludeConfig` only when the
-gateway genuinely requires it.
+`config.toml` is never staged. Supported launchers use the isolated Docker
+profile; the legacy host-native gateway is disabled. Compose uses an in-memory
+tmpfs home.
 
-The native Windows launcher creates a process-specific home under the system
-temporary directory and removes it only when the Evelyn marker is present.
-Compose uses an in-memory tmpfs home.
-
-The dedicated `auth.json` is still a long-lived credential. The next stronger
-boundary is a purpose-issued, short-lived token that can be revoked
-independently from the user's interactive Codex session.
+The dedicated `auth.json` is still a long-lived credential, and it shares the
+gateway container's principal. Read-only mounts do not prevent that principal
+from reading it. Therefore the current safe state is default-off; a
+purpose-issued short-lived token or a verified no-tools broker is required
+before Codex can become a default Minecraft route.
 
 ## Validation boundary
 
@@ -287,12 +289,14 @@ Completed locally:
   는 내부 `compileall`, `pip check`, 계약 import와 집중 테스트 78개를
   통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
 
-Still required before deployment:
+Still required for the corresponding optional/live boundary:
 
 - rebuild STT, Vision, and Codex Gateway images from the changed
   dependency files; this requires explicit approval for the repository's
   service dependency manifests to be queried against public package
   registries;
 - GPU model-load smoke for Qwen3-ASR, SmolVLM2, and Falcon-OCR;
-- one real Codex Gateway action using the dedicated credential copy;
+- before optional Codex re-enable, a pinned-image effective-tool registry and
+  secret-canary test proving local file/network/MCP tool access is absent, then
+  one real action using the dedicated credential copy;
 - Minecraft Microsoft/Xbox login and in-game behavior smoke.

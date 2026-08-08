@@ -2,13 +2,17 @@ import { readFileSync } from 'fs';
 
 const DEFAULT_URL = 'http://codex_gateway:8787/codex/action';
 const DEFAULT_MODEL = 'gpt-5.5';
-const DEFAULT_TOKEN_FILE = '/app/runtime_artifacts/secrets/codex_gateway.token';
+const DEFAULT_TOKEN_FILE = '/gateway-token/codex_gateway.token';
 
 function resolveToken() {
     const configured = String(process.env.VOYAGER_CODEX_GATEWAY_TOKEN || '').trim();
     if (configured) return configured;
     const tokenFile = process.env.VOYAGER_CODEX_GATEWAY_TOKEN_FILE || DEFAULT_TOKEN_FILE;
     return readFileSync(tokenFile, 'utf8').trim();
+}
+
+function codexEnabled() {
+    return /^(?:1|true|yes|on)$/i.test(String(process.env.MINDCRAFT_CODEX_ENABLED || ''));
 }
 
 function formatTurns(turns) {
@@ -41,6 +45,9 @@ export class CodexGateway {
     }
 
     async sendPrompt(prompt, source = 'mindcraft-planner') {
+        if (!codexEnabled()) {
+            throw new Error('mindcraft_codex_disabled');
+        }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutSec * 1000);
         try {

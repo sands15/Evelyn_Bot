@@ -1082,9 +1082,9 @@ owner 경계가 없는 보조 모듈의 광범위한 예외 처리는 남아 있
 예외는 이제 exact allowlist 코드만 `services`에 남기며 예외 원문, upstream
 `error`/login 문자열, URL과 경로를 복사하지 않는다. 최종 payload builder도
 알 수 없는 입력을 generic 고정 코드로 바꾸므로 다른 호출자가 원문을 다시
-주입할 수 없다. Codex readiness는 HTTP service의 `ok`가 아니라 현재 계약의
-`backendReady is true`를 요구해, gateway만 살아 있고 행동 backend가 없는
-상태를 준비 완료로 오판하지 않는다.
+주입할 수 없다. Codex readiness는 HTTP service의 `ok`가 아니라
+`backendReady`, `isolatedRuntime`, `toolAccessVerified`가 모두 exact `true`인지
+요구해, gateway만 살아 있고 행동 backend가 없는 상태를 준비 완료로 오판하지 않는다.
 
 `436fb59`는 Main/Voice LLM에 주입되는 legacy runtime status context도
 content-free로 바꿨다. Codex `error`/`stderr_tail`/`message`, Voyager
@@ -1103,16 +1103,21 @@ evidence가 아니며, legacy 상태와 최종 consumer도 독립적으로 재�
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.
 
-## P2 — Codex 자격증명의 수명
+## P1 — Codex tool-free 실행 경계와 자격증명 격리 미검증
 
-사용자의 live `~/.codex` 직접 마운트는 제거했다. 전용 디렉터리에서
-`auth.json`과 선택적 `config.toml`만 읽어 컨테이너 tmpfs에 복사하며 Gateway는
-read-only root, capability drop, `no-new-privileges`로 실행한다.
+기본 Minecraft/Mindcraft는 local Qwen으로 동작하며 Codex token read, HTTP와
+subprocess를 실행하지 않는다. 선택적 Gateway도 `toolAccessVerified=false`인 동안
+health not-ready, action 503, spawn 0으로 닫힌다. host-native/custom shell 경로와
+`config.toml` staging은 제거했고 전용 `auth.json`만 Docker profile에 mount한다.
 
-전용 `auth.json` 사본은 여전히 장기 자격증명이다.
+그러나 read-only sandbox와 mount는 같은 process principal의 파일 읽기를 막지 않는다.
+현재 source option과 mock subprocess test는 pinned Codex image가 shell·file·network·MCP
+tool을 실제로 0개 제공한다는 증거가 아니다. 전용 `auth.json`도 장기 자격증명이다.
 
-다음 조치: 사용자 대화형 세션과 독립적으로 폐기할 수 있는 목적 제한·짧은 수명
-토큰이 제공되면 교체한다.
+다음 조치: 격리된 image에서 실제 tool registry와 secret canary 비노출을 검증하거나,
+filesystem tool이 없는 broker와 목적 제한·짧은 수명 token을 사용한 뒤에만
+`toolAccessVerified`와 Codex action route를 활성화한다. 그 전에는 기본 local 경로를
+유지한다.
 
 ## P2 — 저장공간 보고는 Host Supervisor 가동에 의존
 
