@@ -92,21 +92,21 @@ function Invoke-RequiredHttp {
         return $json
     }
     catch {
-        Add-Failure "$Name is not responding at $Uri ($($_.Exception.Message))"
+        Add-Failure "$Name is not responding at $Uri (http_check_failed)"
         return $null
     }
 }
 
 Write-Section "Docker"
 if (-not (Test-Path $ComposeFile)) {
-    Add-Failure "Compose file not found: $ComposeFile"
+    Add-Failure "Compose file not found (compose_file_missing)"
 }
 else {
-    Add-Ok "Compose file found: $ComposeFile"
+    Add-Ok "Compose file found"
 }
 
 try {
-    $dockerVersion = docker version --format "{{.Server.Os}}/{{.Server.Arch}}" 2>&1
+    $dockerVersion = docker version --format "{{.Server.Os}}/{{.Server.Arch}}" 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "docker_version_failed"
     }
@@ -118,7 +118,7 @@ catch {
 
 try {
     $composeArgs = Get-ComposeArgs
-    docker compose @composeArgs config 2>&1 | Out-Null
+    $null = docker compose @composeArgs config 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "docker_compose_config_failed"
     }
@@ -131,7 +131,7 @@ catch {
 Write-Section "Compose Services"
 try {
     $composeArgs = Get-ComposeArgs
-    $composeStatus = docker compose @composeArgs ps 2>&1
+    $composeStatus = docker compose @composeArgs ps 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "docker_compose_ps_failed"
     }
@@ -250,7 +250,7 @@ if ($IncludeCodexAction) {
         }
     }
     catch {
-        Add-Failure "Codex action endpoint failed ($($_.Exception.Message))"
+        Add-Failure "Codex action endpoint failed (codex_action_check_failed)"
     }
 }
 
@@ -272,7 +272,7 @@ if ($IncludeDiscordBot) {
         }
     }
     catch {
-        Add-Failure "discord_bot container is not available ($($_.Exception.Message))"
+        Add-Failure "discord_bot container is not available (discord_container_check_failed)"
     }
 }
 
@@ -381,7 +381,7 @@ else {
 
 Write-Section "GPU"
 try {
-    $gpuStatus = nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader 2>&1
+    $gpuStatus = nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "nvidia_smi_failed"
     }
