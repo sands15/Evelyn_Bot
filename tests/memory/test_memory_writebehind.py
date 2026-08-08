@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -54,14 +55,62 @@ class MemoryWriteBehindTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_steps_marks_failure_without_raising(self) -> None:
         payload: dict = {}
+        logs: list[str] = []
+        private_error = "PRIVATE_MEMORY_WRITEBEHIND_CANARY"
 
         async def failing_step() -> None:
-            raise RuntimeError("write failed")
+            raise RuntimeError(private_error)
 
-        await run_memory_writebehind_steps(payload, [failing_step])
+        with TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "writebehind.jsonl"
+            await run_memory_writebehind_steps(
+                payload,
+                [failing_step],
+                event_path=event_path,
+                log=logs.append,
+            )
+            persisted = event_path.read_text(encoding="utf-8")
 
         self.assertEqual(payload["writebehind_status"], "failed")
-        self.assertIn("write failed", payload["writebehind_error"])
+        self.assertEqual(
+            payload["writebehind_error"],
+            "memory_writebehind_failed",
+        )
+        self.assertEqual(payload["writebehind_error_type"], "RuntimeError")
+        self.assertIn('"writebehind_error": "memory_writebehind_failed"', persisted)
+        self.assertIn('"writebehind_error_type": "RuntimeError"', persisted)
+        self.assertIn("errorType=RuntimeError", " ".join(logs))
+        self.assertNotIn(private_error, repr(payload))
+        self.assertNotIn(private_error, persisted)
+        self.assertNotIn(private_error, " ".join(logs))
+
+    def test_event_log_failure_is_content_free(self) -> None:
+        payload: dict = {}
+        logs: list[str] = []
+        private_error = "PRIVATE_EVENT_LOG_CANARY"
+
+        with patch(
+            "evelyn_core.memory_writebehind.append_memory_writebehind_event",
+            side_effect=OSError(private_error),
+        ):
+            mark_memory_writer_status(
+                payload,
+                "queued",
+                event_path=Path("unused.jsonl"),
+                log=logs.append,
+            )
+
+        self.assertEqual(
+            payload["writebehind_event_error"],
+            "memory_writebehind_event_log_failed",
+        )
+        self.assertEqual(
+            payload["writebehind_event_error_type"],
+            "OSError",
+        )
+        self.assertIn("errorType=OSError", " ".join(logs))
+        self.assertNotIn(private_error, repr(payload))
+        self.assertNotIn(private_error, " ".join(logs))
 
     async def test_cancelled_step_reraises_and_marks_cancelled(self) -> None:
         payload: dict = {}

@@ -460,7 +460,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - 비동기 memory write-behind는 Summary LLM owner가 명시적으로
     `ok=false`를 반환하면 `completed`로 기록하지 않고 고정
     `long_term_memory_update_failed` 예외를 기존 failed 상태 경계로 전달한다.
-    turn task detach는 성공·실패 모두 유지한다.
+    turn task detach는 성공·실패 모두 유지한다. step/event-log 실패 payload와
+    30일 보존 JSONL·운영 로그에는 예외 원문 대신 고정 error code와 exception
+    type만 남긴다.
   - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
     단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가

@@ -2,6 +2,8 @@
   "name": "memory_writebehind_failure",
   "source": "voice",
   "session_key": "session-memory",
-  "error": "write failed",
-  "expected_status": "failed"
+  "error": "PRIVATE_MEMORY_WRITEBEHIND_CANARY",
+  "expected_status": "failed",
+  "expected_error": "memory_writebehind_failed",
+  "expected_error_type": "RuntimeError"
 }

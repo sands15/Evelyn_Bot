@@ -90,7 +90,12 @@ class TurnReplayGoldenTests(unittest.IsolatedAsyncioTestCase):
         await run_memory_writebehind_steps(payload, [failing_step])
 
         self.assertEqual(payload["writebehind_status"], fixture["expected_status"])
-        self.assertIn(fixture["error"], payload["writebehind_error"])
+        self.assertEqual(payload["writebehind_error"], fixture["expected_error"])
+        self.assertEqual(
+            payload["writebehind_error_type"],
+            fixture["expected_error_type"],
+        )
+        self.assertNotIn(fixture["error"], repr(payload))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ def append_memory_writebehind_event(path: Path, payload: dict[str, Any], status:
         "writebehind_mode": payload.get("writebehind_mode"),
         "writebehind_reason": payload.get("writebehind_reason"),
         "writebehind_error": payload.get("writebehind_error"),
+        "writebehind_error_type": payload.get("writebehind_error_type"),
         "store_long_term_memory": payload.get("store_long_term_memory"),
         "store_open_questions": payload.get("store_open_questions"),
         "store_minecraft_failure": payload.get("store_minecraft_failure"),
@@ -55,9 +56,15 @@ def mark_memory_writer_status(
         try:
             append_memory_writebehind_event(event_path, payload, status)
         except Exception as exc:
-            payload["writebehind_event_error"] = repr(exc)
+            payload["writebehind_event_error"] = (
+                "memory_writebehind_event_log_failed"
+            )
+            payload["writebehind_event_error_type"] = type(exc).__name__
             if log is not None:
-                log(f"[MEMORY WRITEBEHIND] event log failed: {exc!r}")
+                log(
+                    "[MEMORY WRITEBEHIND] event log failed: "
+                    f"errorType={type(exc).__name__}"
+                )
     return payload
 
 
@@ -94,8 +101,18 @@ async def run_memory_writebehind_steps(
         mark_memory_writer_status(payload, "cancelled", event_path=event_path, log=log)
         raise
     except Exception as exc:
-        mark_memory_writer_status(payload, "failed", event_path=event_path, log=log, writebehind_error=repr(exc))
+        mark_memory_writer_status(
+            payload,
+            "failed",
+            event_path=event_path,
+            log=log,
+            writebehind_error="memory_writebehind_failed",
+            writebehind_error_type=type(exc).__name__,
+        )
         if log is not None:
-            log(f"[MEMORY WRITEBEHIND] failed: {exc!r}")
+            log(
+                "[MEMORY WRITEBEHIND] failed: "
+                f"errorType={type(exc).__name__}"
+            )
         return
     mark_memory_writer_status(payload, "completed", event_path=event_path, log=log)
