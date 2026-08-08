@@ -29,6 +29,19 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deps.run_long_term_memory_update.await_args.kwargs["source_turn_id"],"turn-1")
         deps.detach_task.assert_called_once_with(None,"task")
 
+    async def test_long_term_update_rejects_failed_result_and_detaches_task(self):
+        composition,deps=self.build(
+            run_long_term_memory_update=AsyncMock(return_value={"ok":False})
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^long_term_memory_update_failed$",
+        ):
+            await composition.update_long_term_memory(1,"u","a")
+
+        deps.detach_task.assert_called_once_with(None,"task")
+
     def test_vault_interval_gate_skips_recent_run(self):
         composition,deps=self.build(vault_last_maintenance_at={1:500.0})
         composition.schedule_memory_vault_maintenance(1); deps.create_scoped_task.assert_not_called()

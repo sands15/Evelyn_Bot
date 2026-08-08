@@ -457,6 +457,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     schema의 note ID·상태·turn 참조·확인 시각만 포함하며 기억 본문이나
     transcript를 넣지 않는다. 직접 저장 turn은 일반 Summary LLM memory writer와
     search follow-up을 건너뛰어 같은 발화를 중복 저장하지 않는다.
+  - 비동기 memory write-behind는 Summary LLM owner가 명시적으로
+    `ok=false`를 반환하면 `completed`로 기록하지 않고 고정
+    `long_term_memory_update_failed` 예외를 기존 failed 상태 경계로 전달한다.
+    turn task detach는 성공·실패 모두 유지한다.
   - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
     단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
@@ -1834,7 +1838,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   순서로 진행한다. Fast partial stream 실패는 ambiguous로 남고, Discord는
   session/reply-slot 선점으로 동시 claim을 직렬화하며 기존 turn P 뒤 전달된 turn
   Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
-  text와 source/entry/turn ID를 내보내지 않는다.
+  text와 source/entry/turn ID를 내보내지 않는다. `delivery_succeeded` 복구의
+  저장 증거는 현재 `turnId`와 history의 exact user/assistant/receipt tail이 함께
+  일치해야 하며, 과거의 동일 문답은 새 journal turn의 commit 증거로 쓰지 않는다.
 - Local Voice Fast Control 경로는 별도 `consume()` 뒤 claim을 호출하지 않는다.
   stream/non-stream이 같은 typed transaction을 사용하고, token 응답 전에 exact
   content-free ingress reservation을 durable 기록한다. Bot 재시작 뒤에는 Bridge가

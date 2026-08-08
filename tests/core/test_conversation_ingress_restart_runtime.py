@@ -132,6 +132,51 @@ class ConversationIngressRestartRuntimeTests(unittest.TestCase):
             ["prior user turn", "delivered answer"],
         )
 
+    def test_identical_prior_pair_does_not_complete_a_different_turn(self) -> None:
+        deps, store, checkpoint = self.deps()
+        record = self.record(phase="delivery_succeeded")
+        store.start_new_turn(
+            "guild:1:text:2:user:3",
+            turn_id="older-identical-turn",
+        )
+        store.finish_assistant_text_turn(
+            "guild:1:text:2:user:3",
+            "prior user turn",
+            "delivered answer",
+            system_prompt="system",
+            max_history_items=10,
+            guild_id=1,
+            user_id=3,
+            awaiting_user_reply=False,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+            memory_receipt=record["memoryReceiptRef"],
+        )
+
+        generation = reconcile_recovered_delivery_succeeded(
+            record,
+            deps=deps,
+        )
+
+        self.assertEqual(generation, 5)
+        self.assertEqual(
+            checkpoint.commits,
+            [("guild:1:text:2:user:3", "journal-turn-1")],
+        )
+        self.assertEqual(
+            store.current_turn_id("guild:1:text:2:user:3"),
+            "journal-turn-1",
+        )
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key="guild:1:text:2:user:3",
+        )
+        self.assertEqual(len(history), 5)
+        self.assertEqual(
+            [row["content"] for row in history[-2:]],
+            ["prior user turn", "delivered answer"],
+        )
+
     def test_terminal_commit_requires_exact_turn_history_and_generation(
         self,
     ) -> None:

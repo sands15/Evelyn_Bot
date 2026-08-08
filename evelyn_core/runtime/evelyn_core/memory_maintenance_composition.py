@@ -102,7 +102,7 @@ class MemoryMaintenanceComposition:
         lock = deps.memory_locks.setdefault(guild_id, deps.lock_factory())
         try:
             async with lock:
-                await deps.run_long_term_memory_update(
+                result = await deps.run_long_term_memory_update(
                     guild_id,
                     user_text,
                     answer,
@@ -120,6 +120,8 @@ class MemoryMaintenanceComposition:
                     raw_limit=deps.raw_limit,
                     log=deps.log,
                 )
+                if isinstance(result, dict) and result.get("ok") is False:
+                    raise RuntimeError("long_term_memory_update_failed")
         finally:
             deps.detach_task(turn_scope, task)
 

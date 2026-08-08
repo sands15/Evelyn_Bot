@@ -58,24 +58,6 @@ def _exact_history_tail(
     )
 
 
-def _history_contains_exact_pair(
-    history: list[dict[str, Any]],
-    *,
-    user_text: str,
-    assistant_text: str,
-    memory_receipt_ref: Any,
-) -> bool:
-    return any(
-        _exact_history_tail(
-            history[: index + 1],
-            user_text=user_text,
-            assistant_text=assistant_text,
-            memory_receipt_ref=memory_receipt_ref,
-        )
-        for index in range(1, len(history))
-    )
-
-
 def _verified_checkpoint_status(
     status: Any,
     *,
@@ -127,23 +109,12 @@ def reconcile_recovered_delivery_succeeded(
         system_prompt=deps.system_prompt,
         session_key=scope,
     )
-    pair_persisted = _history_contains_exact_pair(
+    pair_persisted = current_turn == turn_id and _exact_history_tail(
         history,
         user_text=user_text,
         assistant_text=assistant_text,
         memory_receipt_ref=memory_ref,
     )
-    if pair_persisted and current_turn and current_turn != turn_id:
-        status = deps.session_continuity_checkpoint.status()
-        generation = int(status.get("checkpointGeneration") or 0)
-        return (
-            generation
-            if _verified_checkpoint_status(
-                status,
-                generation=generation,
-            )
-            else None
-        )
     if not pair_persisted:
         if (
             history
@@ -168,8 +139,6 @@ def reconcile_recovered_delivery_succeeded(
             topic_id=build_topic_id(user_text, assistant_text),
             memory_receipt=memory_ref,
         )
-    elif not current_turn:
-        store.start_new_turn(scope, turn_id=turn_id)
     status = deps.session_continuity_checkpoint.commit_completed_turn(
         scope,
         turn_id,
