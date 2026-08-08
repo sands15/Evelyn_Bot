@@ -69,7 +69,7 @@ PROVENANCE_FORWARD_REJECTIONS_NAME = (
     "memory_provenance_forward_write_rejections.json"
 )
 RETRIEVAL_CACHE_TTL_SECONDS = 300
-MEMORY_RETRIEVAL_CACHE_SCHEMA = "memory.retrieval-cache.v1"
+MEMORY_RETRIEVAL_CACHE_SCHEMA = "memory.retrieval-cache.v2"
 MEMORY_RECALL_MAX_RENDERED_NOTES = 12
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS = 120
@@ -715,9 +715,56 @@ def _dot_sparse_vectors(left: dict[str, float], right: dict[str, float]) -> floa
     return total
 
 
+def _purge_unreceipted_memory_runtime_artifacts(
+    *,
+    root: Path | None = None,
+    include_autonomy_cache: bool = False,
+) -> None:
+    base = root or MEMORY_ROOT
+    if not base.exists():
+        return
+    base_resolved = base.resolve()
+    for guild_dir in base.glob("guild_*"):
+        if guild_dir.is_symlink() or bool(
+            getattr(guild_dir, "is_junction", lambda: False)()
+        ):
+            raise OSError("unsafe_memory_runtime_artifact_path")
+        if not guild_dir.is_dir():
+            continue
+        guild_resolved = guild_dir.resolve()
+        if not guild_resolved.is_relative_to(base_resolved):
+            raise OSError("unsafe_memory_runtime_artifact_path")
+        scope_dirs = [guild_dir]
+        for pattern in ("room_*", "person_*", "session_*", "system_*"):
+            scope_dirs.extend(guild_dir.glob(pattern))
+        for scope_dir in scope_dirs:
+            if scope_dir.is_symlink() or bool(
+                getattr(scope_dir, "is_junction", lambda: False)()
+            ):
+                raise OSError("unsafe_memory_runtime_artifact_path")
+            if not scope_dir.is_dir():
+                continue
+            if not scope_dir.resolve().is_relative_to(guild_resolved):
+                raise OSError("unsafe_memory_runtime_artifact_path")
+            targets = [
+                scope_dir / "proactive_questions.jsonl",
+                scope_dir / "pending_proactive_question.json",
+            ]
+            if include_autonomy_cache and scope_dir.name == "system_autonomy":
+                targets.append(scope_dir / "cognitive_state.json")
+            for target in targets:
+                if target.is_symlink():
+                    raise OSError("unsafe_memory_runtime_artifact_path")
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+
+
 @_memory_deletion_journal_mutation_linearized
 def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = None) -> int:
     vault = ensure_memory_vault_layout(root)
+    _purge_unreceipted_memory_runtime_artifacts(root=root)
     _reconcile_memory_deletion_tombstones(root=root)
     derivation_state = _reconcile_memory_derivation_revocations(
         root=root
@@ -874,16 +921,20 @@ def _safe_json_list(value: str) -> list[str]:
 
 def _memory_source_type(source: str, note_type: str) -> str:
     normalized = clean_text(source).lower()
+    normalized_note_type = clean_text(note_type).lower()
     if normalized == BOOTSTRAP_NOTE_SOURCE:
         return "system"
-    if "legacy" in normalized:
+    if "legacy" in normalized or normalized_note_type == "legacy":
         return "legacy"
     if (
         "consolidation" in normalized
         or "recomposition" in normalized
     ):
         return "derived"
-    if normalized in {"conversation-turn-log", "daily-turn-log"} or note_type == "daily":
+    if (
+        normalized in {"conversation-turn-log", "daily-turn-log"}
+        or normalized_note_type == "daily"
+    ):
         return "conversation"
     if normalized in {
         "user",
@@ -893,6 +944,15 @@ def _memory_source_type(source: str, note_type: str) -> str:
     }:
         return "user"
     return "unknown" if not normalized else "runtime"
+
+
+def _memory_note_has_unreceipted_derived_source(
+    row: sqlite3.Row,
+) -> bool:
+    return _memory_source_type(
+        str(row["source"]),
+        str(row["note_type"]),
+    ) in {"conversation", "derived", "legacy"}
 
 
 def _is_user_confirmed_memory_note(
@@ -3300,9 +3360,6 @@ def recall_memory_vault(
     started = time.monotonic()
     try:
         _read_memory_deletion_tombstones(root)
-        if request.guild_id is not None:
-            refresh_legacy_memory_mirror(request.guild_id, root=root)
-            refresh_legacy_memory_node_notes(request.guild_id, root=root)
         version = sync_memory_vault_index(root=root, db_path=db_path)
         index_path = db_path or memory_index_db_path(root)
         metadata = request.metadata if isinstance(request.metadata, dict) else {}
@@ -3349,6 +3406,11 @@ def recall_memory_vault(
                 focus_tokens=focus_tokens,
                 limit=max(80, requested_max_items * 20),
             )
+            rows = [
+                row
+                for row in rows
+                if not _memory_note_has_unreceipted_derived_source(row)
+            ]
             if not allow_internal_memory:
                 rows = [row for row in rows if not _is_internal_memory_note(row)]
             vector_scores = _fetch_vector_scores(
@@ -3361,6 +3423,11 @@ def recall_memory_vault(
                 missing_vector_ids = [note_id for note_id in vector_scores if note_id not in existing_note_ids]
                 if missing_vector_ids:
                     rows.extend(_fetch_notes_by_ids(conn, missing_vector_ids))
+                rows = [
+                    row
+                    for row in rows
+                    if not _memory_note_has_unreceipted_derived_source(row)
+                ]
                 if not allow_internal_memory:
                     rows = [row for row in rows if not _is_internal_memory_note(row)]
                 retrieval_mode = f"{retrieval_mode}+vector"
@@ -3389,6 +3456,11 @@ def recall_memory_vault(
                 selected,
                 max_extra=max(0, requested_max_items - len(selected)),
             )
+            graph_neighbors = [
+                row
+                for row in graph_neighbors
+                if not _memory_note_has_unreceipted_derived_source(row)
+            ]
             if not allow_internal_memory:
                 graph_neighbors = [row for row in graph_neighbors if not _is_internal_memory_note(row)]
             if graph_neighbors:
@@ -7732,6 +7804,15 @@ def delete_memory_vault_user_note(
     except OSError:
         cleanup_errors.append("memory_delete_user_state_cleanup_failed")
     try:
+        _purge_unreceipted_memory_runtime_artifacts(
+            root=root,
+            include_autonomy_cache=True,
+        )
+    except OSError:
+        cleanup_errors.append(
+            "memory_delete_runtime_artifact_cleanup_failed"
+        )
+    try:
         version = sync_memory_vault_index(root=root)
     except MemoryDeletionJournalIntegrityError:
         return {
@@ -7902,6 +7983,7 @@ def refresh_memory_hot_context(
                 row["note_id"],
                 deleted_note_ids,
             )
+            and not _memory_note_has_unreceipted_derived_source(row)
         ]
 
         block_lines: list[str] = []
@@ -7936,6 +8018,7 @@ def refresh_memory_hot_context(
             source_paths = []
             note_ids = []
         payload = {
+            "recall_policy": "deletion-current-v1",
             "memory_version": version,
             "created_at": time.time(),
             "content": content,
@@ -8000,6 +8083,8 @@ def _validated_memory_hot_context_payload(
         return {}, "malformed"
     if not isinstance(payload, dict):
         return {}, "malformed"
+    if payload.get("recall_policy") != "deletion-current-v1":
+        return {}, "stale_recall_policy"
     try:
         cached_memory_version = int(payload.get("memory_version") or 0)
         raw_deletion_state = payload.get(

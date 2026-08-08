@@ -387,9 +387,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     summary는 내용 SHA-256에 묶인 sidecar에 파생 evidence ID와 실제 Summary
     LLM 입력 evidence/turn ID를 저장하고, 내용이 따로 바뀌면 provenance만
     fail-closed로 버린다. 새 facts/questions도 같은 실제 입력 ID와 별도 파생
-    evidence ID를 JSONL과 mirror에 보존한다. 일반 경로는 summary·선택된 최근
-    raw/fact/question·현재 턴만, context-size compact 재시도는 summary와 현재
-    턴만 source로 연결한다.
+    evidence ID를 JSONL과 mirror에 보존한다. 다만 이 turn-level provenance에는
+    vault note 삭제 현재성을 증명하는 receipt가 없으므로 stored summary/fact/question과
+    assistant raw는 prompt 입력에서 보류한다. exact user raw와 현재 턴만 사용한다.
   - receipt와 turn summary는 새 파생 항목, 직접 입력 evidence와 source turn의
     안정적인 opaque projection만 content-free 필드로 공개한다. 원본 ID는
     content-bearing/source sidecar 안에만 남는다. 공개 projection은
@@ -1623,6 +1623,37 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   prompt 전에 제거한다. 필터를 통과한 결과의 deletion position만
   persona/cognitive/router/planner, search follow-up와 tool 결과에 병합하고,
   history-derived cache는 strict receipt로 현재성을 증명하지 못하면 무시한다.
+- production autonomy도 observation·summary·recent-context·ping·cognitive-refresh의
+  다섯 history 소비 지점에서 같은 필터를 사용한다. 최초 observation exposure는
+  plan→execute→persist 전체를 guard하고, 이후 fresh callback은 소비와 side effect
+  동안 자체 guard를 잡는다. 무결성 실패는 executor 실패로 낮추지 않는다. 반환·
+  durable autonomy state는 raw history/summary/text와 private assistant-history
+  의사결정 신호를 제거하며, self-state의 unresolved 입력은 user row만 센다.
+  자율 후속 history는 current exposure의 compact receipt를 continuity까지
+  보존한다.
+  receipt 없는 observation/goal/plan/step/router/drive cache는 재시작 때 재사용하지
+  않고 안전한 운영 필드만 남긴 상태로 즉시 다시 저장한다. Minecraft plan/cursor는
+  world observation만으로 결정되므로 bound 대화가 함께 있어도 유지한다. 일반
+  autonomy loop나 cognitive refresh가 진행 중인 guild memory reset은 continuity나
+  파일을 지우기 전에 고정 코드로 거부하고, 사용자가 자율행동을 먼저 끄거나 작업
+  종료 뒤 재시도하도록 안내한다.
+- memory-derived proactive queue는 deletion-current receipt가 없어 selection과 ID
+  mark를 닫았고, producer도 raw/ask text duplicate를 비운다. 과거 queue와 pending
+  원문은 memory index sync에서 제거하고 note 삭제는 receipt 없는 autonomy cache도
+  정리한다. symlink·junction scope alias는 다른 scope를 지우지 않고 전체 작업을
+  fail-closed한다.
+- legacy layered memory는 deletion-current lineage가 생길 때까지 stored summary,
+  facts, questions와 assistant raw를 Main/cognitive/writeback 입력에서 전역 보류한다.
+  exact user raw만 기존 evidence 검사를 거쳐 사용할 수 있다. 같은 원문을 복제한
+  legacy mirror, daily conversation과 semantic derived note도 live recall/hot context에서
+  제외한다. retrieval cache v2와 hot-context recall policy marker가 과거 cache 재사용을
+  막는다. provenance-bearing `open_questions.jsonl` 저장·감사, explicit user/system
+  note와 현재 모델 답변의 명시적 질문은 그대로 유지한다.
+- 이 memory/autonomy 증분을 포함한 CI-equivalent 전체 탐색은 2026-08-08
+  `Ran 3078`, `OK (skipped=21)`이었다. core 731개(skip 1), memory 269개(skip 1),
+  Discord I/O 124개, `compileall`, `pip check`, `git diff --check`도 통과했다.
+  실행 중인 로컬 LLM에 의존하던 Fast Control 실패 테스트는 직접·음성 queue 호출을
+  모두 고정 실패로 격리했다. live 서비스와 실제 사용자 기억은 변경하지 않았다.
 - Main Control Page와 Fast Control Page는 handler 반환이 아니라 actual HTTP
   `prepare` 직전부터 `write_eof`까지 exact memory exposure guard를 유지한다.
   stale guard는 content-free exact 503과 `no-store`로 닫히며, Fast stream은 첫

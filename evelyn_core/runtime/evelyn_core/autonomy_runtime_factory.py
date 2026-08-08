@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, MutableMapping
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Iterator, MutableMapping
 
 from .autonomy import AutonomyEngine
 from .autonomy_observation_state import (
@@ -14,6 +16,15 @@ from .autonomy_observation_state import (
 from .autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyExecutor
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
+)
+from .conversation_memory_exposure import (
+    capture_combined_memory_exposure,
+    filter_conversation_history_for_memory_exposure,
+    memory_receipt_ref_from_exposure,
+)
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
 )
 
 
@@ -32,6 +43,7 @@ class AutonomyRuntimeFactoryDeps:
     select_question_to_ask: Callable[..., Any]
     runtime_session_key: Callable[..., str]
     get_conversation_history: Callable[..., list[dict[str, Any]]]
+    memory_index_dir: Path
     pick_recent_user_text: Callable[[list[dict[str, Any]]], str]
     localtime: Callable[[], Any]
     monotonic: Callable[[], float]
@@ -130,61 +142,83 @@ def get_or_create_autonomy_engine_from_runtime(
                 return True
         return False
 
+    @contextmanager
+    def memory_safe_history(
+        session_key: str,
+    ) -> Iterator[list[dict[str, Any]]]:
+        outcome = filter_conversation_history_for_memory_exposure(
+            deps.get_conversation_history(
+                session_key=session_key,
+                guild_id=guild_id,
+            ),
+            memory_index_dir=deps.memory_index_dir,
+        )
+        exposure = capture_combined_memory_exposure(
+            current_memory_exposure_position(),
+            outcome.memory_exposure_position,
+        )
+        with memory_exposure_guard(
+            expected_position=exposure,
+            required=exposure is not None,
+            index_dir=deps.memory_index_dir,
+        ):
+            yield list(outcome.messages)
+
     async def default_observe() -> dict[str, Any]:
         channel = await find_followup_channel()
         session_key = deps.runtime_session_key(guild_id=guild_id)
-        history = deps.get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = deps.pick_recent_user_text(history)
-        observe_channel_ids = deps.get_observe_channel_ids(guild_id)
-        command_only_channel_ids = deps.get_command_only_channel_ids(guild_id)
-        observed_channels: list[dict[str, Any]] = []
-        guild = deps.get_guild(guild_id)
-        now_local = deps.localtime()
-        quiet_hours = now_local.tm_hour < 8 or now_local.tm_hour >= 23
-        current_engine = deps.autonomy_engines.get(guild_id)
-        last_result = (current_engine.state.last_step_result if current_engine is not None else {}) or {}
-        cached_cognitive = deps.read_cached_cognitive_state(guild_id)
-        last_refresh_at = float(deps.autonomy_last_cognitive_refresh_at.get(guild_id, 0.0) or 0.0)
-        task = deps.autonomy_cognitive_refresh_tasks.get(guild_id)
-        router_refresh_inflight = bool(task is not None and not task.done())
-        if guild is not None:
-            for channel_id in observe_channel_ids[:8]:
-                channel_obj = guild.get_channel(channel_id)
-                channel_name = getattr(channel_obj, "name", str(channel_id)) if channel_obj is not None else str(channel_id)
-                observed_channels.append({"id": channel_id, "name": channel_name})
-        return build_default_autonomy_observation(
-            connected=channel is not None,
-            known_followup_channels=len(
-                [
-                    value
-                    for value in deps.session_followup_targets.values()
-                    if isinstance(value, dict) and value.get("channel_id")
-                ]
-            ),
-            inflight_llm_requests=deps.get_inflight_llm_requests(),
-            active_sessions=deps.get_active_session_count(),
-            history=history,
-            last_autonomy_ping_at=float(deps.last_autonomy_ping_at.get(guild_id, 0.0) or 0.0),
-            observe_channel_ids=observe_channel_ids,
-            command_only_channel_ids=command_only_channel_ids,
-            observed_channels=observed_channels,
-            quiet_hours=quiet_hours,
-            last_result=last_result,
-            cached_cognitive=cached_cognitive,
-            last_cognitive_refresh_at=last_refresh_at,
-            router_refresh_inflight=router_refresh_inflight,
-            autonomy_cognitive_stale_sec=deps.autonomy_cognitive_stale_sec,
-            autonomy_cognitive_min_interval_sec=deps.autonomy_cognitive_min_interval_sec,
-            autonomy_cognitive_force_refresh_sec=deps.autonomy_cognitive_force_refresh_sec,
-            vision_watch=deps.read_vision_watch_state(),
-            vision_watch_interval_sec=deps.vision_watch_interval_sec,
-            local_tts_state=deps.local_tts_snapshot(),
-            local_mic_state=deps.serialize_local_mic_runtime_state(),
-            queued_proactive_question_available=bool(
-                session_key and has_queued_proactive_question(session_key, latest_user_text)
-            ),
-            answer_promises_search_fn=deps.answer_promises_search,
-        )
+        with memory_safe_history(session_key) as history:
+            latest_user_text = deps.pick_recent_user_text(history)
+            observe_channel_ids = deps.get_observe_channel_ids(guild_id)
+            command_only_channel_ids = deps.get_command_only_channel_ids(guild_id)
+            observed_channels: list[dict[str, Any]] = []
+            guild = deps.get_guild(guild_id)
+            now_local = deps.localtime()
+            quiet_hours = now_local.tm_hour < 8 or now_local.tm_hour >= 23
+            current_engine = deps.autonomy_engines.get(guild_id)
+            last_result = (current_engine.state.last_step_result if current_engine is not None else {}) or {}
+            cached_cognitive = deps.read_cached_cognitive_state(guild_id)
+            last_refresh_at = float(deps.autonomy_last_cognitive_refresh_at.get(guild_id, 0.0) or 0.0)
+            task = deps.autonomy_cognitive_refresh_tasks.get(guild_id)
+            router_refresh_inflight = bool(task is not None and not task.done())
+            if guild is not None:
+                for channel_id in observe_channel_ids[:8]:
+                    channel_obj = guild.get_channel(channel_id)
+                    channel_name = getattr(channel_obj, "name", str(channel_id)) if channel_obj is not None else str(channel_id)
+                    observed_channels.append({"id": channel_id, "name": channel_name})
+            return build_default_autonomy_observation(
+                connected=channel is not None,
+                known_followup_channels=len(
+                    [
+                        value
+                        for value in deps.session_followup_targets.values()
+                        if isinstance(value, dict) and value.get("channel_id")
+                    ]
+                ),
+                inflight_llm_requests=deps.get_inflight_llm_requests(),
+                active_sessions=deps.get_active_session_count(),
+                history=history,
+                last_autonomy_ping_at=float(deps.last_autonomy_ping_at.get(guild_id, 0.0) or 0.0),
+                observe_channel_ids=observe_channel_ids,
+                command_only_channel_ids=command_only_channel_ids,
+                observed_channels=observed_channels,
+                quiet_hours=quiet_hours,
+                last_result=last_result,
+                cached_cognitive=cached_cognitive,
+                last_cognitive_refresh_at=last_refresh_at,
+                router_refresh_inflight=router_refresh_inflight,
+                autonomy_cognitive_stale_sec=deps.autonomy_cognitive_stale_sec,
+                autonomy_cognitive_min_interval_sec=deps.autonomy_cognitive_min_interval_sec,
+                autonomy_cognitive_force_refresh_sec=deps.autonomy_cognitive_force_refresh_sec,
+                vision_watch=deps.read_vision_watch_state(),
+                vision_watch_interval_sec=deps.vision_watch_interval_sec,
+                local_tts_state=deps.local_tts_snapshot(),
+                local_mic_state=deps.serialize_local_mic_runtime_state(),
+                queued_proactive_question_available=bool(
+                    session_key and has_queued_proactive_question(session_key, latest_user_text)
+                ),
+                answer_promises_search_fn=deps.answer_promises_search,
+            )
 
     async def default_send_followup(
         text: str,
@@ -198,7 +232,15 @@ def get_or_create_autonomy_engine_from_runtime(
         await deps.send_discord_text(channel, text)
         session_key = deps.runtime_session_key(guild_id=guild_id)
         turn_id = deps.start_new_turn(session_key)
-        deps.append_history(session_key, user_text or "[autonomy]", text, guild_id=guild_id)
+        deps.append_history(
+            session_key,
+            user_text or "[autonomy]",
+            text,
+            guild_id=guild_id,
+            memory_receipt=memory_receipt_ref_from_exposure(
+                current_memory_exposure_position()
+            ),
+        )
         deps.schedule_memory_update(
             guild_id,
             user_text or "[autonomy]",
@@ -247,7 +289,6 @@ def get_or_create_autonomy_engine_from_runtime(
         return {
             "status": "ok",
             "reason": "sent_followup",
-            "text": text,
             "verified": True,
             "evidence_code": "discord_send_completed",
             "continuityDurable": continuity_durable,
@@ -255,18 +296,17 @@ def get_or_create_autonomy_engine_from_runtime(
         }
 
     async def default_summarize() -> dict[str, Any]:
-        history = deps.get_conversation_history(
-            session_key=deps.runtime_session_key(guild_id=guild_id),
-            guild_id=guild_id,
-        )
-        result = build_autonomy_summary_payload(
-            history,
-            active_sessions=deps.get_active_session_count(),
-            inflight_llm_requests=deps.get_inflight_llm_requests(),
-        )
-        result["verified"] = True
-        result["evidence_code"] = "summary_payload_built"
-        return result
+        session_key = deps.runtime_session_key(guild_id=guild_id)
+        with memory_safe_history(session_key) as history:
+            result = build_autonomy_summary_payload(
+                history,
+                active_sessions=deps.get_active_session_count(),
+                inflight_llm_requests=deps.get_inflight_llm_requests(),
+            )
+            result.pop("summary", None)
+            result["verified"] = True
+            result["evidence_code"] = "summary_payload_built"
+            return result
 
     async def default_check_status() -> dict[str, Any]:
         channel = await find_followup_channel()
@@ -287,85 +327,89 @@ def get_or_create_autonomy_engine_from_runtime(
         return result
 
     async def default_summarize_recent_context() -> dict[str, Any]:
-        history = deps.get_conversation_history(
-            session_key=deps.runtime_session_key(guild_id=guild_id),
-            guild_id=guild_id,
-        )
-        result = build_autonomy_recent_context_payload(history)
-        result["verified"] = True
-        result["evidence_code"] = "recent_context_payload_built"
-        return result
+        session_key = deps.runtime_session_key(guild_id=guild_id)
+        with memory_safe_history(session_key) as history:
+            result = build_autonomy_recent_context_payload(history)
+            result.pop("summary", None)
+            result.pop("count", None)
+            result["verified"] = True
+            result["evidence_code"] = "recent_context_payload_built"
+            return result
 
     async def default_maybe_ping_user(text: str) -> dict[str, Any]:
         last_ping_at = float(deps.last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
         if last_ping_at > 0 and (deps.monotonic() - last_ping_at) < 900:
             return {"status": "blocked", "reason": "ping_cooldown"}
         session_key = deps.runtime_session_key(guild_id=guild_id)
-        history = deps.get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = deps.pick_recent_user_text(history)
-        marked = deps.select_and_mark_proactive_question(
-            guild_id=guild_id,
-            source="autonomy",
-            user_text=latest_user_text,
-            answer_text="",
-            awaiting_user_reply=False,
-            session_key=session_key,
-            session_memory_key=session_key,
-        )
-        if not marked:
-            return {
-                "status": "ok",
-                "reason": "no_queued_proactive_question",
-                "skipped": True,
-                "verified": True,
-                "evidence_code": "proactive_gate_completed",
-            }
-        return await default_send_followup(
-            marked["ask_text"],
-            awaiting_user_reply=True,
-            user_text=latest_user_text or "[autonomy]",
-        )
+        with memory_safe_history(session_key) as history:
+            latest_user_text = deps.pick_recent_user_text(history)
+            marked = deps.select_and_mark_proactive_question(
+                guild_id=guild_id,
+                source="autonomy",
+                user_text=latest_user_text,
+                answer_text="",
+                awaiting_user_reply=False,
+                session_key=session_key,
+                session_memory_key=session_key,
+            )
+            if not marked:
+                return {
+                    "status": "ok",
+                    "reason": "no_queued_proactive_question",
+                    "skipped": True,
+                    "verified": True,
+                    "evidence_code": "proactive_gate_completed",
+                }
+            return await default_send_followup(
+                marked["ask_text"],
+                awaiting_user_reply=True,
+                user_text=latest_user_text or "[autonomy]",
+            )
 
     async def default_refresh_cognitive_state() -> dict[str, Any]:
         existing = deps.autonomy_cognitive_refresh_tasks.get(guild_id)
         if existing is not None and not existing.done():
             return {"status": "blocked", "reason": "router_refresh_inflight"}
         session_key = deps.runtime_session_key(guild_id=guild_id)
-        history = deps.get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = deps.pick_recent_user_text(history)
-        if not latest_user_text:
-            return {"status": "blocked", "reason": "no_recent_user_text"}
+        with memory_safe_history(session_key) as history:
+            latest_user_text = deps.pick_recent_user_text(history)
+            if not latest_user_text:
+                return {"status": "blocked", "reason": "no_recent_user_text"}
 
-        async def run_refresh() -> dict[str, Any]:
-            started_mono = deps.monotonic()
-            deps.autonomy_last_cognitive_refresh_at[guild_id] = started_mono
-            state = await deps.update_cognitive_state(
-                guild_id,
-                latest_user_text,
-                session_key=session_key,
-                source="text",
-                turn_scope=None,
-            )
-            elapsed_ms = round((deps.monotonic() - started_mono) * 1000.0, 1)
-            return {
-                "status": "ok",
-                "reason": "router_refreshed",
-                "updated_at": state.get("updated_at"),
-                "action": state.get("action"),
-                "confidence": state.get("confidence"),
-                "elapsed_ms": elapsed_ms,
-                "text": latest_user_text[:120],
-                "verified": True,
-                "evidence_code": "cognitive_state_updated",
-            }
+            async def run_refresh() -> dict[str, Any]:
+                started_mono = deps.monotonic()
+                deps.autonomy_last_cognitive_refresh_at[guild_id] = started_mono
+                state = await deps.update_cognitive_state(
+                    guild_id,
+                    latest_user_text,
+                    session_key=session_key,
+                    source="text",
+                    turn_scope=None,
+                )
+                elapsed_ms = round((deps.monotonic() - started_mono) * 1000.0, 1)
+                return {
+                    "status": "ok",
+                    "reason": "router_refreshed",
+                    "updated_at": state.get("updated_at"),
+                    "action": state.get("action"),
+                    "confidence": state.get("confidence"),
+                    "elapsed_ms": elapsed_ms,
+                    "verified": True,
+                    "evidence_code": "cognitive_state_updated",
+                }
 
-        task = asyncio.create_task(run_refresh())
-        deps.autonomy_cognitive_refresh_tasks[guild_id] = task
-        try:
-            return await task
-        finally:
-            if deps.autonomy_cognitive_refresh_tasks.get(guild_id) is task:
-                deps.autonomy_cognitive_refresh_tasks.pop(guild_id, None)
+            task = asyncio.current_task()
+            if task is None:
+                return {
+                    "status": "blocked",
+                    "reason": "router_refresh_task_unavailable",
+                }
+            deps.autonomy_cognitive_refresh_tasks[guild_id] = task
+            try:
+                return await run_refresh()
+            finally:
+                if deps.autonomy_cognitive_refresh_tasks.get(guild_id) is task:
+                    deps.autonomy_cognitive_refresh_tasks.pop(guild_id, None)
 
     engine = AutonomyEngine(
         guild_id=guild_id,
@@ -394,6 +438,7 @@ def get_or_create_autonomy_engine_from_runtime(
         get_authorized_actions=deps.get_authorized_actions,
         authorize_action=deps.authorize_action,
         record_action_outcome=deps.record_action_outcome,
+        memory_index_dir=deps.memory_index_dir,
     )
     deps.autonomy_engines[guild_id] = engine
     return engine

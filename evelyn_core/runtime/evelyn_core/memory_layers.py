@@ -3,16 +3,19 @@ from __future__ import annotations
 from typing import Any
 
 from .memory import (
-    compact_working_summary,
     memory_raw_path,
-    memory_summary_path,
-    read_memory_summary_provenance,
-    read_fact_rows,
     read_jsonl,
-    read_question_rows,
-    read_text_file,
     read_vault_raw_rows,
 )
+
+
+def _user_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("role") or "").strip().lower() == "user"
+    ]
 
 
 def collect_memory_layers(
@@ -22,17 +25,18 @@ def collect_memory_layers(
     person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> dict[str, dict[str, Any]]:
+    # ponytail: expose derived layers only after they gain a deletion-current receipt.
     layers: dict[str, dict[str, Any]] = {
         "guild": {
             "label": "공용 방 기억",
             "scope_type": "guild",
             "scope_key": None,
-            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id))),
-            "summary_provenance": read_memory_summary_provenance(guild_id),
-            "raw": read_jsonl(memory_raw_path(guild_id)),
-            "vault_raw": read_vault_raw_rows(guild_id),
-            "facts": read_fact_rows(guild_id),
-            "questions": read_question_rows(guild_id),
+            "summary": "",
+            "summary_provenance": {},
+            "raw": _user_rows(read_jsonl(memory_raw_path(guild_id))),
+            "vault_raw": _user_rows(read_vault_raw_rows(guild_id)),
+            "facts": [],
+            "questions": [],
         }
     }
 
@@ -41,18 +45,12 @@ def collect_memory_layers(
             "label": "방 기억",
             "scope_type": "room",
             "scope_key": room_key,
-            "summary": compact_working_summary(
-                read_text_file(memory_summary_path(guild_id, scope_type="room", scope_key=room_key))
-            ),
-            "summary_provenance": read_memory_summary_provenance(
-                guild_id,
-                scope_type="room",
-                scope_key=room_key,
-            ),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="room", scope_key=room_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="room", scope_key=room_key),
-            "facts": read_fact_rows(guild_id, scope_type="room", scope_key=room_key),
-            "questions": read_question_rows(guild_id, scope_type="room", scope_key=room_key),
+            "summary": "",
+            "summary_provenance": {},
+            "raw": _user_rows(read_jsonl(memory_raw_path(guild_id, scope_type="room", scope_key=room_key))),
+            "vault_raw": _user_rows(read_vault_raw_rows(guild_id, scope_type="room", scope_key=room_key)),
+            "facts": [],
+            "questions": [],
         }
 
     if person_key:
@@ -60,18 +58,12 @@ def collect_memory_layers(
             "label": "이 사람 기억",
             "scope_type": "person",
             "scope_key": person_key,
-            "summary": compact_working_summary(
-                read_text_file(memory_summary_path(guild_id, scope_type="person", scope_key=person_key))
-            ),
-            "summary_provenance": read_memory_summary_provenance(
-                guild_id,
-                scope_type="person",
-                scope_key=person_key,
-            ),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="person", scope_key=person_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="person", scope_key=person_key),
-            "facts": read_fact_rows(guild_id, scope_type="person", scope_key=person_key),
-            "questions": read_question_rows(guild_id, scope_type="person", scope_key=person_key),
+            "summary": "",
+            "summary_provenance": {},
+            "raw": _user_rows(read_jsonl(memory_raw_path(guild_id, scope_type="person", scope_key=person_key))),
+            "vault_raw": _user_rows(read_vault_raw_rows(guild_id, scope_type="person", scope_key=person_key)),
+            "facts": [],
+            "questions": [],
         }
 
     if session_memory_key:
@@ -79,18 +71,12 @@ def collect_memory_layers(
             "label": "현재 세션 기억",
             "scope_type": "session",
             "scope_key": session_memory_key,
-            "summary": compact_working_summary(
-                read_text_file(memory_summary_path(guild_id, scope_type="session", scope_key=session_memory_key))
-            ),
-            "summary_provenance": read_memory_summary_provenance(
-                guild_id,
-                scope_type="session",
-                scope_key=session_memory_key,
-            ),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="session", scope_key=session_memory_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="session", scope_key=session_memory_key),
-            "facts": read_fact_rows(guild_id, scope_type="session", scope_key=session_memory_key),
-            "questions": read_question_rows(guild_id, scope_type="session", scope_key=session_memory_key),
+            "summary": "",
+            "summary_provenance": {},
+            "raw": _user_rows(read_jsonl(memory_raw_path(guild_id, scope_type="session", scope_key=session_memory_key))),
+            "vault_raw": _user_rows(read_vault_raw_rows(guild_id, scope_type="session", scope_key=session_memory_key)),
+            "facts": [],
+            "questions": [],
         }
 
     return layers

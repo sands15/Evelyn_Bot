@@ -6,7 +6,7 @@ import inspect
 import json
 import secrets
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -21,9 +21,16 @@ from .autonomy_failure_contract import (
     autonomy_failure_payload,
     autonomy_last_error,
     sanitize_autonomy_observation,
+    sanitize_autonomy_step_result,
 )
 from .autonomy_outcome_evidence import autonomy_outcome_verified
 from .memory import cognitive_state_path, read_json_file, write_json_file
+from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
+from .memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+    reset_memory_exposure_position,
+)
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
 from .paths import get_repo_root
 from .self_model import update_self_state_from_observation
@@ -153,6 +160,7 @@ class AutonomyEngine:
             None,
         ]
         | None = None,
+        memory_index_dir: Path | None = None,
     ) -> None:
         self.guild_id = guild_id
         self.executor = executor
@@ -161,12 +169,16 @@ class AutonomyEngine:
         self.get_authorized_actions = get_authorized_actions
         self.authorize_action = authorize_action
         self.record_action_outcome = record_action_outcome
+        self.memory_index_dir = (
+            Path(memory_index_dir)
+            if memory_index_dir is not None
+            else None
+        )
         self.state = AutonomyRuntimeState()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._executor_connected = False
         self._blocked_counts: dict[str, int] = defaultdict(int)
-        self._recent_goal_kinds: deque[str] = deque(maxlen=8)
 
     @property
     def memory_scope_key(self) -> str:
@@ -175,27 +187,21 @@ class AutonomyEngine:
     def load_persisted_state(self) -> None:
         saved = read_json_file(cognitive_state_path(self.guild_id, scope_type="system", scope_key=self.memory_scope_key))
         runtime = saved.get("autonomy_runtime") if isinstance(saved, dict) else None
+        self.state = AutonomyRuntimeState()
+        self._blocked_counts.clear()
         if not isinstance(runtime, dict):
+            self.persist_state()
             return
-        current_goal = runtime.get("current_goal")
-        current_plan = runtime.get("current_plan")
-        last_step_result = runtime.get("last_step_result") if isinstance(runtime.get("last_step_result"), dict) else {}
-        last_router_refresh_result = runtime.get("last_router_refresh_result") if isinstance(runtime.get("last_router_refresh_result"), dict) else {}
-        drive_state = runtime.get("drive_state") if isinstance(runtime.get("drive_state"), dict) else {}
-        was_enabled = bool(runtime.get("enabled", False))
-        stale_plan = bool(
-            was_enabled
-            or last_step_result.get("reason")
-            in {
-                "retry_suppressed",
-                "action_not_allowed",
-                "authorization_required",
-                "authorization_scope_denied",
-                "authorization_action_unsupported",
-                "authorization_audit_unavailable",
-                "authorization_changed_during_action",
-            }
-        )
+        was_enabled = runtime.get("enabled") is True
+        safety_mode = runtime.get("safety_mode")
+        if safety_mode not in {"constrained", "normal"}:
+            safety_mode = "constrained"
+        failure_count = runtime.get("failure_count")
+        if (
+            type(failure_count) is not int
+            or not 0 <= failure_count <= 1_000_000
+        ):
+            failure_count = 0
         self.state = AutonomyRuntimeState(
             enabled=False,
             status=(
@@ -203,28 +209,36 @@ class AutonomyEngine:
                 if was_enabled
                 else "idle"
             ),
-            safety_mode=clean_text(str(runtime.get("safety_mode", "constrained"))) or "constrained",
+            safety_mode=safety_mode,
             allowed_actions=[],
-            last_observation=sanitize_autonomy_observation(
-                runtime.get("last_observation")
-            ),
-            current_goal=None if stale_plan else (AutonomyGoal(**current_goal) if isinstance(current_goal, dict) and current_goal.get("kind") else None),
-            current_plan=None if stale_plan else (AutonomyPlan(**current_plan) if isinstance(current_plan, dict) and current_plan.get("goal_kind") else None),
-            last_step_result={} if stale_plan else last_step_result,
-            last_router_refresh_result=last_router_refresh_result,
-            drive_state=drive_state,
+            # History-derived runtime caches are not receipt-bound.
+            last_observation={},
+            current_goal=None,
+            current_plan=None,
+            last_step_result={},
+            last_router_refresh_result={},
+            drive_state={},
             last_error=autonomy_last_error(
                 runtime.get("last_error")
             ),
-            failure_count=int(runtime.get("failure_count", 0) or 0),
-            updated_at=float(runtime.get("updated_at", time.time()) or time.time()),
+            failure_count=failure_count,
+            updated_at=time.time(),
         )
+        self.persist_state()
 
     def persist_state(self) -> None:
         path = cognitive_state_path(self.guild_id, scope_type="system", scope_key=self.memory_scope_key)
         payload = read_json_file(path)
         self.state.last_observation = sanitize_autonomy_observation(
             self.state.last_observation
+        )
+        self.state.last_step_result = sanitize_autonomy_step_result(
+            self.state.last_step_result
+        )
+        self.state.last_router_refresh_result = (
+            sanitize_autonomy_step_result(
+                self.state.last_router_refresh_result
+            )
         )
         self.state.last_error = autonomy_last_error(
             self.state.last_error
@@ -366,22 +380,53 @@ class AutonomyEngine:
         return True
 
     async def run_cycle(self) -> AutonomyCycleResult:
-        observation = await self.observe()
+        reset_memory_exposure_position()
+        try:
+            observation = await self.observe()
+            exposure = current_memory_exposure_position()
+            if exposure is None:
+                return await self._run_cycle_with_observation(
+                    observation
+                )
+            if self.memory_index_dir is None:
+                raise MemoryDeletionJournalIntegrityError()
+            with memory_exposure_guard(
+                expected_position=exposure,
+                required=True,
+                index_dir=self.memory_index_dir,
+            ):
+                return await self._run_cycle_with_observation(
+                    observation
+                )
+        finally:
+            reset_memory_exposure_position()
+
+    async def _run_cycle_with_observation(
+        self,
+        observation: dict[str, Any],
+    ) -> AutonomyCycleResult:
         self_state = update_self_state_from_observation(observation)
         self.state.drive_state = asdict(self_state)
         observation["self_state"] = dict(self.state.drive_state)
         needs = self.derive_needs(observation)
         selected_goal = self.select_goal(needs)
-        if selected_goal is not None:
-            self._recent_goal_kinds.append(selected_goal.kind)
         planned = self.state.current_plan if self.should_continue_plan(selected_goal) else self.plan_goal(selected_goal, observation)
-        if clean_text(str(observation.get("active_environment") or observation.get("environment") or "")) == "minecraft":
+        active_environment = clean_text(
+            str(
+                observation.get("active_environment")
+                or observation.get("environment")
+                or "assistant"
+            )
+        ) or "assistant"
+        if active_environment == "minecraft":
             if selected_goal is not None:
                 _mc_log("[MC GOAL]", asdict(selected_goal))
             if planned is not None:
                 _mc_log("[MC PLAN]", asdict(planned))
         step_result = await self.execute_next_step(planned)
-        if isinstance(step_result, dict):
+        memory_bound = current_memory_exposure_position() is not None
+        history_derived = memory_bound and active_environment != "minecraft"
+        if isinstance(step_result, dict) and not history_derived:
             step = step_result.get("step") if isinstance(step_result.get("step"), dict) else None
             action_key = self._action_key(step) if step else ""
             interrupt_reason = clean_text(str(step_result.get("reason", "")))
@@ -394,12 +439,18 @@ class AutonomyEngine:
                 self._blocked_counts.pop(action_key, None)
         if self.should_replan(step_result):
             planned = self.replan_goal(selected_goal, observation, step_result)
-        self.state.last_observation = sanitize_autonomy_observation(
-            observation
+        safe_observation = sanitize_autonomy_observation(observation)
+        safe_step_result = (
+            {}
+            if history_derived
+            else sanitize_autonomy_step_result(step_result)
         )
-        self.state.current_goal = selected_goal
-        self.state.current_plan = planned
-        self.state.last_step_result = step_result or {}
+        self.state.last_observation = safe_observation
+        self.state.current_goal = None if history_derived else selected_goal
+        self.state.current_plan = None if history_derived else planned
+        self.state.last_step_result = safe_step_result
+        if history_derived:
+            self.state.last_router_refresh_result = {}
         authorization_blocked = bool(
             isinstance(step_result, dict)
             and step_result.get("reason")
@@ -437,11 +488,11 @@ class AutonomyEngine:
                     f"{AUTONOMY_EXECUTOR_EXECUTE_FAILED}"
                 )
         return AutonomyCycleResult(
-            observation=observation,
-            needs=needs,
-            selected_goal=selected_goal,
-            planned=planned,
-            step_result=step_result,
+            observation=safe_observation,
+            needs=[] if history_derived else needs,
+            selected_goal=None if history_derived else selected_goal,
+            planned=None if history_derived else planned,
+            step_result=None if history_derived else safe_step_result,
             state=self.state,
         )
 
@@ -788,7 +839,14 @@ class AutonomyEngine:
     def replan_goal(self, goal: AutonomyGoal | None, observation: dict[str, Any], step_result: dict[str, Any] | None) -> AutonomyPlan | None:
         if goal is None:
             return None
-        fallback_reason = clean_text(str((step_result or {}).get("reason", ""))) or "replan"
+        fallback_reason = clean_text(
+            str(
+                sanitize_autonomy_step_result(step_result).get(
+                    "reason",
+                    "",
+                )
+            )
+        ) or "replan"
         plan = self.plan_goal(goal, observation)
         if plan is not None:
             plan.summary = f"{goal.summary} ({fallback_reason} 재계획)"
@@ -978,6 +1036,8 @@ class AutonomyEngine:
             )
         except asyncio.CancelledError:
             raise
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception:
             return self._record_action_result(
                 action_key,
@@ -1029,7 +1089,9 @@ class AutonomyEngine:
                         action_run_id=action_run_id,
                     )
             if step.get("action") == "refresh_cognitive_state":
-                self.state.last_router_refresh_result = dict(result)
+                self.state.last_router_refresh_result = (
+                    sanitize_autonomy_step_result(result)
+                )
             if (
                 verified_outcome
                 and step.get("action") == "equip_shield"

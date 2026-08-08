@@ -6,6 +6,7 @@ from typing import Any, Callable, MutableMapping
 from .guild_runtime_reset import (
     GuildRuntimeResetDeps,
     build_guild_runtime_reset_deps as build_guild_runtime_reset_deps_from_runtime,
+    require_guild_runtime_reset_ready,
     reset_guild_runtime_state_from_runtime,
 )
 
@@ -42,6 +43,7 @@ class GuildRuntimeResetCompositionDeps:
     background_cognitive_tasks: MutableMapping[str, Any]
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
+    autonomy_engines: MutableMapping[int, Any]
     reset_session_continuity_guild: Callable[[int, Callable[[], Any]], Any]
     reset_search_followup_recovery_guild: Callable[[int], Any] | None = None
 
@@ -85,14 +87,20 @@ class GuildRuntimeResetComposition:
             background_cognitive_tasks=deps.background_cognitive_tasks,
             autonomy_last_cognitive_refresh_at=deps.autonomy_last_cognitive_refresh_at,
             autonomy_cognitive_refresh_tasks=deps.autonomy_cognitive_refresh_tasks,
+            autonomy_engines=deps.autonomy_engines,
         )
 
     def reset_guild_runtime_state(self, guild_id: int) -> None:
+        runtime_deps = self.build_guild_runtime_reset_deps()
+        require_guild_runtime_reset_ready(
+            guild_id,
+            deps=runtime_deps,
+        )
         result = self.deps.reset_session_continuity_guild(
             guild_id,
             lambda: reset_guild_runtime_state_from_runtime(
                 guild_id,
-                deps=self.build_guild_runtime_reset_deps(),
+                deps=runtime_deps,
             ),
         )
         if isinstance(result, dict) and result.get("state") == "error":

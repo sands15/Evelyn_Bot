@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .autonomy_authorization import SUPPORTED_AUTONOMY_ACTIONS
+from .autonomy_outcome_evidence import AUTONOMY_ACTION_EVIDENCE_CODES
 
 
 AUTONOMY_FAILURE_SCHEMA = "autonomy.failure.v1"
@@ -20,6 +21,86 @@ AUTONOMY_FAILURE_PHASES = frozenset({"cycle", "observe", "execute"})
 AUTONOMY_FAILURE_DOMAINS = frozenset(
     action.partition(":")[0]
     for action in SUPPORTED_AUTONOMY_ACTIONS
+)
+_AUTONOMY_RESULT_STATUSES = frozenset(
+    {
+        "ok",
+        "done",
+        "completed",
+        "blocked",
+        "failed",
+        "unknown",
+        "unverified",
+    }
+)
+_AUTONOMY_RESULT_REASONS = frozenset(
+    {
+        AUTONOMY_CYCLE_FAILED,
+        AUTONOMY_EXECUTOR_EXECUTE_FAILED,
+        "action_not_allowed",
+        "attack_step_skipped",
+        "authorization_action_unsupported",
+        "authorization_audit_unavailable",
+        "authorization_changed_during_action",
+        "authorization_required",
+        "authorization_scope_denied",
+        "executor_callback_unavailable",
+        "executor_disabled",
+        "executor_result_invalid",
+        "explicit_postcondition_verified",
+        "food_step_skipped",
+        "hazard_interrupt",
+        "hazard_step_skipped",
+        "hostile_interrupt",
+        "idle_ok",
+        "low_health_interrupt",
+        "no_followup_channel",
+        "no_queued_proactive_question",
+        "no_recent_user_text",
+        "outcome_evidence_missing",
+        "outcome_unverified",
+        "ping_cooldown",
+        "plan_complete",
+        "proactive_gate_completed",
+        "recent_context_summarized",
+        "retreat_step_skipped",
+        "retry_budget_exhausted",
+        "retry_suppressed",
+        "router_refresh_inflight",
+        "router_refresh_task_unavailable",
+        "router_refreshed",
+        "sent_followup",
+        "shield_skipped",
+        "status_checked",
+        "summary_ready",
+        "target_absence_verified",
+        "unsupported_default_action",
+    }
+)
+_AUTONOMY_RESULT_EVIDENCE_CODES = frozenset(
+    code
+    for codes in AUTONOMY_ACTION_EVIDENCE_CODES.values()
+    for code in codes
+)
+_AUTONOMY_RESULT_BOOL_FIELDS = frozenset(
+    {
+        "verified",
+        "skipped",
+        "replan",
+        "continuityDurable",
+        "connected",
+    }
+)
+_AUTONOMY_RESULT_NUMBER_FIELDS = frozenset(
+    {
+        "count",
+        "active_sessions",
+        "inflight_llm_requests",
+        "known_followup_channels",
+        "continuityGeneration",
+        "elapsed_ms",
+        "confidence",
+    }
 )
 
 
@@ -101,6 +182,15 @@ def sanitize_autonomy_observation(
     if not isinstance(value, dict):
         return {}
     sanitized = dict(value)
+    for history_field in (
+        "latest_user_text",
+        "recent_visible",
+        "recent_context_items",
+        "unresolved_items",
+        "search_pending",
+        "cognitive_refresh_needed",
+    ):
+        sanitized.pop(history_field, None)
     if "executor_errors" not in sanitized:
         return sanitized
     executor_errors = sanitize_autonomy_executor_errors(
@@ -110,6 +200,45 @@ def sanitize_autonomy_observation(
         sanitized["executor_errors"] = executor_errors
     else:
         sanitized.pop("executor_errors", None)
+    return sanitized
+
+
+def sanitize_autonomy_step_result(
+    value: object,
+) -> dict[str, Any]:
+    """Project an executor result to content-free durable fields."""
+
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    status = value.get("status")
+    if isinstance(status, str) and status in _AUTONOMY_RESULT_STATUSES:
+        sanitized["status"] = status
+    reason = value.get("reason")
+    if isinstance(reason, str) and reason in _AUTONOMY_RESULT_REASONS:
+        sanitized["reason"] = reason
+    evidence_code = value.get("evidence_code")
+    if (
+        isinstance(evidence_code, str)
+        and evidence_code in _AUTONOMY_RESULT_EVIDENCE_CODES
+    ):
+        sanitized["evidence_code"] = evidence_code
+    for key in _AUTONOMY_RESULT_BOOL_FIELDS:
+        candidate = value.get(key)
+        if type(candidate) is bool:
+            sanitized[key] = candidate
+    for key in _AUTONOMY_RESULT_NUMBER_FIELDS:
+        candidate = value.get(key)
+        if type(candidate) in {int, float}:
+            sanitized[key] = candidate
+    failure = value.get("failure")
+    if isinstance(failure, dict):
+        sanitized["failure"] = autonomy_failure_payload(
+            code=failure.get("code"),
+            phase=failure.get("phase"),
+            domain=failure.get("domain"),
+            action=failure.get("action"),
+        )
     return sanitized
 
 
@@ -125,4 +254,5 @@ __all__ = [
     "autonomy_last_error",
     "sanitize_autonomy_executor_errors",
     "sanitize_autonomy_observation",
+    "sanitize_autonomy_step_result",
 ]

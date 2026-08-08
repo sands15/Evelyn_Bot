@@ -113,6 +113,7 @@ def build_default_autonomy_observation(
     refresh_at = float(last_cognitive_refresh_at or 0.0)
     refresh_gap_sec = 999999.0 if refresh_at <= 0 else max(0.0, now_mono_value - refresh_at)
     unresolved_items = 0
+    user_unresolved_items = 0
     search_pending = False
     recent_visible: list[str] = []
     for entry in history[-8:]:
@@ -124,6 +125,8 @@ def build_default_autonomy_observation(
         recent_visible.append(content)
         if "?" in content:
             unresolved_items += 1
+            if clean_text(str(entry.get("role", ""))) == "user":
+                user_unresolved_items += 1
         if answer_promises_search_fn(content):
             search_pending = True
 
@@ -176,6 +179,7 @@ def build_default_autonomy_observation(
         "quiet_hours": bool(quiet_hours),
         "repeated_blocked_action": repeated_blocked_action,
         "unresolved_items": unresolved_items,
+        "user_unresolved_items": user_unresolved_items,
         "search_pending": search_pending,
         "recent_visible": recent_visible[-6:],
         "latest_user_text": latest_user_text,

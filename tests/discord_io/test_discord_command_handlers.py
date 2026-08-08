@@ -754,6 +754,56 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(removed, ["guild_7"])
         self.assertEqual(ctx.sent, ["reset:Home:!"])
 
+    def test_reset_guild_memory_reports_live_autonomy_refresh(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
+        removed: list[object] = []
+
+        def blocked_reset(_guild_id: int) -> None:
+            raise RuntimeError("autonomy_cognitive_refresh_inflight")
+
+        asyncio.run(
+            handle_reset_guild_memory_command(
+                ctx,
+                memory_root=Path("unused"),
+                reset_guild_runtime_state=blocked_reset,
+                remove_tree=removed.append,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reply=lambda **_kwargs: "reset",
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(removed, [])
+        self.assertEqual(
+            ctx.sent,
+            ["기억 정리 작업이 끝나는 중이야. 잠깐 뒤에 다시 시도해줘."],
+        )
+
+    def test_reset_guild_memory_requires_autonomy_stop(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
+        removed: list[object] = []
+
+        def blocked_reset(_guild_id: int) -> None:
+            raise RuntimeError("autonomy_runtime_active")
+
+        asyncio.run(
+            handle_reset_guild_memory_command(
+                ctx,
+                memory_root=Path("unused"),
+                reset_guild_runtime_state=blocked_reset,
+                remove_tree=removed.append,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reply=lambda **_kwargs: "reset",
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(removed, [])
+        self.assertEqual(
+            ctx.sent,
+            ["자율 행동을 먼저 끈 뒤 다시 시도해줘."],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

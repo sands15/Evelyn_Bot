@@ -30,6 +30,12 @@ if "numpy" not in sys.modules:
 from evelyn_core.main_llm_runtime import (  # noqa: E402
     MainLlmRuntimeDeps,
 )
+from evelyn_core.autonomy_runtime_composition import (  # noqa: E402
+    AutonomyRuntimeCompositionDeps,
+)
+from evelyn_core.autonomy_runtime_factory import (  # noqa: E402
+    AutonomyRuntimeFactoryDeps,
+)
 from evelyn_core.search_answer_runtime import (  # noqa: E402
     SearchAnswerRuntimeDeps,
 )
@@ -73,6 +79,8 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
             VoiceRouteExecutionDeps,
             SearchAnswerRuntimeDeps,
             SearchFollowupRuntimeDeps,
+            AutonomyRuntimeCompositionDeps,
+            AutonomyRuntimeFactoryDeps,
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             memory_index_dir = Path(temp_dir) / "memory_index"
@@ -106,6 +114,7 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
             "voice_route_execution.py": 4,
             "search_answer_runtime.py": 1,
             "search_followup_runtime.py": 7,
+            "autonomy_runtime_factory.py": 1,
         }
         for filename, minimum_count in expected_calls.items():
             with self.subTest(filename=filename):
@@ -168,6 +177,9 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
                 "SearchAnswerRuntimeDeps",
                 "SearchFollowupRuntimeDeps",
             },
+            "autonomy_runtime_composition.py": {
+                "AutonomyRuntimeFactoryDeps",
+            },
         }
         for filename, targets in composition_targets.items():
             tree = ast.parse(
@@ -199,6 +211,7 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
             "VoiceResponseDependencyCompositionDeps",
             "VoiceExecutionDependencyCompositionDeps",
             "SearchMemoryDependencyCompositionDeps",
+            "AutonomyRuntimeCompositionDeps",
         ):
             with self.subTest(main_target=target):
                 call = next(

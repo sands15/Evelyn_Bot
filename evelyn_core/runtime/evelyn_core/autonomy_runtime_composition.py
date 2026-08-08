@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .autonomy import AutonomyEngine
@@ -25,6 +26,7 @@ class AutonomyRuntimeCompositionDeps:
     select_question_to_ask: Callable[..., Any]
     runtime_session_key: Callable[..., str]
     get_conversation_history: Callable[..., Any]
+    memory_index_dir: Path
     pick_recent_user_text: Callable[..., Any]
     localtime: Callable[..., Any]
     monotonic: Callable[[], float]
@@ -83,6 +85,7 @@ class AutonomyRuntimeComposition:
             select_question_to_ask=deps.select_question_to_ask,
             runtime_session_key=deps.runtime_session_key,
             get_conversation_history=deps.get_conversation_history,
+            memory_index_dir=deps.memory_index_dir,
             pick_recent_user_text=deps.pick_recent_user_text,
             localtime=deps.localtime,
             monotonic=deps.monotonic,

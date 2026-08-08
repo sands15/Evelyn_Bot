@@ -20,6 +20,10 @@ from .discord_commands import (
     control_command_check_failure_message,
     is_control_command_authorized_payload,
 )
+from .guild_runtime_reset import (
+    AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
+    AUTONOMY_RUNTIME_ACTIVE,
+)
 from .minecraft_action_contract import MINECRAFT_ROUTE_ACTIONS
 from .minecraft_mode_composition import (
     MINECRAFT_CONNECTED_OUTCOME,
@@ -418,7 +422,21 @@ async def handle_reset_guild_memory_command(
     memory_dir = memory_root / f"guild_{guild_id}"
     current_prefix = get_guild_command_prefix(guild_id)
 
-    reset_guild_runtime_state(guild_id)
+    try:
+        reset_guild_runtime_state(guild_id)
+    except RuntimeError as exc:
+        error_code = str(exc)
+        if error_code not in {
+            AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
+            AUTONOMY_RUNTIME_ACTIVE,
+        }:
+            raise
+        await ctx.send(
+            "자율 행동을 먼저 끈 뒤 다시 시도해줘."
+            if error_code == AUTONOMY_RUNTIME_ACTIVE
+            else "기억 정리 작업이 끝나는 중이야. 잠깐 뒤에 다시 시도해줘."
+        )
+        return
     if memory_dir.exists():
         remove_tree(memory_dir)
 

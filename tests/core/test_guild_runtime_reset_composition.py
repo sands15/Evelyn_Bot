@@ -16,6 +16,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.guild_runtime_reset_composition import (  # noqa: E402
     GuildRuntimeResetComposition,
 )
+from evelyn_core.guild_runtime_reset import (  # noqa: E402
+    AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
+    AUTONOMY_RUNTIME_ACTIVE,
+)
 
 
 class GuildRuntimeResetCompositionTests(unittest.TestCase):
@@ -88,7 +92,12 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
                 ),
             )
         )
-        composition.build_guild_runtime_reset_deps = Mock(return_value=object())
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={},
+                autonomy_engines={},
+            )
+        )
 
         with patch(
             "evelyn_core.guild_runtime_reset_composition."
@@ -102,7 +111,76 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
             ["revoke:7", "reset", "flush", "search:7"],
         )
 
+    def test_live_refresh_fails_before_continuity_revocation(self) -> None:
+        events: list[str] = []
+        refresh_task = Mock()
+        refresh_task.done.return_value = False
+        composition = GuildRuntimeResetComposition(
+            SimpleNamespace(
+                reset_session_continuity_guild=(
+                    lambda *_args: events.append("revoke")
+                ),
+            )
+        )
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={7: refresh_task},
+                autonomy_engines={},
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{AUTONOMY_COGNITIVE_REFRESH_INFLIGHT}$",
+        ):
+            composition.reset_guild_runtime_state(7)
+
+        self.assertEqual(events, [])
+        refresh_task.cancel.assert_not_called()
+
+    def test_live_autonomy_fails_before_continuity_revocation(self) -> None:
+        events: list[str] = []
+        autonomy_task = Mock()
+        autonomy_task.done.return_value = False
+        composition = GuildRuntimeResetComposition(
+            SimpleNamespace(
+                reset_session_continuity_guild=(
+                    lambda *_args: events.append("revoke")
+                ),
+            )
+        )
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={},
+                autonomy_engines={
+                    7: SimpleNamespace(
+                        _task=autonomy_task,
+                        state=SimpleNamespace(
+                            enabled=True,
+                            status="running",
+                        ),
+                    )
+                },
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{AUTONOMY_RUNTIME_ACTIVE}$",
+        ):
+            composition.reset_guild_runtime_state(7)
+
+        self.assertEqual(events, [])
+        autonomy_task.cancel.assert_not_called()
+
     def test_continuity_persistence_failure_fails_the_reset_command(self) -> None:
+        autonomy_task = Mock()
+        autonomy_task.done.return_value = True
+        runtime_state = SimpleNamespace(
+            enabled=False,
+            status="idle",
+            current_goal=SimpleNamespace(summary="must remain"),
+        )
         composition = GuildRuntimeResetComposition(
             SimpleNamespace(
                 reset_session_continuity_guild=lambda guild_id, callback: {
@@ -111,12 +189,28 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
                 }
             )
         )
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={},
+                autonomy_engines={
+                    7: SimpleNamespace(
+                        _task=autonomy_task,
+                        state=runtime_state,
+                    )
+                },
+            )
+        )
 
         with self.assertRaisesRegex(
             RuntimeError,
             "continuity_reset_not_durable",
         ):
             composition.reset_guild_runtime_state(7)
+
+        self.assertEqual(
+            runtime_state.current_goal.summary,
+            "must remain",
+        )
 
 
 if __name__ == "__main__":

@@ -198,6 +198,37 @@ history에서 파생된 persona/cognitive/router cache도 strict receipt로 현�
 증명되지 않으면 무시하고, tool/search 결과가 history를 다시 쓸 때는
 필터링된 exposure를 응답 receipt에 병합한다.
 
+자율행동 runtime도 같은 예외 없는 history 소비자다. observation과 선택된
+summary·recent-context·ping·cognitive-refresh callback은 매 조회에서 공용 history
+필터를 사용한다. 최초 observation의 typed exposure는 plan·execute·state commit
+전체를 guard하며, observation 뒤 새 `bound` row를 읽는 callback은 그 소비와
+side effect 동안 자체 guard를 다시 잡는다. 무결성 실패는 일반 executor 오류로
+낮추지 않고 action·cursor·state commit 전에 fail-closed한다. guard 밖으로 반환하거나
+autonomy cognitive state에 저장하는 projection에는 대화 원문, raw summary/text,
+private assistant-history 의사결정 신호를 남기지 않는다. fixed operational failure
+code는 내용 비저장 상태 진단으로 유지한다. receipt 없는 runtime cache는 재시작 때
+전부 버리고 안전한 상태를 즉시 다시 저장한다. Minecraft plan/cursor는 typed world
+observation만으로 결정되므로 대화 exposure guard 안에서 유지한다. 자율 후속 row는
+현재 exposure에서 만든 compact receipt를 continuity에 함께 기록한다. 일반 autonomy
+loop나 cognitive refresh가 살아 있는 guild reset은 continuity·파일 mutation 전에
+거부하며, idle engine은 같은 객체의 cache를 content-free 상태로 비운다.
+
+guild/room/person/session의 stored summary, fact, question과 assistant raw는 vault note
+삭제 현재성을 증명하는 receipt가 없으므로 layered prompt 입력에서 전역 보류한다.
+exact user raw만 기존 evidence shape 검사를 거쳐 사용할 수 있다. 같은 원문이
+`legacy/*` mirror나 `daily/*` conversation note, semantic derived note로 우회하지
+못하도록 live vault recall과 hot context는 `conversation|derived|legacy` source type을
+제외한다. retrieval cache는 `memory.retrieval-cache.v2`, hot context는
+`recall_policy=deletion-current-v1`일 때만 재사용한다. 저장·감사와 사용자 검토는
+유지하며 explicit user/system note recall은 유지한다.
+
+memory-derived proactive question queue는 deletion-current receipt를 갖추기 전까지
+선택과 mark를 전역 fail-closed한다. `open_questions.jsonl`의 provenance-bearing 원본은
+유지하지만 별도 queue에 raw/ask text를 복제하지 않는다. 현재 모델 답변에 직접 든
+명시적 질문은 이 queue와 무관하므로 유지한다. 과거 queue/pending 원문은 index
+sync에서 제거하고, note 삭제는 receipt 없는 autonomy cache도 제거한다. scope의
+symlink·junction alias나 cleanup 실패는 삭제 성공으로 낮추지 않는다.
+
 Main Control Page와 Fast Control Page의 memory-bound JSON response는 handler
 종료로 경계가 끝나지 않는다. actual HTTP `prepare` 전에 exact deletion
 position을 재검사하고 `write_eof` 종료까지 lease를 유지한다. stale로

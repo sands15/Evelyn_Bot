@@ -636,7 +636,7 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         question_cooldown_hit=question_cooldown_hit, evaluate_proactive_question_gate=evaluate_proactive_question_gate,
         proactive_question_scope_candidates=proactive_question_scope_candidates, select_question_to_ask=select_question_to_ask,
         runtime_session_key=runtime_session_key, get_conversation_history=get_conversation_history,
-        pick_recent_user_text=pick_recent_user_text, localtime=time.localtime,
+        memory_index_dir=Path(MEMORY_ROOT) / "memory_index", pick_recent_user_text=pick_recent_user_text, localtime=time.localtime,
         monotonic=time.monotonic, autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
         autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks, read_cached_cognitive_state=read_cached_cognitive_state,
         read_vision_watch_state=read_vision_watch_state, local_tts_snapshot=local_tts_playback_manager.snapshot,
@@ -678,11 +678,11 @@ guild_runtime_reset_composition = GuildRuntimeResetComposition(
         background_search_tasks=background_search_tasks, clear_tts_playback_tracking=clear_tts_playback_tracking,
         tts_playback_tracker=tts_playback_tracker, memory_locks=memory_locks,
         cognitive_locks=cognitive_locks, background_cognitive_tasks=background_cognitive_tasks,
-        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at, autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
+        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
+        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks, autonomy_engines=autonomy_engines,
         reset_session_continuity_guild=session_continuity_checkpoint.reset_guild,
         reset_search_followup_recovery_guild=search_followup_recovery.reset_guild,
-    )
-)
+    ))
 build_guild_runtime_reset_deps = (
     guild_runtime_reset_composition.build_guild_runtime_reset_deps
 )

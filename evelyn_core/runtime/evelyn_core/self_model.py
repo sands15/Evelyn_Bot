@@ -568,7 +568,9 @@ def update_self_state_from_observation(
     inflight = int(observation.get("inflight_llm_requests", 0) or 0)
     quiet_hours = bool(observation.get("quiet_hours", False))
     last_ping_sec = float(observation.get("last_autonomy_ping_sec", 999999) or 999999)
-    unresolved = int(observation.get("unresolved_items", 0) or 0)
+    unresolved = int(
+        observation.get("user_unresolved_items", 0) or 0
+    )
     repeated_blocked = bool(observation.get("repeated_blocked_action", False))
     latest_user_text = clean_text(str(observation.get("latest_user_text") or ""))
     vision_change_recent = bool(observation.get("vision_change_recent", False))
@@ -662,7 +664,7 @@ def select_self_impulse(state: EvelynSelfState, observation: dict[str, Any] | No
         return "comment_on_screen_change", "vision_change"
     if state.curiosity >= 0.66 and state.playfulness >= 0.42:
         return "ask_light_question", "curiosity"
-    if int(observation.get("unresolved_items", 0) or 0) > 0 and state.curiosity >= 0.52:
+    if int(observation.get("user_unresolved_items", 0) or 0) > 0 and state.curiosity >= 0.52:
         return "suggest_next_step", "unresolved_context"
     return "stay_silent", "no_need"
 

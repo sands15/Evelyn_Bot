@@ -13,6 +13,8 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.guild_runtime_reset import (  # noqa: E402
+    AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
+    AUTONOMY_RUNTIME_ACTIVE,
     GuildRuntimeResetDeps,
     build_guild_runtime_reset_deps,
     reset_guild_runtime_state_from_runtime,
@@ -46,7 +48,7 @@ class GuildRuntimeResetTests(unittest.TestCase):
         search_task = FakeTask()
         done_search_task = FakeTask(done=True)
         cognitive_task = FakeTask()
-        refresh_task = FakeTask()
+        refresh_task = FakeTask(done=True)
         registry = FakeTurnScopeRegistry()
         cleared_tts: list[int] = []
         state: dict[str, Any] = {
@@ -84,6 +86,7 @@ class GuildRuntimeResetTests(unittest.TestCase):
             "background_cognitive_tasks": {guild_key: cognitive_task, other_key: FakeTask()},
             "autonomy_last_cognitive_refresh_at": {7: 1.0, 8: 2.0},
             "autonomy_cognitive_refresh_tasks": {7: refresh_task, 8: FakeTask()},
+            "autonomy_engines": {},
             "registry": registry,
             "cleared_tts": cleared_tts,
             "tasks": {
@@ -124,6 +127,7 @@ class GuildRuntimeResetTests(unittest.TestCase):
             background_cognitive_tasks=state["background_cognitive_tasks"],
             autonomy_last_cognitive_refresh_at=state["autonomy_last_cognitive_refresh_at"],
             autonomy_cognitive_refresh_tasks=state["autonomy_cognitive_refresh_tasks"],
+            autonomy_engines=state["autonomy_engines"],
         )
         return deps, state
 
@@ -146,7 +150,56 @@ class GuildRuntimeResetTests(unittest.TestCase):
         self.assertTrue(state["tasks"]["search"].cancelled)
         self.assertFalse(state["tasks"]["done_search"].cancelled)
         self.assertTrue(state["tasks"]["cognitive"].cancelled)
-        self.assertTrue(state["tasks"]["refresh"].cancelled)
+        self.assertFalse(state["tasks"]["refresh"].cancelled)
+
+    def test_live_autonomy_refresh_blocks_reset_before_any_mutation(
+        self,
+    ) -> None:
+        deps, state = self.build_deps()
+        refresh_task = FakeTask()
+        state["autonomy_cognitive_refresh_tasks"][7] = refresh_task
+        snapshots = {
+            key: dict(value)
+            for key, value in state.items()
+            if isinstance(value, dict)
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{AUTONOMY_COGNITIVE_REFRESH_INFLIGHT}$",
+        ):
+            reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+        for key, snapshot in snapshots.items():
+            self.assertEqual(state[key], snapshot, key)
+        self.assertEqual(state["registry"].cancelled_prefixes, [])
+        self.assertEqual(state["cleared_tts"], [])
+        self.assertFalse(refresh_task.cancelled)
+
+    def test_live_autonomy_cycle_blocks_reset_before_any_mutation(self) -> None:
+        deps, state = self.build_deps()
+        autonomy_task = FakeTask()
+        state["autonomy_engines"][7] = SimpleNamespace(
+            _task=autonomy_task,
+            state=SimpleNamespace(enabled=True, status="running"),
+        )
+        snapshots = {
+            key: dict(value)
+            for key, value in state.items()
+            if isinstance(value, dict)
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{AUTONOMY_RUNTIME_ACTIVE}$",
+        ):
+            reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+        for key, snapshot in snapshots.items():
+            self.assertEqual(state[key], snapshot, key)
+        self.assertEqual(state["registry"].cancelled_prefixes, [])
+        self.assertEqual(state["cleared_tts"], [])
+        self.assertFalse(autonomy_task.cancelled)
 
     def test_reset_removes_orphaned_state_without_active_or_owner_anchor(self) -> None:
         deps, state = self.build_deps()
@@ -196,6 +249,45 @@ class GuildRuntimeResetTests(unittest.TestCase):
             )
         )
 
+    def test_reset_scrubs_stopped_autonomy_engine_in_place(self) -> None:
+        deps, state = self.build_deps()
+        runtime_state = SimpleNamespace(
+            enabled=False,
+            status="idle",
+            safety_mode="private",
+            allowed_actions=["private"],
+            last_observation={"private": "canary"},
+            current_goal=SimpleNamespace(summary="private canary"),
+            current_plan=SimpleNamespace(summary="private canary"),
+            last_step_result={"private": "canary"},
+            last_router_refresh_result={"private": "canary"},
+            drive_state={"private": "canary"},
+            last_error="private canary",
+            failure_count=9,
+        )
+        blocked_counts = {"private": 1}
+        state["autonomy_engines"][7] = SimpleNamespace(
+            _task=FakeTask(done=True),
+            state=runtime_state,
+            _blocked_counts=blocked_counts,
+        )
+
+        reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+        self.assertFalse(runtime_state.enabled)
+        self.assertEqual(runtime_state.status, "idle")
+        self.assertEqual(runtime_state.safety_mode, "constrained")
+        self.assertEqual(runtime_state.allowed_actions, [])
+        self.assertEqual(runtime_state.last_observation, {})
+        self.assertIsNone(runtime_state.current_goal)
+        self.assertIsNone(runtime_state.current_plan)
+        self.assertEqual(runtime_state.last_step_result, {})
+        self.assertEqual(runtime_state.last_router_refresh_result, {})
+        self.assertEqual(runtime_state.drive_state, {})
+        self.assertIsNone(runtime_state.last_error)
+        self.assertEqual(runtime_state.failure_count, 0)
+        self.assertEqual(blocked_counts, {})
+
 
 def test_build_guild_runtime_reset_deps_identity() -> None:
     deps = build_guild_runtime_reset_deps(
@@ -229,6 +321,7 @@ def test_build_guild_runtime_reset_deps_identity() -> None:
         background_cognitive_tasks={},
         autonomy_last_cognitive_refresh_at={},
         autonomy_cognitive_refresh_tasks={},
+        autonomy_engines={},
     )
     assert isinstance(deps, GuildRuntimeResetDeps)
 

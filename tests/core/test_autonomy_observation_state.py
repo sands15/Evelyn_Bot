@@ -58,7 +58,7 @@ class AutonomyObservationStateTests(unittest.TestCase):
         history = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "이거 확인해줘?"},
-            {"role": "assistant", "content": "찾아볼게"},
+            {"role": "assistant", "content": "찾아볼게?"},
         ]
 
         observation = build_default_autonomy_observation(
@@ -99,7 +99,9 @@ class AutonomyObservationStateTests(unittest.TestCase):
         self.assertEqual(observation["last_autonomy_ping_sec"], 10.0)
         self.assertTrue(observation["repeated_blocked_action"])
         self.assertTrue(observation["search_pending"])
-        self.assertEqual(observation["unresolved_items"], 1)
+        self.assertEqual(observation["recent_context_items"], 2)
+        self.assertEqual(observation["unresolved_items"], 2)
+        self.assertEqual(observation["user_unresolved_items"], 1)
         self.assertTrue(observation["cognitive_refresh_needed"])
         self.assertTrue(observation["local_tts_active"])
         self.assertTrue(observation["local_mic_recent"])

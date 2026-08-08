@@ -169,7 +169,7 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertTrue(questions[0]["evidence_id"].startswith("memory:question:"))
         self.assertEqual(questions[0]["evidence_id"], mirrored_questions[0]["evidence_id"])
         self.assertEqual(mirrored_questions[0]["text"], "다음 후보 확인 필요")
-        self.assertEqual(len(proactive), 1)
+        self.assertEqual(proactive, [])
 
     def test_summary_provenance_fails_closed_after_summary_content_changes(self) -> None:
         with TemporaryMemoryRoot():

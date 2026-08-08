@@ -53,6 +53,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     read_memory_hot_context,
     recall_memory_vault,
     refresh_memory_hot_context,
+    refresh_legacy_memory_mirror,
     refresh_legacy_memory_node_notes,
     run_memory_vault_maintenance_once,
     run_semantic_memory_consolidation_once,
@@ -381,6 +382,138 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("Stone Tools", first.context_text)
         self.assertFalse(first.metadata["cache_hit"])
         self.assertTrue(second.metadata["cache_hit"])
+
+    def test_sync_purges_only_unreceipted_proactive_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "guild_7" / "session_live"
+            session_dir.mkdir(parents=True)
+            proactive_path = session_dir / "proactive_questions.jsonl"
+            pending_path = session_dir / "pending_proactive_question.json"
+            questions_path = session_dir / "open_questions.jsonl"
+            autonomy_path = (
+                root
+                / "guild_7"
+                / "system_autonomy"
+                / "cognitive_state.json"
+            )
+            autonomy_path.parent.mkdir(parents=True)
+            for path in (
+                proactive_path,
+                pending_path,
+                questions_path,
+                autonomy_path,
+            ):
+                path.write_text("legacy private canary", encoding="utf-8")
+
+            sync_memory_vault_index(root=root)
+
+            self.assertFalse(proactive_path.exists())
+            self.assertFalse(pending_path.exists())
+            self.assertTrue(questions_path.exists())
+            self.assertTrue(autonomy_path.exists())
+
+    def test_sync_rejects_internal_scope_symlink_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guild_dir = root / "guild_7"
+            target_dir = guild_dir / "safe_target"
+            target_dir.mkdir(parents=True)
+            proactive_path = target_dir / "proactive_questions.jsonl"
+            proactive_path.write_text("must remain", encoding="utf-8")
+            alias = guild_dir / "session_alias"
+            try:
+                alias.symlink_to(target_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                OSError,
+                "unsafe_memory_runtime_artifact_path",
+            ):
+                sync_memory_vault_index(root=root)
+
+            self.assertTrue(proactive_path.exists())
+            alias.unlink()
+            alias.symlink_to(
+                guild_dir / "missing_target",
+                target_is_directory=True,
+            )
+            with self.assertRaisesRegex(
+                OSError,
+                "unsafe_memory_runtime_artifact_path",
+            ):
+                sync_memory_vault_index(root=root)
+
+    def test_live_recall_withholds_unreceipted_conversation_and_legacy_notes(
+        self,
+    ) -> None:
+        unsafe_summary = "삭제 현재성 없는 레거시 요약 표식"
+        unsafe_answer = "삭제 현재성 없는 어시스턴트 답변 표식"
+        unsafe_legacy_note = "source가 없는 레거시 노트 표식"
+        safe_note = "사용자가 직접 저장한 안전 기억 표식"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guild_dir = root / "guild_7"
+            guild_dir.mkdir(parents=True)
+            (guild_dir / "rolling_summary.txt").write_text(
+                unsafe_summary,
+                encoding="utf-8",
+            )
+            daily_path = append_turn_rows_to_memory_vault(
+                7,
+                [
+                    {
+                        "role": "user",
+                        "text": "오늘 대화를 기록해줘",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": unsafe_answer,
+                    },
+                ],
+                root=root,
+            )
+            legacy_path = refresh_legacy_memory_mirror(7, root=root)
+            write_memory_vault_note(
+                note_type="legacy",
+                title="기존 레거시 기억",
+                body=unsafe_legacy_note,
+                root=root,
+            )
+            write_memory_vault_note(
+                note_type="concept",
+                title="직접 저장 기억",
+                body=safe_note,
+                source="control-page-user",
+                root=root,
+            )
+            receipt: dict[str, object] = {}
+
+            unsafe_context = build_memory_vault_context(
+                7,
+                f"{unsafe_summary} {unsafe_answer} {unsafe_legacy_note}",
+                root=root,
+                receipt=receipt,
+            )
+            safe_context = build_memory_vault_context(
+                7,
+                safe_note,
+                root=root,
+            )
+
+            self.assertIsNotNone(daily_path)
+            self.assertTrue(daily_path.exists())
+            self.assertIsNotNone(legacy_path)
+            self.assertTrue(legacy_path.exists())
+            self.assertNotIn(unsafe_summary, unsafe_context)
+            self.assertNotIn(unsafe_answer, unsafe_context)
+            self.assertNotIn(unsafe_legacy_note, unsafe_context)
+            self.assertFalse(
+                {"conversation", "derived", "legacy"}
+                & set(receipt.get("sourceTypeCounts") or {})
+            )
+            self.assertIn(safe_note, safe_context)
 
     def test_cache_hit_cannot_export_private_retrieval_mode(
         self,
@@ -1483,7 +1616,7 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(writer.call_count, 1)
         self.assertTrue(writer.call_args.kwargs["durable"])
 
-    def test_provenance_is_exposed_in_cards_and_cached_recall(self) -> None:
+    def test_derived_provenance_is_exposed_in_cards_but_not_live_recall(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_memory_vault_note(
@@ -1527,11 +1660,8 @@ class MemoryVaultTests(unittest.TestCase):
             provenance["evidenceHashes"],
             ["evidence-sha256-123"],
         )
-        self.assertIn("[Memory Provenance]", first.context_text)
-        self.assertEqual(
-            first.metadata["provenance"][0]["schema"],
-            MEMORY_PROVENANCE_SCHEMA,
-        )
+        self.assertEqual(first.context_text, "")
+        self.assertEqual(first.metadata["provenance"], [])
         self.assertTrue(second.metadata["cache_hit"])
         self.assertEqual(
             second.metadata["provenance"],
@@ -1850,6 +1980,20 @@ class MemoryVaultTests(unittest.TestCase):
                 root=root,
                 now=lambda: 100.0,
             )
+            session_dir = root / "guild_7" / "session_delete"
+            session_dir.mkdir(parents=True)
+            proactive_path = session_dir / "proactive_questions.jsonl"
+            pending_path = session_dir / "pending_proactive_question.json"
+            autonomy_path = (
+                root
+                / "guild_7"
+                / "system_autonomy"
+                / "cognitive_state.json"
+            )
+            autonomy_path.parent.mkdir(parents=True)
+            proactive_path.write_text(body, encoding="utf-8")
+            pending_path.write_text(body, encoding="utf-8")
+            autonomy_path.write_text(body, encoding="utf-8")
             result = delete_memory_vault_user_note(
                 preview["note"]["path"],
                 preview["confirmToken"],
@@ -1896,6 +2040,14 @@ class MemoryVaultTests(unittest.TestCase):
             except MemoryNoteDeletedError as exc:
                 recreated_error = exc
             path_exists_after = path.exists()
+            runtime_artifacts_exist_after = any(
+                candidate.exists()
+                for candidate in (
+                    proactive_path,
+                    pending_path,
+                    autonomy_path,
+                )
+            )
             was_deleted = memory_note_was_deleted(note.note_id, root=root)
             reused = delete_memory_vault_user_note(
                 note.note_id,
@@ -1909,6 +2061,7 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertTrue(preview["ok"])
         self.assertTrue(result["ok"])
         self.assertFalse(path_exists_after)
+        self.assertFalse(runtime_artifacts_exist_after)
         self.assertEqual(note_index_count, 0)
         self.assertEqual(vector_index_count, 0)
         self.assertEqual(retrieval_cache_count, 0)
@@ -2782,7 +2935,7 @@ class MemoryVaultTests(unittest.TestCase):
             ),
         )
         self.assertTrue(recall.ok)
-        self.assertIn("Structured Memory Architecture", recall.context_text)
+        self.assertNotIn("Structured Memory Architecture", recall.context_text)
 
 
 if __name__ == "__main__":

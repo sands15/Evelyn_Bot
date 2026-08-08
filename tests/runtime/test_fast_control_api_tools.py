@@ -1965,8 +1965,10 @@ class FastControlApiToolTests(unittest.TestCase):
         owner = ContinuityOwner()
         original_collect = fast_api.collect_runtime_health
         original_ask = fast_api.ask_main_llm
+        original_ask_and_queue = fast_api.ask_main_llm_and_queue_speech
         fast_api.collect_runtime_health = fake_collect_runtime_health
         fast_api.ask_main_llm = fail_main_llm
+        fast_api.ask_main_llm_and_queue_speech = fail_main_llm
         try:
             with patch.object(
                 fast_api,
@@ -1979,6 +1981,7 @@ class FastControlApiToolTests(unittest.TestCase):
         finally:
             fast_api.collect_runtime_health = original_collect
             fast_api.ask_main_llm = original_ask
+            fast_api.ask_main_llm_and_queue_speech = original_ask_and_queue
 
         with patch.object(
             fast_api,

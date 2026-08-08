@@ -395,7 +395,7 @@ class MemoryDerivationRevocationIntegrationTests(
         self.assertTrue(multi_exists)
         self.assertTrue(downstream_exists)
         self.assertTrue(single_was_deleted)
-        self.assertIn(
+        self.assertNotIn(
             "old downstream apricot conclusion",
             hot_before["content"],
         )
@@ -525,8 +525,12 @@ class MemoryDerivationRevocationIntegrationTests(
             "live blueberry evidence from source B",
             joined_prompts,
         )
-        self.assertIn(
+        self.assertNotIn(
             "Only live blueberry evidence remains.",
+            recall.context_text,
+        )
+        self.assertIn(
+            "live blueberry evidence from source B",
             recall.context_text,
         )
         self.assertNotIn("apricot", recall.context_text)

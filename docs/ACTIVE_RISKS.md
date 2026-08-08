@@ -777,10 +777,10 @@ recall receipt가 `attributed`가 되고, 정상 pinned hot-context의 ID가 손
 아니다.
 
 새로 저장되는 raw 대화 row는 content-free stable evidence ID와 source turn
-ID를 guild/room/person/session scope에 동일하게 보존한다. Prompt에 실제 선택된
-row만 receipt와 turn summary에 기록하므로 이후 턴에서 어느 원문 turn이
-제공됐는지 역추적할 수 있다. 기존 raw row는 내용을 이용해 ID를 소급 추론하지
-않고 `unattributed`로 남긴다.
+ID를 guild/room/person/session scope에 동일하게 보존한다. 그러나 assistant raw는
+vault note 삭제 현재성 receipt가 없으므로 prompt에서 전역 보류한다. exact user raw만
+기존 evidence 검사 뒤 사용할 수 있고, 기존 raw row는 내용을 이용해 ID를 소급
+추론하지 않는다.
 
 새로 생성되는 rolling summary는 본문 hash에 묶인 content-free sidecar에 자체
 파생 evidence ID와 실제 Summary LLM 입력 evidence/turn ID를 기록한다. 새
@@ -788,17 +788,24 @@ facts/questions도 같은 입력 계보와 별도 파생 ID를 hot JSONL과 mirr
 보존한다. context-size compact 재시도에서는 첫 시도의 최근 row를 source로
 남기지 않고 compact prompt에 실제 포함된 summary와 현재 턴만 연결한다. sidecar
 본문 hash가 다르거나 row provenance가 손상되면 receipt는 이를 근거로 인정하지
-않고 fail-closed한다.
+않고 fail-closed한다. 이 저장 계보만으로는 note 삭제 현재성을 증명할 수 없으므로
+stored summary/facts/questions도 prompt consumer에서는 현재 전역 보류한다.
 
-배포 전의 rolling summary·facts/questions와 과거 raw row는 여전히 근거 없는
-상태지만 사용 정책은 결정적으로 닫았다. 내용 유사도나 시간 인접성으로 소급
-연결하지 않고, 최종 Main/Fast 경계에서 `partial|unattributed` 결합 본문 전체를
-모델 입력에서 보류한다. prompt에는 구체 내용을 포함하지 않는
+배포 전후의 stored derived layer와 assistant raw는 deletion-current lineage가 없어
+사용 정책을 결정적으로 닫았다. 내용 유사도나 시간 인접성으로 소급 연결하지 않고
+layer 수집 단계에서 제외한다. 다른 `partial|unattributed` 결합 문맥도 최종
+Main/Fast 경계에서 전체 보류한다. prompt에는 구체 내용을 포함하지 않는
 `MEMORY_WITHHELD_RULE`만 남아 필요하면 사용자에게 정보를 다시 말해 달라고
 요청한다. producer의 `groundingState`도 근거 ID/count로 재계산하며, 최종
 1,680자 경계에서 문맥이 잘리면 같은 본문 보류 정책을 적용한다. receipt와 turn
 summary는 `state=withheld`, `promptMemoryWithheld`와 content-free 보류 count만
 기록하고 supplied evidence는 0으로 비운다.
+
+layer 원문을 복제한 legacy mirror, daily conversation note와 semantic derived note도
+별도 vault recall 우회가 되지 않도록 live recall/hot context에서 제외한다. cache
+schema v2와 hot-context policy marker가 이전 attributed cache를 무효화한다. 저장과
+감사는 유지되지만 자동 파생 기억의 live recall은 deletion-current lineage가 생길
+때까지 일시적으로 꺼져 있고, explicit user/system note recall은 유지된다.
 
 저장 legacy coverage는 이제 `memory.legacy-context-coverage.v1`로 측정한다.
 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로 재검사하고
@@ -906,10 +913,26 @@ search/tool 전용 sink는 vault memory context를 입력으로 받지 않는다
 세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
 compact `bound|not_used|unattributed` receipt를 process-local history에만 두지
 않고 durable checkpoint, restart restore, session·cross-surface merge까지 전파한다.
-Main/Fast/Voice/Search/tool이 history를 재사용하기 전에 누락·손상·
+Main/Fast/Voice/Search/tool과 production autonomy가 history를 재사용하기 전에 누락·손상·
 `unattributed`·stale version·tombstoned-note assistant row를 fail-closed로
 제거하고, persona/cognitive/router의 history-derived 상태도 strict receipt가
-없으면 재사용하지 않는다. Main/Fast Control의 actual HTTP write,
+없으면 재사용하지 않는다. autonomy는 observation부터 plan·execute·persist까지
+typed exposure를 유지하고, 늦게 읽은 callback도 자체 guard 안에서 side effect를
+완료한다. durable/returned state에는 raw history·summary·text와 private
+assistant-history 의사결정 신호를 남기지 않으며 후속 대화에는 compact receipt를
+전파한다. 재시작 때 receipt 없는 autonomy cache는 모두 버린다. Minecraft 활성
+환경의 plan/cursor는 대화 history가 아니라 typed world observation으로만 결정되므로
+삭제 guard를 유지한 채 보존한다.
+일반 autonomy loop나 cognitive refresh가 살아 있으면 guild reset은 continuity와
+파일 삭제 전에 고정 코드로 거부한다. legacy runtime cache는 load 즉시 content-free
+상태로 다시 저장하며 note 삭제도 receipt 없는 autonomy cache를 정리한다.
+proactive open-question queue는 deletion-current receipt가 없어 선택·mark를 전역
+fail-closed했고 새 raw/ask text 복제도 저장하지 않는다. 과거 queue/pending 원문은
+index sync에서 제거한다. stored summary/fact/question과 assistant raw도 같은
+lineage 공백 때문에 prompt에서 보류하지만, exact user raw와 모델이 현재 답변에
+직접 넣은 명시적 질문은 유지된다. 기능 재활성화는 exact receipt와 tombstone
+검증이 생긴 뒤에만 가능하다.
+Main/Fast Control의 actual HTTP write,
 Discord/TTS playback handoff와 Local Bridge의 HTTP EOF 후 host guard도 같은
 deletion position을 재검사한다. receipt와 boundary 메타데이터에는 대화
 원문·transcript·raw audio를 저장하지 않는다.

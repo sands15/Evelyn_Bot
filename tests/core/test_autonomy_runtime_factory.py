@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import sys
+import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
@@ -15,6 +20,23 @@ from evelyn_core.autonomy_runtime_factory import (
     AutonomyRuntimeFactoryDeps,
     get_or_create_autonomy_engine_from_runtime,
 )
+from evelyn_core import memory_deletion_journal as journal
+from evelyn_core.conversation_memory_receipt import (
+    memory_receipt_ref_from_receipt,
+)
+from evelyn_core.memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+)
+from evelyn_core.memory_integrity_authenticity import (
+    MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
+    MEMORY_INTEGRITY_BOOTSTRAP_ENV,
+    MEMORY_INTEGRITY_KEY_FILE_ENV,
+)
+from evelyn_core.memory_exposure import (
+    current_memory_exposure_position,
+    memory_exposure_guard,
+)
+from evelyn_core.self_model import EvelynSelfState
 from tests.continuity_test_support import (
     durable_continuity_status,
 )
@@ -28,8 +50,27 @@ class FakeGuild:
         return self.channels.get(channel_id)
 
 
+def bound_receipt(note_id: str) -> dict[str, Any]:
+    return memory_receipt_ref_from_receipt(
+        {
+            "schema": "memory.context-receipt.v1",
+            "state": "provided",
+            "groundingState": "attributed",
+            "memoryVersion": 0,
+            "suppliedNoteIds": [note_id],
+            "suppliedNoteCount": 1,
+            "contentFree": True,
+        }
+    )
+
+
 class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.memory_index_dir = (
+            Path(self.temp_dir.name) / "memory_index"
+        )
         self.events: list[tuple[str, Any]] = []
         self.engines: dict[int, Any] = {}
         self.channels = {10: SimpleNamespace(id=10, name="observe", send=object())}
@@ -70,6 +111,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             select_question_to_ask=lambda *_args, **_kwargs: None,
             runtime_session_key=lambda **kwargs: f"runtime:{kwargs['guild_id']}",
             get_conversation_history=lambda **_kwargs: list(self.history),
+            memory_index_dir=self.memory_index_dir,
             pick_recent_user_text=lambda history: history[-1]["content"] if history else "",
             localtime=lambda: SimpleNamespace(tm_hour=12),
             monotonic=lambda: next(self.clock_values),
@@ -176,6 +218,239 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observation["command_only_channel_ids"], [20])
         self.assertFalse(observation["quiet_hours"])
 
+    async def test_all_history_consumers_drop_unreceipted_assistant_text(
+        self,
+    ) -> None:
+        private = "AUTONOMY_HISTORY_CANARY"
+        selected_user_texts: list[str] = []
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {"role": "assistant", "content": private},
+        ]
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "select_and_mark_proactive_question": (
+                    lambda **kwargs: selected_user_texts.append(
+                        kwargs["user_text"]
+                    )
+                    or None
+                ),
+            }
+        )
+        executor = self.default_executor()
+
+        observation = await executor.observe()
+        summary = await executor.summarize_fn()
+        recent = await executor.summarize_recent_context_fn()
+        ping = await executor.maybe_ping_user_fn("확인")
+        refresh = await executor.refresh_cognitive_state_fn()
+
+        combined = str(
+            {
+                "observation": observation,
+                "summary": summary,
+                "recent": recent,
+                "ping": ping,
+                "refresh": refresh,
+                "events": self.events,
+            }
+        )
+        self.assertNotIn(private, combined)
+        self.assertNotIn("summary", summary)
+        self.assertNotIn("summary", recent)
+        self.assertNotIn("count", recent)
+        self.assertNotIn("text", refresh)
+        self.assertEqual(selected_user_texts, ["SAFE_USER_TEXT"])
+        refresh_event = next(
+            payload
+            for kind, payload in self.events
+            if kind == "refresh"
+        )
+        self.assertEqual(refresh_event[0][1], "SAFE_USER_TEXT")
+
+    @contextmanager
+    def unconfigured_memory_authenticity(self):
+        with patch.dict(
+            os.environ,
+            {
+                MEMORY_INTEGRITY_KEY_FILE_ENV: "",
+                MEMORY_INTEGRITY_ANCHOR_DIR_ENV: "",
+                MEMORY_INTEGRITY_BOOTSTRAP_ENV: "",
+            },
+        ):
+            yield
+
+    async def test_delete_after_observe_blocks_cycle_before_action(
+        self,
+    ) -> None:
+        note_id = "concept-0123456789abcdef"
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {
+                "role": "assistant",
+                "content": "BOUND_HISTORY_CANARY",
+                "memoryReceiptRef": bound_receipt(note_id),
+            },
+        ]
+        engine = self.create_engine()
+        original_observe = engine.observe
+
+        async def observe_then_delete() -> dict[str, Any]:
+            observation = await original_observe()
+            journal.append_memory_deletion_tombstone(
+                self.memory_index_dir,
+                {
+                    "schema": journal.MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
+                    "noteId": note_id,
+                    "noteType": "concept",
+                    "sourceType": "conversation",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-08T00:00:00Z",
+                },
+            )
+            return observation
+
+        engine.observe = observe_then_delete
+        engine._run_cycle_with_observation = AsyncMock()
+
+        with self.unconfigured_memory_authenticity():
+            with self.assertRaises(
+                MemoryDeletionJournalIntegrityError
+            ):
+                await engine.run_cycle()
+
+        engine._run_cycle_with_observation.assert_not_awaited()
+        self.assertEqual(self.events, [])
+
+    async def test_cycle_does_not_return_or_persist_bound_history_text(
+        self,
+    ) -> None:
+        private = "BOUND_HISTORY_RETURN_CANARY"
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {
+                "role": "assistant",
+                "content": private,
+                "memoryReceiptRef": bound_receipt(
+                    "concept-fedcba9876543210"
+                ),
+            },
+        ]
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "get_active_session_count": lambda: 0,
+            }
+        )
+        engine = self.create_engine()
+        executed_plans: list[Any] = []
+
+        async def execute(plan: Any) -> dict[str, Any]:
+            executed_plans.append(plan)
+            return {
+                "status": "failed",
+                "reason": "autonomy_executor_execute_failed",
+            }
+
+        with (
+            self.unconfigured_memory_authenticity(),
+            patch(
+                "evelyn_core.autonomy.update_self_state_from_observation",
+                return_value=EvelynSelfState(),
+            ),
+            patch.object(engine, "persist_state"),
+            patch.object(
+                engine,
+                "execute_next_step",
+                side_effect=execute,
+            ),
+        ):
+            cycle = await engine.run_cycle()
+
+        self.assertEqual(len(executed_plans), 1)
+        self.assertIsNotNone(executed_plans[0])
+        self.assertNotIn(private, str(cycle))
+        self.assertNotIn(private, str(engine.state))
+        self.assertNotIn("latest_user_text", cycle.observation)
+        self.assertNotIn("recent_visible", cycle.observation)
+        self.assertEqual(cycle.needs, [])
+        self.assertIsNone(cycle.selected_goal)
+        self.assertIsNone(cycle.planned)
+        self.assertIsNone(cycle.step_result)
+        self.assertIsNone(engine.state.current_goal)
+        self.assertIsNone(engine.state.current_plan)
+        self.assertEqual(engine.state.last_step_result, {})
+        self.assertEqual(engine.state.failure_count, 1)
+        self.assertEqual(
+            engine.state.last_error,
+            "autonomy_executor_execute_failed",
+        )
+
+    async def test_bound_history_does_not_reset_minecraft_plan_cursor(
+        self,
+    ) -> None:
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {
+                "role": "assistant",
+                "content": "BOUND_CURRENT_TEXT",
+                "memoryReceiptRef": bound_receipt(
+                    "concept-c123456789abcdef"
+                ),
+            },
+        ]
+        engine = self.create_engine()
+        default_observe = engine.observe
+
+        async def observe_minecraft() -> dict[str, Any]:
+            observation = await default_observe()
+            observation["active_environment"] = "minecraft"
+            observation["environments"] = {
+                "minecraft": {
+                    "health": 20,
+                    "hunger": 20,
+                    "inventory": {},
+                }
+            }
+            return observation
+
+        plans: list[Any] = []
+
+        async def advance(plan: Any) -> dict[str, Any]:
+            plans.append(plan)
+            plan.cursor += 1
+            return {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+            }
+
+        engine.observe = observe_minecraft
+
+        with (
+            self.unconfigured_memory_authenticity(),
+            patch(
+                "evelyn_core.autonomy.update_self_state_from_observation",
+                return_value=EvelynSelfState(),
+            ),
+            patch.object(engine, "persist_state"),
+            patch.object(
+                engine,
+                "execute_next_step",
+                side_effect=advance,
+            ),
+        ):
+            first = await engine.run_cycle()
+            second = await engine.run_cycle()
+
+        self.assertEqual(len(plans), 2)
+        self.assertIs(plans[0], plans[1])
+        self.assertEqual(plans[1].cursor, 2)
+        self.assertIs(first.planned, second.planned)
+        self.assertIs(engine.state.current_plan, second.planned)
+        self.assertEqual(second.selected_goal.kind, "progress")
+
     async def test_send_followup_records_history_memory_session_and_ping(self) -> None:
         result = await self.default_executor().send_followup_fn(
             "후속 답변",
@@ -196,6 +471,15 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             kinds,
             ["send", "history", "memory", "session", "commit", "self_state"],
+        )
+        history_payload = next(
+            payload
+            for kind, payload in self.events
+            if kind == "history"
+        )
+        self.assertEqual(
+            history_payload[1]["memory_receipt"]["state"],
+            "not_used",
         )
         session_payload = next(payload for kind, payload in self.events if kind == "session")
         self.assertEqual(session_payload[1]["ttl_sec"], 30.0)
@@ -263,12 +547,95 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.last_refresh[11], 100.0)
         self.assertNotIn(11, self.refresh_tasks)
 
+    async def test_bound_refresh_reuses_current_task_deletion_lease(
+        self,
+    ) -> None:
+        note_id = "concept-b123456789abcdef"
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {
+                "role": "assistant",
+                "content": "BOUND_CURRENT_TEXT",
+                "memoryReceiptRef": bound_receipt(note_id),
+            },
+        ]
+
+        async def update_cognitive(
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            self.assertIs(
+                self.refresh_tasks[11],
+                asyncio.current_task(),
+            )
+            exposure = current_memory_exposure_position()
+            self.assertIsNotNone(exposure)
+            with memory_exposure_guard(
+                expected_position=exposure,
+                required=True,
+                index_dir=self.memory_index_dir,
+            ):
+                return {
+                    "updated_at": "now",
+                    "action": "reply",
+                    "confidence": 0.9,
+                }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "update_cognitive_state": update_cognitive,
+            }
+        )
+
+        with self.unconfigured_memory_authenticity():
+            result = await self.default_executor().refresh_cognitive_state_fn()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn(11, self.refresh_tasks)
+
     async def test_maybe_ping_respects_recent_ping_cooldown(self) -> None:
         self.last_ping[11] = 50.0
 
         result = await self.default_executor().maybe_ping_user_fn("확인")
 
         self.assertEqual(result, {"status": "blocked", "reason": "ping_cooldown"})
+
+    async def test_memory_bound_autonomy_followup_keeps_compact_receipt(
+        self,
+    ) -> None:
+        note_id = "concept-a123456789abcdef"
+        self.history = [
+            {"role": "user", "content": "SAFE_USER_TEXT"},
+            {
+                "role": "assistant",
+                "content": "BOUND_CURRENT_TEXT",
+                "memoryReceiptRef": bound_receipt(note_id),
+            },
+        ]
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "select_and_mark_proactive_question": (
+                    lambda **_kwargs: {"ask_text": "후속 확인"}
+                ),
+            }
+        )
+
+        with self.unconfigured_memory_authenticity():
+            result = await self.default_executor().maybe_ping_user_fn(
+                "확인"
+            )
+
+        self.assertEqual(result["status"], "ok")
+        history_payload = next(
+            payload
+            for kind, payload in self.events
+            if kind == "history"
+        )
+        receipt = history_payload[1]["memory_receipt"]
+        self.assertEqual(receipt["state"], "bound")
+        self.assertEqual(receipt["suppliedNoteIds"], [note_id])
 
     def test_main_delegates_autonomy_factory_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

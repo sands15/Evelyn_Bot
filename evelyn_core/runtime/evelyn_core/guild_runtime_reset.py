@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
 
+AUTONOMY_COGNITIVE_REFRESH_INFLIGHT = "autonomy_cognitive_refresh_inflight"
+AUTONOMY_RUNTIME_ACTIVE = "autonomy_runtime_active"
+
+
 @dataclass(frozen=True)
 class GuildRuntimeResetDeps:
     session_histories: MutableMapping[str, Any]
@@ -36,6 +40,7 @@ class GuildRuntimeResetDeps:
     background_cognitive_tasks: MutableMapping[str, Any]
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
+    autonomy_engines: MutableMapping[int, Any]
 
 
 def build_guild_runtime_reset_deps(
@@ -70,6 +75,7 @@ def build_guild_runtime_reset_deps(
     background_cognitive_tasks: MutableMapping[str, Any],
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any],
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any],
+    autonomy_engines: MutableMapping[int, Any],
 ) -> GuildRuntimeResetDeps:
     return GuildRuntimeResetDeps(
         session_histories=session_histories,
@@ -102,6 +108,7 @@ def build_guild_runtime_reset_deps(
         background_cognitive_tasks=background_cognitive_tasks,
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
         autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
+        autonomy_engines=autonomy_engines,
     )
 
 
@@ -119,7 +126,56 @@ def _drop_prefixed(mapping: MutableMapping[str, Any], prefix: str) -> None:
         mapping.pop(key, None)
 
 
+def require_guild_runtime_reset_ready(
+    guild_id: int,
+    *,
+    deps: GuildRuntimeResetDeps,
+) -> None:
+    engine = deps.autonomy_engines.get(guild_id)
+    if engine is not None:
+        task = getattr(engine, "_task", None)
+        state = getattr(engine, "state", None)
+        try:
+            task_done = task is None or task.done()
+        except Exception:
+            task_done = False
+        if (
+            not task_done
+            or state is None
+            or bool(getattr(state, "enabled", False))
+            or str(getattr(state, "status", ""))
+            not in {"idle", "authorization_required"}
+        ):
+            raise RuntimeError(AUTONOMY_RUNTIME_ACTIVE)
+    refresh_task = deps.autonomy_cognitive_refresh_tasks.get(guild_id)
+    try:
+        refresh_done = refresh_task is None or refresh_task.done()
+    except Exception:
+        refresh_done = False
+    if not refresh_done:
+        raise RuntimeError(AUTONOMY_COGNITIVE_REFRESH_INFLIGHT)
+
+
 def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeResetDeps) -> None:
+    require_guild_runtime_reset_ready(guild_id, deps=deps)
+    engine = deps.autonomy_engines.get(guild_id)
+    if engine is not None:
+        state = engine.state
+        state.enabled = False
+        state.status = "idle"
+        state.safety_mode = "constrained"
+        state.allowed_actions = []
+        state.last_observation = {}
+        state.current_goal = None
+        state.current_plan = None
+        state.last_step_result = {}
+        state.last_router_refresh_result = {}
+        state.drive_state = {}
+        state.last_error = None
+        state.failure_count = 0
+        blocked_counts = getattr(engine, "_blocked_counts", None)
+        if hasattr(blocked_counts, "clear"):
+            blocked_counts.clear()
     prefix = f"guild:{guild_id}:"
     for mapping in (
         deps.session_histories,
@@ -168,5 +224,4 @@ def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeR
             _cancel_task(task)
             deps.background_cognitive_tasks.pop(key, None)
     deps.autonomy_last_cognitive_refresh_at.pop(guild_id, None)
-    refresh_task = deps.autonomy_cognitive_refresh_tasks.pop(guild_id, None)
-    _cancel_task(refresh_task)
+    deps.autonomy_cognitive_refresh_tasks.pop(guild_id, None)
