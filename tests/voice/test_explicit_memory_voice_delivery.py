@@ -75,6 +75,61 @@ class ExplicitMemoryVoiceDeliveryTests(
         self.assertEqual(len(summaries), 1)
         self.assertEqual(summaries[0]["event_name"], "voice_turn_summary")
 
+    async def test_wake_only_reply_rejects_unstarted_playback(self) -> None:
+        metrics: dict = {"meta": {}}
+        failures: list[tuple[str, object, dict]] = []
+        reported: list[Exception] = []
+
+        async def skip_playback(_vc, _answer: str, **kwargs) -> None:
+            kwargs["metrics"]["meta"].update(
+                {
+                    "playback_started": False,
+                    "playback_completed": False,
+                }
+            )
+
+        result = await deliver_voice_reply(
+            voice_reply=SimpleNamespace(
+                wake_only_turn=True,
+                history_user_text="이블린",
+                prompt_user_text="unused",
+                turn_type="wake_call",
+                selected_path="canned_wake_reply",
+            ),
+            canned_wake_reply="응, 듣고 있어.",
+            vc=object(),
+            accepted_turn_id="turn-wake-stale",
+            session_key="session-1",
+            guild_id=7,
+            room_key="room-key",
+            person_key="person-key",
+            session_memory_key="session-memory",
+            metrics=metrics,
+            turn_scope=object(),
+            on_final_answer=None,
+            speak_answer=skip_playback,
+            ask_llm_and_speak_streaming=lambda *_args, **_kwargs: None,
+            record_voice_pipeline_failure=(
+                lambda code, error, _metrics, **kwargs: failures.append(
+                    (code, error, kwargs)
+                )
+            ),
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            strip_omnivoice_tags=lambda value: value,
+            report_delivery_error=reported.append,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            metrics["meta"]["voice_delivery_failure_code"],
+            "voice_delivery_failed",
+        )
+        self.assertEqual(failures[0][0], "tts_playback_failed")
+        self.assertEqual(failures[0][2], {"stage": "wake_only_speak_answer"})
+        self.assertEqual(str(failures[0][1]), "tts_playback_not_completed")
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(str(reported[0]), "tts_playback_not_completed")
+
     async def test_wake_only_cancel_emits_one_terminal_summary_and_reraises(
         self,
     ) -> None:
@@ -224,6 +279,62 @@ class ExplicitMemoryVoiceDeliveryTests(
                 )
             ],
         )
+
+    async def test_streaming_reply_rejects_unstarted_playback(self) -> None:
+        failures: list[tuple[str, object, dict]] = []
+        reported: list[Exception] = []
+        metrics: dict = {"meta": {}}
+
+        async def stream_without_playback(*_args, **kwargs) -> str:
+            kwargs["metrics"]["meta"].update(
+                {
+                    "playback_started": False,
+                    "playback_completed": False,
+                }
+            )
+            return "대답은 만들어졌지만 재생되지 않았어."
+
+        result = await deliver_voice_reply(
+            voice_reply=SimpleNamespace(
+                wake_only_turn=False,
+                history_user_text="답을 들려줘",
+                prompt_user_text="답을 들려줘",
+                turn_type="conversation",
+                selected_path="main_llm",
+            ),
+            canned_wake_reply="unused",
+            vc=object(),
+            accepted_turn_id="turn-stream-stale",
+            session_key="session-1",
+            guild_id=7,
+            room_key="room-key",
+            person_key="person-key",
+            session_memory_key="session-memory",
+            metrics=metrics,
+            turn_scope=object(),
+            on_final_answer=None,
+            speak_answer=lambda *_args, **_kwargs: None,
+            ask_llm_and_speak_streaming=stream_without_playback,
+            record_voice_pipeline_failure=(
+                lambda code, error, _metrics, **kwargs: failures.append(
+                    (code, error, kwargs)
+                )
+            ),
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            strip_omnivoice_tags=lambda value: value,
+            report_delivery_error=reported.append,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            metrics["meta"]["voice_delivery_failure_code"],
+            "voice_delivery_failed",
+        )
+        self.assertEqual(failures[0][0], "voice_delivery_failed")
+        self.assertEqual(failures[0][2], {"stage": "llm_tts_delivery"})
+        self.assertEqual(str(failures[0][1]), "tts_playback_not_completed")
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(str(reported[0]), "tts_playback_not_completed")
 
     async def test_validation_bound_streaming_keeps_prompt_raw_but_redacts_debug_text(self) -> None:
         user_secret = "VOICE_PRIVACY_SENTINEL_LLM_USER_5d3a"

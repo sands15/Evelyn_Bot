@@ -72,7 +72,10 @@ class TurnScope:
     def register_task(self, task: asyncio.Task | None = None) -> asyncio.Task | None:
         task = task or asyncio.current_task()
         if task is not None:
-            self.tasks.add(task)
+            if self.cancelled:
+                task.cancel()
+            else:
+                self.tasks.add(task)
         return task
 
     def unregister_task(self, task: asyncio.Task | None = None) -> None:
@@ -120,6 +123,7 @@ class TurnScopeRegistry:
     def attach_current_task(self, turn_scope: TurnScope | None) -> asyncio.Task | None:
         if turn_scope is None:
             return None
+        turn_scope.raise_if_cancelled()
         return turn_scope.register_task(asyncio.current_task())
 
     def detach_task(self, turn_scope: TurnScope | None, task: asyncio.Task | None) -> None:

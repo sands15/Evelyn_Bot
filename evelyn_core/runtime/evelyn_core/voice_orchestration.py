@@ -1715,6 +1715,10 @@ async def deliver_voice_reply(
             extra="cancelled=true mode=single_reply",
         )
 
+    def raise_if_playback_not_completed() -> None:
+        if metrics.get("meta", {}).get("playback_completed") is False:
+            raise RuntimeError("tts_playback_not_completed")
+
     try:
         memory_command_matched = False
         memory_command_reply = ""
@@ -1775,6 +1779,7 @@ async def deliver_voice_reply(
                     turn_scope=turn_scope,
                     metrics=metrics,
                 )
+                raise_if_playback_not_completed()
             except asyncio.CancelledError:
                 mark_single_reply_cancelled()
                 raise
@@ -1837,6 +1842,7 @@ async def deliver_voice_reply(
                     turn_scope=turn_scope,
                     metrics=metrics,
                 )
+                raise_if_playback_not_completed()
             except asyncio.CancelledError:
                 mark_single_reply_cancelled()
                 raise
@@ -1893,6 +1899,7 @@ async def deliver_voice_reply(
                     metrics=metrics,
                     turn_scope=turn_scope,
                 )
+                raise_if_playback_not_completed()
             except Exception as e:
                 record_voice_pipeline_failure(
                     "voice_delivery_failed",

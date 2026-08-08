@@ -189,7 +189,7 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
             process_item.pop("enqueued_at", None)
             await deps.process_member_audio(**process_item)
         except Exception as exc:
-            deps.log(f"[VOICE WORKER] 실패: {exc!r}")
+            deps.log(f"[VOICE WORKER] 실패: errorType={type(exc).__name__}")
         finally:
             deps.voice_ingress_queue.task_done()
 

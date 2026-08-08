@@ -89,6 +89,25 @@ class TurnLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         self.assertNotIn(task, scope.tasks)
 
+    async def test_cancelled_scope_rejects_late_tasks_before_they_run(self) -> None:
+        registry = TurnScopeRegistry()
+        scope = TurnScope("cancelled")
+        side_effects: list[str] = []
+        scope.cancel(reason="replaced_by_new_turn")
+
+        with self.assertRaises(asyncio.CancelledError):
+            registry.attach_current_task(scope)
+
+        async def stale_work() -> None:
+            side_effects.append("ran")
+
+        task = registry.create_scoped_task(stale_work(), turn_scope=scope)
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(side_effects, [])
+        self.assertNotIn(task, scope.tasks)
+
     async def test_registry_cancel_matching_prefix_cancels_and_removes(self) -> None:
         registry = TurnScopeRegistry()
         matching = TurnScope("turn-1")

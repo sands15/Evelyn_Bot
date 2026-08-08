@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -162,6 +162,34 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "[VOICE QUEUE DROP] reason=validation_attempt_stale",
             harness.logs,
         )
+
+    async def test_worker_logs_only_exception_type_and_continues(self) -> None:
+        private_detail = "PRIVATE_VOICE_WORKER_ERROR_7f19"
+        harness = IngressHarness()
+        processed: list[str] = []
+        await harness.queue.put({"session_key": "fail", "debug_meta": {}})
+        await harness.queue.put({"session_key": "next", "debug_meta": {}})
+
+        async def process_member_audio(**item: Any) -> None:
+            if item["session_key"] == "fail":
+                raise RuntimeError(private_detail)
+            processed.append(item["session_key"])
+
+        deps = replace(
+            harness.deps(),
+            process_member_audio=process_member_audio,
+        )
+        worker = asyncio.create_task(voice_ingress_worker_from_runtime(deps=deps))
+        await asyncio.wait_for(harness.queue.join(), timeout=1.0)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        self.assertEqual(processed, ["next"])
+        self.assertIn(
+            "[VOICE WORKER] 실패: errorType=RuntimeError",
+            harness.logs,
+        )
+        self.assertNotIn(private_detail, repr(harness.logs))
 
     async def test_worker_drops_unbound_item_queued_before_validation_during_silence(self) -> None:
         harness = IngressHarness()
