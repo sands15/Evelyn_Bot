@@ -30,9 +30,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   whole-turn·inter-agent exposure는 final sink까지 clear를 막고 goal/status의
   execution·gate·observation 원문은 저장하지 않는다.
   core deletion/edit broker·receipt/ACK, recovery exact correlation과 legacy cleanup은 P1이다.
-- 2026-08-08 memory 삭제는 fresh recall Busy fallback과 mutation 2초 admission을
-  유지한다. replica가 anchor bootstrap·strict restart·과거 pair replay와 canonical
-  metadata를 검증했지만 host ACL·Docker mount, live UI와 rotation은 남은 P1이다.
+- 2026-08-08~09 memory 삭제는 Busy fallback과 2초 mutation admission을 유지하고, UI는 적용된
+  edit·provenance cleanup 503을 강제 재조회한 뒤 자동 재시도하지 않는다. replica 검증은
+  통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 남은 P1이다.
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을

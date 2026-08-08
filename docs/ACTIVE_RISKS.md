@@ -944,8 +944,10 @@ semantic consolidation과 derivation recomposition의 Sub-LLM 구간은 shared r
 busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. Control Page mutation은
 pre-entry writer busy만 최대 2초 비동기 대기하며 operation·guard-exit·result-shaped
 busy와 confirm token 작업은 재실행하지 않는다. 2초를 넘는 경합은 기존 exact 503과
-수동 재시도로 남고, 이 live UI 전이와 64 MiB journal 상한의 검증 가능한 rotation은
-아직 검증하지 않았다.
+수동 재시도로 남는다. 이미 commit된 edit·provenance mutation의 cleanup 503은 UI가
+고정 public code로 구분해 4개 snapshot을 무효화하고 강제 재조회한 뒤 적용 사실과
+자동 재시도 금지를 표시한다. 남은 공백은 이 busy 전이의 live 확인과 64 MiB journal
+상한의 검증 가능한 rotation이다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서

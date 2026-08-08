@@ -3908,7 +3908,10 @@
           if ([
             "memory_deletion_journal_busy",
             "memory_deletion_journal_integrity_failed",
-            "memory_delete_cleanup_required"
+            "memory_delete_cleanup_required",
+            "memory_edit_cleanup_required",
+            "memory_provenance_backfill_cleanup_required",
+            "memory_provenance_correction_cleanup_required"
           ].includes(candidate)) {
             evelynErrorCode = candidate;
           }
@@ -4966,6 +4969,11 @@
             : "근거 연결 결과를 다시 확인해줘."
         );
       } catch (error) {
+        if (String(error.evelynErrorCode || "") === "memory_provenance_backfill_cleanup_required") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("근거 연결은 적용됐어. 후처리 상태를 확인하려고 최신 상태를 다시 불러왔고 자동 재시도하지 않았어.");
+          return;
+        }
         if (String(error.message || "") === "api_error:409") {
           memorySnapshot = null;
           memoryGraphSnapshot = null;
@@ -5081,6 +5089,11 @@
             : "수동 근거 연결 결과를 다시 확인해줘."
         );
       } catch (error) {
+        if (String(error.evelynErrorCode || "") === "memory_provenance_backfill_cleanup_required") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("수동 근거 연결은 적용됐어. 후처리 상태를 확인하려고 최신 상태를 다시 불러왔고 자동 재시도하지 않았어.");
+          return;
+        }
         if (String(error.message || "") === "api_error:409") {
           memorySnapshot = null;
           memoryGraphSnapshot = null;
@@ -5220,14 +5233,14 @@
         );
       } catch (error) {
         const code = String(error.message || "");
+        if (String(error.evelynErrorCode || "") === "memory_provenance_correction_cleanup_required") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("근거 연결 수정은 적용됐어. 후처리 상태를 확인하려고 최신 상태를 다시 불러왔고 자동 재시도하지 않았어.");
+          return;
+        }
         if (code === "api_error:409") {
           await refreshMemoryAfterProvenanceChange();
           setBubble("선택이 현재 연결과 같거나 미리보기 뒤 기억·근거·그래프가 바뀌어서 적용하지 않았어. 최신 상태에서 다시 선택해줘.");
-          return;
-        }
-        if (code === "api_error:503") {
-          await refreshMemoryAfterProvenanceChange();
-          setBubble("연결 파일은 바뀌었을 수 있지만 journal 또는 인덱스 후처리를 확인해야 해. 새로 불러온 상태와 런타임 로그를 확인해줘.");
           return;
         }
         setBubble(`근거 연결 수정에 실패했어: ${error.message}`);
@@ -5283,14 +5296,14 @@
         );
       } catch (error) {
         const code = String(error.message || "");
+        if (String(error.evelynErrorCode || "") === "memory_provenance_correction_cleanup_required") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("근거 연결 되돌리기는 적용됐어. 후처리 상태를 확인하려고 최신 상태를 다시 불러왔고 자동 재시도하지 않았어.");
+          return;
+        }
         if (code === "api_error:409") {
           await refreshMemoryAfterProvenanceChange();
           setBubble("그 변경은 더 이상 가장 최근 변경이 아니거나 현재 연결이 달라져서 되돌리지 않았어.");
-          return;
-        }
-        if (code === "api_error:503") {
-          await refreshMemoryAfterProvenanceChange();
-          setBubble("되돌리기 파일은 바뀌었을 수 있지만 journal 또는 인덱스 후처리를 확인해야 해. 새로 불러온 상태를 확인해줘.");
           return;
         }
         setBubble(`근거 연결 되돌리기에 실패했어: ${error.message}`);
@@ -5465,6 +5478,16 @@
         await loadMemoryVault({ force: true });
         setBubble(action === "edit" ? "Memory node updated." : action === "confirm" ? "현재 표시된 기억 내용이 이 revision에 결박되어 확인됐어." : "Memory node hidden.");
       } catch (error) {
+        if (action === "edit" && String(error.evelynErrorCode || "") === "memory_edit_cleanup_required") {
+          memorySnapshot = null;
+          memoryGraphSnapshot = null;
+          memoryAuditSnapshot = null;
+          memoryCorrectionSnapshot = null;
+          selectedMemoryCard = null;
+          await loadMemoryVault({ force: true });
+          setBubble("기억 변경은 적용됐어. 후처리 상태를 확인하려고 최신 상태를 다시 불러왔고 자동 재시도하지 않았어.");
+          return;
+        }
         if (action === "confirm" && String(error.message || "") === "api_error:409") {
           memorySnapshot = null;
           memoryGraphSnapshot = null;

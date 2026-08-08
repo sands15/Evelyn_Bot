@@ -393,9 +393,50 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
-            'code === "api_error:503"',
+            '"memory_provenance_correction_cleanup_required"',
             self.html,
         )
+
+    def test_applied_cleanup_failures_refresh_without_retrying_mutations(
+        self,
+    ) -> None:
+        def function_source(name: str, next_name: str) -> str:
+            start = self.html.index(f"async function {name}(")
+            end = self.html.index(f"function {next_name}(", start)
+            return self.html[start:end]
+
+        fetch_api = function_source("fetchApi", "applyState")
+        for code in (
+            "memory_edit_cleanup_required",
+            "memory_provenance_backfill_cleanup_required",
+            "memory_provenance_correction_cleanup_required",
+        ):
+            self.assertIn(f'"{code}"', fetch_api)
+
+        edit = function_source("postMemoryAction", "deleteSelectedMemory")
+        self.assertIn('"memory_edit_cleanup_required"', edit)
+        self.assertIn("await loadMemoryVault({ force: true });", edit)
+        self.assertIn("자동 재시도하지 않았어.", edit)
+
+        provenance_functions = (
+            ("applyMemoryProvenanceBackfill", "loadMemoryManualSourcePicker", "backfill"),
+            ("applyMemoryManualProvenance", "refreshMemoryAfterProvenanceChange", "backfill"),
+            ("applyMemoryProvenanceCorrection", "undoMemoryProvenanceCorrection", "correction"),
+            ("undoMemoryProvenanceCorrection", "renderMemoryCards", "correction"),
+        )
+        for name, next_name, kind in provenance_functions:
+            with self.subTest(name=name):
+                source = function_source(name, next_name)
+                self.assertIn(
+                    f'"memory_provenance_{kind}_cleanup_required"',
+                    source,
+                )
+                self.assertIn(
+                    "await refreshMemoryAfterProvenanceChange();",
+                    source,
+                )
+                self.assertIn("자동 재시도하지 않았어.", source)
+                self.assertEqual(source.count('/apply"'), 1)
 
 
 if __name__ == "__main__":

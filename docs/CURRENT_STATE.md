@@ -2103,3 +2103,13 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   시작하지 않았다. 읽기 전용 preflight에서 active validation session 없음, mic physical
   OFF, 24 kHz mono int16 output ready, OmniVoice warmup 완료와 오류 0을 확인했다.
 - search follow-up 22개와 Discord I/O 전체 125개도 통과했다.
+
+## 2026-08-09 Control Page applied-cleanup 경계
+
+- memory edit, provenance backfill과 correction/undo가 파일 commit 뒤 후처리에서 실패한
+  503을 일반 `api_error`로 버리지 않는다. 세 fixed cleanup code만 공개 allowlist에
+  보존하고 응답의 다른 필드는 계속 폐기한다.
+- edit/backfill/manual/correction/undo는 적용된 cleanup code에서 4개 memory snapshot을
+  무효화하고 강제 재조회한 뒤 적용 사실과 자동 재시도 금지를 표시한다. busy와
+  integrity 503은 적용 성공으로 오인하지 않는다.
+- UI 전체 178개와 diff check가 통과했다. 실행 중 Control Page image는 교체하지 않았다.
