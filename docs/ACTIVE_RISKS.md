@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-08-03 KST
+Last reviewed: 2026-08-08 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -33,20 +33,24 @@ Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조하고, 밀
 
 ## P0 — 승인된 자율행동 live E2E 검증 대기
 
-2026-08-01 source 감사에서 production 연결 공백을 추가로 확인했다.
-`RoutedAutonomyExecutor`의 executor map이 비어 있고 Discord `자율시작`은 현재
-`assistant:*` scope만 승인한다. 따라서 assistant grant/outcome과 명시적 Minecraft
-world lease는 각각 검증할 수 있지만, 승인된 `minecraft:*` action이 같은
-AutonomyEngine plan에서 실제 world postcondition까지 이어졌다고 증명할 수 없다.
-또한 `goal_verified`는 goal echo이고 readiness `ready`는 준비 상태이므로 어느
-것도 실제 effect 증거가 아니다. trusted content-free postcondition observer가
-연결되기 전에는 이 항목을 통과로 판정하지 않는다.
+2026-08-08 source 재감사에서 2026-08-01에 확인했던 production 연결 공백은
+`8cf3581` 이후 닫힌 상태임을 확인했다. `main.py`는 guild별 typed Minecraft
+executor builder를 production `RoutedAutonomyExecutor`에 전달한다. Discord
+`마크접속`이 실제 연결을 확인한 뒤 route를 활성화하고, `자율시작`이 그 route를
+다시 연결·검증한 경우에만 exact production allowlist인
+`MINECRAFT_ROUTE_ACTIONS`를 grant에 추가한다. 현재 허용되는 Minecraft scope는
+`minecraft:find_food_source` 하나이며, route 검증 실패 시에는 기존처럼
+`assistant:*` scope만 발급한다.
 
-Control Page에는 이 공백을 숨기지 않는 `autonomy-p0.v1` dry observer를 추가했다.
-이 검증기는 grant/connect/goal/stop 또는 service/queue mutation을 직접
-실행하지 않고 기존 durable artifact만 관찰하며, 위 연결 공백을 고정 blocker로
-보고한다. 실제 live 검증은 연결 배선과 postcondition observer를 먼저 완성한 뒤
-사용자가 별도 승인 세션에서 실행해야 한다.
+Mindcraft action gateway는 exact grant·lease·actionRun·goalRun·contract binding으로
+content-free world-effect projector를 arm한다. projector의 durable
+`effect_verified` event와 owner의 dispatch·completion, assistant의 exact outcome을
+`autonomy-p0.v1` observer가 같은 shared artifact 경로에서 상관시킨다. 다만
+`goal_verified`는 goal echo이고 readiness `ready`는 준비 상태일 뿐이므로 실제
+effect를 대신하지 않는다. observer도 grant/connect/goal/stop 또는 service/queue
+mutation을 실행하지 않으며, 필요한 live evidence가 없거나 stale이면 route와
+postcondition blocker를 계속 유지한다. 남은 P0는 배선 구현이 아니라 사용자가
+승인한 실제 Discord→Minecraft world-effect 세션의 성공·실패·복구 검증이다.
 
 assistant 실행 전 승인·사후 재검사·outcome에는 실행별 `actionRunId`를 추가했고,
 Minecraft stop audit에는 원래 lease ID를 보존한다. observer는 각각 같은 실행과

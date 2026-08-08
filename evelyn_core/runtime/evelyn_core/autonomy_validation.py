@@ -296,11 +296,11 @@ def _new_step(definition: dict[str, Any], *, now: float) -> dict[str, Any]:
 class AutonomyValidationManager:
     """Read-only observer for the autonomy P0 evidence chain.
 
-    The manager only reads the authorization and Minecraft world-lease audit
-    artifacts.  No method grants authority, starts a service, submits a goal,
-    writes a host queue, or calls an effect API.  Its own artifacts contain
-    fixed codes and booleans only; external identifiers are represented by
-    session-salted fingerprints in the private recovery state.
+    The manager only reads authorization, Minecraft world-lease, and
+    world-effect audit artifacts.  No method grants authority, starts a
+    service, submits a goal, writes a host queue, or calls an effect API.  Its
+    own artifacts contain fixed codes and booleans only; external identifiers
+    are represented by session-salted fingerprints in private recovery state.
     """
 
     def __init__(

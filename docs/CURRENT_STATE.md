@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-08-08 KST
-Source branch: `codex/omnivoice-tts-cutover`, Control Page chat continuity increment
+Source branch: `codex/omnivoice-tts-cutover`, autonomy source re-audit increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -1821,10 +1821,15 @@ Source branch: `codex/omnivoice-tts-cutover`, Control Page chat continuity incre
     증명해야 한다.
     Minecraft의 `goal_verified`와 readiness만으로는 world effect를 인정하지 않고
     trusted explicit postcondition 증거를 별도로 요구한다.
-  - source 감사에서 production `RoutedAutonomyExecutor`의 executor map이 비어 있고
-    현재 Discord grant가 assistant scope만 포함한다는 연결 공백을 확인했다.
-    postcondition observer도 validation에 연결되지 않았으므로 이를 고정 blocker로
-    공개하며, 승인된 Minecraft 단일 E2E 완료를 주장하지 않는다.
+  - 현재 production `RoutedAutonomyExecutor`에는 guild별 typed Minecraft executor가
+    등록된다. Discord `마크접속`이 실제 연결을 확인한 뒤 route를 활성화하고,
+    `자율시작`이 route를 다시 검증한 경우에만 exact allowlist
+    `minecraft:find_food_source`를 grant에 추가한다. route가 없거나 재검증에
+    실패하면 assistant scope만 발급한다.
+  - Mindcraft action gateway의 content-free world-effect projector와 validation
+    observer는 같은 shared artifact의 exact grant·lease·actionRun·goalRun·contract
+    증거를 상관시킨다. source 배선은 연결됐지만 실제 Discord와 Minecraft world에서
+    단일 승인 E2E를 수행하지 않았으므로 자율행동 P0 운영 완료를 주장하지 않는다.
   - 최종 회귀는 runtime 583개(skip 4), Minecraft 160개(skip 7), UI 171개(skip 8),
     변경 집중 132개를 통과했다. core discovery 656개에는 기능 assertion 실패가
     없었고 Bot API 검증 이미지에 없는 `git`·Pillow·Discord 의존 4건은 Windows
