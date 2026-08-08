@@ -916,10 +916,11 @@ content-free unavailable로 닫는다.
 
 semantic consolidation과 derivation recomposition의 Sub-LLM 구간은 shared reader로
 일반 조회와 공존한다. 다만 삭제·편집 writer는 호출당 최대 45초 동안 retryable
-busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. confirm token을 가진
-mutation을 generic하게 재전송하는 것은 멱등하지 않으므로 자동 재시도는 아직
-추가하지 않았다. bounded admission retry의 live 전이와 64 MiB journal 상한의
-검증 가능한 rotation도 남아 있다.
+busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. Control Page mutation은
+pre-entry writer busy만 최대 2초 비동기 대기하며 operation·guard-exit·result-shaped
+busy와 confirm token 작업은 재실행하지 않는다. 2초를 넘는 경합은 기존 exact 503과
+수동 재시도로 남고, 이 live UI 전이와 64 MiB journal 상한의 검증 가능한 rotation은
+아직 검증하지 않았다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
@@ -965,14 +966,14 @@ exposure의 state/version/note ID 불일치를 assistant persistence·continuity
 
 따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation, materialize된 response의
 exclusive lease나 fresh recall busy가 아니라, fallback turn의 일시적인
-`indexFresh=false`, Sub-LLM shared phase 중 삭제·편집 writer의 bounded-retry 공백과
-64 MiB journal rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
+`indexFresh=false`, 2초 admission을 넘는 Sub-LLM shared phase의 삭제·편집 writer
+경합과 64 MiB journal rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
 계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
 계속 남는다.
 
 다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
-one-shot bootstrap과 pair replay를 먼저 검증한다. Sub-LLM shared phase의 bounded
-busy 재시도를 실제 UI 전이로 검증하고, chain과 외부 anchor를 잃지 않는
+one-shot bootstrap과 pair replay를 먼저 검증한다. Sub-LLM shared phase의 2초
+admission과 timeout 503을 실제 UI 전이로 검증하고, chain과 외부 anchor를 잃지 않는
 checkpointed rotation도 함께 설계한다. fallback 빈도와 `indexFresh=false`가 실제
 사용자 recall 품질에 미치는 영향은 live telemetry 없이 추정하지 않는다.
 

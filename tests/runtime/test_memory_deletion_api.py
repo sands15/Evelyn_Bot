@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +24,7 @@ from evelyn_core.control_page_http import CONTROL_PAGE_CSRF_HEADER  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_read_guard,
 )
 
 
@@ -58,6 +62,342 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
             "Origin": self.origin,
             CONTROL_PAGE_CSRF_HEADER: self.csrf,
         }
+
+    async def test_bounded_admission_retries_only_before_operation(
+        self,
+    ) -> None:
+        attempts = 0
+        operation_calls = 0
+
+        @contextlib.contextmanager
+        def guard(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise MemoryDeletionJournalBusyError()
+            yield
+
+        def operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            return {"ok": True}
+
+        with (
+            patch.object(
+                control_page_server,
+                "memory_deletion_journal_guard",
+                side_effect=guard,
+            ),
+            patch.object(
+                control_page_server,
+                "MEMORY_MUTATION_ADMISSION_RETRY_SEC",
+                0.0,
+            ),
+        ):
+            result = await (
+                control_page_server._run_memory_mutation_with_bounded_admission(
+                    operation
+                )
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(attempts, 3)
+        self.assertEqual(operation_calls, 1)
+
+    async def test_bounded_admission_waits_for_real_shared_reader(
+        self,
+    ) -> None:
+        reader_ready = threading.Event()
+        release_reader = threading.Event()
+        operation_calls = 0
+        index_dir = memory_vault.memory_index_dir()
+
+        def hold_reader() -> None:
+            with memory_deletion_journal_read_guard(index_dir):
+                reader_ready.set()
+                if not release_reader.wait(timeout=2.0):
+                    raise RuntimeError("reader_release_timeout")
+
+        def operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            return {"ok": True}
+
+        reader = asyncio.create_task(asyncio.to_thread(hold_reader))
+        self.assertTrue(await asyncio.to_thread(reader_ready.wait, 2.0))
+        mutation = asyncio.create_task(
+            control_page_server._run_memory_mutation_with_bounded_admission(
+                operation
+            )
+        )
+        await asyncio.sleep(0.1)
+        self.assertFalse(mutation.done())
+        self.assertEqual(operation_calls, 0)
+        release_reader.set()
+        self.assertEqual(await mutation, {"ok": True})
+        await reader
+        self.assertEqual(operation_calls, 1)
+
+    async def test_bounded_admission_never_retries_after_entry(
+        self,
+    ) -> None:
+        for failure_phase in ("operation", "exit"):
+            with self.subTest(failure_phase=failure_phase):
+                attempts = 0
+                operation_calls = 0
+
+                @contextlib.contextmanager
+                def guard(*_args, **_kwargs):
+                    nonlocal attempts
+                    attempts += 1
+                    yield
+                    if failure_phase == "exit":
+                        raise MemoryDeletionJournalBusyError()
+
+                def operation() -> dict[str, object]:
+                    nonlocal operation_calls
+                    operation_calls += 1
+                    if failure_phase == "operation":
+                        raise MemoryDeletionJournalBusyError()
+                    return {"ok": True}
+
+                with patch.object(
+                    control_page_server,
+                    "memory_deletion_journal_guard",
+                    side_effect=guard,
+                ):
+                    with self.assertRaises(
+                        MemoryDeletionJournalBusyError
+                    ):
+                        await (
+                            control_page_server._run_memory_mutation_with_bounded_admission(
+                                operation
+                            )
+                        )
+
+                self.assertEqual(attempts, 1)
+                self.assertEqual(operation_calls, 1)
+
+        attempts = 0
+        operation_calls = 0
+
+        @contextlib.contextmanager
+        def result_guard(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            yield
+
+        def result_operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            return {
+                "ok": False,
+                "error": "memory_deletion_journal_busy",
+            }
+
+        with patch.object(
+            control_page_server,
+            "memory_deletion_journal_guard",
+            side_effect=result_guard,
+        ):
+            result = await (
+                control_page_server._run_memory_mutation_with_bounded_admission(
+                    result_operation
+                )
+            )
+        self.assertEqual(
+            result,
+            {"ok": False, "error": "memory_deletion_journal_busy"},
+        )
+        self.assertEqual(attempts, 1)
+        self.assertEqual(operation_calls, 1)
+
+    async def test_bounded_admission_rejects_late_guard_yield(
+        self,
+    ) -> None:
+        guard_started = threading.Event()
+        release_guard = threading.Event()
+        operation_calls = 0
+
+        @contextlib.contextmanager
+        def guard(*_args, **_kwargs):
+            guard_started.set()
+            if not release_guard.wait(timeout=2.0):
+                raise RuntimeError("guard_release_timeout")
+            yield
+
+        def operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            return {"ok": True}
+
+        with (
+            patch.object(
+                control_page_server,
+                "memory_deletion_journal_guard",
+                side_effect=guard,
+            ),
+            patch.object(
+                control_page_server,
+                "MEMORY_MUTATION_ADMISSION_TIMEOUT_SEC",
+                0.05,
+            ),
+        ):
+            task = asyncio.create_task(
+                control_page_server._run_memory_mutation_with_bounded_admission(
+                    operation
+                )
+            )
+            self.assertTrue(
+                await asyncio.to_thread(guard_started.wait, 2.0)
+            )
+            await asyncio.sleep(0.1)
+            release_guard.set()
+            with self.assertRaises(MemoryDeletionJournalBusyError):
+                await task
+
+        self.assertEqual(operation_calls, 0)
+
+    async def test_bounded_admission_timeout_never_runs_operation(
+        self,
+    ) -> None:
+        attempts = 0
+        operation_calls = 0
+
+        @contextlib.contextmanager
+        def guard(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise MemoryDeletionJournalBusyError()
+            yield
+
+        def operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            return {"ok": True}
+
+        with (
+            patch.object(
+                control_page_server,
+                "memory_deletion_journal_guard",
+                side_effect=guard,
+            ),
+            patch.object(
+                control_page_server,
+                "MEMORY_MUTATION_ADMISSION_TIMEOUT_SEC",
+                0.0,
+            ),
+        ):
+            with self.assertRaises(MemoryDeletionJournalBusyError):
+                await (
+                    control_page_server._run_memory_mutation_with_bounded_admission(
+                        operation
+                    )
+                )
+
+        self.assertEqual(attempts, 0)
+        self.assertEqual(operation_calls, 0)
+
+    async def test_bounded_admission_cancellation_is_linearized(
+        self,
+    ) -> None:
+        for cancel_phase in ("before_admission", "after_admission"):
+            with self.subTest(cancel_phase=cancel_phase):
+                guard_waiting = threading.Event()
+                operation_started = threading.Event()
+                release_observed = threading.Event()
+                release = threading.Event()
+                operation_calls = 0
+
+                @contextlib.contextmanager
+                def guard(*_args, **_kwargs):
+                    if cancel_phase == "before_admission":
+                        guard_waiting.set()
+                        if release.wait(timeout=2.0):
+                            release_observed.set()
+                    yield
+
+                def operation() -> dict[str, object]:
+                    nonlocal operation_calls
+                    operation_calls += 1
+                    operation_started.set()
+                    if cancel_phase == "after_admission":
+                        if release.wait(timeout=2.0):
+                            release_observed.set()
+                    return {"ok": True}
+
+                with patch.object(
+                    control_page_server,
+                    "memory_deletion_journal_guard",
+                    side_effect=guard,
+                ):
+                    task = asyncio.create_task(
+                        control_page_server._run_memory_mutation_with_bounded_admission(
+                            operation
+                        )
+                    )
+                    expected_event = (
+                        guard_waiting
+                        if cancel_phase == "before_admission"
+                        else operation_started
+                    )
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            expected_event.wait,
+                            2.0,
+                        )
+                    )
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+                self.assertEqual(
+                    operation_calls,
+                    0 if cancel_phase == "before_admission" else 1,
+                )
+                self.assertTrue(release_observed.is_set())
+
+    async def test_bounded_admission_does_not_hide_worker_failure_on_cancel(
+        self,
+    ) -> None:
+        operation_started = threading.Event()
+        release_operation = threading.Event()
+        operation_calls = 0
+
+        @contextlib.contextmanager
+        def guard(*_args, **_kwargs):
+            yield
+
+        def operation() -> dict[str, object]:
+            nonlocal operation_calls
+            operation_calls += 1
+            operation_started.set()
+            if not release_operation.wait(timeout=2.0):
+                raise RuntimeError("operation_release_timeout")
+            raise MemoryDeletionJournalBusyError()
+
+        with patch.object(
+            control_page_server,
+            "memory_deletion_journal_guard",
+            side_effect=guard,
+        ):
+            task = asyncio.create_task(
+                control_page_server._run_memory_mutation_with_bounded_admission(
+                    operation
+                )
+            )
+            self.assertTrue(
+                await asyncio.to_thread(operation_started.wait, 2.0)
+            )
+            task.cancel()
+            await asyncio.sleep(0)
+            release_operation.set()
+            with self.assertRaises(MemoryDeletionJournalBusyError):
+                await task
+
+        self.assertEqual(operation_calls, 1)
 
     async def test_preview_and_apply_use_two_step_contract(self) -> None:
         preview_result = {

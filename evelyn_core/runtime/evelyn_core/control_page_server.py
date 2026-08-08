@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -46,6 +47,7 @@ from .memory_deletion_journal import (
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_guard,
 )
 from .memory_exposure import MemoryExposurePosition
 from .memory_vault import (
@@ -53,6 +55,7 @@ from .memory_vault import (
     delete_memory_vault_user_note,
     ensure_memory_vault_layout,
     export_memory_graph,
+    memory_index_dir,
     memory_provenance_backfill_preview,
     memory_provenance_manual_source_options,
     memory_vault_user_note,
@@ -118,6 +121,8 @@ EVELYN_INTERNAL_CONTROL_TOKEN = os.getenv(
     "",
 ).strip()
 PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "6.0"))
+MEMORY_MUTATION_ADMISSION_TIMEOUT_SEC = 2.0
+MEMORY_MUTATION_ADMISSION_RETRY_SEC = 0.05
 LOCAL_HELP_COMMANDS = {"/", "/help"}
 LOCAL_STATUS_COMMANDS = {"/status"}
 LOCAL_MEMORY_COMMANDS = {"/memory", "/obsidian"}
@@ -2795,6 +2800,57 @@ async def memory_note_handler(request: web.Request) -> web.StreamResponse:
     return json_response(result, status=200 if result.get("ok") else 404)
 
 
+async def _run_memory_mutation_with_bounded_admission(
+    operation: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + MEMORY_MUTATION_ADMISSION_TIMEOUT_SEC
+    cancelled = False
+    state_lock = threading.Lock()
+    admission_busy = object()
+
+    def attempt() -> dict[str, Any] | object:
+        nonlocal cancelled
+        entered = False
+        if time.monotonic() >= deadline:
+            return admission_busy
+        try:
+            with memory_deletion_journal_guard(
+                memory_index_dir(),
+                require_stable=False,
+            ):
+                with state_lock:
+                    if cancelled or time.monotonic() >= deadline:
+                        return admission_busy
+                    entered = True
+                return operation()
+        except MemoryDeletionJournalBusyError:
+            if entered:
+                raise
+            return admission_busy
+
+    while True:
+        worker = asyncio.create_task(asyncio.to_thread(attempt))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                with state_lock:
+                    cancelled = True
+                cancellation = exc
+        result = worker.result()
+        if cancellation is not None:
+            raise cancellation
+        if result is not admission_busy:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MemoryDeletionJournalBusyError()
+        await asyncio.sleep(
+            min(MEMORY_MUTATION_ADMISSION_RETRY_SEC, remaining)
+        )
+
+
 async def memory_note_action_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
     try:
@@ -2802,14 +2858,16 @@ async def memory_note_action_handler(request: web.Request) -> web.StreamResponse
     except Exception:
         payload = {}
     action = str((payload or {}).get("action") or "").strip()
-    result = update_memory_vault_user_note(
-        note_id,
-        action,
-        title=(payload or {}).get("title"),
-        body=(payload or {}).get("body"),
-        expected_content_hash=(payload or {}).get(
-            "expectedContentHash"
-        ),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: update_memory_vault_user_note(
+            note_id,
+            action,
+            title=(payload or {}).get("title"),
+            body=(payload or {}).get("body"),
+            expected_content_hash=(payload or {}).get(
+                "expectedContentHash"
+            ),
+        )
     )
     return json_response(
         result,
@@ -2977,9 +3035,11 @@ async def memory_provenance_backfill_preview_handler(
     )
     if not isinstance(source_note_ids, list):
         source_note_ids = []
-    result = preview_memory_provenance_backfill_application(
-        note_id,
-        [str(item) for item in source_note_ids],
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: preview_memory_provenance_backfill_application(
+            note_id,
+            [str(item) for item in source_note_ids],
+        )
     )
     return json_response(
         result,
@@ -2995,9 +3055,11 @@ async def memory_provenance_backfill_apply_handler(
         payload = await request.json()
     except Exception:
         payload = {}
-    result = apply_memory_provenance_backfill(
-        note_id,
-        str((payload or {}).get("confirmToken") or ""),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: apply_memory_provenance_backfill(
+            note_id,
+            str((payload or {}).get("confirmToken") or ""),
+        )
     )
     return json_response(
         result,
@@ -3033,10 +3095,12 @@ async def memory_provenance_manual_preview_handler(
     )
     if not isinstance(source_note_ids, list):
         source_note_ids = []
-    result = preview_memory_provenance_backfill_application(
-        note_id,
-        [str(item) for item in source_note_ids],
-        selection_mode="user_selected",
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: preview_memory_provenance_backfill_application(
+            note_id,
+            [str(item) for item in source_note_ids],
+            selection_mode="user_selected",
+        )
     )
     return json_response(
         result,
@@ -3077,6 +3141,7 @@ async def memory_provenance_correction_sources_handler(
 async def memory_provenance_correction_preview_handler(
     request: web.Request,
 ) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
     try:
         payload = await request.json()
     except Exception:
@@ -3104,9 +3169,11 @@ async def memory_provenance_correction_preview_handler(
             result,
             status=memory_provenance_correction_status(result),
         )
-    result = preview_memory_provenance_correction(
-        request.match_info.get("note_id", ""),
-        source_note_ids,
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: preview_memory_provenance_correction(
+            note_id,
+            source_note_ids,
+        )
     )
     return json_response(
         result,
@@ -3117,13 +3184,16 @@ async def memory_provenance_correction_preview_handler(
 async def memory_provenance_correction_apply_handler(
     request: web.Request,
 ) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-    result = apply_memory_provenance_correction(
-        request.match_info.get("note_id", ""),
-        str((payload or {}).get("confirmToken") or ""),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: apply_memory_provenance_correction(
+            note_id,
+            str((payload or {}).get("confirmToken") or ""),
+        )
     )
     return json_response(
         result,
@@ -3134,13 +3204,16 @@ async def memory_provenance_correction_apply_handler(
 async def memory_provenance_correction_undo_preview_handler(
     request: web.Request,
 ) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-    result = preview_memory_provenance_correction_undo(
-        request.match_info.get("note_id", ""),
-        str((payload or {}).get("changeId") or ""),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: preview_memory_provenance_correction_undo(
+            note_id,
+            str((payload or {}).get("changeId") or ""),
+        )
     )
     return json_response(
         result,
@@ -3151,13 +3224,16 @@ async def memory_provenance_correction_undo_preview_handler(
 async def memory_provenance_correction_undo_apply_handler(
     request: web.Request,
 ) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-    result = apply_memory_provenance_correction_undo(
-        request.match_info.get("note_id", ""),
-        str((payload or {}).get("confirmToken") or ""),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: apply_memory_provenance_correction_undo(
+            note_id,
+            str((payload or {}).get("confirmToken") or ""),
+        )
     )
     return json_response(
         result,
@@ -3173,9 +3249,13 @@ async def memory_note_delete_preview_handler(
         payload = await request.json()
     except Exception:
         payload = {}
-    result = preview_memory_vault_user_note_deletion(
-        note_id,
-        reason=str((payload or {}).get("reason") or "user_requested"),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: preview_memory_vault_user_note_deletion(
+            note_id,
+            reason=str(
+                (payload or {}).get("reason") or "user_requested"
+            ),
+        )
     )
     return json_response(result, status=memory_note_delete_status(result))
 
@@ -3188,10 +3268,14 @@ async def memory_note_delete_apply_handler(
         payload = await request.json()
     except Exception:
         payload = {}
-    result = delete_memory_vault_user_note(
-        note_id,
-        str((payload or {}).get("confirmToken") or ""),
-        reason=str((payload or {}).get("reason") or "user_requested"),
+    result = await _run_memory_mutation_with_bounded_admission(
+        lambda: delete_memory_vault_user_note(
+            note_id,
+            str((payload or {}).get("confirmToken") or ""),
+            reason=str(
+                (payload or {}).get("reason") or "user_requested"
+            ),
+        )
     )
     return json_response(result, status=memory_note_delete_status(result))
 

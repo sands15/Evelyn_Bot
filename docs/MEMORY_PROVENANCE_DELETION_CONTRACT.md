@@ -686,6 +686,15 @@ provenance preview/apply, index/cache rebuild와 memory write처럼 실제 artif
 노출 후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로 그 본문을 반환할
 수 없다.
 
+Control Page의 memory edit와 provenance/delete preview·apply는 writer admission이
+일시적으로 busy일 때만 최대 2초 동안 50ms 간격으로 기다린다. 각 시도는 worker
+thread에서 outer writer lease를 얻고 같은 thread에서 기존 domain operation을 정확히
+한 번 호출한다. lease가 yield하기 전의 busy만 다시 시도하며, operation 본문·guard
+종료·result-shaped busy는 재실행하지 않는다. deadline 뒤 늦게 얻은 lease도 operation과
+confirm token을 소비하지 않는다. 요청 취소가 admission보다 먼저면 operation은 0회,
+admission이 먼저면 시작한 operation을 1회 끝낸 뒤 worker 오류를 취소보다 우선 보존한다.
+2초 안에 admission되지 않으면 기존 content-free/no-store busy 503을 반환한다.
+
 semantic consolidation은 fresh shared reader lease 안에서 현재 source의 tombstone과
 전체 content hash를 확인하고 Sub-LLM 요청·전체 응답을 수행한다. shared lease를 완전히
 놓은 뒤 fresh writer에서 source hash를 다시 확인하고, 같을 때만 note batch와 후속

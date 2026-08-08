@@ -2001,12 +2001,16 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   current state가 달라지면 stale result를 버리고, 같을 때만 write와 post-sync를 같은
   writer 안에서 완료한다.
 - 일반 reader는 최대 45초 Sub-LLM과 공존한다. 삭제·편집 writer는 그 shared phase 동안
-  retryable busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. bounded retry의
-  live 전이, journal rotation과 외부 anchor 운영 검증은 계속 남는다.
+  retryable busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. Control Page의
+  memory edit와 provenance/delete preview·apply는 same-worker outer writer 아래에서
+  pre-entry busy만 최대 2초·50ms 간격으로 기다린다. operation·guard exit·result-shaped
+  busy는 재실행하지 않고, deadline 뒤 늦은 admission과 admission 전 취소는 operation과
+  token 소비 0회로 닫는다. admission 뒤 취소는 operation 1회를 끝내고 worker 오류를
+  보존한다. 2초를 넘긴 경합은 exact no-store 503이며 live UI 전이는 아직 미검증이다.
 - Windows 교차-process reader-reader/reader-writer, async owner 수명, 재진입·upgrade,
   동시 response 소비와 8798·8799/API/UI privacy projection을 synthetic data로 검증했다.
   paused Sub-LLM 중 reader 공존·삭제 Busy, shared→writer handoff의 source 삭제와 target
   user-edit 우선, stale model canary 전 파일 비저장도 실제 thread race로 검증했다.
-- memory 288개(skip 1), core 736개(skip 1), runtime 764개(skip 4)와 CI-equivalent
-  전체 3,112개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
+- memory 288개(skip 1), core 736개(skip 1), runtime 771개(skip 4)와 CI-equivalent
+  전체 3,119개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
   Docker 서비스는 사용하거나 변경하지 않았다.
