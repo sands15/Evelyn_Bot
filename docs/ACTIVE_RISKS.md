@@ -242,9 +242,11 @@ Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 �
 commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
 
-Discord 음성의 source-level 성공 판정은 playback pipeline이 명시한
-`playback_completed=false`를 거부한다. stale validation이나 비어 있지 않은
-답변의 무재생 반환은 single·streaming 모두 기존 실패 finalizer로 합류해
+음성의 source-level 성공 판정은 playback pipeline이 명시한
+`playback_completed=false`를 거부한다. Local speaker는 single의 실제 반환값과
+streaming의 이 턴별 queued/played chunk 수를 투영하므로 부분 재생, stale validation,
+다른 턴의 전역 재생 수 증가를 완료로 오인하지 않는다. 비어 있지 않은 답변의
+무재생 반환은 Discord·local single/streaming 모두 기존 실패 finalizer로 합류해
 답변 완료로 commit되지 않는다. 교체·취소된 `TurnScope`에 current task가
 뒤늦게 attach되면 즉시 거부하고, 새 background task는 coroutine 본문 실행 전에
 취소한다. voice worker의 catch-all 로그에는 exception type만 남긴다.

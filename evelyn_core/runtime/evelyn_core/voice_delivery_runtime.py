@@ -270,18 +270,35 @@ async def ask_llm_and_speak_local_from_runtime(
                 )
                 fallback_needed = True
             playback_count_after = deps.local_playback_count()
-            fallback_block_reason = _local_tts_fallback_block_reason(metrics)
-            no_completed_playback = (
-                queued_sentence_count <= 0
-                or playback_count_after <= playback_count_before
+            meta = metrics.setdefault("meta", {})
+            exact_played_chunks = meta.get("local_tts_played_chunk_count")
+            if isinstance(exact_played_chunks, int) and not isinstance(
+                exact_played_chunks,
+                bool,
+            ):
+                played_chunk_count = max(0, exact_played_chunks)
+            else:
+                played_chunk_count = max(
+                    0,
+                    playback_count_after - playback_count_before,
+                )
+            stream_completed = (
+                not fallback_needed
+                and queued_sentence_count > 0
+                and played_chunk_count >= queued_sentence_count
+                and meta.get("qualified_tts_interrupt") is not True
             )
+            fallback_block_reason = _local_tts_fallback_block_reason(metrics)
+            if fallback_block_reason is None and played_chunk_count > 0:
+                fallback_block_reason = "playback_attempted"
+            stream_incomplete = not stream_completed
             if fallback_block_reason is not None:
-                if fallback_needed or no_completed_playback:
+                if fallback_needed or stream_incomplete:
                     metrics.setdefault("meta", {})[
                         "local_streaming_tts_fallback_suppressed_reason"
                     ] = fallback_block_reason
                 fallback_needed = False
-            elif no_completed_playback:
+            elif stream_incomplete:
                 fallback_needed = True
                 metrics.setdefault("meta", {})["local_streaming_tts_fallback_reason"] = (
                     "no_sentence_queued" if queued_sentence_count <= 0 else "no_local_playback"
@@ -289,15 +306,22 @@ async def ask_llm_and_speak_local_from_runtime(
         finally:
             await delivery.abort()
 
+        playback_completed = stream_completed
         if fallback_needed and cleaned_answer:
             metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True
-            await deps.speak_answer_local(
+            fallback_played = await deps.speak_answer_local(
                 cleaned_answer,
                 turn_id=turn_id,
                 session_key=session_key,
                 turn_scope=turn_scope,
                 metrics=metrics,
             )
+            playback_completed = (
+                bool(fallback_played)
+                and meta.get("qualified_tts_interrupt") is not True
+            )
+        if cleaned_answer:
+            metrics.setdefault("meta", {})["playback_completed"] = playback_completed
 
         deps.log_voice_bottleneck_summary(
             metrics,

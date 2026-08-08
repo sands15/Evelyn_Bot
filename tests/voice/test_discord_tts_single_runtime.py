@@ -60,10 +60,12 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.lock = FakeLock()
         self.manager = FakePlaybackManager()
         self.local = False
+        self.local_played = True
         self.cached = False
 
-    async def speak_local(self, *args, **kwargs) -> None:
+    async def speak_local(self, *args, **kwargs) -> bool:
         self.local_calls.append((args, kwargs))
+        return self.local_played
 
     async def play_cached(self, *args, **kwargs) -> bool:
         self.cached_calls.append((args, kwargs))
@@ -94,6 +96,7 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_speaker_delegates_without_cache_or_discord_playback(self) -> None:
         self.local = True
+        metrics = {"marks": {}}
 
         await speak_answer_from_runtime(
             object(),
@@ -101,13 +104,55 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
             deps=self.build_deps(),
             turn_id="turn-1",
             session_key="session-1",
-            metrics={"marks": {}},
+            metrics=metrics,
         )
 
         self.assertEqual(self.local_calls[0][0], ("안녕",))
         self.assertEqual(self.local_calls[0][1]["turn_id"], "turn-1")
         self.assertEqual(self.cached_calls, [])
         self.assertIsNone(self.manager.request)
+        self.assertIs(metrics["meta"]["playback_completed"], True)
+
+    async def test_local_speaker_projects_failed_playback(self) -> None:
+        self.local = True
+        self.local_played = False
+        metrics = {"meta": {}}
+
+        await speak_answer_from_runtime(
+            object(),
+            "안녕",
+            deps=self.build_deps(),
+            metrics=metrics,
+        )
+
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+
+    async def test_local_speaker_projects_qualified_interrupt_as_incomplete(self) -> None:
+        self.local = True
+        metrics = {"meta": {"qualified_tts_interrupt": True}}
+
+        await speak_answer_from_runtime(
+            object(),
+            "안녕",
+            deps=self.build_deps(),
+            metrics=metrics,
+        )
+
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+
+    async def test_local_speaker_blank_reply_preserves_empty_answer_classification(self) -> None:
+        self.local = True
+        self.local_played = False
+        metrics = {"meta": {}}
+
+        await speak_answer_from_runtime(
+            object(),
+            "   ",
+            deps=self.build_deps(),
+            metrics=metrics,
+        )
+
+        self.assertNotIn("playback_completed", metrics["meta"])
 
     async def test_cached_audio_short_circuits_source_creation(self) -> None:
         self.cached = True

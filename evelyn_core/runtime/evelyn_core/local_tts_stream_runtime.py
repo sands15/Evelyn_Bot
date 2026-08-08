@@ -186,6 +186,9 @@ async def stream_local_tts_sentences_from_runtime(
     session_key: str | None = None,
     turn_scope: Any = None,
 ) -> int:
+    meta = metrics.setdefault("meta", {}) if isinstance(metrics, dict) else None
+    if isinstance(meta, dict):
+        meta["local_tts_played_chunk_count"] = 0
     if not deps.playback_manager.enabled:
         return 0
 
@@ -312,6 +315,8 @@ async def stream_local_tts_sentences_from_runtime(
                 ):
                     break
     finally:
+        if isinstance(meta, dict):
+            meta["local_tts_played_chunk_count"] = played_chunks
         if prefetch_task is not None and not prefetch_task.done():
             prefetch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

@@ -8,13 +8,14 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .text import clean_text
 
 
 @dataclass(frozen=True)
 class DiscordTtsSingleRuntimeDeps:
     memory_index_dir: Path
     is_local_speaker_voice_client: Callable[[Any], bool]
-    speak_answer_local: Callable[..., Awaitable[None]]
+    speak_answer_local: Callable[..., Awaitable[bool]]
     tts_running_state: Any
     play_cached_answer_audio: Callable[..., Awaitable[bool]]
     tts_lock: Any
@@ -57,13 +58,18 @@ async def speak_answer_from_runtime(
     metrics: dict | None = None,
 ) -> None:
     if deps.is_local_speaker_voice_client(vc):
-        await deps.speak_answer_local(
+        played = await deps.speak_answer_local(
             answer,
             turn_id=turn_id,
             session_key=session_key,
             turn_scope=turn_scope,
             metrics=metrics,
         )
+        if isinstance(metrics, dict) and clean_text(answer):
+            meta = metrics.setdefault("meta", {})
+            meta["playback_completed"] = (
+                bool(played) and meta.get("qualified_tts_interrupt") is not True
+            )
         return
 
     guild_id = getattr(getattr(vc, "guild", None), "id", None)

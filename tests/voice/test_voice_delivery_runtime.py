@@ -82,6 +82,8 @@ class RuntimeHarness:
     detached: bool = False
     answer_text: str | None = None
     emit_sentence: bool = True
+    fallback_played: bool = True
+    fallback_qualified_interrupt: bool = False
     local_delivery_manager: LocalTtsPlaybackManager | None = None
 
     def deps(self) -> VoiceDeliveryRuntimeDeps:
@@ -94,8 +96,13 @@ class RuntimeHarness:
 
         async def speak_answer_local(answer: str, **_kwargs: Any) -> bool:
             self.fallback_spoken.append(answer)
-            self.playback_count += 1
-            return True
+            if self.fallback_qualified_interrupt:
+                _kwargs["metrics"].setdefault("meta", {})[
+                    "qualified_tts_interrupt"
+                ] = True
+            if self.fallback_played:
+                self.playback_count += 1
+            return self.fallback_played
 
         def start_streaming_local_voice_delivery(**kwargs: Any) -> FakeDelivery:
             if self.local_delivery_manager is not None:
@@ -170,9 +177,125 @@ class VoiceDeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.fallback_spoken, ["로컬 답변"])
         self.assertEqual(metrics["meta"]["local_streaming_tts_fallback_reason"], "no_sentence_queued")
         self.assertTrue(metrics["meta"]["local_streaming_tts_fallback_used"])
+        self.assertIs(metrics["meta"]["playback_completed"], True)
         self.assertEqual(metrics["meta"]["delivery_mode"], "llm_sentence_stream")
         self.assertTrue(harness.local_delivery.aborted)
         self.assertTrue(any("fallback=True" in summary for summary in harness.summaries))
+
+    async def test_local_streaming_projects_failed_full_answer_fallback(self) -> None:
+        harness = RuntimeHarness(fallback_played=False)
+        metrics = {"started_at": 1.0, "marks": {}, "meta": {}}
+
+        answer = await ask_llm_and_speak_local_from_runtime(
+            "local",
+            "로컬",
+            deps=harness.deps(),
+            guild_id=1,
+            session_key="s1",
+            metrics=metrics,
+        )
+
+        self.assertEqual(answer, "로컬 답변")
+        self.assertEqual(harness.fallback_spoken, ["로컬 답변"])
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertEqual(harness.playback_count, 0)
+
+    async def test_local_streaming_projects_interrupted_fallback_as_incomplete(self) -> None:
+        harness = RuntimeHarness(fallback_qualified_interrupt=True)
+        metrics = {"started_at": 1.0, "marks": {}, "meta": {}}
+
+        await ask_llm_and_speak_local_from_runtime(
+            "local",
+            "로컬",
+            deps=harness.deps(),
+            guild_id=1,
+            session_key="s1",
+            metrics=metrics,
+        )
+
+        self.assertEqual(harness.fallback_spoken, ["로컬 답변"])
+        self.assertIs(metrics["meta"]["qualified_tts_interrupt"], True)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+
+    async def test_local_streaming_rejects_partial_sentence_playback(self) -> None:
+        harness = RuntimeHarness()
+        metrics = {"started_at": 1.0, "marks": {}, "meta": {}}
+
+        class PartialPlaybackDelivery(FakeDelivery):
+            async def finalize(self) -> int:
+                self.finalized = True
+                metrics["meta"].update(
+                    {
+                        "local_tts_playback_attempted": True,
+                        "local_tts_played_chunk_count": 1,
+                    }
+                )
+                harness.playback_count += 1
+                return 2
+
+        harness.local_delivery = PartialPlaybackDelivery(queued_count=2)
+
+        answer = await ask_llm_and_speak_local_from_runtime(
+            "local",
+            "로컬",
+            deps=harness.deps(),
+            guild_id=1,
+            session_key="s1",
+            metrics=metrics,
+        )
+
+        self.assertEqual(answer, "로컬 답변")
+        self.assertEqual(harness.fallback_spoken, [])
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertEqual(
+            metrics["meta"]["local_streaming_tts_fallback_suppressed_reason"],
+            "playback_attempted",
+        )
+
+    async def test_local_streaming_does_not_count_other_turn_playback(self) -> None:
+        harness = RuntimeHarness(fallback_played=False)
+        metrics = {"started_at": 1.0, "marks": {}, "meta": {}}
+
+        class NoPlaybackDelivery(FakeDelivery):
+            async def finalize(self) -> int:
+                self.finalized = True
+                metrics["meta"]["local_tts_played_chunk_count"] = 0
+                harness.playback_count += 1
+                return 1
+
+        harness.local_delivery = NoPlaybackDelivery(queued_count=1)
+
+        await ask_llm_and_speak_local_from_runtime(
+            "local",
+            "로컬",
+            deps=harness.deps(),
+            guild_id=1,
+            session_key="s1",
+            metrics=metrics,
+        )
+
+        self.assertEqual(harness.fallback_spoken, ["로컬 답변"])
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+
+    async def test_empty_local_streaming_reply_keeps_empty_failure_taxonomy(self) -> None:
+        harness = RuntimeHarness(answer_text="")
+        metrics = {"started_at": 1.0, "marks": {}, "meta": {}}
+
+        answer = await ask_llm_and_speak_local_from_runtime(
+            "local",
+            "로컬",
+            deps=harness.deps(),
+            guild_id=1,
+            session_key="s1",
+            metrics=metrics,
+        )
+
+        self.assertEqual(answer, "")
+        self.assertEqual(
+            metrics["meta"]["voice_delivery_failure_code"],
+            "voice_delivery_empty",
+        )
+        self.assertNotIn("playback_completed", metrics["meta"])
 
     async def test_partial_device_write_never_replays_full_answer_fallback(self) -> None:
         class PartialWriteFailureStream:
@@ -221,6 +344,7 @@ class VoiceDeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             metrics["meta"]["local_streaming_tts_fallback_suppressed_reason"],
             "playback_attempted",
         )
+        self.assertIs(metrics["meta"]["playback_completed"], False)
         self.assertTrue(any("fallback=False" in summary for summary in harness.summaries))
 
     async def test_stale_validation_attempt_blocks_device_and_full_answer_fallback(self) -> None:
@@ -286,6 +410,7 @@ class VoiceDeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             metrics["meta"]["local_streaming_tts_fallback_suppressed_reason"],
             "validation_attempt_stale",
         )
+        self.assertIs(metrics["meta"]["playback_completed"], False)
         self.assertNotIn("local_streaming_tts_fallback_used", metrics["meta"])
         self.assertEqual(manager.snapshot()["playCount"], 0)
         self.assertTrue(any("fallback=False" in summary for summary in harness.summaries))

@@ -136,6 +136,7 @@ class LocalTtsStreamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, 1)
+        self.assertEqual(metrics["meta"]["local_tts_played_chunk_count"], 1)
         self.assertEqual(self.created_sources[0][0], "안녕")
         self.assertEqual(self.created_sources[0][1]["chunk_index"], 2)
         self.assertEqual(self.created_sources[0][1]["trace_payload"]["output_mode"], "local_speaker")
@@ -173,6 +174,7 @@ class LocalTtsStreamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, 1)
+        self.assertEqual(metrics["meta"]["local_tts_played_chunk_count"], 1)
         self.assertEqual(self.manager.played, [self.created_sources[0][2]])
         self.assertIn((2, self.created_sources[1][2]), self.cleaned)
 

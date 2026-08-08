@@ -131,9 +131,11 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
-  - Discord 음성은 playback pipeline이 `playback_completed=false`를 명시한
-    stale validation·무재생 결과를 완료로 확정하지 않는다. 고정 전달 실패와
-    user-only continuity 경로로 보내며 single·streaming 양쪽을 검사한다.
+  - Discord와 local speaker 음성은 playback pipeline이
+    `playback_completed=false`를 명시한 stale validation·무재생·부분 재생 결과를
+    완료로 확정하지 않는다. Local streaming은 전역 누계가 아니라 이 턴의 exact
+    queued/played chunk 수를 우선 사용한다. 고정 전달 실패와 user-only continuity
+    경로로 보내며 single·streaming 양쪽을 검사한다.
   - 취소된 `TurnScope`에 current task가 늦게 attach되면 즉시 거부하고, 새
     background task는 coroutine 본문 실행 전에 취소한다. 음성 worker의 처리
     예외 로그는 exception type만 남기고 원문 메시지는 기록하지 않는다.
