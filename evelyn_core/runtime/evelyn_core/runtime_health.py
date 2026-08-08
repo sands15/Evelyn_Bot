@@ -474,7 +474,19 @@ async def check_service(service: ServiceSpec, *, probe_runner: ProbeRunner | Non
     started = time.monotonic()
     results: list[dict[str, Any]] = []
     for check in service.checks:
-        result = await runner(service, check)
+        probe_started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                runner(service, check),
+                timeout=max(0.001, check.timeout_ms / 1000.0),
+            )
+        except asyncio.TimeoutError:
+            result = {
+                "kind": check.kind,
+                "ok": False,
+                "reason": "timeout",
+                "elapsedMs": round((time.monotonic() - probe_started) * 1000.0, 1),
+            }
         results.append(dict(result))
         if check.kind == "tcp" and not result.get("ok"):
             break

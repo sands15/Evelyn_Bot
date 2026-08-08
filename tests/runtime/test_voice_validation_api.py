@@ -1509,18 +1509,31 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             str(running["sessionId"])
         )
         self.assertTrue(bound["ok"], bound)
-        terminal = {**running, "state": "failed"}
+        aborted = self.manager.abort(session_id=str(running["sessionId"]))
+        self.assertTrue(aborted["ok"], aborted)
 
-        with patch.object(self.manager, "snapshot", return_value=terminal):
+        with patch.object(
+            self.manager,
+            "snapshot",
+            wraps=self.manager.snapshot,
+        ) as snapshot:
             response = await self.client.get(
                 "/api/control-page/voice-validation",
                 headers={"Origin": self.origin},
             )
         payload = await response.json()
 
+        snapshot.assert_called_once_with()
         self.assertEqual(response.status, 200)
-        self.assertEqual(payload["session"]["state"], "failed")
+        self.assertEqual(payload["session"]["state"], "aborted")
         self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        local = payload["session"]["capabilities"]["voiceLocal"]
+        self.assertEqual(local["consent"]["state"], "inactive")
+        self.assertFalse(local["consent"]["active"])
+        self.assertIn(
+            "local_mic_consent_required",
+            {item["code"] for item in local["blockers"]},
+        )
         self.assertEqual(
             [call.args[0] for call in self.mic_control.await_args_list],
             [False],
@@ -1567,6 +1580,14 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["session"]["state"], "failed")
         self.assertEqual(self.consent_manager.status()["state"], "revoking")
         self.assertFalse(payload["cleanup"]["controlApplied"])
+        local = payload["session"]["capabilities"]["voiceLocal"]
+        self.assertEqual(local["consent"]["state"], "revoking")
+        self.assertFalse(local["consent"]["active"])
+        self.assertTrue(local["consent"]["recoveryRequired"])
+        self.assertIn(
+            "local_mic_consent_recovery_required",
+            {item["code"] for item in local["blockers"]},
+        )
 
     async def test_abort_reports_incomplete_capture_cleanup(self):
         running = self.start_manager_session()

@@ -2085,3 +2085,17 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   strict compact receipt와 함께 구조화하는 것이다. legacy data/log cleanup은 사용자 승인
   migration으로만 수행한다. `!clearChat`은 대화 유래 상태 reset이며 자율 목표의 영구 정지는
   `!endGoal`을 사용한다.
+
+## 2026-08-09 비-Minecraft 음성·Runtime Health 경계
+
+- voice validation GET은 consent lock 안에서 session을 한 번만 읽고 terminal/expired
+  session의 capture를 정리한 뒤 현재 consent capability를 공개 사본에 붙인다. 성공과
+  cleanup 실패 응답이 철회 전 `active=true`를 재사용하지 않는다.
+- Runtime Health의 모든 probe는 manifest `timeout_ms`로 제한된다. 멈춘 runner는
+  content-free `timeout` 결과로 끝나며 required service readiness를 얻지 못한다.
+- Discord voice reconnect wait가 client를 반환하지 못하면 stale client를 rearm·warmup·
+  저장·반환하지 않는다. 실제 connected client만 성공 경계를 통과한다.
+- 변경 파일 집중 80개와 voice 전체 610개(skip 5)가 통과했다. 실행 중 image를
+  교체하거나 마이크·Discord를
+  시작하지 않았다. 읽기 전용 preflight에서 active validation session 없음, mic physical
+  OFF, 24 kHz mono int16 output ready, OmniVoice warmup 완료와 오류 0을 확인했다.

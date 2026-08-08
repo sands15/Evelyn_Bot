@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import os
 import unittest
@@ -15,6 +16,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.runtime_health import (  # noqa: E402
     apply_runtime_health_overrides,
+    check_service,
     collect_runtime_health,
     public_runtime_health_snapshot,
 )
@@ -197,6 +199,46 @@ def fake_probe(states: dict[str, str]):
 
 
 class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_timeout_is_bounded_and_content_free(self) -> None:
+        probe = HealthProbeSpec(
+            kind="tcp",
+            host="127.0.0.1",
+            port=1,
+            timeout_ms=20,
+        )
+        service = ServiceSpec(
+            id="stt",
+            label="STT",
+            kind="http",
+            required=True,
+            host=probe.host,
+            port=probe.port,
+            checks=(probe,),
+        )
+
+        async def blocked_probe(*_args):
+            await asyncio.Event().wait()
+
+        result = await asyncio.wait_for(
+            check_service(service, probe_runner=blocked_probe),
+            timeout=0.5,
+        )
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["state"], "down")
+        self.assertEqual(result["reason"], "timeout")
+        self.assertEqual(
+            result["checks"],
+            [
+                {
+                    "kind": "tcp",
+                    "ok": False,
+                    "reason": "timeout",
+                    "elapsedMs": result["checks"][0]["elapsedMs"],
+                }
+            ],
+        )
+
     async def test_public_projection_removes_raw_probe_evidence(self) -> None:
         raw = {
             "revision": 7,

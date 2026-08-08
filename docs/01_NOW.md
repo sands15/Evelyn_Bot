@@ -21,7 +21,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
-- Docker/runtime 검사 fail-closed와 local/Discord 음성 실환경 연속성 검증
+- Conversation Continuity와 local/Discord 음성의 장애·재시작 실환경 검증
 
 ## 최근 확인
 
@@ -56,10 +56,10 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
 - Local Voice는 단일 capture owner, durable reservation/claim, capture-consent fence와
   cross-process attempt lease로 재시작·경쟁·중복 실행을 fail-closed 처리한다.
-- validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반
-  history/replay에 남기지 않는다.
-- 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
-  서명 상태와 watchdog physical OFF로 닫힌다.
+- validation GET은 consent 정리 뒤 현재 상태를 반환하고, Runtime Health probe는 manifest
+  timeout을 지킨다. 실패한 Discord reconnect는 stale client를 성공으로 저장하지 않는다.
+- validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반 history에 남기지 않는다.
+- 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
 - CI-equivalent 전체 3,138개(skip 22), 관련 집중 검증과 JS 구문이 통과했다. 현재
   마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
@@ -77,4 +77,4 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[ACTIVE_RISKS]] — 남은 위험과 검증 공백
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
-- [[worklog/2026-08-09]] — Mindcraft history 삭제·재시작 경계 근거
+- [[worklog/2026-08-09]] — 당일 구현·검증 근거

@@ -343,7 +343,10 @@ class VoiceSupportComposition:
         elif voice_client.channel != target_channel:
             await voice_client.move_to(target_channel)
 
-        if isinstance(voice_client, self.deps.voice_client_type):
+        if (
+            isinstance(voice_client, self.deps.voice_client_type)
+            and voice_client.is_connected()
+        ):
             voice_client.on_user_audio = self.deps.process_member_audio()
             if not voice_client.is_listener_healthy():
                 try:

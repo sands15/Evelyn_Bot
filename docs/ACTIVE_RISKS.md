@@ -294,6 +294,10 @@ ordering과 latency를 확인할 수 있어 live E2E가 단순 응답 의미 추
 저장하지 않는다. 현재 owner가 손상되면 정상인 상대 owner도 주입하지 않아
 검증할 수 없는 reset 경계를 우회하지 않는다.
 
+Discord voice 재무장도 내부 reconnect wait가 client를 반환하지 못하면 기존 stale
+client를 성공으로 저장·반환하지 않는다. 실제 `is_connected()`가 true인 client만
+listener callback, warmup과 last-channel success를 갱신한다.
+
 다음 조치: 사용자가 별도 Discord 검증 세션을 시작할 때 개인 scope를 설정하고
 Control Page→Discord, Discord text→Control Page, Discord voice→Control Page를
 각각 실행한다. 다른 사용자와 다른 guild가 섞이지 않는지, reset 직후 이전
@@ -455,6 +459,10 @@ identity가 exact `/health`를 통과했고 공식 runtime checker도 core readi
 `defaultHost/error/host/hostEnv/payload/portEnv/target`은 0개였다. privacy 표시는 raw
 probe payload와 filesystem path를 모두 `false`로 보고했다.
 
+2026-08-09 source는 각 probe를 manifest의 `timeout_ms`로 강제 제한한다. 멈춘
+runner는 target·exception 원문 없이 `reason=timeout`으로 투영되고 required service는
+ready가 되지 않는다. cooperative cancellation과 bounded 반환 회귀가 통과했다.
+
 Discord와 Minecraft/Codex는 의도적으로 deferred라 public health 전체는 optional
 degraded다. 다음 조치는 사용자가 각 surface를 승인해 기동할 때도 같은 공개 projection과
 exact source identity가 유지되는지 확인하는 것이다.
@@ -512,8 +520,7 @@ LLM을 다시 실행하지 않는다.
 포함한 source 검증이 통과했다. 따라서 owner와 admission race의 source P0는 닫혔다.
 voice 전체 회귀의 최신 개수는 worklog의 최종 검증 항목을 따른다. 실행 중 Control
 Page 이미지는 교체하지 않았고, Docker bind mount의 container 간 경합이나 Windows
-native와 Linux container를 섞은 두 lock의 coherence는 live 증거가 없다. mic 활성 뒤
-health 수집 전체 deadline 부재도 P1 starvation hardening으로 남긴다.
+native와 Linux container를 섞은 두 lock의 coherence는 live 증거가 없다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
@@ -539,6 +546,12 @@ identifier를 제거하고 profile API의 `ref_text`를 숨긴다. 새 image의 
 worker와 단일 playback owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다.
 mock 회귀는 통과했지만 남은 공백은 사용자 스피커 청취, 실제 마이크 10-turn·무음,
 barge-in과 Discord 채널 E2E다.
+
+2026-08-09 source는 validation GET이 terminal/expired session의 동의를 철회한 뒤
+철회 전 capability를 반환하던 경합을 닫았다. session snapshot은 consent lock 안에서
+한 번만 읽고, 성공·cleanup 실패 응답 모두 현재 consent projection을 그 공개 사본에
+붙인다. 읽기 전용 live preflight는 active session 없음, mic physical OFF, output ready,
+OmniVoice warmup 완료와 오류 0을 확인했지만 실제 재생·캡처는 수행하지 않았다.
 
 2026-08-02 source 경계에서는 Local I/O Bridge가 캡처를 시작하기 전에
 process-lifetime OS file lock을 fail-closed로 획득한다. Windows Supervisor는

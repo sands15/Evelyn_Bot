@@ -2022,14 +2022,14 @@ async def voice_capture_consent_revoke_handler(
 async def voice_validation_handler(request: web.Request) -> web.StreamResponse:
     validation_manager = get_voice_validation_manager()
     health = await cached_runtime_health(force=True)
-    capabilities = _voice_capabilities_with_capture_consent(health)
     lock = request.app[VOICE_CAPTURE_CONSENT_LOCK_KEY]
     async with lock:
-        session = validation_manager.snapshot(capabilities=capabilities)
+        session = validation_manager.snapshot()
         cleanup = await _reconcile_voice_capture_consent_locked(
             request.app,
             validation_session=session,
         )
+        session["capabilities"] = _voice_capabilities_with_capture_consent(health)
         if not cleanup.get("ok"):
             return _voice_capture_cleanup_failure_response(
                 cleanup,

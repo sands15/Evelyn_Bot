@@ -25,9 +25,16 @@ class FakeVoiceChannel:
 
 
 class FakeVoiceClient:
-    def __init__(self, channel: FakeVoiceChannel, *, healthy: bool = False) -> None:
+    def __init__(
+        self,
+        channel: FakeVoiceChannel,
+        *,
+        healthy: bool = False,
+        connected: bool = True,
+    ) -> None:
         self.channel = channel
         self.healthy = healthy
+        self.connected = connected
         self.on_user_audio = None
         self.stop_calls = 0
         self.listen_calls = 0
@@ -35,6 +42,9 @@ class FakeVoiceClient:
 
     def is_internal_voice_reconnect_active(self) -> bool:
         return False
+
+    def is_connected(self) -> bool:
+        return self.connected
 
     def is_listener_healthy(self) -> bool:
         return self.healthy
@@ -244,6 +254,29 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             reason="restore_last_voice_channel",
             manual_disconnect=False,
         )
+
+    async def test_failed_internal_reconnect_does_not_rearm_stale_client(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, connected=False)
+        voice_client.is_internal_voice_reconnect_active = Mock(return_value=True)
+        guild = FakeGuild(voice_client)
+        warmup = AsyncMock()
+        save = Mock()
+        deps = self.build_deps(
+            warmup_voice_path=warmup,
+            save_last_voice_channel_state=save,
+        )
+        composition = VoiceSupportComposition(deps)
+        composition.wait_for_internal_voice_reconnect = AsyncMock(return_value=None)
+
+        result = await composition.ensure_listening_voice_client(guild, channel)
+
+        self.assertIsNone(result)
+        composition.wait_for_internal_voice_reconnect.assert_awaited_once_with(channel)
+        self.assertEqual(voice_client.listen_calls, 0)
+        self.assertIsNone(voice_client.on_user_audio)
+        warmup.assert_not_awaited()
+        save.assert_not_called()
 
     async def test_restore_failure_exposes_only_code_and_type(self) -> None:
         channel = FakeVoiceChannel()
