@@ -130,10 +130,17 @@ function Wait-Port {
     param(
         [string]$HostName,
         [int]$Port,
-        [string]$Label
+        [string]$Label,
+        [switch]$ModelStartup
     )
 
-    $timeoutSec = if ($env:START_WAIT_TIMEOUT_SEC) { [int]$env:START_WAIT_TIMEOUT_SEC } else { 180 }
+    $timeoutSec = if ($ModelStartup) {
+        if ($env:START_MODEL_WAIT_TIMEOUT_SEC) { [int]$env:START_MODEL_WAIT_TIMEOUT_SEC } else { 600 }
+    } elseif ($env:START_WAIT_TIMEOUT_SEC) {
+        [int]$env:START_WAIT_TIMEOUT_SEC
+    } else {
+        180
+    }
     $intervalMs = if ($env:START_WAIT_INTERVAL_SEC) { [int]$env:START_WAIT_INTERVAL_SEC * 1000 } else { 2000 }
     $deadline = (Get-Date).AddSeconds($timeoutSec)
 
@@ -153,7 +160,7 @@ function Wait-HttpReady {
     param(
         [string]$Url,
         [string]$Label,
-        [ValidateSet('ready', 'vision')]
+        [ValidateSet('ready', 'vision', 'omnivoice')]
         [string]$Contract = 'ready'
     )
 
@@ -167,7 +174,13 @@ function Wait-HttpReady {
     while ((Get-Date) -lt $deadline) {
         try {
             $health = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 5
-            $ready = if ($Contract -eq 'vision') {
+            $ready = if ($Contract -eq 'omnivoice') {
+                $health.ready -eq $true -and
+                    $health.model_loaded -eq $true -and
+                    [string]$health.status -eq 'healthy' -and
+                    [string]$health.model_id -eq 'k2-fsa/OmniVoice' -and
+                    [string]$health.model_revision -eq 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'
+            } elseif ($Contract -eq 'vision') {
                 [bool]$health.ok -and [bool]$health.models.smol.loaded
             } else {
                 [bool]$health.ok -and [bool]$health.ready
@@ -466,6 +479,20 @@ function Test-DockerContainerRunning {
     )
 }
 
+function Test-DockerImageExists {
+    param([string]$Image)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $imageId = & docker image inspect --format '{{.Id}}' $Image 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return $exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$imageId)
+}
+
 function Stop-BotApiForImageRefresh {
     Write-Host '[Evelyn] Stopping the current Bot API cleanly before replacing its image.'
     Invoke-DockerCommand -Arguments @(
@@ -512,12 +539,12 @@ function Start-DockerCore {
 
     $keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
+    $ttsImage = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+    $ttsImageMissing = -not (Test-DockerImageExists -Image $ttsImage)
+    $dockerBuildServices = @()
     if ($buildEnabled) {
         Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
-        if (-not (Test-Path -LiteralPath $dockerImageBuilder -PathType Leaf)) {
-            throw "Docker image builder not found: $dockerImageBuilder"
-        }
-        $dockerBuildServices = @(
+        $dockerBuildServices += @(
             'bot_api',
             'control_page',
             'vision'
@@ -525,8 +552,21 @@ function Start-DockerCore {
         if ($keepDiscordBot) {
             $dockerBuildServices += 'discord_bot'
         }
+    }
+    if ($buildEnabled -or $ttsImageMissing) {
+        $dockerBuildServices += 'tts'
+    }
+    if ($dockerBuildServices.Count -gt 0) {
+        if (-not (Test-Path -LiteralPath $dockerImageBuilder -PathType Leaf)) {
+            throw "Docker image builder not found: $dockerImageBuilder"
+        }
+        if ($ttsImageMissing -and -not $buildEnabled) {
+            Write-Host '[Evelyn] Building the missing source-gated OmniVoice TTS image.'
+        }
         & $dockerImageBuilder -ProjectRoot $projectRoot -Services $dockerBuildServices
-        Stop-BotApiForImageRefresh
+        if ($buildEnabled) {
+            Stop-BotApiForImageRefresh
+        }
     } else {
         Write-Host '[Evelyn] Reusing existing Docker images. Set EVELYN_DOCKER_BUILD=true to rebuild app images.'
     }
@@ -535,7 +575,7 @@ function Start-DockerCore {
         Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('--profile', 'discord', 'stop', 'discord_bot')) -IgnoreFailure
     }
 
-    $composeArgs = $composeBaseArgs + @('up', '-d') + $coreServices
+    $composeArgs = $composeBaseArgs + @('up', '-d', '--no-build') + $coreServices
     Invoke-DockerCommandWithRuntimeChannelTokens -Arguments (
         @('compose') + $composeArgs
     )
@@ -695,10 +735,10 @@ try {
     Wait-Port -HostName '127.0.0.1' -Port 9820 -Label 'Main-LLM'
     Wait-Port -HostName '127.0.0.1' -Port 9822 -Label 'Router-LLM'
     Wait-Port -HostName '127.0.0.1' -Port 9821 -Label 'Sub-LLM'
-    Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS'
+    Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS' -ModelStartup
     Wait-Port -HostName '127.0.0.1' -Port 8892 -Label 'STT'
     Wait-Port -HostName '127.0.0.1' -Port 8891 -Label 'Vision'
-    Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'
+    Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS' -Contract 'omnivoice'
     Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'
     Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'
     Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'

@@ -207,6 +207,7 @@ class HostSupervisorTests(unittest.TestCase):
         command, command_options = self.commands[-1]
         discord_env = command_options["env"]
         self.assertEqual(command[-2:], ["--no-deps", "discord_bot"])
+        self.assertIn("--no-build", command)
         self.assertEqual(
             bridge_env["LOCAL_BRIDGE_STATUS_AUTH_TOKEN"],
             "reporter-secret",

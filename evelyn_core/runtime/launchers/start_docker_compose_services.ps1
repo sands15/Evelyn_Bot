@@ -126,18 +126,32 @@ $buildEnabled = $Build -or (
     ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
 )
 
-if ($buildEnabled) {
-    $composeBuildServices = @($serviceArgs)
-    if ($normalizedServices -contains 'vision') {
-        $pathSafeBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
-        if (-not (Test-Path -LiteralPath $pathSafeBuilder -PathType Leaf)) {
-            throw "Path-safe Docker image builder not found: $pathSafeBuilder"
-        }
-        & $pathSafeBuilder -ProjectRoot $projectRoot -Services @('vision')
-        $composeBuildServices = @(
-            $composeBuildServices | Where-Object { $_ -ne 'vision' }
-        )
+$pathSafeBuildServices = @()
+if ($buildEnabled -and $normalizedServices -contains 'vision') {
+    $pathSafeBuildServices += 'vision'
+}
+if ($normalizedServices -contains 'tts') {
+    $ttsImage = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+    & docker image inspect $ttsImage *> $null
+    $ttsImageMissing = $LASTEXITCODE -ne 0
+    if ($buildEnabled -or $ttsImageMissing) {
+        $pathSafeBuildServices += 'tts'
     }
+}
+if ($pathSafeBuildServices.Count -gt 0) {
+    $pathSafeBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
+    if (-not (Test-Path -LiteralPath $pathSafeBuilder -PathType Leaf)) {
+        throw "Path-safe Docker image builder not found: $pathSafeBuilder"
+    }
+    & $pathSafeBuilder -ProjectRoot $projectRoot -Services $pathSafeBuildServices
+}
+
+if ($buildEnabled) {
+    $composeBuildServices = @(
+        $serviceArgs | Where-Object {
+            $_ -notin $pathSafeBuildServices
+        }
+    )
     if ($composeBuildServices.Count -gt 0) {
         Invoke-DockerCommand -Arguments (
             @('compose') + $composeArgs + @('build') + $composeBuildServices
@@ -145,4 +159,6 @@ if ($buildEnabled) {
     }
 }
 
-Invoke-DockerCommand -Arguments (@('compose') + $composeArgs + @('up', '-d') + $serviceArgs)
+Invoke-DockerCommand -Arguments (
+    @('compose') + $composeArgs + @('up', '-d', '--no-build') + $serviceArgs
+)

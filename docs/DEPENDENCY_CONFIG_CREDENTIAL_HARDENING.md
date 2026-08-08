@@ -1,7 +1,7 @@
 # Dependency, Configuration, and Credential Hardening
 
 Document status: **Current**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-03 KST
 
 ## Dependency compatibility result
 
@@ -13,7 +13,8 @@ Last reviewed: 2026-08-01 KST
 | Discord image | `torch==2.13.0` | not installed directly | CPU runtime pinned to the patched Torch release |
 | STT CUDA 12.8 image | `torch/torchaudio==2.11.0+cu128` | `4.57.6` | newest matched CUDA 12.8 family currently published |
 | Vision CUDA 12.8 image | `torch==2.11.0+cu128`, `torchvision==0.26.0+cu128` | `5.14.1` | matched CUDA family and current Transformers |
-| VoxCPM image | `torch/torchaudio==2.8.0` | image-owned | unchanged pending exact-latent and FlashAttention model smoke |
+| OmniVoice image | `torch/torchaudio==2.8.0+cu128` | image-owned | default TTS; `omnivoice==0.1.5` and SHA-256-gated server source |
+| VoxCPM compatibility image | `torch/torchaudio==2.8.0` | image-owned | opt-in diagnostics only; unchanged pending exact-latent and FlashAttention model smoke |
 
 `qwen-asr==0.0.6` declares an exact dependency on
 `transformers==4.57.6`. A dry resolver check rejects combining it with
@@ -24,6 +25,31 @@ The official CUDA 12.8 index currently stops at Torch/Torchaudio 2.11 and
 Torchvision 0.26. Root/CPU runtimes can use Torch 2.13, but CUDA services
 cannot claim the same remediation until compatible CUDA wheels and model
 smoke evidence exist.
+
+OmniVoice does not install mutable server `main`. The image copies only the
+external checkout's `omnivoice_server/` package through a named build context,
+copies only four explicit Python globs, compares the exact 20-file set and validates every
+SHA-256 from `docker/omnivoice_source.sha256`. Runtime dependency pins cover the
+direct dependencies only. Startup also verifies all 13 required paths in the pinned model
+snapshot against `docker/omnivoice_model.sha256`; transitive wheels and the CUDA base image
+digest remain unlocked, so this is not described as a fully reproducible image.
+
+The model cache mount is limited to `hub/`, read-only, and loaded offline. It must contain
+revision `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`; readiness also requires that exact
+`model_revision` in health. The Evelyn clone profile remains read-only. A source or required
+model revision change must be reviewed together with a new manifest and image fingerprint.
+
+The local server patch removes synthesis text, filesystem paths and session/turn identifiers
+from operational logs. Profile API and request-validation error responses do not echo input
+text; it remains available only inside the server for synthesis. Default local synthesis uses sentence streaming.
+Experimental blockwise generation remains disabled until a client disconnect reliably cancels
+the in-flight model generation and releases its concurrency slot.
+
+Compose sets TTS `pull_policy: never`. The path-safe local image builder builds a missing image
+or an explicitly requested fresh image, including from a non-ASCII project path; Host Supervisor
+repair only reuses an existing image. The VoxCPM service on host 8881 is an opt-in compatibility
+and diagnostic target, not an automatic/runtime fallback, and existing clients are not rerouted
+from `tts:8880` when it starts.
 
 Falcon-OCR still requires Hugging Face remote model code. Evelyn now pins the
 full upstream commit `42ec56b72a23984ac059e7c8a6d397a8529423fe` and verifies

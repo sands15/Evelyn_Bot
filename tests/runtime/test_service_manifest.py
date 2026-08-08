@@ -58,6 +58,24 @@ class ServiceManifestTests(unittest.TestCase):
         ports = service_port_map(manifest)
         self.assertEqual(ports["stt"], 8892)
 
+    def test_tts_health_probe_requires_exact_omnivoice_model(self) -> None:
+        manifest = load_service_manifest(force=True)
+        service = get_service(manifest, "tts")
+
+        self.assertIsNotNone(service)
+        assert service is not None
+        health = next(check for check in service.checks if check.kind == "http")
+        self.assertEqual(
+            health.expect_json,
+            {
+                "status": "healthy",
+                "ready": True,
+                "model_loaded": True,
+                "model_id": "k2-fsa/OmniVoice",
+                "model_revision": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+            },
+        )
+
     def test_environment_override_is_reflected_in_effective_port(self) -> None:
         original = os.environ.get("CONTROL_PAGE_BOT_API_PORT")
         os.environ["CONTROL_PAGE_BOT_API_PORT"] = "18098"

@@ -1,7 +1,7 @@
 param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot '..\..\..'),
-    [ValidateSet('bot_api', 'control_page', 'discord_bot', 'vision')]
-    [string[]]$Services = @('bot_api', 'control_page', 'discord_bot', 'vision')
+    [ValidateSet('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')]
+    [string[]]$Services = @('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +15,12 @@ if (-not (Test-Path -LiteralPath $sourceRevisionHelper -PathType Leaf)) {
 }
 . $sourceRevisionHelper
 $sourceRevision = Initialize-EvelynSourceRevision -ProjectRoot $resolvedProjectRoot
+$omnivoiceServerRoot = if ($env:EVELYN_OMNIVOICE_SERVER_DIR) {
+    [System.IO.Path]::GetFullPath([string]$env:EVELYN_OMNIVOICE_SERVER_DIR)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'omnivoice-server'))
+}
+$omnivoiceSourceRoot = Join-Path $omnivoiceServerRoot 'omnivoice_server'
 $imageDefinitions = @{
     bot_api = @{
         Dockerfile = 'docker\Dockerfile.bot-api'
@@ -27,6 +33,11 @@ $imageDefinitions = @{
     discord_bot = @{
         Dockerfile = 'docker\Dockerfile.discord-bot'
         Image = 'evelyn-fast-control-discord_bot'
+    }
+    tts = @{
+        Dockerfile = 'docker\Dockerfile.omnivoice'
+        Image = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+        BuildContexts = @("omnivoice_source=$omnivoiceSourceRoot")
     }
     vision = @(
         @{
@@ -80,7 +91,8 @@ function Get-SubstTarget {
 function Invoke-DockerBuild {
     param(
         [string]$Dockerfile,
-        [string]$Image
+        [string]$Image,
+        [string[]]$BuildContexts = @()
     )
 
     $arguments = @(
@@ -90,6 +102,13 @@ function Invoke-DockerBuild {
         '--build-arg', "EVELYN_SOURCE_REVISION=$sourceRevision",
         '.'
     )
+    foreach ($buildContext in $BuildContexts) {
+        $arguments = @(
+            $arguments[0..($arguments.Count - 2)] +
+            @('--build-context', $buildContext) +
+            $arguments[-1]
+        )
+    }
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -153,6 +172,9 @@ try {
     Push-Location -LiteralPath $buildRoot
     try {
         foreach ($service in $Services) {
+            if ($service -eq 'tts' -and -not (Test-Path -LiteralPath $omnivoiceSourceRoot -PathType Container)) {
+                throw "OmniVoice source directory not found: $omnivoiceSourceRoot"
+            }
             $definitions = @($imageDefinitions[$service])
             foreach ($definition in $definitions) {
                 $dockerfile = [string]$definition.Dockerfile
@@ -161,7 +183,10 @@ try {
                 }
                 $image = [string]$definition.Image
                 Write-Host "[Evelyn] Building allowlisted image $service as $image."
-                Invoke-DockerBuild -Dockerfile $dockerfile -Image $image
+                Invoke-DockerBuild `
+                    -Dockerfile $dockerfile `
+                    -Image $image `
+                    -BuildContexts @($definition.BuildContexts)
             }
         }
     } finally {

@@ -193,6 +193,24 @@ class RuntimeStartupIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(services["control_page"]["state"], "up")
         self.assertEqual(services["bot_api"]["state"], "up")
 
+    async def test_http_200_with_mismatched_json_is_not_ready(self) -> None:
+        control_port = unused_tcp_port()
+        bot_port = unused_tcp_port()
+        self.start_health_process(control_port)
+        self.start_health_process(bot_port, ok=False)
+
+        health = await collect_runtime_health(
+            manifest=manifest_for_ports(
+                control_page_port=control_port,
+                bot_api_port=bot_port,
+            )
+        )
+        services = {service["id"]: service for service in health["services"]}
+
+        self.assertEqual(services["control_page"]["state"], "up")
+        self.assertEqual(services["bot_api"]["state"], "partial")
+        self.assertFalse(health["ok"])
+
 
 class RealMainProcessStartupSmokeTests(unittest.TestCase):
     def setUp(self) -> None:

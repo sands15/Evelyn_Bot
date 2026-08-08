@@ -102,3 +102,28 @@ type: decision-log
   이를 503/retryable 상태로 되돌리지 않는다. 철회가 claim lease를 제때 얻지 못하면
   메모리에서 먼저 `revoking`으로 닫고 physical OFF를 계속 시도한다. raw audio와
   transcript는 이 계약이나 보고서에 추가로 저장하지 않는다.
+
+## 2026-08-03 — 기본 TTS를 실제 OmniVoice로 고정
+
+- 상태: 승인
+- 결정: 내부·호스트 계약 `tts:8880`은 유지하면서 기본 모델을
+  `k2-fsa/OmniVoice`로 교체한다. offline model cache는 revision
+  `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 read-only로 제공하고 health의
+  `model_revision`까지 exact 일치해야 한다. VoxCPM2의 host `8881` 서비스는
+  opt-in 호환성·진단용으로만 보존하며 자동 또는 runtime fallback으로 사용하지 않는다.
+- 이유: 기존 클라이언트가 이미 OmniVoice clone·24 kHz PCM streaming 계약을
+  사용하므로 호출 계층을 바꾸지 않고 실제 모델과 표시·health의 불일치를 없앤다.
+- 근거: `docker-compose.fast-control.yml`, `docker/Dockerfile.omnivoice`,
+  `evelyn_core/runtime/service_manifest.json`,
+  `tests/runtime/test_docker_compose_contract.py`
+- 영향: 기본 TTS build는 검토된 외부 Python 소스 20개의 SHA-256 allowlist와 고정된
+  직접 runtime 의존성 버전을 사용한다. 시작 시 고정 revision의 필수 model snapshot
+  경로 13개도 SHA-256으로 검증한다. 전이 wheel과 CUDA base image digest까지 고정한
+  완전 재현 build라는 뜻은 아니다. profile은 read-only이며
+  profile API와 validation 오류 응답은 입력 원문을 숨기고 운영 로그에는 합성 text,
+  경로, session/turn 식별자를 남기지 않는다. 기본 합성은 sentence streaming을 사용하고 실험적 blockwise 경로는
+  client disconnect cancellation이 안전해질 때까지 비활성화한다. Compose는 TTS image를
+  `pull_policy: never`로 외부에서 받지 않으며 공식 path-safe builder가 누락되었거나 새로
+  요청된 image를 만든다. Supervisor 복구는 이미 있는 image만 사용한다. 8881 서비스를
+  시작해도 기존 client는 `tts:8880`에서 reroute되지 않는다. image build/recreate와 실제
+  clone-stream smoke 전에는 live 전환 완료로 보고하지 않는다.

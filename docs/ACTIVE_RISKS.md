@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-08-02 KST
+Last reviewed: 2026-08-03 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -387,6 +387,16 @@ CUDA 12.8 공식 인덱스는 현재 Torch/Torchaudio 2.11과 Torchvision 0.26�
 없다. exact-latent/FlashAttention 결합인 VoxCPM은 모델 smoke 없이 2.8에서
 올리지 않았다.
 
+기본 TTS source는 `k2-fsa/OmniVoice`와 CUDA 12.8 Torch/Torchaudio 2.8로
+전환했다. 서버 Python 소스는 exact 20-file SHA-256 allowlist로 닫았고 직접 runtime
+의존성을 고정했다. 고정 revision의 필수 model snapshot 경로 13개도 시작 시 SHA-256으로
+검증하지만 전이 wheel과 CUDA base image digest까지 고정한 완전 재현 build는 아니다.
+offline cache는 revision
+`c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 read-only로 제공해야 한다. Docker 권한
+승인이 사용량 제한으로 거부돼 새 image build, model load와 실제 clone-stream 합성
+smoke는 아직 수행하지 못했다. VoxCPM2의 host 8881 서비스는 opt-in 호환성·진단용이며
+자동/runtime fallback도, 기존 client의 reroute도 제공하지 않는다.
+
 Falcon-OCR은 여전히 Hugging Face remote model code 실행을 요구한다. 다만
 full commit과 모든 snapshot 파일의 size/SHA-256을 고정하고, 실행 전 전체
 검증, 기본 offline/local-only 로드, read-only model cache·root filesystem,
@@ -512,6 +522,21 @@ Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재�
 설치되며, launcher는 Host Supervisor와 Local I/O Bridge에서 서로 다른 두 번의
 fresh heartbeat를 확인한 뒤에만 준비 완료를 보고한다. TTS 음성 프로필의 WAV,
 JSON, `ref_text`도 Docker 시작 전에 검사한다.
+
+현재 source의 TTS readiness는 HTTP 200만으로 통과하지 않고 실제 OmniVoice의
+`status=healthy`, `ready=true`, `model_loaded=true`,
+`model_id=k2-fsa/OmniVoice`,
+`model_revision=c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 모두 요구한다. cache는 offline
+read-only다. Compose의 `pull_policy: never`와 path-safe builder는 누락·fresh image를
+로컬에서 만들고 Supervisor repair는 기존 image만 사용한다. 다만 이 source로 실행 중
+컨테이너를 교체하지 못했으므로 model identity/revision, `/v1/models`, Evelyn clone
+PCM의 live 증거는 아직 없다.
+
+기본 local 합성은 sentence streaming을 사용한다. 실험적 blockwise generation은
+client disconnect가 in-flight generation과 concurrency slot을 확실히 취소한다는 live
+증거가 없으므로 비활성 상태다. 서버 source는 operational log의 text/path/session
+identifier를 제거하고 profile API의 `ref_text`를 숨기지만, 이 privacy 계약도 새 image
+배포 전에는 live 응답으로 검증됐다고 보지 않는다.
 
 2026-08-02 source 경계에서는 Local I/O Bridge가 캡처를 시작하기 전에
 process-lifetime OS file lock을 fail-closed로 획득한다. Windows Supervisor는

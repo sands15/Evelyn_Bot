@@ -398,6 +398,52 @@ services:
   tts:
     container_name: evelyn-tts
     profiles: ["tts"]
+    image: evelyn-omnivoice-tts:recipe-7cfc51e96088
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.omnivoice
+      additional_contexts:
+        omnivoice_source: ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}/omnivoice_server
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "0"
+      OMNIVOICE_HOST: "0.0.0.0"
+      OMNIVOICE_PORT: "8880"
+      OMNIVOICE_DEVICE: "cuda"
+      OMNIVOICE_MODEL_ID: "k2-fsa/OmniVoice"
+      OMNIVOICE_MODEL_REVISION: "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+      OMNIVOICE_PROFILE_DIR: "/home/ubuntu/app/profiles"
+      OMNIVOICE_NUM_STEP: "32"
+      OMNIVOICE_MAX_CONCURRENT: "2"
+      OMNIVOICE_LOG_LEVEL: "info"
+      OMNIVOICE_STREAM_STRATEGY: "sentence"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/home/ubuntu/app/profiles:ro
+      - ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}/hub:/home/ubuntu/.cache/huggingface/hub:ro
+    ports:
+      - "127.0.0.1:8880:8880"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('status') == 'healthy' and payload.get('ready') is True and payload.get('model_loaded') is True and payload.get('model_id') == 'k2-fsa/OmniVoice' and payload.get('model_revision') == 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4' else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  voxcpm_fallback:
+    container_name: evelyn-voxcpm-fallback
+    profiles: ["tts-fallback"]
+    image: evelyn-fast-control-tts:latest
+    pull_policy: never
     build:
       context: .
       dockerfile: docker/Dockerfile.voxcpm
@@ -434,44 +480,13 @@ services:
       - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/app/profiles:ro
       - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
     ports:
-      - "127.0.0.1:8880:8880"
+      - "127.0.0.1:8881:8880"
     healthcheck:
       test: ["CMD", "python3", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('ok') and payload.get('ready') and payload.get('backend') == 'voxcpm2-nanovllm' else 1)"]
       interval: 15s
       timeout: 10s
       retries: 20
       start_period: 600s
-
-  omnivoice_fallback:
-    container_name: evelyn-omnivoice-fallback
-    profiles: ["tts-fallback"]
-    build:
-      context: ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}
-      dockerfile: Dockerfile.cuda
-    restart: "no"
-    gpus: all
-    environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
-      OMNIVOICE_HOST: "0.0.0.0"
-      OMNIVOICE_PORT: "8880"
-      OMNIVOICE_DEVICE: "cuda"
-      OMNIVOICE_PROFILE_DIR: "/home/ubuntu/app/profiles"
-      OMNIVOICE_NUM_STEP: "32"
-      OMNIVOICE_MAX_CONCURRENT: "2"
-      OMNIVOICE_LOG_LEVEL: "info"
-    volumes:
-      - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/home/ubuntu/app/profiles
-      - ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}:/home/ubuntu/.cache/huggingface
-    ports:
-      - "127.0.0.1:8881:8880"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 90s
 
   vision_runtime:
     container_name: evelyn-vision-runtime

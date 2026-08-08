@@ -12,7 +12,8 @@
 - `main_llm`: llama-server main LLM, `9820`
 - `router_llm`: llama-server router LLM, `9822`
 - `sub_llm`: llama-server sub LLM, `9821`
-- `tts`: OmniVoice TTS, `8880`
+- `tts`: `k2-fsa/OmniVoice` TTS, `8880`
+- `voxcpm_fallback`: opt-in 호환성·진단 profile, host `8881`
 - `stt`: Qwen3-ASR STT service, `8892`
 - `vision`: credential-free Vision ingress, `8891`
 - `vision_runtime`: isolated SmolVLM2/Falcon-OCR GPU runtime
@@ -25,6 +26,22 @@ Discord bot loop는 `discord` profile의 `discord_bot` 서비스로 분리한다
 
 Windows 로컬 기본 경로는 launcher를 사용한다. Host Supervisor와 화면 bridge,
 TTS profile 검증, 모델 readiness까지 같은 계약으로 확인한다.
+
+기본 OmniVoice 이미지는 `EVELYN_OMNIVOICE_SERVER_DIR` 아래의
+`omnivoice_server/`만 build context로 읽는다. 환경변수가 없으면
+`${USERPROFILE}/omnivoice-server`를 사용한다. 검토된 Python 파일 20개가
+`docker/omnivoice_source.sha256`과 정확히 일치해야 하며, 복사 대상의 추가·변경은
+build가 실패한다. 광범위한 `COPY .`는 사용하지 않고 Python glob 네 개만
+이미지에 넣는다. 시작 시 `docker/omnivoice_model.sha256`으로 고정 revision의 필수
+snapshot 경로 13개를 검증한다. 직접 runtime 의존성만 고정했으며 전이 wheel과 base
+image digest까지 고정한 완전 재현 build로 보지는 않는다.
+
+Hugging Face cache에는 offline revision
+`c5fdb5ccb189668d56333f77ba2629f4cd7535f4`가 이미 있어야 하며 컨테이너에는
+read-only로 마운트한다. Evelyn profile도 read-only다. 서버의 profile API와 validation
+오류 응답은 입력 원문을 반환하지 않고 운영 로그는 합성 text, profile/config 경로와
+session/turn 식별자를 기록하지 않는다. standalone TTS launcher는 고정 recipe image가
+없을 때 path-safe builder로 먼저 생성한다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass `
@@ -41,7 +58,7 @@ powershell -ExecutionPolicy Bypass `
 ```
 
 프로젝트 경로에 한글 등 non-ASCII 문자가 있으면 launcher가 사용하지 않는 임시
-드라이브 문자에 프로젝트를 매핑한 뒤 allowlist 서비스 그룹 세 개만 빌드한다.
+드라이브 문자에 프로젝트를 매핑한 뒤 요청된 allowlist 서비스 그룹만 빌드한다.
 Vision 그룹은 `vision` ingress와 `vision_runtime` 두 이미지를 함께 갱신한다.
 launcher는 자신이 만든 매핑임을 다시 확인한 뒤 해제하며 기존 `subst` 매핑은
 재사용하거나 삭제하지 않는다.
@@ -50,18 +67,28 @@ launcher는 자신이 만든 매핑임을 다시 확인한 뒤 해제하며 기�
 crash 뒤 `owner_claim.json`이 남아 있어도 이는 경고만 표시하는 진단 파일이며,
 새 Bot API가 stable process-lifetime OS lock을 획득해야만 owner가 된다.
 
-기본 런타임:
+`tts`는 `pull_policy: never`라 registry에서 같은 이름의 image를 받지 않는다. 공식
+launcher는 image가 없거나 `EVELYN_DOCKER_BUILD=true`로 새 build를 요청했을 때
+non-ASCII 경로와 외부 named context를 검증하는 path-safe builder로 TTS image를 만든다.
+Host Supervisor의 runtime repair는 build하지 않고 이미 있는 image만 재사용한다.
+
+launcher를 거치지 않고 시작할 때는 먼저 같은 builder로 TTS image를 준비한다.
 
 ```powershell
-cd C:\Evelyn
-docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager up -d --build
+powershell -ExecutionPolicy Bypass `
+  -File .\evelyn_core\runtime\launchers\build_local_docker_images.ps1 `
+  -ProjectRoot . -Services tts
+```
+
+```powershell
+docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager up -d --no-build
 ```
 
 Discord bot worker까지 포함:
 
 ```powershell
 $env:DISCORD_BOT_TOKEN='<token>'
-docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager --profile discord up -d --build
+docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager --profile discord up -d --no-build
 ```
 
 `discord_bot`만 교체:
@@ -107,6 +134,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 정상 기준:
 
 - 모든 핵심 HTTP health가 응답한다.
+- TTS health가 `status=healthy`, `ready=true`, `model_loaded=true`,
+  `model_id=k2-fsa/OmniVoice`,
+  `model_revision=c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 모두 만족한다.
 - `controlReady`, `botReady`, `mainReady`, `routerReady`, `subReady`, `ttsReady`, `sttReady`, `chatReady`, `voiceReady`, `visionReady`가 `true`다.
 - 기본 local core 검사에서는 지연 시작되는 `voyagerReady`, `codexReady`가
   경고일 수 있다.
@@ -145,6 +175,11 @@ code에는 인터넷이나 다른 Evelyn 서비스로 향하는 route를 주지 
 - STT는 로컬 모델을 로드하지 않고 `STT_SERVICE_URL=http://stt:8892`로 원격 STT 서비스를 우선 사용한다.
 - `STT_SERVICE_FALLBACK_LOCAL=false`로 두어 컨테이너 안에서 Qwen ASR을 중복 로드하지 않는다.
 - TTS는 `OMNIVOICE_SERVER_URL=http://tts:8880`을 사용한다.
+- 기본 합성은 `/v1/audio/speech`의 sentence streaming이다. 실험적 blockwise
+  streaming은 client disconnect가 model generation까지 안전하게 취소된다는 증거가
+  생길 때까지 비활성화한다.
+- `voxcpm_fallback`은 host `8881`에서 수동 진단할 수 있는 호환성 서비스일 뿐이다.
+  이를 시작해도 Docker client와 Windows bridge는 `tts:8880`에서 자동 reroute되지 않는다.
 - 로컬모드는 Docker core와 Windows local I/O bridge로 나뉜다. Docker는 LLM/TTS/STT/Vision/Control/Bot API를 맡고, Windows bridge는 실제 마이크 캡처와 스피커 재생만 맡는다.
 - 컨테이너 안에서는 Windows 화면 캡처가 불가능하므로 `discord_bot`의 `VISION_WATCH_ENABLED=false`를 유지한다.
 - Windows Host Supervisor의 Host Vision Bridge가 요청별 임시 캡처, foreground

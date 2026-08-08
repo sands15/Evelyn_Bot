@@ -161,7 +161,14 @@ Invoke-RequiredHttp "Sub LLM" "http://127.0.0.1:9821/v1/models" {
 
 Invoke-RequiredHttp "TTS" "http://127.0.0.1:8880/health" {
     param($json, $content)
-    return $null -ne $json -and ($json.ready -eq $true -or $json.status -eq "healthy")
+    return (
+        $null -ne $json -and
+        $json.status -eq "healthy" -and
+        $json.ready -eq $true -and
+        $json.model_loaded -eq $true -and
+        $json.model_id -eq "k2-fsa/OmniVoice" -and
+        $json.model_revision -eq "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+    )
 } | Out-Null
 
 Invoke-RequiredHttp "STT" "http://127.0.0.1:8892/health" {

@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+
+ARG EVELYN_SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.revision=$EVELYN_SOURCE_REVISION
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ffmpeg \
+    libgomp1 \
+    libsndfile1 \
+    patch \
+    python3 \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if ! getent group ubuntu >/dev/null; then groupadd ubuntu; fi \
+    && if ! id -u ubuntu >/dev/null 2>&1; then useradd --create-home --shell /bin/bash --gid ubuntu ubuntu; fi \
+    && mkdir -p /home/ubuntu/app/profiles /home/ubuntu/.cache/huggingface/hub /opt/omnivoice-server \
+    && chown -R ubuntu:ubuntu /home/ubuntu /opt/omnivoice-server
+
+ENV HOME=/home/ubuntu \
+    VIRTUAL_ENV=/home/ubuntu/venv \
+    PATH=/home/ubuntu/venv/bin:/usr/local/cuda/bin:${PATH} \
+    PYTHONPATH=/opt/omnivoice-server \
+    CUDA_HOME=/usr/local/cuda \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    HF_HOME=/home/ubuntu/.cache/huggingface \
+    HF_HUB_CACHE=/home/ubuntu/.cache/huggingface/hub \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    OMNIVOICE_MODEL_REVISION=c5fdb5ccb189668d56333f77ba2629f4cd7535f4
+
+RUN python3 -m venv --system-site-packages "$VIRTUAL_ENV" \
+    && "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
+        torch==2.8.0+cu128 \
+        torchaudio==2.8.0+cu128 \
+        torchcodec==0.11 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+    && "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
+        "fastapi==0.136.1" \
+        "huggingface-hub==1.15.0" \
+        "omnivoice==0.1.5" \
+        "platformdirs==4.9.6" \
+        "psutil==7.2.2" \
+        "pydantic==2.13.4" \
+        "pydantic-settings==2.14.1" \
+        "python-multipart==0.0.29" \
+        "uvicorn[standard]==0.47.0"
+
+COPY docker/omnivoice_source.sha256 /tmp/omnivoice_source.sha256
+COPY docker/omnivoice_model.sha256 /opt/omnivoice-server/omnivoice_model.sha256
+COPY docker/omnivoice-server.LICENSE /licenses/omnivoice-server.LICENSE
+COPY docker/omnivoice_evelyn.patch /tmp/omnivoice_evelyn.patch
+COPY docker/run_omnivoice.sh /usr/local/bin/evelyn-omnivoice-entrypoint
+COPY --from=omnivoice_source *.py /opt/omnivoice-server/omnivoice_server/
+COPY --from=omnivoice_source routers/*.py /opt/omnivoice-server/omnivoice_server/routers/
+COPY --from=omnivoice_source services/*.py /opt/omnivoice-server/omnivoice_server/services/
+COPY --from=omnivoice_source utils/*.py /opt/omnivoice-server/omnivoice_server/utils/
+RUN cd /opt/omnivoice-server \
+    && find omnivoice_server -type f -name '*.py' -printf '%P\n' | sort > /tmp/omnivoice_actual_files.txt \
+    && awk '{print $2}' /tmp/omnivoice_source.sha256 | sed 's#^omnivoice_server/##' | sort > /tmp/omnivoice_expected_files.txt \
+    && diff -u /tmp/omnivoice_expected_files.txt /tmp/omnivoice_actual_files.txt \
+    && sha256sum --check /tmp/omnivoice_source.sha256 \
+    && patch --batch --forward -p1 < /tmp/omnivoice_evelyn.patch \
+    && chmod 0755 /usr/local/bin/evelyn-omnivoice-entrypoint
+
+USER ubuntu
+WORKDIR /home/ubuntu/app
+
+EXPOSE 8880
+
+ENTRYPOINT ["/usr/local/bin/evelyn-omnivoice-entrypoint"]

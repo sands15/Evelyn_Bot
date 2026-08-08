@@ -1,0 +1,243 @@
+--- a/omnivoice_server/services/inference.py
++++ b/omnivoice_server/services/inference.py
+@@ -45,6 +45,16 @@
+     "first_pcm_chunk_written",
+ }
+ 
++_PRIVATE_LOG_FIELDS = {
++    "cache_scope",
++    "ref_audio",
++    "ref_text",
++    "speaker",
++    "session_key",
++    "turn_id",
++    "voice",
++}
++
+ 
+ @dataclass
+ class SynthesisRequest:
+@@ -195,12 +205,8 @@
+     payload: dict[str, Any] = {}
+     if tracked.chunk_index is not None:
+         payload["chunk_index"] = tracked.chunk_index
+-    if tracked.turn_id:
+-        payload["turn_id"] = tracked.turn_id
+-    if tracked.session_key:
+-        payload["session_key"] = tracked.session_key
+     for key, value in fields.items():
+-        if value is not None:
++        if value is not None and key not in _PRIVATE_LOG_FIELDS:
+             payload[key] = value
+     lines = [
+         "[TTS SERVER]",
+@@ -213,13 +219,6 @@
+     message = "\n".join(lines)
+     if event in _TTS_PIPELINE_EVENTS:
+         logger.info(message)
+-        print(
+-            "[TTS PIPELINE]\n"
+-            f"event={event}\n"
+-            f"request_id={tracked.request_id}\n"
+-            f"elapsed_ms={elapsed_ms:.1f}"
+-            + ("\n" + "\n".join(f"{key}={value!r}" for key, value in payload.items()) if payload else "")
+-        )
+     else:
+         logger.debug(message)
+ 
+--- a/omnivoice_server/routers/speech.py
++++ b/omnivoice_server/routers/speech.py
+@@ -24,7 +24,6 @@
+     ensure_request_tracking,
+     log_request_event,
+ )
+-from ..services.blockwise_stream import BlockwiseStreamOptions
+ from ..services.metrics import MetricsService
+ from ..services.profiles import ProfileService
+ from ..utils.audio import tensor_to_pcm16_bytes, tensors_to_wav_bytes
+@@ -212,37 +211,9 @@
+ 
+     if body.stream:
+         if stream_strategy == "blockwise_capped_first":
+-            options = BlockwiseStreamOptions(
+-                block_size=body.stream_block_size or cfg.stream_block_size,
+-                first_block_steps=body.stream_first_block_steps or cfg.stream_first_block_steps,
+-                block_steps=body.stream_block_steps or cfg.stream_block_steps,
+-                first_immediate_cap_ms=(
+-                    body.stream_first_immediate_cap_ms
+-                    if body.stream_first_immediate_cap_ms is not None
+-                    else cfg.stream_first_immediate_cap_ms
+-                ),
+-                lookahead_crossfade_ms=(
+-                    body.stream_lookahead_crossfade_ms
+-                    if body.stream_lookahead_crossfade_ms is not None
+-                    else cfg.stream_lookahead_crossfade_ms
+-                ),
+-            )
+-            if options.lookahead_crossfade_ms != 0:
+-                raise HTTPException(
+-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+-                    detail="blockwise_capped_first currently supports only none0 assembly; set stream_lookahead_crossfade_ms=0",
+-                )
+-            return StreamingResponse(
+-                inference_svc.stream_blockwise_capped_first_pcm(prepared_req, options),
+-                media_type="audio/pcm",
+-                headers={
+-                    "X-Audio-Sample-Rate": "24000",
+-                    "X-Audio-Channels": "1",
+-                    "X-Audio-Bit-Depth": "16",
+-                    "X-Audio-Format": "pcm-int16-le",
+-                    "X-OmniVoice-Stream-Strategy": "blockwise_capped_first",
+-                    "X-OmniVoice-First-Cap-Ms": str(options.first_immediate_cap_ms),
+-                },
++            raise HTTPException(
++                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
++                detail="blockwise_capped_first is disabled until disconnect cancellation is safe",
+             )
+         return StreamingResponse(
+             _stream_sentences(normalized_text, prepared_req, inference_svc, metrics_svc, cfg),
+@@ -268,7 +240,10 @@
+     except Exception as e:
+         metrics_svc.record_error()
+-        logger.exception("Synthesis failed")
++        logger.error(
++            "Synthesis failed; error_type=%s",
++            type(e).__name__,
++        )
+         raise HTTPException(
+             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-            detail=f"Synthesis failed: {e}",
++            detail="Synthesis failed",
+         )
+@@ -349,11 +324,18 @@
+                 yield chunk
+         except asyncio.TimeoutError:
+             metrics_svc.record_timeout()
+-            logger.warning(f"Streaming chunk timed out: '{sentence[:50]}...'")
++            logger.warning(
++                "Streaming chunk timed out; chars=%d",
++                len(sentence),
++            )
+             return
+-        except Exception:
++        except Exception as exc:
+             metrics_svc.record_error()
+-            logger.exception(f"Streaming chunk failed: '{sentence[:50]}...'")
++            logger.error(
++                "Streaming chunk failed; chars=%d error_type=%s",
++                len(sentence),
++                type(exc).__name__,
++            )
+             return
+ 
+ 
+@@ -452,9 +434,12 @@
+         except Exception as e:
+             metrics_svc.record_error()
+-            logger.exception("Clone synthesis failed")
++            logger.error(
++                "Clone synthesis failed; error_type=%s",
++                type(e).__name__,
++            )
+             raise HTTPException(
+                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-                detail=f"Synthesis failed: {e}",
++                detail="Synthesis failed",
+             )
+ 
+     audio_bytes_out = tensors_to_wav_bytes(result.tensors)
+--- a/omnivoice_server/app.py
++++ b/omnivoice_server/app.py
+@@ -121,8 +121,7 @@
+             content={
+                 "error": {
+                     "code": "validation_error",
+                     "message": "Request validation failed",
+-                    "detail": exc.errors(),
+                 }
+             },
+         )
+--- a/omnivoice_server/routers/health.py
++++ b/omnivoice_server/routers/health.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ import time
+ 
+ import psutil
+@@ -14,6 +15,7 @@
+     cfg = request.app.state.cfg
+     model_svc = request.app.state.model_svc
+     ram_mb = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
++    model_revision = os.environ.get("OMNIVOICE_MODEL_REVISION", "")
+ 
+     if not model_svc.is_loaded:
+         return JSONResponse(
+@@ -23,6 +25,7 @@
+                 "status": "starting",
+                 "ready": False,
+                 "model_loaded": False,
++                "model_revision": model_revision,
+                 "memory_rss_mb": ram_mb,
+             },
+         )
+@@ -36,6 +39,7 @@
+         "model_loaded": True,
+         "uptime_s": uptime_s,
+         "model_id": cfg.model_id,
++        "model_revision": model_revision,
+         "memory_rss_mb": ram_mb,
+     }
+ 
+--- a/omnivoice_server/routers/voices.py
++++ b/omnivoice_server/routers/voices.py
+@@ -33,6 +33,14 @@
+     return request.app.state.profile_svc
+ 
+ 
++def _public_profile(profile: dict) -> dict:
++    return {
++        key: value
++        for key, value in profile.items()
++        if key != "ref_text"
++    } | {"has_ref_text": bool(profile.get("ref_text"))}
++
++
+ # ── GET /v1/voices ───────────────────────────────────────────────────────────
+ 
+ 
+@@ -72,7 +79,7 @@
+             "type": "clone",
+             "profile_id": p["profile_id"],
+             "created_at": p.get("created_at"),
+-            "ref_text": p.get("ref_text"),
++            "has_ref_text": bool(p.get("ref_text")),
+         }
+         for p in profiles
+     ]
+@@ -131,7 +138,7 @@
+             detail=str(e),
+         )
+ 
+-    return meta
++    return _public_profile(meta)
+ 
+ 
+ # ── GET /v1/voices/profiles/{profile_id} ─────────────────────────────────────
+@@ -149,7 +156,7 @@
+             status_code=status.HTTP_404_NOT_FOUND,
+             detail=f"Profile '{profile_id}' not found",
+         )
+-    return profile
++    return _public_profile(profile)
+ 
+ 
+ # ── DELETE /v1/voices/profiles/{profile_id} ──────────────────────────────────
+@@ -229,4 +236,4 @@
+             overwrite=True,
+         )
+ 
+-    return meta
++    return _public_profile(meta)

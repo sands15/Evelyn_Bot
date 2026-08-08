@@ -1081,6 +1081,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         )
         bridge_source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_io_bridge.py").read_text(encoding="utf-8")
         supervisor_source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "host_supervisor.py").read_text(encoding="utf-8")
+        start_env = (REPO_ROOT / "evelyn_core" / "start_env.bat").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("function Invoke-DockerCommandWithRuntimeChannelTokens", script)
         self.assertIn("Invoke-DockerCommandWithRuntimeChannelTokens -Arguments (", script)
@@ -1089,7 +1092,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("'--profile', 'stt'", script)
         self.assertNotIn("'--profile', 'voyager'", script)
         self.assertIn("EVELYN_DOCKER_BUILD", script)
-        self.assertIn("@('up', '-d')", script)
+        self.assertIn("@('up', '-d', '--no-build')", script)
         self.assertIn("'stop', 'discord_bot'", script)
         self.assertIn("EVELYN_LOCAL_KEEP_DISCORD_BOT", script)
         self.assertIn("evelyn_core.host_supervisor", script)
@@ -1141,6 +1144,10 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC = '0.7'", script)
         self.assertNotIn("py -3 main.py", script)
         self.assertIn("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", bridge_source)
+        self.assertIn(
+            '"LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",\n    "false",',
+            bridge_source,
+        )
         self.assertIn("if not self.mic_enabled:", bridge_source)
         self.assertIn('"micEnabled": self.mic_enabled', bridge_source)
         self.assertIn('"micControlRevision": self.mic_control_request_revision', bridge_source)
@@ -1162,6 +1169,26 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn('"num_step": OMNIVOICE_NUM_STEP', bridge_source)
         self.assertIn('"stream_strategy": OMNIVOICE_STREAM_STRATEGY', bridge_source)
         self.assertIn('"stream_first_block_steps": OMNIVOICE_STREAM_FIRST_BLOCK_STEPS', bridge_source)
+        config_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "config.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'OMNIVOICE_STREAM_STRATEGY = os.getenv("OMNIVOICE_STREAM_STRATEGY", "sentence")',
+            config_source,
+        )
+        self.assertIn(
+            'OMNIVOICE_STREAM_FOLLOWUP_STRATEGY = os.getenv("OMNIVOICE_STREAM_FOLLOWUP_STRATEGY", "sentence")',
+            config_source,
+        )
+        self.assertIn(
+            'set "OMNIVOICE_STREAM_STRATEGY=sentence"',
+            start_env,
+        )
+        self.assertIn(
+            'set "OMNIVOICE_STREAM_FOLLOWUP_STRATEGY=sentence"',
+            start_env,
+        )
+        self.assertNotIn("blockwise_capped_first", start_env)
         self.assertIn('"mic": mic_stats', bridge_source)
 
     def test_start_local_has_lightweight_vision_profile(self) -> None:

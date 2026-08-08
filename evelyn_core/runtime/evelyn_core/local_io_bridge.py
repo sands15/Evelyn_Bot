@@ -125,7 +125,7 @@ LOCAL_BRIDGE_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_ENABLED", "true").strip()
 LOCAL_BRIDGE_STREAMING_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED = os.getenv(
     "LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",
-    "true",
+    "false",
 ).strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_MIN_TEXT_CHARS = max(1, int(os.getenv("LOCAL_BRIDGE_MIN_TEXT_CHARS", "2")))
 LOCAL_BRIDGE_STATUS_INTERVAL_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_STATUS_INTERVAL_SEC", "0.25")))

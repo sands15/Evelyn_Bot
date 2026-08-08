@@ -814,6 +814,7 @@ class HostSupervisor:
             profile,
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             service,
         ]

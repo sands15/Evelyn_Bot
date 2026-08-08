@@ -232,8 +232,21 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("START_MODEL_WAIT_TIMEOUT_SEC", script)
         self.assertIn("[bool]$health.ok -and [bool]$health.ready", script)
         self.assertIn("[bool]$health.ok -and [bool]$health.models.smol.loaded", script)
+        self.assertIn("$health.ready -eq $true", script)
+        self.assertIn("$health.model_loaded -eq $true", script)
+        self.assertIn("[string]$health.status -eq 'healthy'", script)
+        self.assertIn("[string]$health.model_id -eq 'k2-fsa/OmniVoice'", script)
         self.assertIn(
-            "Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'",
+            "[string]$health.model_revision -eq 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'",
+            script,
+        )
+        self.assertIn("[switch]$ModelStartup", script)
+        self.assertIn(
+            "Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS' -ModelStartup",
+            script,
+        )
+        self.assertIn(
+            "Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS' -Contract 'omnivoice'",
             script,
         )
         self.assertIn(
@@ -374,6 +387,9 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("& $dockerImageBuilder -ProjectRoot $projectRoot", launcher)
         self.assertIn("$dockerBuildServices = @(", launcher)
         self.assertIn("$dockerBuildServices += 'discord_bot'", launcher)
+        self.assertIn("$dockerBuildServices += 'tts'", launcher)
+        self.assertIn("Test-DockerImageExists -Image $ttsImage", launcher)
+        self.assertIn("@('up', '-d', '--no-build')", launcher)
         self.assertIn(
             "& $dockerImageBuilder -ProjectRoot $projectRoot "
             "-Services $dockerBuildServices",
@@ -407,7 +423,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertNotIn("@('compose') + $composeBaseArgs + @('build'", launcher)
 
         self.assertIn(
-            "[ValidateSet('bot_api', 'control_page', 'discord_bot', 'vision')]",
+            "[ValidateSet('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')]",
             builder,
         )
         self.assertIn("$requiresAsciiAlias", builder)
@@ -418,6 +434,10 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'evelyn-fast-control-bot_api'", builder)
         self.assertIn("'evelyn-fast-control-control_page'", builder)
         self.assertIn("'evelyn-fast-control-discord_bot'", builder)
+        self.assertIn("'evelyn-omnivoice-tts:recipe-7cfc51e96088'", builder)
+        self.assertIn("'docker\\Dockerfile.omnivoice'", builder)
+        self.assertIn("--build-context", builder)
+        self.assertIn("omnivoice_source=", builder)
         self.assertIn("'evelyn-fast-control-vision'", builder)
         self.assertIn("'evelyn-fast-control-vision_runtime'", builder)
         self.assertIn("'docker\\Dockerfile.vision-ingress'", builder)

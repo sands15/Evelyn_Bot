@@ -178,6 +178,134 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("VISION_SERVICE_URL: \"http://vision:8891\"", source)
         self.assertIn("VOYAGER_CODEX_GATEWAY_URL: \"http://codex_gateway:8787/codex/action\"", source)
 
+    def test_default_tts_is_source_and_revision_gated_omnivoice(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        tts = source.split("  tts:\n", 1)[1].split(
+            "\n  voxcpm_fallback:",
+            1,
+        )[0]
+        fallback = source.split("  voxcpm_fallback:\n", 1)[1].split(
+            "\n  vision_runtime:",
+            1,
+        )[0]
+        checker = CHECK_SCRIPT.read_text(encoding="utf-8")
+        dockerfile = (DOCKER_DIR / "Dockerfile.omnivoice").read_text(
+            encoding="utf-8"
+        )
+        source_manifest = (DOCKER_DIR / "omnivoice_source.sha256").read_text(
+            encoding="utf-8"
+        )
+        model_manifest = (DOCKER_DIR / "omnivoice_model.sha256").read_text(
+            encoding="utf-8"
+        )
+        privacy_patch = (DOCKER_DIR / "omnivoice_evelyn.patch").read_text(
+            encoding="utf-8"
+        )
+        entrypoint = (DOCKER_DIR / "run_omnivoice.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('profiles: ["tts"]', tts)
+        self.assertIn("image: evelyn-omnivoice-tts:recipe-7cfc51e96088", tts)
+        self.assertIn("pull_policy: never", tts)
+        self.assertIn("dockerfile: docker/Dockerfile.omnivoice", tts)
+        self.assertIn("omnivoice_source:", tts)
+        self.assertIn('OMNIVOICE_MODEL_ID: "k2-fsa/OmniVoice"', tts)
+        self.assertIn(
+            'OMNIVOICE_MODEL_REVISION: "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"',
+            tts,
+        )
+        self.assertIn('OMNIVOICE_STREAM_STRATEGY: "sentence"', tts)
+        self.assertIn('HF_HUB_OFFLINE: "1"', tts)
+        self.assertIn("/home/ubuntu/app/profiles:ro", tts)
+        self.assertIn("/hub:/home/ubuntu/.cache/huggingface/hub:ro", tts)
+        self.assertIn("payload.get('status') == 'healthy'", tts)
+        self.assertIn("payload.get('model_loaded') is True", tts)
+        self.assertIn("payload.get('model_id') == 'k2-fsa/OmniVoice'", tts)
+        self.assertIn(
+            "payload.get('model_revision') == 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'",
+            tts,
+        )
+        self.assertIn('max-size: "10m"', tts)
+        self.assertIn('max-file: "3"', tts)
+        self.assertNotIn("VOXCPM_", tts)
+
+        self.assertIn('profiles: ["tts-fallback"]', fallback)
+        self.assertIn("pull_policy: never", fallback)
+        self.assertIn("docker/Dockerfile.voxcpm", fallback)
+        self.assertIn('VOXCPM_MODEL_ID: "openbmb/VoxCPM2"', fallback)
+        self.assertIn('"127.0.0.1:8881:8880"', fallback)
+
+        self.assertIn("COPY --from=omnivoice_source", dockerfile)
+        self.assertNotIn("COPY --from=omnivoice_source .", dockerfile)
+        self.assertIn(
+            "COPY --from=omnivoice_source services/*.py",
+            dockerfile,
+        )
+        self.assertIn("sha256sum --check /tmp/omnivoice_source.sha256", dockerfile)
+        self.assertIn(
+            "COPY docker/omnivoice_model.sha256",
+            dockerfile,
+        )
+        self.assertIn("patch --batch --forward -p1", dockerfile)
+        self.assertIn("ENTRYPOINT", dockerfile)
+        self.assertIn("${PATH}", dockerfile)
+        self.assertIn("${LD_LIBRARY_PATH}", dockerfile)
+        self.assertNotIn("git+https://", dockerfile)
+        self.assertEqual(len(source_manifest.splitlines()), 20)
+        self.assertEqual(len(model_manifest.splitlines()), 13)
+        self.assertTrue((DOCKER_DIR / "omnivoice-server.LICENSE").is_file())
+        self.assertIn("_PRIVATE_LOG_FIELDS", privacy_patch)
+        self.assertIn('+    "speaker",', privacy_patch)
+        self.assertIn('+    "voice",', privacy_patch)
+        self.assertIn("disconnect cancellation is safe", privacy_patch)
+        self.assertIn('"Streaming chunk failed; chars=%d error_type=%s"', privacy_patch)
+        self.assertIn('if key != "ref_text"', privacy_patch)
+        self.assertIn('"Synthesis failed; error_type=%s"', privacy_patch)
+        self.assertIn('"Clone synthesis failed; error_type=%s"', privacy_patch)
+        self.assertEqual(privacy_patch.count('detail="Synthesis failed"'), 2)
+        self.assertIn('-                    "detail": exc.errors(),', privacy_patch)
+        self.assertIn("OMNIVOICE_MODEL_REVISION", entrypoint)
+        self.assertIn(
+            'expected_model_revision="c5fdb5ccb189668d56333f77ba2629f4cd7535f4"',
+            entrypoint,
+        )
+        self.assertIn(
+            '"${OMNIVOICE_MODEL_REVISION:-}" != "${expected_model_revision}"',
+            entrypoint,
+        )
+        self.assertIn(
+            "sha256sum --check --strict /opt/omnivoice-server/omnivoice_model.sha256",
+            entrypoint,
+        )
+        self.assertIn("exit 78", entrypoint)
+
+        local_bridge = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "local_io_bridge.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",\n    "false",',
+            local_bridge,
+        )
+
+        for field in (
+            "status",
+            "ready",
+            "model_loaded",
+            "model_id",
+            "model_revision",
+        ):
+            self.assertIn(f"$json.{field}", checker)
+        self.assertIn('$json.model_id -eq "k2-fsa/OmniVoice"', checker)
+        self.assertIn(
+            '$json.model_revision -eq "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"',
+            checker,
+        )
+
     def test_evelyn_containers_do_not_auto_start_with_docker_desktop(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 
@@ -457,11 +585,21 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('call "%~dp0start_local.bat" %*', core_start)
         self.assertIn("start_local_background.ps1", local_start)
         self.assertIn("docker-compose.fast-control.yml", docker_helper)
-        self.assertIn("@('compose') + $composeArgs + @('up', '-d') + $serviceArgs", docker_helper)
+        self.assertIn(
+            "@('compose') + $composeArgs + @('up', '-d', '--no-build') + $serviceArgs",
+            docker_helper,
+        )
         self.assertIn("$normalizedServices -contains 'vision'", docker_helper)
+        self.assertIn("$normalizedServices -contains 'tts'", docker_helper)
+        self.assertIn(
+            "& docker image inspect $ttsImage *> $null",
+            docker_helper,
+        )
+        self.assertIn("evelyn-omnivoice-tts:recipe-7cfc51e96088", docker_helper)
+        self.assertIn("if ($buildEnabled -or $ttsImageMissing)", docker_helper)
         self.assertIn("build_local_docker_images.ps1", docker_helper)
-        self.assertIn("-Services @('vision')", docker_helper)
-        self.assertIn("$composeBuildServices | Where-Object", docker_helper)
+        self.assertIn("-Services $pathSafeBuildServices", docker_helper)
+        self.assertIn("$serviceArgs | Where-Object", docker_helper)
         self.assertIn("$normalizedServices -contains 'voyager'", docker_helper)
         self.assertIn("$credentialDirectory.StartsWith(", docker_helper)
         self.assertIn("$liveCodexPrefix", docker_helper)

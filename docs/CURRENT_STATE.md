@@ -1833,4 +1833,33 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
     `git diff --check`도 통과했다. 실행 중 컨테이너와 실제 Discord·Minecraft,
     사용자 grant/lease/runtime artifact는 시작하거나 교체하지 않았다.
 
+## 2026-08-03 기본 TTS OmniVoice 전환 source 상태
+
+- 기본 Compose 서비스명과 URL은 `tts:8880`으로 유지하면서 구현을
+  `k2-fsa/OmniVoice`로 교체했다. 기존 VoxCPM2는 `voxcpm_fallback`과
+  `tts-fallback` profile, host port 8881의 opt-in 호환성·진단 서비스로만 남는다.
+  자동/runtime fallback은 아니며 이를 시작해도 client는 8880에서 reroute되지 않는다.
+- 새 이미지에는 외부 checkout 전체, 음성 샘플, venv와 runtime cache를 넣지 않는다.
+  `omnivoice_server/`의 Python 파일 20개만 named context로 복사하며 exact 파일 목록과
+  SHA-256을 build에서 검증한다. 시작 시 고정 revision의 필수 model snapshot 경로
+  13개도 SHA-256으로 검증한다. 직접 runtime 의존성만 고정했으며 전이 wheel과 base
+  image digest까지 고정된 완전 재현 build는 아니다. Evelyn profile과 Hugging Face
+  `hub/` cache는 read-only다. cache는 offline revision
+  `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`를 포함해야 한다.
+- Compose health, Windows launcher, service manifest와 공식 runtime checker가
+  `healthy + ready + model_loaded + k2-fsa/OmniVoice + exact model_revision`을 동일하게
+  요구한다. HTTP 200이나 이전 VoxCPM health만으로는 readiness를 얻지 못한다.
+  Local Bridge 기본 경로는 OmniVoice `/v1/audio/speech`의 sentence PCM stream이다.
+  실험적 blockwise generation은 disconnect cancellation이 안전해질 때까지 꺼져 있다.
+- 서버 patch는 operational log에서 합성 text, 경로, session/turn 식별자를 제거하고
+  profile API와 request validation 오류 응답에서 입력 원문을 숨긴다. Compose는 TTS image를 `pull_policy: never`로
+  외부에서 받지 않는다. path-safe builder가 missing/fresh image를 만들며 standalone TTS
+  launcher도 image가 없으면 이를 호출한다. Supervisor
+  repair는 existing image만 재사용한다.
+- 최종 변경 집중 149개와 기존 OmniVoice request/source·VoxCPM profile 계약 17개가 통과했다.
+  Local Bridge의 기본 경로 변경 뒤 voice 전체 606개(skip 5)도 통과했다.
+  최종 runtime 전체 756개(skip 4)도 실패 없이 통과했다. Docker
+  Compose config/build/recreate는 권한 승인 사용량 제한으로 실행하지 못했으므로 실제
+  model load/revision, clone-stream, privacy 응답과 청취 E2E 완료를 주장하지 않는다.
+
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.
