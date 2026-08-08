@@ -92,6 +92,19 @@ class _Session:
         return _Response(self.status, payload)
 
 
+class _ReceiptSession(_Session):
+    def __init__(self, receipts: list[object | None]) -> None:
+        super().__init__()
+        self.receipts = iter(receipts)
+
+    def post(self, *args, **kwargs):
+        response = super().post(*args, **kwargs)
+        receipt = next(self.receipts, None)
+        if receipt is not None:
+            response.payload["conversationDeliveryAckReceipt"] = receipt
+        return response
+
+
 class _SoundDevice:
     def __init__(
         self,
@@ -212,6 +225,85 @@ class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertFalse(accepted)
                 bridge._handle_control_response.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_delivery_ack_is_http_only_and_retries_until_exact_receipt(
+        self,
+    ) -> None:
+        retryable_receipt = {
+            "schema": local_io_bridge.LOCAL_BRIDGE_DELIVERY_ACK_RECEIPT_SCHEMA,
+            "accepted": False,
+            "duplicate": False,
+            "retryable": True,
+            "errorCode": "local_playback_ack_commit_pending",
+            "contentFree": True,
+        }
+        accepted_receipt = {
+            **retryable_receipt,
+            "accepted": True,
+            "retryable": False,
+            "errorCode": "",
+        }
+        bridge = LocalIoBridge()
+        session = _ReceiptSession(
+            [
+                retryable_receipt,
+                {"accepted": True},
+                accepted_receipt,
+                None,
+            ]
+        )
+        bridge.session = session  # type: ignore[assignment]
+        bridge._handle_control_response = Mock()  # type: ignore[method-assign]
+        binding = {
+            "schema": local_io_bridge.LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA,
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": "turn-1",
+            "assistantHash": "a" * 64,
+            "required": True,
+            "contentFree": True,
+        }
+        bridge._queue_conversation_delivery_ack(binding, outcome="played")
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_voice_capture_watchdog",
+                new=AsyncMock(),
+            ),
+            patch.object(bridge, "_refresh_output_readiness"),
+            patch.object(bridge, "_output_devices_snapshot", return_value=[]),
+            patch(
+                "evelyn_core.local_io_bridge.atomic_json_write"
+            ) as write_status,
+            patch("evelyn_core.local_io_bridge.emit_silence_liveness_event"),
+        ):
+            self.assertTrue(await bridge._post_status())
+            self.assertEqual(len(bridge.pending_conversation_delivery_acks), 1)
+            self.assertTrue(await bridge._post_status())
+            self.assertEqual(len(bridge.pending_conversation_delivery_acks), 1)
+            self.assertTrue(await bridge._post_status())
+            self.assertEqual(bridge.pending_conversation_delivery_acks, [])
+            self.assertTrue(await bridge._post_status())
+
+        artifact_payloads = [
+            call.args[1] for call in write_status.call_args_list
+        ]
+        self.assertEqual(len(artifact_payloads), 4)
+        self.assertTrue(
+            all(
+                "conversationDeliveryAck" not in payload
+                for payload in artifact_payloads
+            )
+        )
+        for request in session.requests[:3]:
+            self.assertEqual(
+                request["payload"]["conversationDeliveryAck"]["outcome"],
+                "played",
+            )
+        self.assertNotIn(
+            "conversationDeliveryAck",
+            session.requests[3]["payload"],
+        )
 
     async def test_concurrent_status_reports_cannot_overwrite_newer_sequence(self) -> None:
         bridge = LocalIoBridge()

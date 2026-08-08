@@ -2072,7 +2072,7 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   통과했다. Node 행동 suite는 다음 Mindcraft image build의 blocking gate로 연결했지만
   이번에는 image build를 실행하지 않았다.
 
-## 2026-08-09 Mindcraft ephemeral history와 process-local sink 경계
+## 2026-08-09 Mindcraft ephemeral history, broker와 process-local sink 경계
 
 - 기본 history는 `mindcraft.history.ephemeral.v1` bounded turn과 process-local monotonic
   generation만 유지한다. `save()`는 content-free checkpoint 상태만 반환하고 디스크에
@@ -2098,16 +2098,25 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   번역 서비스로 보내지 않는다. Python owner는 Node child stdout/stderr를 `DEVNULL`로
   연결한다. 이는 새 child 원문 log 생성을 막지만 기존 data/log를 삭제했다는 뜻은 아니다.
 - Python status owner와 Node writer는 legacy/free-text 상태를 재사용하지 않고 exact
-  content-free projection만 공개·기록한다. 검증은 Mindcraft 25개, Minecraft 227개(skip 11),
-  Voyager 24개, runtime 782개(skip 4), CI-equivalent 전체 3,138개(skip 22)를 통과했다.
-- 이 증분은 source-level process-local 경계다. Docker image build, image 내부 full Node suite,
-  실제 Minecraft login·action과 live clear는 수행하지 않았다. durable rollback-safe clear,
-  cross-process persistence와 core Evelyn deletion/edit exposure도 구현되지 않았다.
-- 남은 P1은 fixed-route authenticated Bot API broker가 local/router 요청을 기존
-  `memory_exposure_request`에 연결하고 delivery ACK까지 lease를 유지하며, assistant turn을
-  strict compact receipt와 함께 구조화하는 것이다. legacy data/log cleanup은 사용자 승인
-  migration으로만 수행한다. `!clearChat`은 대화 유래 상태 reset이며 자율 목표의 영구 정지는
-  `!endGoal`을 사용한다.
+  content-free projection만 공개·기록한다.
+- Node planner의 local/router/subgoal/recovery 요청은 caller가 URL·model을 고를 수 없는
+  authenticated Bot API broker 하나만 사용한다. 전용 token file을 쓰고 direct model
+  endpoint와 Codex fallback은 기본 service에서 제거했다. 현재 ephemeral turn은 core memory를
+  입력으로 받지 않으므로 broker request projection의 각 row에 strict `not_used` receipt를
+  붙이고, 반환 receipt도 `not_used`가 아니면 거부한다.
+- broker는 공용 conversation filter와 `memory_exposure_request`를 재사용해 fixed upstream을
+  호출하고, 첫 NDJSON result를 보낸 뒤 Node consumer가 exact `delivered|discarded` ACK를
+  완료할 때까지 lease를 유지한다. 이 ACK는 frame parse/validation 증거이지 history append,
+  chat route나 world action 성공 증거는 아니다. process-local generation fence는 이와 별도로
+  실제 awaited route/action sink까지 유지된다. replay window는 active lease ID를 보존하면서
+  오래된 완료 ID만 축출한다.
+- 검증은 continuity 87개, Mindcraft/broker/Compose 관련 56개, voice 633개(skip 5),
+  CI-equivalent 전체 3,190개(skip 22)와 Python·JavaScript 구문을 통과했다.
+- 이 증분은 source-level 경계다. Docker image build, image 내부 full Node suite, 실제
+  Minecraft login·action과 live clear는 수행하지 않았다. durable rollback-safe history와
+  bound-receipt restart restore는 없고 legacy data/log cleanup은 사용자 승인 migration으로만
+  수행한다. recovery same-command/different-target exact correlation도 P1이다. `!clearChat`은
+  대화 유래 상태 reset이며 자율 목표의 영구 정지는 `!endGoal`을 사용한다.
 
 ## 2026-08-09 비-Minecraft 음성·Runtime Health 경계
 
@@ -2134,6 +2143,14 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - search follow-up 22개와 Discord I/O 전체 125개도 통과했다.
 - 최신 offline 경계 검증은 memory 전체 293개(skip 1), voice 전체 615개(skip 5),
   deletion HTTP/middleware 35개와 Python compile·diff check를 통과했다.
+- TTS 재생이 필요한 `local_bridge` JSON/stream reply는 HTTP EOF에서 assistant history,
+  continuity와 background action을 확정하지 않는다. authenticated status의 exact
+  bridge instance·turn·assistant hash `played` ACK 뒤 server-side currentness를 다시 확인하고
+  한 번만 확정한다. ACK는 HTTP 전송에만 붙고 signed status artifact에는 저장하지 않는다.
+- wrong/stale/duplicate ACK는 side effect를 반복하지 않는다. `failed|partial|cancelled`,
+  error reply, bridge rotation·동시 재시작과 TTL orphan은 exact ingress/action을 정리하고
+  자동 재생 없이 다음 turn을 연다. 이는 software playback completion 경계이며 사용자가
+  실제로 들었다는 live 증거는 아니다. 최신 continuity 87개와 voice 633개(skip 5)가 통과했다.
 
 ## 2026-08-09 Memory applied-cleanup 경계
 

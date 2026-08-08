@@ -11,7 +11,6 @@ import {
     parseRecoveryPlan,
     validateActionResponse,
 } from '/app/mindcraft/src/models/evelyn_planner.js';
-import { CodexGateway } from '/app/mindcraft/src/models/codex_gateway.js';
 import { Prompter } from '/app/mindcraft/src/models/prompter.js';
 import { Agent } from '/app/mindcraft/src/agent/agent.js';
 import convoManager from '/app/mindcraft/src/agent/conversation.js';
@@ -70,6 +69,130 @@ function goalPolicyFixture(overrides = {}) {
             fs.rmSync(directory, {recursive: true, force: true});
         }
     };
+}
+
+function brokerFetchFixture() {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-mindcraft-broker-'));
+    const tokenPath = path.join(directory, 'token');
+    const endpoint = 'http://broker.test/internal/mindcraft-llm';
+    const token = 'A'.repeat(48);
+    const previous = {
+        fetch: globalThis.fetch,
+        url: process.env.MINDCRAFT_LLM_BROKER_URL,
+        tokenFile: process.env.MINDCRAFT_LLM_BROKER_TOKEN_FILE,
+    };
+    const requests = [];
+    const acknowledgements = [];
+    const pending = [];
+    const streams = new Map();
+    const cancelled = new Set();
+    const encoder = new TextEncoder();
+    let leaseSequence = 0;
+    let ackPayload = {ok: true, contentFree: true};
+
+    fs.writeFileSync(tokenPath, token);
+    process.env.MINDCRAFT_LLM_BROKER_URL = endpoint;
+    process.env.MINDCRAFT_LLM_BROKER_TOKEN_FILE = tokenPath;
+    globalThis.fetch = async (url, options = {}) => {
+        const href = String(url);
+        const body = JSON.parse(String(options.body || '{}'));
+        if (href === `${endpoint}/ack`) {
+            acknowledgements.push(body);
+            const controller = streams.get(body.leaseId);
+            assert.ok(controller, 'ACK must reference an open broker lease');
+            controller.close();
+            return new Response(JSON.stringify(ackPayload), {
+                status: 200,
+                headers: {'Content-Type': 'application/json'},
+            });
+        }
+        assert.equal(href, endpoint);
+        requests.push({href, body, headers: options.headers});
+        return new Promise((resolve, reject) => pending.push({body, resolve, reject}));
+    };
+
+    return {
+        endpoint,
+        token,
+        requests,
+        acknowledgements,
+        cancelled,
+        setAckPayload(value) {
+            ackPayload = value;
+        },
+        async waitForPending(expected = 1) {
+            for (let attempt = 0; attempt < 100 && pending.length < expected; attempt += 1) {
+                await new Promise((resolve) => setImmediate(resolve));
+            }
+            assert.equal(pending.length, expected);
+        },
+        releaseNext(content, memoryReceiptRef = {
+            schema: 'conversation.memory-receipt-ref.v1',
+            state: 'not_used',
+            memoryVersion: 0,
+            suppliedNoteIds: [],
+            suppliedNoteCount: 0,
+            contentFree: true,
+        }) {
+            const next = pending.shift();
+            assert.ok(next);
+            const leaseId = (++leaseSequence).toString(16).padStart(64, '0');
+            const response = new Response(new ReadableStream({
+                start(controller) {
+                    streams.set(leaseId, controller);
+                    controller.enqueue(encoder.encode(`${JSON.stringify({
+                        schema: 'mindcraft.llm-result.v1',
+                        requestId: next.body.requestId,
+                        content,
+                        memoryReceiptRef,
+                        deliveryLease: {
+                            schema: 'mindcraft.llm-delivery-lease.v1',
+                            leaseId,
+                            ttlMs: 660000,
+                            contentFree: true,
+                        },
+                    })}\n`));
+                },
+                cancel() {
+                    cancelled.add(leaseId);
+                },
+            }), {
+                status: 200,
+                headers: {'Content-Type': 'application/x-ndjson; charset=utf-8'},
+            });
+            next.resolve(response);
+        },
+        rejectNext(error = new Error('broker unavailable')) {
+            const next = pending.shift();
+            assert.ok(next);
+            next.reject(error);
+        },
+        cleanup() {
+            for (const controller of streams.values()) {
+                try { controller.close(); } catch {}
+            }
+            globalThis.fetch = previous.fetch;
+            if (previous.url === undefined) delete process.env.MINDCRAFT_LLM_BROKER_URL;
+            else process.env.MINDCRAFT_LLM_BROKER_URL = previous.url;
+            if (previous.tokenFile === undefined) delete process.env.MINDCRAFT_LLM_BROKER_TOKEN_FILE;
+            else process.env.MINDCRAFT_LLM_BROKER_TOKEN_FILE = previous.tokenFile;
+            fs.rmSync(directory, {recursive: true, force: true});
+        },
+    };
+}
+
+async function settleBrokerRequest(promise) {
+    let timer;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('broker_test_timeout')), 1000);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 test('request classification separates actions, memory summaries, and ordinary chat', () => {
@@ -137,15 +260,18 @@ test('subgoal candidate parser accepts strict JSON and caps the candidate count'
     assert.deepEqual(parseSubgoalCandidates('not json'), []);
 });
 
-test('strategic subgoal escalation uses one Codex JSON proposal', async () => {
+test('strategic subgoal escalation uses one broker JSON proposal', async () => {
+    const broker = brokerFetchFixture();
     const planner = new EvelynPlanner();
     planner.codexEnabled = true;
-    let calls = 0;
     planner.lastCodexAt = 0;
-    planner.codex.sendPrompt = async (_prompt, label) => {
-        calls += 1;
-        assert.equal(label, 'mindcraft-strategic-subgoal');
-        return JSON.stringify({
+    try {
+        const request = planner.proposeStrategicSubgoals({
+            ultimate_goal: 'Defeat the Ender Dragon',
+            world_state: {dimension: 'nether'}
+        });
+        await broker.waitForPending();
+        broker.releaseNext(JSON.stringify({
             candidates: [{
                 id: 'obtain_blaze_rods',
                 kind: 'obtain',
@@ -153,17 +279,17 @@ test('strategic subgoal escalation uses one Codex JSON proposal', async () => {
                 quantity: 6,
                 success: {kind: 'inventory', target: '#blaze_rods', count: 6}
             }]
-        });
-    };
-    const result = await planner.proposeStrategicSubgoals({
-        ultimate_goal: 'Defeat the Ender Dragon',
-        world_state: {dimension: 'nether'}
-    });
-    assert.equal(calls, 1);
-    assert.equal(result[0].id, 'obtain_blaze_rods');
+        }));
+        const result = await request;
+        assert.equal(result[0].id, 'obtain_blaze_rods');
+        assert.equal(broker.requests.length, 1);
+        assert.equal(broker.requests[0].body.requestKind, 'subgoal');
+    } finally {
+        broker.cleanup();
+    }
 });
 
-test('Codex is disabled before token lookup or network access by default', async () => {
+test('strategic routing remains disabled before network access by default', async () => {
     const previous = process.env.MINDCRAFT_CODEX_ENABLED;
     const previousFetch = globalThis.fetch;
     let fetchCalls = 0;
@@ -173,23 +299,67 @@ test('Codex is disabled before token lookup or network access by default', async
         throw new Error('network must not be reached');
     };
     try {
-        await assert.rejects(
-            new CodexGateway().sendPrompt('untrusted chat'),
-            /mindcraft_codex_disabled/
-        );
-        assert.equal(fetchCalls, 0);
-
         const planner = new EvelynPlanner();
-        planner.codex.sendPrompt = async () => {
-            throw new Error('Codex must not be called');
-        };
         planner.proposeSubgoals = async () => [{id: 'local_subgoal'}];
         assert.equal(await planner.chooseRoute([{role: 'user', content: 'complex strategy'}]), 'local');
         assert.equal((await planner.proposeStrategicSubgoals({}))[0].id, 'local_subgoal');
+        assert.equal(fetchCalls, 0);
     } finally {
         globalThis.fetch = previousFetch;
         if (previous === undefined) delete process.env.MINDCRAFT_CODEX_ENABLED;
         else process.env.MINDCRAFT_CODEX_ENABLED = previous;
+    }
+});
+
+test('MINDCRAFT_CODEX_ENABLED routes complex work only through the broker', async () => {
+    const previousEnabled = process.env.MINDCRAFT_CODEX_ENABLED;
+    const previousGatewayUrl = process.env.MINDCRAFT_CODEX_GATEWAY_URL;
+    process.env.MINDCRAFT_CODEX_ENABLED = 'true';
+    process.env.MINDCRAFT_CODEX_GATEWAY_URL = 'http://direct.invalid/codex/action';
+    const broker = brokerFetchFixture();
+    try {
+        const planner = new EvelynPlanner();
+        const request = planner.sendRequest(
+            [{role: 'user', content: 'make a complex multi-step strategy'}],
+            'Speak briefly to players',
+        );
+        await broker.waitForPending();
+        broker.releaseNext('{"route":"codex"}');
+        await broker.waitForPending();
+        broker.releaseNext('broker-only complex response');
+        assert.equal(await request, 'broker-only complex response');
+        assert.deepEqual(
+            broker.requests.map((entry) => entry.body.requestKind),
+            ['router', 'chat'],
+        );
+        assert.ok(broker.requests.every((entry) => entry.href === broker.endpoint));
+    } finally {
+        broker.cleanup();
+        if (previousEnabled === undefined) delete process.env.MINDCRAFT_CODEX_ENABLED;
+        else process.env.MINDCRAFT_CODEX_ENABLED = previousEnabled;
+        if (previousGatewayUrl === undefined) delete process.env.MINDCRAFT_CODEX_GATEWAY_URL;
+        else process.env.MINDCRAFT_CODEX_GATEWAY_URL = previousGatewayUrl;
+    }
+});
+
+test('embedding remains local when the legacy Codex flag is enabled', async () => {
+    const previousEnabled = process.env.MINDCRAFT_CODEX_ENABLED;
+    const previousFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    process.env.MINDCRAFT_CODEX_ENABLED = 'true';
+    globalThis.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error('embedding must remain local');
+    };
+    try {
+        const vector = await new EvelynPlanner().embed('oak log oak');
+        assert.equal(vector.length, 128);
+        assert.ok(Math.abs(Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) - 1) < 1e-12);
+        assert.equal(fetchCalls, 0);
+    } finally {
+        globalThis.fetch = previousFetch;
+        if (previousEnabled === undefined) delete process.env.MINDCRAFT_CODEX_ENABLED;
+        else process.env.MINDCRAFT_CODEX_ENABLED = previousEnabled;
     }
 });
 
@@ -319,52 +489,49 @@ test('simple action bypasses Router and uses local Qwen directly', async () => {
 });
 
 test('local utility failures preserve memory and ignore bot chatter', async () => {
+    const previousFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error('utility fallback must not use a direct transport');
+    };
     const planner = new EvelynPlanner();
     planner.codexEnabled = true;
-    let codexCalls = 0;
-    planner.codex.sendRequest = async () => {
-        codexCalls += 1;
-        return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
-    };
     planner.requestLocal = async () => {
         throw new Error('local unavailable');
     };
+    try {
+        await assert.rejects(
+            planner.sendRequest([], 'Update your memory by summarizing and respond only with the unwrapped memory text'),
+            /mindcraft_memory_summary_unavailable/
+        );
+        assert.equal(
+            await planner.sendRequest([], "Decide by outputting only 'respond' or 'ignore'"),
+            'ignore'
+        );
+        assert.equal(
+            await planner.sendRequest([], 'Speak briefly to players'),
+            '지금은 안전하게 판단할 수 없어 멈출게. !stop',
+        );
 
-    await assert.rejects(
-        planner.sendRequest([], 'Update your memory by summarizing and respond only with the unwrapped memory text'),
-        /mindcraft_memory_summary_unavailable/
-    );
-    assert.equal(
-        await planner.sendRequest([], "Decide by outputting only 'respond' or 'ignore'"),
-        'ignore'
-    );
-    assert.equal(codexCalls, 0);
-
-    const prompter = Object.create(Prompter.prototype);
-    prompter.agent = {history: {memory: 'keep-me'}};
-    prompter.profile = {saving_memory: 'save'};
-    prompter.chat_model = {sendRequest: async () => { throw new Error('local unavailable'); }};
-    prompter.checkCooldown = async () => {};
-    prompter.replaceStrings = async () => 'save';
-    prompter._saveLog = async () => {};
-    assert.equal(await prompter.promptMemSaving([]), 'keep-me');
+        const prompter = Object.create(Prompter.prototype);
+        prompter.agent = {history: {memory: 'keep-me'}};
+        prompter.profile = {saving_memory: 'save'};
+        prompter.chat_model = {sendRequest: async () => { throw new Error('local unavailable'); }};
+        prompter.checkCooldown = async () => {};
+        prompter.replaceStrings = async () => 'save';
+        prompter._saveLog = async () => {};
+        assert.equal(await prompter.promptMemSaving([]), 'keep-me');
+        assert.equal(fetchCalls, 0);
+    } finally {
+        globalThis.fetch = previousFetch;
+    }
 });
 
 test('policy-violating memory summaries keep the previous summary', async () => {
-    const previousFetch = globalThis.fetch;
+    const broker = brokerFetchFixture();
     const planner = new EvelynPlanner();
     planner.codexEnabled = true;
-    let codexCalls = 0;
-    planner.codex.sendRequest = async () => {
-        codexCalls += 1;
-        return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
-    };
-    globalThis.fetch = async () => ({
-        ok: true,
-        json: async () => ({
-            choices: [{message: {content: 'Never run /kill while remembering this turn.'}}]
-        })
-    });
     try {
         const prompter = Object.create(Prompter.prototype);
         prompter.agent = {history: {memory: 'keep-me'}};
@@ -373,10 +540,112 @@ test('policy-violating memory summaries keep the previous summary', async () => 
         prompter.checkCooldown = async () => {};
         prompter.replaceStrings = async () => 'Update your memory by summarizing';
         prompter._saveLog = async () => {};
-        assert.equal(await prompter.promptMemSaving([]), 'keep-me');
-        assert.equal(codexCalls, 0);
+        const saving = prompter.promptMemSaving([]);
+        await broker.waitForPending();
+        broker.releaseNext('Never run /kill while remembering this turn.');
+        assert.equal(await saving, 'keep-me');
+        assert.equal(broker.acknowledgements[0].outcome, 'discarded');
     } finally {
-        globalThis.fetch = previousFetch;
+        broker.cleanup();
+    }
+});
+
+test('broker-only transport consumes the first NDJSON frame and ACKs delivery outcome', async () => {
+    const broker = brokerFetchFixture();
+    const planner = new EvelynPlanner('ignored-model', 'http://direct.invalid');
+    try {
+        const chat = planner.requestLocal(
+            [{role: 'user', content: 'hello'}],
+            'Speak briefly to players',
+            '***',
+            'chat',
+        );
+        await broker.waitForPending();
+        broker.releaseNext('hello from broker');
+        assert.equal(await settleBrokerRequest(chat), 'hello from broker');
+
+        const memory = planner.requestLocal(
+            [],
+            'Update your memory by summarizing',
+            '***',
+            'memory',
+        );
+        await broker.waitForPending();
+        broker.releaseNext('Never run /kill while remembering this turn.');
+        await assert.rejects(
+            settleBrokerRequest(memory),
+            (error) => error?.code === 'mindcraft_memory_summary_unavailable',
+        );
+
+        const goal = planner.requestLocal([], 'Determine what goal to target next', '***', 'goal');
+        await broker.waitForPending();
+        broker.releaseNext('gather logs');
+        assert.equal(await settleBrokerRequest(goal), 'gather logs');
+
+        assert.deepEqual(
+            broker.acknowledgements.map((ack) => ack.outcome),
+            ['delivered', 'discarded', 'delivered'],
+        );
+        assert.ok(broker.requests.every((request) => request.href === broker.endpoint));
+        assert.equal(
+            broker.requests.some((request) => /(?:minecraft_llm|router_llm|direct\.invalid)/.test(request.href)),
+            false,
+        );
+        const first = broker.requests[0];
+        assert.equal(first.headers['X-Evelyn-Mindcraft-LLM-Token'], broker.token);
+        assert.deepEqual(Object.keys(first.body).sort(), [
+            'historyReceiptRef', 'messages', 'requestId', 'requestKind', 'schema',
+        ]);
+        assert.equal(first.body.schema, 'mindcraft.llm-request.v1');
+        assert.equal(first.body.requestKind, 'chat');
+        assert.deepEqual(
+            broker.requests.map((request) => request.body.requestKind),
+            ['chat', 'memory', 'chat'],
+        );
+        assert.equal(first.body.historyReceiptRef.state, 'not_used');
+        assert.ok(first.body.messages.every((message) => message.memoryReceiptRef.state === 'not_used'));
+        for (const acknowledgement of broker.acknowledgements) {
+            assert.equal(acknowledgement.schema, 'mindcraft.llm-delivery-ack.v1');
+            assert.equal(acknowledgement.contentFree, true);
+        }
+    } finally {
+        broker.cleanup();
+    }
+});
+
+test('broker ACK or receipt mismatch fails closed', async () => {
+    const broker = brokerFetchFixture();
+    const planner = new EvelynPlanner();
+    try {
+        broker.setAckPayload({ok: true, contentFree: false});
+        const badAck = planner.requestLocal([], 'Speak briefly to players', '***', 'chat');
+        await broker.waitForPending();
+        broker.releaseNext('must not escape after a bad ACK');
+        await assert.rejects(
+            settleBrokerRequest(badAck),
+            (error) => error?.code === 'mindcraft_llm_delivery_ack_invalid',
+        );
+        assert.equal(broker.acknowledgements.length, 1);
+
+        broker.setAckPayload({ok: true, contentFree: true});
+        const badReceipt = planner.requestLocal([], 'Speak briefly to players', '***', 'chat');
+        await broker.waitForPending();
+        broker.releaseNext('must not escape after a bad receipt', {
+            schema: 'conversation.memory-receipt-ref.v1',
+            state: 'unattributed',
+            memoryVersion: 0,
+            suppliedNoteIds: [],
+            suppliedNoteCount: 0,
+            contentFree: true,
+        });
+        await assert.rejects(
+            settleBrokerRequest(badReceipt),
+            (error) => error?.code === 'mindcraft_llm_result_invalid',
+        );
+        assert.equal(broker.acknowledgements.length, 1);
+        assert.equal(broker.cancelled.size, 1);
+    } finally {
+        broker.cleanup();
     }
 });
 
@@ -421,59 +690,58 @@ test('a direct user message clears latched self-prompt action mode', async () =>
     );
 });
 
-test('stuck action requests one Codex plan and lets Qwen execute its first step', async () => {
+test('stuck action requests one broker recovery plan and executes its first step', async () => {
     const fixture = goalPolicyFixture();
+    const broker = brokerFetchFixture();
     try {
-    const planner = new EvelynPlanner();
-    planner.codexEnabled = true;
-    let codexCalls = 0;
-    planner.codex.sendPrompt = async () => {
-        codexCalls += 1;
-        return JSON.stringify({
+        const planner = new EvelynPlanner();
+        planner.codexEnabled = true;
+        planner.requestLocal = async () => {
+            throw new Error('Recovery execution must not replace the exact broker step');
+        };
+        const turns = [
+            {role: 'assistant', content: '!searchWiki("desert blocks")'},
+            {role: 'system', content: 'desert blocks was not found on the Minecraft Wiki.'},
+            {role: 'assistant', content: '!searchWiki("desert materials")'},
+            {role: 'system', content: 'desert materials was not found on the Minecraft Wiki.'},
+            selfPrompt(),
+        ];
+        const request = planner.sendRequest(turns, ACTION_SYSTEM);
+        await broker.waitForPending();
+        broker.releaseNext(JSON.stringify({
             reason: 'Repeated wiki searches are not progressing.',
             steps: ['!nearbyBlocks', '!inventory']
-        });
-    };
-    planner.requestLocal = async () => {
-        throw new Error('Recovery execution must not let Qwen replace the exact Codex step');
-    };
-
-    const turns = [
-        {role: 'assistant', content: '!searchWiki("desert blocks")'},
-        {role: 'system', content: 'desert blocks was not found on the Minecraft Wiki.'},
-        {role: 'assistant', content: '!searchWiki("desert materials")'},
-        {role: 'system', content: 'desert materials was not found on the Minecraft Wiki.'},
-        selfPrompt(),
-    ];
-    const result = await planner.sendRequest(turns, ACTION_SYSTEM);
-    assert.equal(result, '!nearbyBlocks');
-    assert.equal(codexCalls, 1);
-    assert.equal(planner.recoveryPlan.steps.length, 2);
+        }));
+        assert.equal(await request, '!nearbyBlocks');
+        assert.equal(broker.requests.length, 1);
+        assert.equal(broker.requests[0].body.requestKind, 'recovery');
+        assert.equal(planner.recoveryPlan.steps.length, 2);
     } finally {
+        broker.cleanup();
         fixture.cleanup();
     }
 });
 
-test('failed Codex recovery enters cooldown instead of retrying every planner tick', async () => {
+test('failed broker recovery enters cooldown instead of retrying every planner tick', async () => {
     const fixture = goalPolicyFixture();
+    const broker = brokerFetchFixture();
     try {
-    const planner = new EvelynPlanner();
-    planner.codexEnabled = true;
-    let codexCalls = 0;
-    planner.codex.sendPrompt = async () => {
-        codexCalls += 1;
-        throw new Error('temporary Codex failure');
-    };
-    const turns = [
-        {role: 'assistant', content: '!searchWiki("desert blocks")'},
-        {role: 'system', content: 'desert blocks was not found on the Minecraft Wiki.'},
-        selfPrompt(),
-    ];
+        const planner = new EvelynPlanner();
+        planner.codexEnabled = true;
+        const turns = [
+            {role: 'assistant', content: '!searchWiki("desert blocks")'},
+            {role: 'system', content: 'desert blocks was not found on the Minecraft Wiki.'},
+            selfPrompt(),
+        ];
 
-    assert.equal(await planner.sendRequest(turns, ACTION_SYSTEM), '!nearbyBlocks');
-    assert.equal(await planner.sendRequest(turns, ACTION_SYSTEM), '!inventory');
-    assert.equal(codexCalls, 1);
+        const first = planner.sendRequest(turns, ACTION_SYSTEM);
+        await broker.waitForPending();
+        broker.rejectNext(new Error('temporary broker failure'));
+        assert.equal(await first, '!nearbyBlocks');
+        assert.equal(await planner.sendRequest(turns, ACTION_SYSTEM), '!inventory');
+        assert.equal(broker.requests.length, 1);
     } finally {
+        broker.cleanup();
         fixture.cleanup();
     }
 });
@@ -547,8 +815,8 @@ test('planner recovery state is not persisted across restart', () => {
 
 test('ephemeral history fences model exposure without persistence', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-history-boundary-'));
+    const broker = brokerFetchFixture();
     const previousCwd = process.cwd();
-    const previousFetch = globalThis.fetch;
     const previousStatePath = process.env.MINDCRAFT_PLANNER_STATE_PATH;
     const originalConsole = {
         error: console.error,
@@ -560,8 +828,6 @@ test('ephemeral history fences model exposure without persistence', async () => 
     const privateSender = 'PRIVATE_HISTORY_SENDER_CANARY';
     const privateSelfPrompt = 'PRIVATE_SELF_PROMPT_CANARY';
     const capturedLogs = [];
-    const fetchBodies = [];
-    const pendingFetches = [];
     const agent = {
         name: 'Evelyn_0428',
         self_prompter: {
@@ -574,21 +840,6 @@ test('ephemeral history fences model exposure without persistence', async () => 
         last_sender: privateSender,
     };
 
-    const waitForFetchCount = async (expected) => {
-        for (let attempt = 0; attempt < 100 && pendingFetches.length < expected; attempt += 1) {
-            await new Promise((resolve) => setImmediate(resolve));
-        }
-        assert.equal(pendingFetches.length, expected);
-    };
-    const releaseNextFetch = (content) => {
-        const release = pendingFetches.shift();
-        assert.ok(release);
-        release({
-            ok: true,
-            status: 200,
-            json: async () => ({choices: [{message: {content}}]}),
-        });
-    };
     const allFileText = (root) => {
         const rows = [];
         const visit = (current) => {
@@ -607,10 +858,6 @@ test('ephemeral history fences model exposure without persistence', async () => 
     console.log = (...args) => capturedLogs.push(args.join(' '));
     console.warn = (...args) => capturedLogs.push(args.join(' '));
     console.error = (...args) => capturedLogs.push(args.join(' '));
-    globalThis.fetch = async (_url, options) => {
-        fetchBodies.push(String(options?.body || ''));
-        return new Promise((resolve) => pendingFetches.push(resolve));
-    };
 
     try {
         const legacyAgent = {...agent, name: 'Legacy_Evelyn'};
@@ -642,24 +889,29 @@ test('ephemeral history fences model exposure without persistence', async () => 
 
         const firstSnapshot = live.getHistory();
         const firstRequest = planner.sendRequest(firstSnapshot, 'Speak briefly to players');
-        await waitForFetchCount(1);
-        assert.match(fetchBodies[0], new RegExp(privateUser));
-        assert.match(fetchBodies[0], new RegExp(privateAssistant));
+        await broker.waitForPending();
+        const firstBody = JSON.stringify(broker.requests[0].body);
+        assert.match(firstBody, new RegExp(privateUser));
+        assert.match(firstBody, new RegExp(privateAssistant));
         assert.throws(
             () => live.clear(),
             (error) => error?.code === 'mindcraft_history_busy',
         );
-        releaseNextFetch('first safe response');
+        broker.releaseNext('first safe response');
         assert.equal(await firstRequest, 'first safe response');
 
         const changedSnapshot = live.getHistory();
         const changedRequest = planner.sendRequest(changedSnapshot, 'Speak briefly to players');
-        await waitForFetchCount(1);
+        await broker.waitForPending();
         live.add('system', 'current state changed after request admission');
-        releaseNextFetch('STALE_RESPONSE_CANARY');
+        broker.releaseNext('STALE_RESPONSE_CANARY');
         await assert.rejects(
             changedRequest,
             (error) => error?.code === 'mindcraft_history_stale',
+        );
+        assert.deepEqual(
+            broker.acknowledgements.map((ack) => ack.outcome),
+            ['delivered', 'discarded'],
         );
 
         planner.recoveryPlan = {steps: ['!inventory']};
@@ -677,12 +929,12 @@ test('ephemeral history fences model exposure without persistence', async () => 
         assert.equal(agent.self_prompter.prompt, '');
         assert.equal(fs.existsSync(process.env.MINDCRAFT_PLANNER_STATE_PATH), false);
 
-        const fetchCountBeforeOldSnapshot = fetchBodies.length;
+        const fetchCountBeforeOldSnapshot = broker.requests.length;
         await assert.rejects(
             planner.sendRequest(firstSnapshot, 'Speak briefly to players'),
             (error) => error?.code === 'mindcraft_history_stale',
         );
-        assert.equal(fetchBodies.length, fetchCountBeforeOldSnapshot);
+        assert.equal(broker.requests.length, fetchCountBeforeOldSnapshot);
 
         const restarted = new History(agent);
         const restored = restarted.load();
@@ -703,7 +955,7 @@ test('ephemeral history fences model exposure without persistence', async () => 
             assert.equal(capturedLogs.join('\n').includes(canary), false);
         }
     } finally {
-        globalThis.fetch = previousFetch;
+        broker.cleanup();
         console.error = originalConsole.error;
         console.log = originalConsole.log;
         console.warn = originalConsole.warn;
@@ -844,15 +1096,18 @@ test('Agent whole-turn lease fences clear and goal state persists content-free',
 
         process.env.MINDCRAFT_GOAL_MANAGER_STATE_PATH = statePath;
         const policyPlanner = new EvelynPlanner();
-        let policyPrompt = '';
-        policyPlanner.codexEnabled = true;
-        policyPlanner.codex.sendPrompt = async (prompt) => {
-            policyPrompt = prompt;
-            return JSON.stringify({steps: ['!inventory']});
-        };
-        await policyPlanner.createRecoveryPlan([], ACTION_SYSTEM, 'test');
-        assert.equal(policyPrompt.includes(rawObservation), false);
-        assert.match(policyPrompt, /"allowedCommands":\["!inventory","!nearbyBlocks"\]/);
+        const policyBroker = brokerFetchFixture();
+        try {
+            const planRequest = policyPlanner.createRecoveryPlan([], ACTION_SYSTEM, 'test');
+            await policyBroker.waitForPending();
+            const policyPrompt = policyBroker.requests[0].body.messages[0].content;
+            policyBroker.releaseNext(JSON.stringify({steps: ['!inventory']}));
+            await planRequest;
+            assert.equal(policyPrompt.includes(rawObservation), false);
+            assert.match(policyPrompt, /"allowedCommands":\["!inventory","!nearbyBlocks"\]/);
+        } finally {
+            policyBroker.cleanup();
+        }
 
         const releasePrepare = deferred();
         let prepareStarted = false;

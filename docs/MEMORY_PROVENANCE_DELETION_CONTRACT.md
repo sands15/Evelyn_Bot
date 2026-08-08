@@ -258,12 +258,15 @@ buffer하고 producer close 후 playback owner가 동일 position을 새로 검�
 합성·재생한다. Windows Local I/O Bridge의 direct Fast stream은 `bound`
 문장·delta를 HTTP EOF까지 합성하거나 재생하지 않는다. EOF로
 server lease가 끝난 뒤에만 wire boundary를 strict parse하고 host guard를
-획득해 TTS/PCM을 시작한다. 경계 누락·손상·불일치·stale는
-장치 write 0회로 fail-closed한다.
+획득해 TTS/PCM을 시작한다. 경계 누락·손상·불일치·stale는 장치 write 0회로
+fail-closed한다. TTS-required reply의 HTTP EOF 자체는 server-side 성공이 아니다.
+Bridge가 software playback을 완료한 뒤 exact instance·turn·assistant hash의
+authenticated ACK를 보내면 server가 같은 currentness를 다시 검증한 뒤 commit한다.
+실패·부분 재생·취소와 stale ACK는 assistant나 action을 확정하지 않는다.
 
 성공한 voice 턴의 history/continuity, memory write, search follow-up,
 session/persona 갱신 같은 post-playback side effect는 정확한 reply receipt와
-exposure가 일치하고 실제 playback이 성공한 뒤에만 같은 guard 안에서
+exposure가 일치하고 software playback completion이 확인된 뒤에만 같은 guard 안에서
 commit한다. stale·receipt mismatch·재생 실패는 assistant 답변과 파생
 side effect를 남기지 않으며, 이미 수용된 사용자 턴만 미응답
 continuity로 내구성 있게 보존할 수 있다.

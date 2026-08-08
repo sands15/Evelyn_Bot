@@ -45,6 +45,7 @@ DEFAULT_FAST_CONTROL_MAX_HISTORY_ITEMS = 40
 FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF = (
     "fast-control:voice-validation-ephemeral"
 )
+FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF = "fast-control:local-playback"
 _EPHEMERAL_VALIDATION_RESPONSE_PREFIX = (
     "validation-response-sha256:"
 )
@@ -419,6 +420,37 @@ class FastControlContinuityOwner:
         with self._lock:
             return self._require_ingress().mark_delivery_ambiguous(
                 entry_id,
+                error_code=error_code,
+            )
+
+    def discard_failed_ingress(
+        self,
+        entry_id: Any,
+        *,
+        assistant_hash: Any,
+    ) -> None:
+        with self._lock:
+            ingress = self._require_ingress()
+            record = ingress.record_for(entry_id)
+            error_code = clean_text(
+                (record or {}).get("lastErrorCode")
+            )
+            if error_code not in {
+                "conversation_ingress_delivery_ambiguous",
+                "conversation_ingress_delivery_ambiguous_after_restart",
+                "conversation_ingress_delivery_disconnected",
+                "conversation_ingress_delivery_failed",
+                "conversation_ingress_process_interrupted",
+            }:
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_error_binding_mismatch"
+                )
+            ingress.discard_ambiguous(
+                entry_id,
+                assistant_hash=assistant_hash,
+                delivery_ref=clean_text(
+                    (record or {}).get("deliveryRef")
+                ),
                 error_code=error_code,
             )
 
@@ -1173,6 +1205,7 @@ __all__ = [
     "DEFAULT_FAST_CONTROL_MAX_HISTORY_ITEMS",
     "FAST_CONTROL_CONTINUITY_STATUS_SCHEMA",
     "FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF",
+    "FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF",
     "FAST_CONTROL_INGRESS_RECOVERY_STATUS_SCHEMA",
     "FAST_CONTROL_INGRESS_SURFACE",
     "FAST_CONTROL_SESSION_KEY",

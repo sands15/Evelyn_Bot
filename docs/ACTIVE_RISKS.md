@@ -1008,14 +1008,17 @@ summary placeholder, recovery/action-mode, goal-manager의 raw execution/gate �
 self-prompt·`last_sender`를 비운다. goal/status artifact에는 raw command·result·reason이나
 observation argument 대신 enum code와 count/boolean만 기록한다. Node writer와 Python
 status owner는 legacy/free-text 상태를 재사용하지 않고 runtime error도 fixed code로 투영한다.
-이것은 현재 프로세스의 원자적 clear/response 경계일 뿐 durable rollback-safe clear,
-재시작 복구나 core Evelyn deletion/edit exposure를 뜻하지 않는다. Docker image build,
-실제 Minecraft 연결·행동과 live clear도 이 증분에서 검증하지 않았다.
+Node의 direct local/router/Codex model endpoint는 기본 경로에서 제거했다. planner는 전용
+token-file authenticated Bot API broker만 호출하고, broker가 fixed upstream을 선택해 공용
+conversation filter와 `memory_exposure_request`를 통과시킨다. 현재 core memory 입력이 없는
+broker request projection row는 strict `not_used` receipt이며 반환된 다른 state는 거부한다.
+lease는 Node의 frame parse/validation 뒤 `delivered|discarded` ACK까지 유지된다. 이 ACK는
+history append·chat route·world action 성공 증거가 아니며, process-local generation exposure만
+실제 final route/action sink까지 별도로 이어진다.
 
-남은 P1은 local/router LLM을 fixed-route authenticated Bot API broker로 모으고 기존
-`memory_exposure_request` lease를 delivery ACK까지 유지하며, assistant turn을 strict
-`bound|not_used|unattributed` receipt와 함께 구조화하는 것이다. legacy memory/archive와
-과거 log의 삭제·이관은 사용자 승인 migration으로만 수행한다.
+이는 durable rollback-safe clear, bound-receipt restart history나 legacy cleanup을 뜻하지
+않는다. 기존 memory/archive와 과거 log의 삭제·이관은 사용자 승인 migration으로만
+수행한다. Docker image build, 실제 Minecraft 연결·행동과 live clear도 검증하지 않았다.
 
 추가 P1로 recovery outcome은 durable raw command 대신 command code로만 상관하므로,
 겹친 같은-command/different-target 실행을 exact하게 구별하지 못한다. `!clearChat`은 자율
@@ -1043,9 +1046,9 @@ index sync에서 제거한다. stored summary/fact/question과 assistant raw도 
 lineage 공백 때문에 prompt에서 보류하지만, exact user raw와 모델이 현재 답변에
 직접 넣은 명시적 질문은 유지된다. 기능 재활성화는 exact receipt와 tombstone
 검증이 생긴 뒤에만 가능하다.
-Main/Fast Control의 actual HTTP write,
-Discord/TTS playback handoff와 Local Bridge의 HTTP EOF 후 host guard도 같은
-deletion position을 재검사한다. receipt와 boundary 메타데이터에는 대화
+Main/Fast Control의 actual HTTP write와 Discord/TTS playback handoff가 같은 deletion
+position을 재검사한다. TTS-bound Local Bridge reply는 HTTP EOF를 성공으로 쓰지 않고
+software-playback ACK 뒤 server-side currentness를 재검증해 commit한다. receipt와 boundary 메타데이터에는 대화
 원문·transcript·raw audio를 저장하지 않는다.
 
 공개 8799도 8798 응답을 완전히 읽은 뒤 content-free handoff를 strict parse하고

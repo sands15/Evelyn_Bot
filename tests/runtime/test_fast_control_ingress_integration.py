@@ -8,7 +8,7 @@ import tempfile
 import textwrap
 import threading
 import unittest
-from contextlib import nullcontext, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -324,9 +324,90 @@ def _validation_chat_payload(
     }
 
 
+def _local_ack_turn(
+    root: Path,
+    *,
+    bridge_id: str,
+    turn_id: str,
+    text: str,
+) -> SimpleNamespace:
+    owner = fast_api.FastControlContinuityOwner(
+        artifacts_root=root,
+        enabled=True,
+        log=lambda *_args, **_kwargs: None,
+    )
+    manager = fast_api.LocalVoiceAdmissionManager()
+    issued = _durably_issue_local_voice(
+        manager,
+        owner,
+        bridge_id=bridge_id,
+        turn_id=turn_id,
+        text=text,
+    )
+    return SimpleNamespace(
+        owner=owner,
+        manager=manager,
+        issued=issued,
+        payload={
+            "source": "local_bridge",
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "text": issued["forwardText"],
+            "admissionToken": issued["admissionToken"],
+            "admissionMode": issued["mode"],
+        },
+    )
+
+
+def _local_ack_runtime_patches(
+    turn: SimpleNamespace,
+    **overrides,
+):
+    replacements = {
+        "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "r" * 48,
+        "FAST_CONTROL_CONTINUITY_OWNER": turn.owner,
+        "LOCAL_VOICE_ADMISSION": turn.manager,
+        "local_voice_validation_binding_is_current": Mock(
+            side_effect=lambda binding: not binding
+        ),
+        "memory_exposure_guard": Mock(
+            side_effect=lambda *_args, **_kwargs: nullcontext()
+        ),
+        "execute_explicit_memory_confirmation": Mock(
+            return_value=(False, "", None, "")
+        ),
+        "plan_fast_tool_request_for_turn": AsyncMock(return_value=None),
+        "resolve_pre_llm_reply": AsyncMock(return_value=None),
+        "prepare_tool_plan_background_action": Mock(return_value=None),
+        "prepare_registered_background_action": Mock(return_value=None),
+        "should_suppress_tts_for_command": Mock(return_value=False),
+        "should_queue_local_bridge_speech": Mock(return_value=False),
+        "cached_fast_runtime_health": AsyncMock(return_value={}),
+    }
+    replacements.update(overrides)
+    return patch.multiple(fast_api, **replacements)
+
+
+@asynccontextmanager
+async def _local_ack_client(*, stream: bool):
+    app = web.Application()
+    app.router.add_post(
+        "/chat",
+        fast_api.chat_stream_handler if stream else fast_api.chat_handler,
+    )
+    app.router.add_post("/status", fast_api.local_bridge_status_handler)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
 class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         fast_api.CHAT_MESSAGES.clear()
+        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES.clear()
         self._previous_capture_fence_digest = (
             fast_api.LOCAL_BRIDGE_STATUS.get("voiceCaptureFenceDigest")
         )
@@ -359,6 +440,79 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self._previous_capture_fence_digest
             )
         fast_api.CHAT_MESSAGES.clear()
+        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES.clear()
+
+    @staticmethod
+    def _local_bridge_status_payload(
+        *,
+        bridge_id: str,
+        status_seq: int,
+        started_at: float,
+        delivery_ack: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "schema": "local_io_bridge.status.v1",
+            "statusSeq": status_seq,
+            "heartbeatAt": fast_api.time.time(),
+            "pid": 4242,
+            "bridgeInstanceId": bridge_id,
+            "startedAt": started_at,
+            "enabled": True,
+            "ready": True,
+            "micEnabled": True,
+            "micControlRevision": 0,
+            "micControlActionId": "",
+            "micControlPendingRevision": 0,
+            "micControlPendingActionId": "",
+            "micControlState": "idle",
+            "micControlDesiredEnabled": True,
+            "micControlError": "",
+            "micCaptureStopped": False,
+            "mic": {
+                "enabled": True,
+                "captureReady": True,
+                "captureActive": False,
+                "captureStopped": False,
+            },
+            "conversationDeliveryAck": delivery_ack,
+        }
+
+    async def _post_local_bridge_delivery_ack(
+        self,
+        client: TestClient,
+        *,
+        binding: dict[str, object],
+        status_seq: int,
+        started_at: float,
+        outcome: str = "played",
+        assistant_hash: str | None = None,
+    ) -> dict[str, object]:
+        ack = {
+            "schema": fast_api.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+            "bridgeInstanceId": binding["bridgeInstanceId"],
+            "turnId": binding["turnId"],
+            "assistantHash": (
+                binding["assistantHash"]
+                if assistant_hash is None
+                else assistant_hash
+            ),
+            "outcome": outcome,
+            "contentFree": True,
+        }
+        response = await client.post(
+            "/status",
+            json=self._local_bridge_status_payload(
+                bridge_id=str(binding["bridgeInstanceId"]),
+                status_seq=status_seq,
+                started_at=started_at,
+                delivery_ack=ack,
+            ),
+            headers={
+                fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: "r" * 48,
+            },
+        )
+        self.assertEqual(response.status, 200)
+        return (await response.json())["conversationDeliveryAckReceipt"]
 
     async def test_client_retry_lease_has_server_safety_margin(self) -> None:
         self.assertEqual(DEFAULT_INGRESS_MAX_AGE_SEC, 15 * 60)
@@ -3208,6 +3362,822 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "terminal",
             ],
         )
+
+    async def test_local_bridge_json_waits_for_exact_played_ack(self) -> None:
+        started_at = fast_api.time.time() - 1.0
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="b" * 32,
+                turn_id="local-json-ack-turn",
+                text="이블린, 재생 확인 뒤 작업을 시작해줘",
+            )
+            task = SimpleNamespace(
+                task_id="local-playback-action",
+                status="running",
+                start_reply="재생 확인 뒤 작업을 시작할게.",
+                user_text=turn.issued["forwardText"],
+                source="local_bridge",
+                to_dict=lambda: {
+                    "taskId": "local-playback-action",
+                    "status": "running",
+                },
+            )
+            commit = Mock(wraps=fast_api.commit_fast_control_turn)
+            launch = Mock()
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(
+                    turn,
+                    prepare_registered_background_action=Mock(
+                        return_value=(task, AsyncMock(return_value="완료"))
+                    ),
+                    append_chat_message=Mock(
+                        wraps=fast_api.append_chat_message
+                    ),
+                    commit_fast_control_turn=commit,
+                    launch_background_action=launch,
+                ),
+            ):
+                async with _local_ack_client(stream=False) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    binding = (await response.json())["ingress"][
+                        "playbackAck"
+                    ]
+                    assistant_count = lambda: sum(
+                        item.get("role") == "assistant"
+                        for item in fast_api.CHAT_MESSAGES
+                    )
+                    self.assertEqual(
+                        (commit.call_count, assistant_count(), launch.call_count),
+                        (0, 0, 0),
+                    )
+                    self.assertEqual(
+                        len(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES), 1
+                    )
+
+                    wrong_hash = (
+                        "1" * 64
+                        if binding["assistantHash"] == "0" * 64
+                        else "0" * 64
+                    )
+                    wrong = await self._post_local_bridge_delivery_ack(
+                        client,
+                        binding=binding,
+                        status_seq=1,
+                        started_at=started_at,
+                        assistant_hash=wrong_hash,
+                    )
+                    self.assertFalse(wrong["accepted"])
+                    self.assertEqual(
+                        (commit.call_count, assistant_count(), launch.call_count),
+                        (0, 0, 0),
+                    )
+
+                    played = await self._post_local_bridge_delivery_ack(
+                        client,
+                        binding=binding,
+                        status_seq=2,
+                        started_at=started_at,
+                    )
+                    self.assertTrue(played["accepted"], played)
+                    self.assertFalse(played["duplicate"])
+                    self.assertEqual(
+                        (commit.call_count, assistant_count(), launch.call_count),
+                        (1, 1, 1),
+                    )
+
+                    duplicate = await self._post_local_bridge_delivery_ack(
+                        client,
+                        binding=binding,
+                        status_seq=3,
+                        started_at=started_at,
+                    )
+                    self.assertTrue(duplicate["duplicate"])
+                    self.assertEqual(
+                        (commit.call_count, assistant_count(), launch.call_count),
+                        (1, 1, 1),
+                    )
+
+    async def test_local_bridge_stream_done_waits_for_played_ack(self) -> None:
+        started_at = fast_api.time.time() - 1.0
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="c" * 32,
+                turn_id="local-stream-ack-turn",
+                text="이블린, 스트림 재생 확인을 해줘",
+            )
+            commit = Mock(wraps=fast_api.commit_fast_control_turn)
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(
+                    turn,
+                    resolve_pre_llm_reply=AsyncMock(
+                        return_value="스트림 응답 재생을 확인해줘."
+                    ),
+                    append_chat_message=Mock(
+                        wraps=fast_api.append_chat_message
+                    ),
+                    commit_fast_control_turn=commit,
+                ),
+            ):
+                async with _local_ack_client(stream=True) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    events = [
+                        json.loads(line)
+                        for line in (await response.text()).splitlines()
+                        if line.strip()
+                    ]
+                    boundary = next(
+                        item
+                        for item in events
+                        if item.get("type") == "memory_boundary"
+                    )
+                    done = next(
+                        item for item in events if item.get("type") == "done"
+                    )
+                    binding = done["ingress"]["playbackAck"]
+                    self.assertEqual(
+                        boundary["ingress"]["playbackAck"]["assistantHash"],
+                        "",
+                    )
+                    self.assertEqual(
+                        binding["assistantHash"],
+                        fast_api.final_text_sha256(done["reply"]),
+                    )
+                    self.assertEqual(commit.call_count, 0)
+                    self.assertEqual(
+                        len(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES), 1
+                    )
+
+                    receipt = await self._post_local_bridge_delivery_ack(
+                        client,
+                        binding=binding,
+                        status_seq=1,
+                        started_at=started_at,
+                    )
+                    self.assertTrue(receipt["accepted"], receipt)
+                    duplicate = await self._post_local_bridge_delivery_ack(
+                        client,
+                        binding=binding,
+                        status_seq=2,
+                        started_at=started_at,
+                    )
+                    self.assertTrue(duplicate["duplicate"])
+                    self.assertEqual(commit.call_count, 1)
+                    self.assertEqual(
+                        sum(
+                            item.get("role") == "assistant"
+                            for item in fast_api.CHAT_MESSAGES
+                        ),
+                        1,
+                    )
+
+    async def test_local_bridge_error_response_never_commits_at_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="d" * 32,
+                turn_id="local-error-eof-turn",
+                text="이블린, 오류 응답 경계를 확인해줘",
+            )
+            commit = Mock(wraps=fast_api.commit_fast_control_turn)
+            launch = Mock()
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(
+                    turn,
+                    execute_explicit_memory_confirmation=Mock(
+                        side_effect=RuntimeError("private failure canary")
+                    ),
+                    append_chat_message=Mock(
+                        wraps=fast_api.append_chat_message
+                    ),
+                    commit_fast_control_turn=commit,
+                    launch_background_action=launch,
+                ),
+            ):
+                async with _local_ack_client(stream=False) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    payload = await response.json()
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"], "fast_control_chat_failed")
+                    self.assertNotIn("playbackAck", payload["ingress"])
+                    self.assertEqual(commit.call_count, 0)
+                    self.assertEqual(launch.call_count, 0)
+                    self.assertFalse(
+                        any(
+                            item.get("role") == "assistant"
+                            for item in fast_api.CHAT_MESSAGES
+                        )
+                    )
+                    self.assertEqual(
+                        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {}
+                    )
+                    self.assertEqual(
+                        turn.owner.ingress.recovery_records(),
+                        [],
+                    )
+                    unrelated = turn.owner.claim_ingress(
+                        request_id="unrelated-after-error-response",
+                        accepted_text="다음 요청",
+                    )
+                    self.assertTrue(unrelated["shouldProcess"])
+
+    async def test_local_bridge_stream_error_response_discards_at_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="7" * 32,
+                turn_id="local-stream-error-eof-turn",
+                text="이블린, 스트림 오류 응답 경계를 확인해줘",
+            )
+            commit = Mock(wraps=fast_api.commit_fast_control_turn)
+            launch = Mock()
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(
+                    turn,
+                    execute_explicit_memory_confirmation=Mock(
+                        side_effect=RuntimeError("private stream failure canary")
+                    ),
+                    append_chat_message=Mock(
+                        wraps=fast_api.append_chat_message
+                    ),
+                    commit_fast_control_turn=commit,
+                    launch_background_action=launch,
+                ),
+            ):
+                async with _local_ack_client(stream=True) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    events = [
+                        json.loads(line)
+                        for line in (await response.text()).splitlines()
+                        if line.strip()
+                    ]
+                    error = next(
+                        event for event in events if event.get("type") == "error"
+                    )
+                    self.assertEqual(error["error"], "fast_control_stream_failed")
+                    self.assertNotIn("playbackAck", error.get("ingress", {}))
+                    self.assertEqual(commit.call_count, 0)
+                    self.assertEqual(launch.call_count, 0)
+                    self.assertFalse(
+                        any(
+                            item.get("role") == "assistant"
+                            for item in fast_api.CHAT_MESSAGES
+                        )
+                    )
+                    self.assertEqual(
+                        turn.owner.ingress.recovery_records(),
+                        [],
+                    )
+                    unrelated = turn.owner.claim_ingress(
+                        request_id="unrelated-after-stream-error-response",
+                        accepted_text="다음 요청",
+                    )
+                    self.assertTrue(unrelated["shouldProcess"])
+
+    async def test_orphan_pending_cleanup_retries_before_pop(self) -> None:
+        bridge_id = "8" * 32
+        turn_id = "orphan-pending-turn"
+        source_delivery_id = json.dumps(
+            [bridge_id, turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        entry_id = fast_api.conversation_ingress_entry_id(
+            surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+            scope=fast_api.FAST_CONTROL_SESSION_KEY,
+            source_delivery_id=source_delivery_id,
+        )
+        fail = Mock(return_value=False)
+        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES[entry_id] = {
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "assistantHash": "",
+            "expectedPosition": None,
+            "context": nullcontext(),
+            "complete": lambda: False,
+            "fail": fail,
+        }
+        pending = fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES[entry_id]
+        pending["context"] = SimpleNamespace(
+            run=lambda callback, outcome: callback(outcome)
+        )
+        owner = SimpleNamespace(ingress_record=lambda *_args, **_kwargs: None)
+        ack = {
+            "schema": fast_api.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+            "bridgeInstanceId": bridge_id,
+            "turnId": turn_id,
+            "assistantHash": "",
+            "outcome": "cancelled",
+            "contentFree": True,
+        }
+        with patch.object(fast_api, "FAST_CONTROL_CONTINUITY_OWNER", owner):
+            first = fast_api._consume_local_bridge_delivery_ack(ack)
+            self.assertFalse(first["accepted"])
+            self.assertTrue(first["retryable"])
+            self.assertEqual(
+                first["errorCode"],
+                "local_playback_ack_commit_pending",
+            )
+            self.assertIn(entry_id, fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES)
+
+            fail.return_value = True
+            fast_api._retire_other_bridge_pending_deliveries(bridge_id)
+
+        self.assertNotIn(entry_id, fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES)
+        self.assertEqual(fail.call_count, 2)
+
+    async def test_expired_same_bridge_pending_uses_action_only_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="6" * 32,
+                turn_id="expired-same-bridge-turn",
+                text="이블린, 만료된 재생 경계를 확인해줘",
+            )
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(turn),
+            ):
+                async with _local_ack_client(stream=False) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    self.assertEqual(response.status, 200)
+                    entry_id = turn.owner.ingress.recovery_records()[0]["entryId"]
+                    self.assertIn(
+                        entry_id,
+                        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES,
+                    )
+                    turn.owner.ingress.wall_time = lambda: (
+                        fast_api.time.time() + DEFAULT_INGRESS_MAX_AGE_SEC + 1
+                    )
+                    status_payload = self._local_bridge_status_payload(
+                        bridge_id="6" * 32,
+                        status_seq=1,
+                        started_at=fast_api.time.time() - 1.0,
+                        delivery_ack={},
+                    )
+                    status_payload.pop("conversationDeliveryAck")
+                    status = await client.post(
+                        "/status",
+                        json=status_payload,
+                        headers={
+                            fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: "r" * 48,
+                        },
+                    )
+
+            self.assertEqual(status.status, 200)
+            self.assertIsNone(turn.owner.ingress_record(entry_id))
+            self.assertNotIn(
+                entry_id,
+                fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES,
+            )
+            unrelated = turn.owner.claim_ingress(
+                request_id="unrelated-after-expired-playback",
+                accepted_text="다음 요청",
+            )
+            self.assertTrue(unrelated["shouldProcess"])
+
+    async def test_early_stream_cancel_discards_exact_ingress(self) -> None:
+        started_at = fast_api.time.time() - 1.0
+        release_stream = asyncio.Event()
+        task = SimpleNamespace(
+            task_id="early-cancel-action",
+            status="running",
+            start_reply="부분 응답입니다.",
+            user_text="긴 스트림",
+            source="local_bridge",
+            to_dict=lambda: {
+                "taskId": "early-cancel-action",
+                "status": task.status,
+            },
+        )
+        action_fail = Mock(
+            side_effect=lambda *_args, **_kwargs: (
+                setattr(task, "status", "failed") or task
+            )
+        )
+        action_finish = Mock(
+            side_effect=[RuntimeError("private finish failure"), None]
+        )
+        action_launch = Mock()
+
+        async def blocked_stream():
+            yield "부분 응답입니다."
+            await release_stream.wait()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="e" * 32,
+                turn_id="local-early-cancel-turn",
+                text="이블린, 긴 스트림을 시작해줘",
+            )
+            commit = Mock(wraps=fast_api.commit_fast_control_turn)
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(
+                    turn,
+                    iter_main_llm_deltas=Mock(
+                        side_effect=lambda *_args, **_kwargs: blocked_stream()
+                    ),
+                    should_emit_memory_recall_progress=Mock(return_value=True),
+                    prepare_registered_background_action=Mock(
+                        return_value=(task, AsyncMock(return_value="완료"))
+                    ),
+                    commit_fast_control_turn=commit,
+                    launch_background_action=action_launch,
+                ),
+                patch.object(
+                    fast_api.ACTION_COORDINATOR,
+                    "fail",
+                    action_fail,
+                ),
+                patch.object(
+                    fast_api.FAST_ACTION_RECOVERY_JOURNAL,
+                    "finish",
+                    action_finish,
+                ),
+            ):
+                async with _local_ack_client(stream=True) as client:
+                    response = None
+                    try:
+                        response = await asyncio.wait_for(
+                            client.post("/chat", json=turn.payload),
+                            timeout=2.0,
+                        )
+                        boundary = json.loads(
+                            (await response.content.readline()).decode("utf-8")
+                        )
+                        binding = boundary["ingress"]["playbackAck"]
+                        self.assertEqual(binding["assistantHash"], "")
+                        original_entry_id = (
+                            turn.owner.ingress.recovery_records()[0]["entryId"]
+                        )
+                        receipt = await self._post_local_bridge_delivery_ack(
+                            client,
+                            binding=binding,
+                            status_seq=1,
+                            started_at=started_at,
+                            outcome="cancelled",
+                            assistant_hash="",
+                        )
+                        self.assertFalse(receipt["accepted"], receipt)
+                        self.assertTrue(receipt["retryable"], receipt)
+                        self.assertEqual(
+                            receipt["errorCode"],
+                            "local_playback_ack_commit_pending",
+                        )
+                        self.assertIn(
+                            original_entry_id,
+                            fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES,
+                        )
+                        self.assertEqual(
+                            turn.owner.ingress_record(original_entry_id)["phase"],
+                            "delivery_inflight",
+                        )
+                        accepted = await self._post_local_bridge_delivery_ack(
+                            client,
+                            binding=binding,
+                            status_seq=2,
+                            started_at=started_at,
+                            outcome="cancelled",
+                            assistant_hash="",
+                        )
+                        self.assertTrue(accepted["accepted"], accepted)
+                        recovered_owner = fast_api.FastControlContinuityOwner(
+                            artifacts_root=Path(temporary),
+                            enabled=True,
+                            log=lambda *_args, **_kwargs: None,
+                        )
+                        self.assertIsNone(
+                            recovered_owner.ingress_record(original_entry_id)
+                        )
+                        self.assertEqual(
+                            fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {}
+                        )
+                        unrelated = recovered_owner.claim_ingress(
+                            request_id="unrelated-request-after-cancel",
+                            accepted_text="다음 요청",
+                        )
+                        self.assertTrue(unrelated["shouldProcess"])
+                        release_stream.set()
+                        await asyncio.wait_for(response.read(), timeout=2.0)
+                        self.assertEqual(commit.call_count, 0)
+                        self.assertEqual(action_fail.call_count, 1)
+                        self.assertEqual(action_finish.call_count, 2)
+                        self.assertEqual(action_launch.call_count, 0)
+                    finally:
+                        release_stream.set()
+                        if response is not None:
+                            response.close()
+
+    async def test_early_failure_ack_uses_reported_outcome(self) -> None:
+        for outcome in ("failed", "partial"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temporary:
+                owner = fast_api.FastControlContinuityOwner(
+                    artifacts_root=Path(temporary),
+                    enabled=True,
+                    log=lambda *_args, **_kwargs: None,
+                )
+                bridge_id = outcome[0] * 32
+                turn_id = f"early-{outcome}-turn"
+                source_delivery_id = json.dumps(
+                    [bridge_id, turn_id],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                claimed = owner.claim_ingress(
+                    request_id=source_delivery_id,
+                    accepted_text="재생 전 실패 경계",
+                )
+                entry_id = str(claimed["entryId"])
+                owner.mark_ingress_delivery_inflight(
+                    entry_id,
+                    delivery_ref=fast_api.FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+                    streaming=True,
+                )
+                seen_outcomes: list[str] = []
+
+                def fail(reported_outcome: str) -> bool:
+                    seen_outcomes.append(reported_outcome)
+                    owner.mark_ingress_delivery_ambiguous(
+                        entry_id,
+                        error_code=fast_api._local_bridge_delivery_failure_code(
+                            reported_outcome
+                        ),
+                    )
+                    return True
+
+                ack = {
+                    "schema": fast_api.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+                    "bridgeInstanceId": bridge_id,
+                    "turnId": turn_id,
+                    "assistantHash": "",
+                    "outcome": outcome,
+                    "contentFree": True,
+                }
+                with patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ):
+                    not_ready = fast_api._consume_local_bridge_delivery_ack(ack)
+
+                self.assertFalse(not_ready["accepted"], not_ready)
+                self.assertTrue(not_ready["retryable"], not_ready)
+                self.assertEqual(
+                    not_ready["errorCode"],
+                    "local_playback_ack_not_ready",
+                )
+                self.assertEqual(seen_outcomes, [])
+                self.assertIsNotNone(owner.ingress_record(entry_id))
+
+                fast_api._arm_pending_local_bridge_delivery(
+                    entry_id=entry_id,
+                    binding={
+                        "bridgeInstanceId": bridge_id,
+                        "turnId": turn_id,
+                        "assistantHash": "",
+                    },
+                    expected_position=None,
+                    complete=lambda: False,
+                    fail=fail,
+                )
+                with patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ):
+                    receipt = fast_api._consume_local_bridge_delivery_ack(ack)
+
+                self.assertTrue(receipt["accepted"], receipt)
+                self.assertEqual(seen_outcomes, [outcome])
+                self.assertIsNone(owner.ingress_record(entry_id))
+                self.assertEqual(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {})
+
+    async def test_restart_ambiguous_ack_discards_and_unblocks_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            bridge_id = "9" * 32
+            turn_id = "restart-ambiguous-turn"
+            source_delivery_id = json.dumps(
+                [bridge_id, turn_id],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            claimed = owner.claim_ingress(
+                request_id=source_delivery_id,
+                accepted_text="재시작 경계",
+            )
+            entry_id = str(claimed["entryId"])
+            assistant_text = "재생 대기 응답"
+            owner.bind_ingress_response(
+                entry_id,
+                assistant_text=assistant_text,
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            owner.mark_ingress_delivery_inflight(
+                entry_id,
+                delivery_ref=fast_api.FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+            )
+
+            restored = fast_api.FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            recovered = restored.ingress_record(entry_id)
+            self.assertEqual(
+                recovered["lastErrorCode"],
+                "conversation_ingress_delivery_ambiguous_after_restart",
+            )
+            with patch.object(
+                fast_api,
+                "FAST_CONTROL_CONTINUITY_OWNER",
+                restored,
+            ):
+                receipt = fast_api._consume_local_bridge_delivery_ack(
+                    {
+                        "schema": fast_api.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+                        "bridgeInstanceId": bridge_id,
+                        "turnId": turn_id,
+                        "assistantHash": fast_api.final_text_sha256(
+                            assistant_text
+                        ),
+                        "outcome": "cancelled",
+                        "contentFree": True,
+                    }
+                )
+
+            self.assertTrue(receipt["accepted"], receipt)
+            self.assertTrue(receipt["duplicate"], receipt)
+            self.assertIsNone(restored.ingress_record(entry_id))
+            unrelated = restored.claim_ingress(
+                request_id="unrelated-after-restart-ack",
+                accepted_text="다음 요청",
+            )
+            self.assertTrue(unrelated["shouldProcess"])
+
+    async def test_new_bridge_retires_recovered_delivery_without_live_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            old_bridge_id = "4" * 32
+            turn_id = "recovered-old-bridge-turn"
+            claimed = owner.claim_ingress(
+                request_id=json.dumps(
+                    [old_bridge_id, turn_id],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                accepted_text="재시작 전 요청",
+            )
+            entry_id = str(claimed["entryId"])
+            assistant_text = "재시작 전 재생 대기 응답"
+            owner.bind_ingress_response(
+                entry_id,
+                assistant_text=assistant_text,
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            owner.mark_ingress_delivery_inflight(
+                entry_id,
+                delivery_ref=fast_api.FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+            )
+            restored = fast_api.FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            self.assertEqual(
+                restored.ingress_record(entry_id)["phase"],
+                "delivery_ambiguous",
+            )
+            self.assertEqual(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {})
+            turn = SimpleNamespace(
+                owner=restored,
+                manager=fast_api.LocalVoiceAdmissionManager(),
+            )
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(turn),
+            ):
+                async with _local_ack_client(stream=False) as client:
+                    payload = self._local_bridge_status_payload(
+                        bridge_id="5" * 32,
+                        status_seq=1,
+                        started_at=fast_api.time.time() - 1.0,
+                        delivery_ack={},
+                    )
+                    payload.pop("conversationDeliveryAck")
+                    response = await client.post(
+                        "/status",
+                        json=payload,
+                        headers={
+                            fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: "r" * 48,
+                        },
+                    )
+
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(restored.ingress_record(entry_id))
+            unrelated = restored.claim_ingress(
+                request_id="unrelated-after-both-restarted",
+                accepted_text="다음 요청",
+            )
+            self.assertTrue(unrelated["shouldProcess"])
+
+    async def test_new_bridge_retires_old_pending_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            turn = _local_ack_turn(
+                Path(temporary),
+                bridge_id="f" * 32,
+                turn_id="old-bridge-pending-turn",
+                text="이블린, 브리지 교체 경계를 확인해줘",
+            )
+            with (
+                patch.dict(
+                    fast_api.LOCAL_BRIDGE_STATUS,
+                    {"voiceCaptureFenceDigest": CAPTURE_FENCE_DIGEST},
+                    clear=True,
+                ),
+                _local_ack_runtime_patches(turn),
+            ):
+                async with _local_ack_client(stream=False) as client:
+                    response = await client.post("/chat", json=turn.payload)
+                    self.assertEqual(response.status, 200)
+                    old_entry_id = turn.owner.ingress.recovery_records()[0][
+                        "entryId"
+                    ]
+                    self.assertEqual(
+                        len(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES),
+                        1,
+                    )
+
+                    status_payload = self._local_bridge_status_payload(
+                        bridge_id="1" * 32,
+                        status_seq=1,
+                        started_at=fast_api.time.time() - 0.5,
+                        delivery_ack={},
+                    )
+                    status_payload.pop("conversationDeliveryAck")
+                    rotated = await client.post(
+                        "/status",
+                        json=status_payload,
+                        headers={
+                            fast_api.LOCAL_BRIDGE_STATUS_AUTH_HEADER: "r" * 48,
+                        },
+                    )
+                    self.assertEqual(rotated.status, 200)
+                    self.assertIsNone(turn.owner.ingress_record(old_entry_id))
+                    self.assertEqual(
+                        fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES,
+                        {},
+                    )
+                    unrelated = turn.owner.claim_ingress(
+                        request_id="unrelated-after-bridge-rotation",
+                        accepted_text="다음 요청",
+                    )
+                    self.assertTrue(unrelated["shouldProcess"])
 
     async def test_recovered_context_is_bounded_deduplicated_and_private(
         self,

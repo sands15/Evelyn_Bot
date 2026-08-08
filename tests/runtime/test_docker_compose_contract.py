@@ -350,9 +350,13 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('evelyn_core.mindcraft_service', voyager)
         self.assertIn('["CMD", "python3", "-c"', voyager)
 
-    def test_mindcraft_uses_qwen14b_local_planner_with_shared_router(self) -> None:
+    def test_mindcraft_uses_fixed_bot_api_broker_for_local_llms(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
-        voyager = source.split("  voyager:\n", 1)[1]
+        bot_api = source.split("  bot_api:\n", 1)[1].split(
+            "\n  control_page:",
+            1,
+        )[0]
+        voyager = source.split("  voyager:\n", 1)[1].split("\nvolumes:", 1)[0]
         minecraft_llm = source.split("  minecraft_llm:\n", 1)[1].split("\n  sub_llm:", 1)[0]
 
         self.assertIn('profiles: ["llm", "voyager"]', source)
@@ -366,13 +370,27 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('NVIDIA_VISIBLE_DEVICES: "1"', minecraft_llm)
         self.assertIn('CUDA_VISIBLE_DEVICES: "1"', minecraft_llm)
         self.assertIn('LLAMA_CHAT_TEMPLATE_KWARGS: \'{"enable_thinking":false}\'', minecraft_llm)
-        self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', voyager)
-        self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', voyager)
+        self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', bot_api)
+        self.assertIn('MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"', bot_api)
+        self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', bot_api)
+        self.assertIn('MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"', bot_api)
+        self.assertIn('MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"', bot_api)
+        self.assertIn('- mindcraft_llm_broker_token:/mindcraft-llm-broker', bot_api)
+        self.assertNotIn('mindcraft_llm_broker_token:/mindcraft-llm-broker:ro', bot_api)
+        self.assertIn('MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"', voyager)
+        self.assertIn('MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"', voyager)
+        self.assertIn('- mindcraft_llm_broker_token:/mindcraft-llm-broker:ro', voyager)
+        self.assertNotIn("MINDCRAFT_LOCAL_", voyager)
+        self.assertNotIn("MINDCRAFT_ROUTER_", voyager)
+        self.assertNotIn("VOYAGER_CODEX_GATEWAY_TOKEN_FILE", voyager)
+        self.assertNotIn("codex_gateway_token:/gateway-token", voyager)
         self.assertIn('MINDCRAFT_CODEX_ENABLED: "false"', voyager)
         self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", voyager)
         self.assertIn('MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"', voyager)
+        self.assertIn('bot_api:\n        condition: service_healthy', voyager)
         self.assertIn('minecraft_llm:', voyager)
         self.assertIn('router_llm:', voyager)
+        self.assertIn('\n  mindcraft_llm_broker_token:\n', source)
         self.assertIn("GET /health HTTP/1.0", minecraft_llm)
         router_llm = source.split("  router_llm:\n", 1)[1].split("\n  minecraft_llm:", 1)[0]
         self.assertIn("GET /health HTTP/1.0", router_llm)

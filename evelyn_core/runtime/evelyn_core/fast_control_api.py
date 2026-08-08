@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 import hmac
 import hashlib
 import json
@@ -70,6 +70,7 @@ from .fast_tool_planner import (
 from .fast_control_continuity import (
     FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF,
     FAST_CONTROL_INGRESS_SURFACE,
+    FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
     FAST_CONTROL_SESSION_KEY,
     FastControlContinuityOwner,
 )
@@ -122,6 +123,7 @@ from .minecraft_world_lease_delegation import (
 from .minecraft_world_lease_http_runtime import (
     MinecraftWorldLeaseHttpRuntime,
 )
+from .mindcraft_llm_broker import install_mindcraft_llm_broker
 from .memory_deletion_journal import (
     MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
@@ -331,6 +333,15 @@ LOCAL_BRIDGE_STATUS_MAX_BYTES = max(
 LOCAL_BRIDGE_MIC_ENABLE_FENCE_SCHEMA = (
     "local_io_bridge.mic-enable-fence.v1"
 )
+LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA = (
+    "local_bridge.conversation-delivery-binding.v1"
+)
+LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA = (
+    "local_bridge.conversation-delivery-ack.v1"
+)
+LOCAL_BRIDGE_DELIVERY_ACK_RECEIPT_SCHEMA = (
+    "local_bridge.conversation-delivery-ack-receipt.v1"
+)
 FAST_MAIN_LLM_SYSTEM_PROMPT = "\n".join(
     (
         build_evelyn_system_prompt(),
@@ -398,6 +409,7 @@ LOCAL_BRIDGE_STATUS: dict[str, Any] = {
     "ready": False,
     "mode": "windows_io_bridge",
 }
+LOCAL_BRIDGE_PENDING_DELIVERIES: dict[str, dict[str, Any]] = {}
 LOCAL_VOICE_ADMISSION = LocalVoiceAdmissionManager()
 LOCAL_BRIDGE_SPEAK_QUEUE: list[dict[str, Any]] = []
 LOCAL_BRIDGE_SPEAK_SEQ = 0
@@ -1648,6 +1660,9 @@ def _prepare_fast_control_ingress(
                 ),
             )
     claim["_effectId"] = request_id
+    if normalized_source == "local_bridge":
+        claim["_bridgeInstanceId"] = bridge_instance_id
+        claim["_bridgeTurnId"] = bridge_turn_id
     if claim.get("shouldProcess") is True:
         return claim, None, None
     if claim.get("phase") != "completed":
@@ -2448,6 +2463,417 @@ def _mic_action_id(value: Any, *, allow_empty: bool = False) -> str | None:
     return value
 
 
+_LOCAL_BRIDGE_DELIVERY_IDENTIFIER = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z",
+    re.ASCII,
+)
+_LOCAL_BRIDGE_DELIVERY_HASH = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_LOCAL_BRIDGE_DELIVERY_OUTCOMES = frozenset(
+    {"played", "failed", "partial", "cancelled"}
+)
+def _local_bridge_delivery_binding(
+    ingress_claim: dict[str, Any] | None,
+    assistant_text: str | None,
+) -> dict[str, Any] | None:
+    entry_id = clean_text((ingress_claim or {}).get("entryId"))
+    bridge_instance_id = clean_text(
+        (ingress_claim or {}).get("_bridgeInstanceId")
+    )
+    turn_id = clean_text((ingress_claim or {}).get("_bridgeTurnId"))
+    if not entry_id or not bridge_instance_id or not turn_id:
+        return None
+    return {
+        "schema": LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA,
+        "bridgeInstanceId": bridge_instance_id,
+        "turnId": turn_id,
+        "assistantHash": (
+            final_text_sha256(assistant_text)
+            if assistant_text is not None
+            else ""
+        ),
+        "required": True,
+        "contentFree": True,
+    }
+
+
+def _local_bridge_delivery_ack_receipt(
+    *,
+    accepted: bool,
+    duplicate: bool = False,
+    retryable: bool = False,
+    error_code: str = "",
+) -> dict[str, Any]:
+    return {
+        "schema": LOCAL_BRIDGE_DELIVERY_ACK_RECEIPT_SCHEMA,
+        "accepted": bool(accepted),
+        "duplicate": bool(duplicate),
+        "retryable": bool(retryable),
+        "errorCode": clean_text(error_code),
+        "contentFree": True,
+    }
+
+
+def _normalize_local_bridge_delivery_ack(
+    value: Any,
+    *,
+    bridge_instance_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "bridgeInstanceId",
+        "turnId",
+        "assistantHash",
+        "outcome",
+        "contentFree",
+    }:
+        return None
+    turn_id = clean_text(value.get("turnId"))
+    assistant_hash = clean_text(value.get("assistantHash"))
+    outcome = clean_text(value.get("outcome")).lower()
+    hash_is_valid = bool(
+        _LOCAL_BRIDGE_DELIVERY_HASH.fullmatch(assistant_hash)
+    )
+    if (
+        value.get("schema") != LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA
+        or clean_text(value.get("bridgeInstanceId")) != bridge_instance_id
+        or _LOCAL_BRIDGE_DELIVERY_IDENTIFIER.fullmatch(turn_id) is None
+        or not (
+            hash_is_valid
+            or (outcome != "played" and assistant_hash == "")
+        )
+        or outcome not in _LOCAL_BRIDGE_DELIVERY_OUTCOMES
+        or value.get("contentFree") is not True
+    ):
+        return None
+    return {
+        "schema": LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+        "bridgeInstanceId": bridge_instance_id,
+        "turnId": turn_id,
+        "assistantHash": assistant_hash,
+        "outcome": outcome,
+        "contentFree": True,
+    }
+
+
+def _run_pending_local_bridge_delivery_failure(
+    pending: dict[str, Any],
+    outcome: str,
+) -> bool:
+    try:
+        return bool(
+            pending["context"].run(
+                pending["fail"],
+                outcome,
+            )
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] local_playback_failure_finalize_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return False
+
+
+def _local_bridge_delivery_failure_code(outcome: str) -> str:
+    return {
+        "cancelled": "conversation_ingress_process_interrupted",
+        "partial": "conversation_ingress_delivery_ambiguous",
+    }.get(outcome, "conversation_ingress_delivery_failed")
+
+
+def _discard_pending_local_bridge_delivery(
+    entry_id: str,
+    *,
+    outcome: str | None = None,
+) -> None:
+    pending = LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+    if pending is not None and outcome is not None:
+        _run_pending_local_bridge_delivery_failure(pending, outcome)
+
+
+def _arm_pending_local_bridge_delivery(
+    *,
+    entry_id: str,
+    binding: dict[str, Any],
+    expected_position: MemoryExposurePosition | None,
+    complete: Callable[[], bool],
+    fail: Callable[[str], bool],
+) -> None:
+    bridge_instance_id = str(binding["bridgeInstanceId"])
+    existing = LOCAL_BRIDGE_PENDING_DELIVERIES.get(entry_id)
+    if existing is not None and (
+        existing.get("bridgeInstanceId") != bridge_instance_id
+        or existing.get("turnId") != binding["turnId"]
+        or existing.get("assistantHash") != binding["assistantHash"]
+    ):
+        raise ConversationIngressBindingMismatch(
+            "conversation_ingress_delivery_binding_mismatch"
+        )
+    if existing is None and LOCAL_BRIDGE_PENDING_DELIVERIES:
+        raise ConversationIngressRecoveryError(
+            "conversation_ingress_recovery_pending"
+        )
+    LOCAL_BRIDGE_PENDING_DELIVERIES[entry_id] = {
+        "bridgeInstanceId": bridge_instance_id,
+        "turnId": str(binding["turnId"]),
+        "assistantHash": str(binding["assistantHash"]),
+        "expectedPosition": expected_position,
+        "context": copy_context(),
+        "complete": complete,
+        "fail": fail,
+    }
+
+
+def _consume_local_bridge_delivery_ack(
+    ack: dict[str, Any],
+) -> dict[str, Any]:
+    source_delivery_id = json.dumps(
+        [ack["bridgeInstanceId"], ack["turnId"]],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    entry_id = conversation_ingress_entry_id(
+        surface=FAST_CONTROL_INGRESS_SURFACE,
+        scope=FAST_CONTROL_SESSION_KEY,
+        source_delivery_id=source_delivery_id,
+    )
+    try:
+        record = FAST_CONTROL_CONTINUITY_OWNER.ingress_record(entry_id)
+    except Exception:
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            retryable=True,
+            error_code="local_playback_ack_unavailable",
+        )
+    if record is None:
+        pending = LOCAL_BRIDGE_PENDING_DELIVERIES.get(entry_id)
+        if pending is not None:
+            if not _run_pending_local_bridge_delivery_failure(
+                pending,
+                "cancelled",
+            ):
+                return _local_bridge_delivery_ack_receipt(
+                    accepted=False,
+                    retryable=True,
+                    error_code="local_playback_ack_commit_pending",
+                )
+            LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            error_code="local_playback_ack_stale",
+        )
+    phase = clean_text(record.get("phase"))
+    record_assistant_text = clean_text(record.get("assistantText"))
+    record_assistant_hash = (
+        final_text_sha256(record_assistant_text)
+        if record_assistant_text
+        else ""
+    )
+    outcome = str(ack["outcome"])
+    expected_failure = _local_bridge_delivery_failure_code(outcome)
+    early_failure = outcome != "played" and not ack["assistantHash"]
+    if early_failure:
+        if (
+            record.get("deliveryRef")
+            != FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+            or phase not in {"delivery_inflight", "delivery_ambiguous"}
+        ):
+            return _local_bridge_delivery_ack_receipt(
+                accepted=False,
+                error_code="local_playback_ack_stale",
+            )
+        try:
+            pending = LOCAL_BRIDGE_PENDING_DELIVERIES.get(entry_id)
+            if pending is not None:
+                if not _run_pending_local_bridge_delivery_failure(
+                    pending,
+                    outcome,
+                ):
+                    raise ConversationIngressRecoveryError(
+                        "conversation_ingress_recovery_unavailable"
+                    )
+            elif phase == "delivery_inflight":
+                return _local_bridge_delivery_ack_receipt(
+                    accepted=False,
+                    retryable=True,
+                    error_code="local_playback_ack_not_ready",
+                )
+            FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
+                entry_id,
+                assistant_hash="",
+            )
+        except Exception:
+            return _local_bridge_delivery_ack_receipt(
+                accepted=False,
+                retryable=True,
+                error_code="local_playback_ack_commit_pending",
+            )
+        _discard_pending_local_bridge_delivery(entry_id)
+        return _local_bridge_delivery_ack_receipt(accepted=True)
+    if not record_assistant_hash and phase == "delivery_inflight":
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            retryable=True,
+            error_code="local_playback_ack_not_ready",
+        )
+    if (
+        record_assistant_hash != ack["assistantHash"]
+        or record.get("deliveryRef")
+        != FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+    ):
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            error_code="local_playback_ack_stale",
+        )
+    if phase == "completed":
+        LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+        return _local_bridge_delivery_ack_receipt(
+            accepted=outcome == "played",
+            duplicate=outcome == "played",
+            error_code=(
+                "" if outcome == "played" else "local_playback_ack_conflict"
+            ),
+        )
+    if phase == "delivery_ambiguous":
+        try:
+            FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
+                entry_id,
+                assistant_hash=ack["assistantHash"],
+            )
+        except Exception:
+            return _local_bridge_delivery_ack_receipt(
+                accepted=False,
+                retryable=True,
+                error_code="local_playback_ack_commit_pending",
+            )
+        LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+        return _local_bridge_delivery_ack_receipt(
+            accepted=outcome != "played",
+            duplicate=outcome != "played",
+            error_code=("" if outcome != "played" else "local_playback_ack_stale"),
+        )
+    pending = LOCAL_BRIDGE_PENDING_DELIVERIES.get(entry_id)
+    if (
+        pending is None
+        or pending.get("bridgeInstanceId") != ack["bridgeInstanceId"]
+        or pending.get("turnId") != ack["turnId"]
+        or pending.get("assistantHash") != ack["assistantHash"]
+    ):
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            error_code="local_playback_ack_stale",
+        )
+    try:
+        if outcome == "played":
+            expected_position = pending.get("expectedPosition")
+            with memory_exposure_guard(
+                expected_position=expected_position,
+                required=expected_position is not None,
+                index_dir=Path(MEMORY_ROOT) / "memory_index",
+            ):
+                completed = bool(
+                    pending["context"].run(pending["complete"])
+                )
+        else:
+            completed = _run_pending_local_bridge_delivery_failure(
+                pending,
+                outcome,
+            )
+            if completed:
+                FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
+                    entry_id,
+                    assistant_hash=ack["assistantHash"],
+                )
+    except MemoryDeletionJournalBusyError:
+        completed = False
+    except MemoryDeletionJournalIntegrityError:
+        _run_pending_local_bridge_delivery_failure(pending, "failed")
+        LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            error_code="local_playback_ack_stale",
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] local_playback_ack_finalize_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        completed = False
+    if not completed:
+        return _local_bridge_delivery_ack_receipt(
+            accepted=False,
+            retryable=True,
+            error_code="local_playback_ack_commit_pending",
+        )
+    LOCAL_BRIDGE_PENDING_DELIVERIES.pop(entry_id, None)
+    return _local_bridge_delivery_ack_receipt(accepted=True)
+
+
+def _retire_other_bridge_pending_deliveries(
+    bridge_instance_id: str,
+) -> None:
+    for entry_id, pending in tuple(LOCAL_BRIDGE_PENDING_DELIVERIES.items()):
+        if pending.get("bridgeInstanceId") == bridge_instance_id:
+            try:
+                if FAST_CONTROL_CONTINUITY_OWNER.ingress_record(entry_id) is not None:
+                    continue
+            except Exception:
+                continue
+        _consume_local_bridge_delivery_ack(
+            {
+                "schema": LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+                "bridgeInstanceId": str(pending["bridgeInstanceId"]),
+                "turnId": str(pending["turnId"]),
+                "assistantHash": str(pending["assistantHash"]),
+                "outcome": "cancelled",
+                "contentFree": True,
+            }
+        )
+    ingress = getattr(FAST_CONTROL_CONTINUITY_OWNER, "ingress", None)
+    if ingress is None:
+        return
+    try:
+        records = ingress.recovery_records()
+    except Exception:
+        return
+    for record in records:
+        if (
+            record.get("deliveryRef")
+            != FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+            or record.get("phase")
+            not in {"delivery_inflight", "delivery_ambiguous"}
+        ):
+            continue
+        try:
+            source_binding = json.loads(str(record.get("sourceDeliveryId") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(source_binding, list)
+            or len(source_binding) != 2
+            or not all(isinstance(value, str) for value in source_binding)
+            or source_binding[0] == bridge_instance_id
+        ):
+            continue
+        assistant_text = clean_text(record.get("assistantText"))
+        _consume_local_bridge_delivery_ack(
+            {
+                "schema": LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+                "bridgeInstanceId": source_binding[0],
+                "turnId": source_binding[1],
+                "assistantHash": (
+                    final_text_sha256(assistant_text)
+                    if assistant_text
+                    else ""
+                ),
+                "outcome": "cancelled",
+                "contentFree": True,
+            }
+        )
+
+
 _LOCAL_BRIDGE_STATUS_PASSTHROUGH_FIELDS = frozenset(
     {
         "activePlaybackOwner",
@@ -2536,6 +2962,15 @@ def _normalize_local_bridge_status(
         or started_at > heartbeat_at + LOCAL_BRIDGE_HEARTBEAT_MAX_SKEW_SEC
     ):
         return None
+    delivery_ack: dict[str, Any] | None = None
+    delivery_ack_invalid = False
+    if "conversationDeliveryAck" in payload:
+        delivery_ack = _normalize_local_bridge_delivery_ack(
+            payload.get("conversationDeliveryAck"),
+            bridge_instance_id=bridge_instance_id,
+        )
+        if delivery_ack is None:
+            delivery_ack_invalid = True
     boolean_fields = (
         "enabled",
         "ready",
@@ -2762,6 +3197,10 @@ def _normalize_local_bridge_status(
     if normalized_watchdog is not None:
         normalized["voiceCaptureWatchdog"] = normalized_watchdog
         normalized["voiceCaptureFenceDigest"] = str(fence_digest)
+    if delivery_ack is not None:
+        normalized["conversationDeliveryAck"] = delivery_ack
+    elif delivery_ack_invalid:
+        normalized["_conversationDeliveryAckInvalid"] = True
     return normalized
 
 
@@ -5772,6 +6211,23 @@ async def _finalize_fast_chat_response(
         ingress_entry_id = clean_text(
             (ingress_claim or {}).get("entryId")
         )
+        local_bridge_delivery = bool(
+            clean_text(source) == "local_bridge"
+            and not isolated_validation
+            and ingress_entry_id
+        )
+        local_playback_required = bool(
+            local_bridge_delivery and not suppress_tts and not error_code
+        )
+        local_playback_boundary = bool(
+            local_playback_required
+            or (local_bridge_delivery and error_code)
+        )
+        playback_binding = (
+            _local_bridge_delivery_binding(ingress_claim, reply)
+            if local_playback_required
+            else None
+        )
         if ingress_entry_id and not isolated_validation:
             try:
                 FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
@@ -5789,7 +6245,7 @@ async def _finalize_fast_chat_response(
                         else None
                     ),
                 )
-        if not isolated_validation:
+        if not isolated_validation and not local_playback_boundary:
             append_chat_message(
                 "assistant",
                 "Evelyn",
@@ -5864,50 +6320,68 @@ async def _finalize_fast_chat_response(
         if task_record is not None:
             result["task"] = task_record.to_dict()
         if ingress_entry_id:
-            result["ingress"] = {
+            ingress_result: dict[str, Any] = {
                 "state": "delivery_pending",
                 "cached": False,
                 "automaticReplay": False,
             }
+            if playback_binding is not None:
+                ingress_result["playbackAck"] = playback_binding
+            result["ingress"] = ingress_result
         after_write: Callable[[], None] | None = None
         before_write: Callable[[], None] | None = None
         after_write_failure: Callable[[str], None] | None = None
         if ingress_entry_id:
-            def begin_ingress_delivery() -> None:
-                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
+            def fail_unlaunched_action(outcome: str) -> None:
+                if task_record is None:
+                    return
+                try:
+                    if task_record.status == "running":
+                        ACTION_COORDINATOR.fail(
+                            task_record.task_id,
+                            f"local_playback_{outcome}",
+                            reply=(
+                                "음성 재생을 완료하지 못해서 작업을 시작하지 않았어."
+                            ),
+                            memory_receipt=not_used_memory_receipt_ref(),
+                        )
+                finally:
+                    FAST_ACTION_RECOVERY_JOURNAL.finish(task_record.task_id)
+
+            def fail_local_playback(outcome: str) -> bool:
+                fail_unlaunched_action(outcome)
+                try:
+                    FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
+                        ingress_entry_id,
+                        error_code=_local_bridge_delivery_failure_code(outcome),
+                    )
+                except ConversationIngressRecoveryError as exc:
+                    if exc.code != "conversation_ingress_entry_not_found":
+                        raise
+                return True
+
+            def abandon_local_playback(outcome: str) -> None:
+                fail_local_playback(outcome)
+                FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
                     ingress_entry_id,
-                    delivery_ref=(
-                        FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
-                        if isolated_validation
-                        else FAST_CONTROL_HTTP_DELIVERY_REF
-                    ),
-                    streaming=isolated_validation,
+                    assistant_hash=final_text_sha256(reply),
                 )
 
-            def fail_ingress_delivery(failure_code: str) -> None:
+            def complete_ingress_delivery() -> bool:
                 if isolated_validation:
                     FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
                         ingress_entry_id,
                         assistant_text=reply,
                         memory_receipt_ref=response_memory_receipt_ref,
                     )
-                    return
-                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
-                    ingress_entry_id,
-                    error_code=failure_code,
-                )
-
-            def complete_ingress_delivery() -> None:
-                if isolated_validation:
-                    FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
-                        ingress_entry_id,
-                        assistant_text=reply,
-                        memory_receipt_ref=response_memory_receipt_ref,
-                    )
-                    return
+                    return True
                 FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
                     ingress_entry_id,
-                    delivery_ref=FAST_CONTROL_HTTP_DELIVERY_REF,
+                    delivery_ref=(
+                        FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+                        if playback_binding is not None
+                        else FAST_CONTROL_HTTP_DELIVERY_REF
+                    ),
                 )
                 committed = (
                     commit_fast_control_terminal_turn(
@@ -5929,20 +6403,86 @@ async def _finalize_fast_chat_response(
                     )
                 )
                 if committed.get("durable") is not True:
-                    return
+                    return False
+                if local_playback_boundary:
+                    append_chat_message(
+                        "assistant",
+                        "Evelyn",
+                        reply,
+                        source="fast_control_api",
+                        task_id=(
+                            task_record.task_id
+                            if task_record is not None
+                            else None
+                        ),
+                        task_status=(
+                            task_record.status
+                            if task_record is not None
+                            else None
+                        ),
+                        memory_receipt=response_memory_receipt_ref,
+                        memory_write_receipt=memory_write_receipt,
+                    )
                 if (
                     task_record is not None
                     and task_runner is not None
                     and task_record.status == "running"
                 ):
-                    launch_background_action(
-                        task_record,
-                        task_runner,
+                    launch_background_action(task_record, task_runner)
+                return True
+
+            def begin_ingress_delivery() -> None:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
+                    ingress_entry_id,
+                    delivery_ref=(
+                        FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
+                        if isolated_validation
+                        else (
+                            FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+                            if playback_binding is not None
+                            else FAST_CONTROL_HTTP_DELIVERY_REF
+                        )
+                    ),
+                    streaming=isolated_validation,
+                )
+                if playback_binding is not None:
+                    _arm_pending_local_bridge_delivery(
+                        entry_id=ingress_entry_id,
+                        binding=playback_binding,
+                        expected_position=response_exposure,
+                        complete=complete_ingress_delivery,
+                        fail=fail_local_playback,
                     )
+
+            def fail_ingress_delivery(failure_code: str) -> None:
+                if isolated_validation:
+                    FAST_CONTROL_CONTINUITY_OWNER.complete_ephemeral_ingress(
+                        ingress_entry_id,
+                        assistant_text=reply,
+                        memory_receipt_ref=response_memory_receipt_ref,
+                    )
+                    return
+                if local_playback_boundary:
+                    fail_unlaunched_action("failed")
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
+                    ingress_entry_id,
+                    error_code=failure_code,
+                )
+                if local_playback_boundary:
+                    FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
+                        ingress_entry_id,
+                        assistant_hash=final_text_sha256(reply),
+                    )
+                _discard_pending_local_bridge_delivery(ingress_entry_id)
 
             before_write = begin_ingress_delivery
             after_write_failure = fail_ingress_delivery
-            after_write = complete_ingress_delivery
+            if playback_binding is not None:
+                after_write = lambda: None
+            elif local_playback_boundary:
+                after_write = lambda: abandon_local_playback("failed")
+            else:
+                after_write = complete_ingress_delivery
         elif (
             task_record is not None
             and task_runner is not None
@@ -6287,18 +6827,48 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
     ingress_entry_id = clean_text(
         (ingress_claim or {}).get("entryId")
     )
+    local_bridge_delivery = bool(
+        clean_text(source) == "local_bridge"
+        and not isolated_validation
+        and ingress_entry_id
+    )
+    local_stream_playback_required = bool(
+        local_bridge_delivery and not suppress_tts
+    )
+    early_playback_binding = (
+        _local_bridge_delivery_binding(ingress_claim, None)
+        if local_stream_playback_required
+        else None
+    )
     ingress_delivery_started = False
     ingress_delivery_failed = False
 
-    def mark_stream_delivery_ambiguous(error_code: str) -> None:
+    def fail_stream_unlaunched_action(outcome: str) -> None:
+        if task_record is None:
+            return
+        try:
+            if task_record.status == "running":
+                ACTION_COORDINATOR.fail(
+                    task_record.task_id,
+                    f"local_playback_{outcome}",
+                    reply=(
+                        "음성 재생을 완료하지 못해서 작업을 시작하지 않았어."
+                    ),
+                    memory_receipt=not_used_memory_receipt_ref(),
+                )
+        finally:
+            FAST_ACTION_RECOVERY_JOURNAL.finish(task_record.task_id)
+
+    def mark_stream_delivery_ambiguous(error_code: str) -> bool:
         nonlocal ingress_delivery_failed
         if (
             not ingress_entry_id
             or not ingress_delivery_started
             or ingress_delivery_failed
         ):
-            return
-        ingress_delivery_failed = True
+            return False
+        if local_bridge_delivery:
+            fail_stream_unlaunched_action("failed")
         try:
             FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
                 ingress_entry_id,
@@ -6310,6 +6880,33 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 f"errorCode={exc.code}",
                 flush=True,
             )
+            return False
+        ingress_delivery_failed = True
+        _discard_pending_local_bridge_delivery(ingress_entry_id)
+        return True
+
+    def abandon_stream_delivery(
+        error_code: str,
+        *,
+        assistant_hash: str,
+    ) -> bool:
+        if not mark_stream_delivery_ambiguous(error_code):
+            return False
+        if not local_bridge_delivery:
+            return True
+        try:
+            FAST_CONTROL_CONTINUITY_OWNER.discard_failed_ingress(
+                ingress_entry_id,
+                assistant_hash=assistant_hash,
+            )
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] stream_ingress_discard_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+            return False
+        return True
 
     async def ensure_response_prepared() -> None:
         nonlocal ingress_delivery_started
@@ -6320,7 +6917,11 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     delivery_ref=(
                         FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF
                         if isolated_validation
-                        else FAST_CONTROL_STREAM_DELIVERY_REF
+                        else (
+                            FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF
+                            if local_stream_playback_required
+                            else FAST_CONTROL_STREAM_DELIVERY_REF
+                        )
                     ),
                     streaming=True,
                 )
@@ -6380,6 +6981,11 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     memory_exposure_position_to_dict(position)
                     if position is not None
                     else None
+                ),
+                **(
+                    {"ingress": {"playbackAck": early_playback_binding}}
+                    if early_playback_binding is not None
+                    else {}
                 ),
             },
             position,
@@ -6507,7 +7113,17 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     assistant_text=reply,
                     memory_receipt_ref=response_memory_receipt_ref,
                 )
-            if not isolated_validation:
+            playback_binding = (
+                _local_bridge_delivery_binding(ingress_claim, reply)
+                if local_stream_playback_required
+                and not memory_command_error
+                else None
+            )
+            local_stream_deferred = bool(
+                playback_binding is not None
+                or (local_bridge_delivery and memory_command_error)
+            )
+            if not isolated_validation and not local_stream_deferred:
                 append_chat_message(
                     "assistant",
                     "Evelyn",
@@ -6527,6 +7143,66 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     memory_write_receipt=memory_write_receipt,
                 )
             terminal_reply_recorded = True
+
+            def fail_local_stream_playback(outcome: str) -> bool:
+                fail_stream_unlaunched_action(outcome)
+                try:
+                    FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
+                        ingress_entry_id,
+                        error_code=_local_bridge_delivery_failure_code(outcome),
+                    )
+                except ConversationIngressRecoveryError as exc:
+                    if exc.code != "conversation_ingress_entry_not_found":
+                        raise
+                return True
+
+            def complete_local_stream_delivery() -> bool:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+                )
+                committed = commit_fast_control_turn(
+                    text,
+                    reply,
+                    memory_receipt=response_memory_receipt_ref,
+                    ingress_entry_id=ingress_entry_id,
+                )
+                if committed.get("durable") is not True:
+                    return False
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    reply,
+                    source="fast_control_api_stream",
+                    task_id=(
+                        task_record.task_id
+                        if task_record is not None
+                        else None
+                    ),
+                    task_status=(
+                        task_record.status
+                        if task_record is not None
+                        else None
+                    ),
+                    memory_receipt=response_memory_receipt_ref,
+                    memory_write_receipt=memory_write_receipt,
+                )
+                if (
+                    task_record is not None
+                    and task_runner is not None
+                    and task_record.status == "running"
+                ):
+                    launch_background_action(task_record, task_runner)
+                return True
+
+            if playback_binding is not None:
+                _arm_pending_local_bridge_delivery(
+                    entry_id=ingress_entry_id,
+                    binding=playback_binding,
+                    expected_position=response_exposure,
+                    complete=complete_local_stream_delivery,
+                    fail=fail_local_stream_playback,
+                )
             continuity = (
                 _pending_fast_control_continuity_result()
                 if ingress_entry_id or isolated_validation
@@ -6559,6 +7235,11 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                                 "state": "delivery_pending",
                                 "cached": False,
                                 "automaticReplay": False,
+                                **(
+                                    {"playbackAck": playback_binding}
+                                    if playback_binding is not None
+                                    else {}
+                                ),
                             }
                         }
                         if ingress_entry_id
@@ -6581,6 +7262,13 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 raise
             response_finished = True
 
+        if playback_binding is not None:
+            return
+        if local_stream_deferred:
+            mark_stream_delivery_ambiguous(
+                "conversation_ingress_delivery_failed"
+            )
+            return
         delivery_committed = True
         if ingress_entry_id:
             if isolated_validation:
@@ -6799,16 +7487,26 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 memory_receipt=not_used_memory_receipt_ref(),
             )
             failure_reply = failed.final_reply
-            append_chat_message(
-                "assistant",
-                "Evelyn",
-                failed.final_reply,
-                source="fast_control_action_followup",
-                task_id=failed.task_id,
-                task_status=failed.status,
-                memory_receipt=not_used_memory_receipt_ref(),
-            )
-        elif not isolated_validation:
+            if local_bridge_delivery:
+                try:
+                    FAST_ACTION_RECOVERY_JOURNAL.finish(failed.task_id)
+                except Exception as recovery_exc:
+                    print(
+                        "[FAST CONTROL] action_recovery_finish_failed "
+                        f"errorType={type(recovery_exc).__name__}",
+                        flush=True,
+                    )
+            else:
+                append_chat_message(
+                    "assistant",
+                    "Evelyn",
+                    failed.final_reply,
+                    source="fast_control_action_followup",
+                    task_id=failed.task_id,
+                    task_status=failed.status,
+                    memory_receipt=not_used_memory_receipt_ref(),
+                )
+        elif not isolated_validation and not local_bridge_delivery:
             append_chat_message(
                 "assistant",
                 "Evelyn",
@@ -6888,6 +7586,12 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     memory_receipt_ref=failure_receipt,
                 )
             response_finished = True
+            return response
+        if local_bridge_delivery and ingress_entry_id:
+            abandon_stream_delivery(
+                "conversation_ingress_delivery_failed",
+                assistant_hash=final_text_sha256(failure_reply),
+            )
             return response
         if ingress_entry_id:
             if isolated_validation:
@@ -6972,6 +7676,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 async def local_bridge_status_handler(request: web.Request) -> web.StreamResponse:
     speak_requests: list[dict[str, Any]] = []
     status_ack: dict[str, Any] | None = None
+    delivery_ack_receipt: dict[str, Any] | None = None
     if request.method == "POST":
         authorized, error, status = _request_has_control_token(
             request,
@@ -7016,6 +7721,10 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
                 },
                 status=409,
             )
+        delivery_ack = normalized.pop("conversationDeliveryAck", None)
+        delivery_ack_invalid = bool(
+            normalized.pop("_conversationDeliveryAckInvalid", False)
+        )
         # Replace the complete authoritative snapshot. A partial or delayed
         # report can never inherit fields/freshness from a previous heartbeat.
         LOCAL_BRIDGE_STATUS.clear()
@@ -7037,6 +7746,7 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
             # Keep status/control delivery alive so the Bridge can physically
             # stop capture. The manager's durable revocation fence stays shut.
             pass
+        _retire_other_bridge_pending_deliveries(bridge_instance_id)
         if normalized["micEnabled"] is False:
             try:
                 _reset_local_voice_admission(
@@ -7053,6 +7763,15 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
         ).lower()
         if minecraft_revision and minecraft_state in {"ready", "failed"}:
             clear_local_bridge_minecraft_command_request(minecraft_revision)
+        if delivery_ack_invalid:
+            delivery_ack_receipt = _local_bridge_delivery_ack_receipt(
+                accepted=False,
+                error_code="local_playback_ack_invalid",
+            )
+        elif delivery_ack is not None:
+            delivery_ack_receipt = _consume_local_bridge_delivery_ack(
+                delivery_ack
+            )
         speak_requests = drain_local_bridge_speak_requests()
     else:
         authorized, error, status = _request_has_control_token(
@@ -7062,21 +7781,24 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
         )
         if not authorized:
             return json_response({"ok": False, "error": error}, status=status)
-    return json_response(
-        {
-            "ok": True,
-            "localBridge": status_ack or local_bridge_status_snapshot(),
-            "speakRequests": speak_requests,
-            "outputDeviceRequest": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
-            if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice")
-            else {},
-            "micControlRequest": dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST),
-            "minecraftCommandRequest": dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST),
-            "restart": dict(RESTART_REQUEST),
-            "shutdown": dict(SHUTDOWN_REQUEST),
-            "voiceAdmission": LOCAL_VOICE_ADMISSION.public_status(),
-        }
-    )
+    response_payload: dict[str, Any] = {
+        "ok": True,
+        "localBridge": status_ack or local_bridge_status_snapshot(),
+        "speakRequests": speak_requests,
+        "outputDeviceRequest": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
+        if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice")
+        else {},
+        "micControlRequest": dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST),
+        "minecraftCommandRequest": dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST),
+        "restart": dict(RESTART_REQUEST),
+        "shutdown": dict(SHUTDOWN_REQUEST),
+        "voiceAdmission": LOCAL_VOICE_ADMISSION.public_status(),
+    }
+    if delivery_ack_receipt is not None:
+        response_payload["conversationDeliveryAckReceipt"] = (
+            delivery_ack_receipt
+        )
+    return json_response(response_payload)
 
 
 async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
@@ -7378,6 +8100,7 @@ def create_app(
         app.cleanup_ctx.append(
             minecraft_world_lease_owner_context
         )
+    install_mindcraft_llm_broker(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get(
         "/internal/minecraft-world-lease",

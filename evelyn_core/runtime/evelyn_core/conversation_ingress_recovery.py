@@ -1789,6 +1789,45 @@ class ConversationIngressRecoveryJournal:
                 disposition="delivery_ambiguous",
             )
 
+    def discard_ambiguous(
+        self,
+        entry_id: Any,
+        *,
+        assistant_hash: Any,
+        delivery_ref: Any,
+        error_code: Any,
+    ) -> None:
+        """Durably discard one exact, explicitly abandoned delivery."""
+
+        normalized_hash = _sha256(assistant_hash, allow_empty=True)
+        normalized_ref = _bounded_identifier(
+            delivery_ref,
+            code="conversation_ingress_delivery_ref_invalid",
+            max_chars=512,
+        )
+        normalized_error = _error_code(error_code)
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            entry = self._entry(entry_id)
+            if not (
+                entry["phase"] == "delivery_ambiguous"
+                and (
+                    not normalized_hash
+                    or entry["assistantHash"] == normalized_hash
+                )
+                and entry["deliveryRef"] == normalized_ref
+                and entry["lastErrorCode"] == normalized_error
+            ):
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_delivery_binding_mismatch"
+                )
+
+            def mutate() -> None:
+                self._entries.pop(str(entry["entryId"]), None)
+
+            self._mutate_and_write(mutate)
+
     def begin_terminal_commit(
         self,
         entry_id: Any,

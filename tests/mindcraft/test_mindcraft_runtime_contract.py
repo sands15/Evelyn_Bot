@@ -788,7 +788,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("mindcraft-planner", source)
         self.assertIn("gpt-5.5", source)
 
-    def test_planner_defaults_to_local_qwen_and_gates_codex(self) -> None:
+    def test_planner_uses_broker_only_and_gates_codex(self) -> None:
         source = (
             REPO_ROOT / "external" / "mindcraft_evelyn" / "src" / "models" / "evelyn_planner.js"
         ).read_text(encoding="utf-8")
@@ -799,22 +799,27 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn(
             "if (kind === 'memory') throw new Error('mindcraft_memory_summary_unavailable');\n"
             "            if (kind === 'classifier') return 'ignore';\n"
-            "            if (this.codexEnabled) return this.codex.sendRequest(turns, systemMessage);",
+            "            return '지금은 안전하게 판단할 수 없어 멈출게. !stop';",
             source,
         )
+        self.assertNotIn("CodexGateway", source)
+        self.assertNotIn("this.codex.", source)
+        self.assertNotIn("MINDCRAFT_CODEX_GATEWAY_URL", source)
         self.assertIn(
             "if (kind === 'memory' && content === '!stop')",
             source,
         )
-        self.assertIn("http://router_llm:9822/v1/chat/completions", source)
-        self.assertIn("http://minecraft_llm:9823/v1/chat/completions", source)
-        self.assertIn("Qwen3-14B-Q4_K_M.gguf", source)
-        self.assertIn("chat_template_kwargs: {enable_thinking: false}", source)
+        self.assertIn("MINDCRAFT_LLM_BROKER_URL", source)
+        self.assertIn("MINDCRAFT_LLM_BROKER_TOKEN_FILE", source)
+        self.assertIn("mindcraft.llm-request.v1", source)
+        self.assertIn("mindcraft.llm-delivery-ack.v1", source)
+        self.assertNotIn("http://router_llm:9822/v1/chat/completions", source)
+        self.assertNotIn("http://minecraft_llm:9823/v1/chat/completions", source)
         self.assertIn("Planner output violated command policy", source)
         self.assertIn("analyzeRecentTurns", source)
         self.assertIn("same_failed_command_repeated", source)
         self.assertIn("invalid_registry_name", source)
-        self.assertIn("mindcraft-recovery-plan", source)
+        self.assertIn("requestBroker(\n            'recovery'", source)
         self.assertIn("gate=recovery", source)
         self.assertIn("lastObservedExecutionSequence", source)
         self.assertIn("FORBIDDEN_RECOVERY_COMMANDS", source)
@@ -869,6 +874,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         compose = (REPO_ROOT / "docker-compose.fast-control.yml").read_text(
             encoding="utf-8"
         )
+        bot_api = compose.partition("  bot_api:")[2].partition("\n  control_page:")[0]
         voyager = compose.partition("  voyager:")[2].partition("\nvolumes:")[0]
         runtime_source = (
             REPO_ROOT
@@ -975,7 +981,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("PRIVATE_OBSERVATION_CANARY", node_test)
         self.assertIn("PRIVATE_HISTORY_USER_CANARY", node_test)
         self.assertIn("PRIVATE_INTER_AGENT_CANARY", node_test)
-        self.assertIn("assert.match(fetchBodies[0]", node_test)
+        self.assertIn("assert.match(firstBody", node_test)
         self.assertNotIn("durable clear fences in-flight", node_test)
         self.assertIn(
             "patch -p1 < /tmp/evelyn-mindcraft-history-boundary.patch",
@@ -994,6 +1000,23 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("container_name: evelyn-mindcraft", voyager)
         self.assertNotIn("./bot_memory/mindcraft", voyager)
         self.assertNotIn("MINDCRAFT_PLANNER_STATE_PATH", voyager)
+        self.assertIn(
+            'MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"',
+            bot_api,
+        )
+        self.assertIn(
+            'MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"',
+            voyager,
+        )
+        self.assertIn(
+            "mindcraft_llm_broker_token:/mindcraft-llm-broker:ro",
+            voyager,
+        )
+        self.assertIn("bot_api:\n        condition: service_healthy", voyager)
+        self.assertNotIn("MINDCRAFT_LOCAL_", voyager)
+        self.assertNotIn("MINDCRAFT_ROUTER_", voyager)
+        self.assertNotIn("VOYAGER_CODEX_GATEWAY_TOKEN_FILE", voyager)
+        self.assertNotIn("codex_gateway_token:/gateway-token", voyager)
         self.assertIn('"load_memory": False', runtime_source)
         self.assertIn("stdout=subprocess.DEVNULL", runtime_source)
         self.assertIn("stderr=subprocess.DEVNULL", runtime_source)

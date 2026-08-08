@@ -207,7 +207,11 @@ durable reservation/restart, consent generation 교체, revoke/claim 선형화 r
 HTTP EOF lease 경계는 로컬
 소스 테스트 대상으로 포함한다. journal reserve·claim·head write 경계의 오류와
 강제 종료를 재현해 자동 대화 재실행 0, exact duplicate 억제, raw 오류 없는 재시도와
-reservation revoke를 검증했다. 그러나 실제 마이크·스피커에서
+reservation revoke를 검증했다. TTS 재생이 필요한 일반 Local Bridge reply는 HTTP EOF를
+완료로 사용하지 않는다. exact bridge instance·turn·assistant hash의 authenticated
+software-playback ACK 뒤에만 assistant history, continuity와 background action을 한 번
+확정하고, 실패·부분 재생·취소·bridge rotation은 exact ingress를 폐기해 자동 재생하지
+않는다. ACK는 signed status artifact에 저장하지 않는다. 그러나 실제 마이크·스피커에서
 10개 accepted turn, 2개 barge-in, 15초 silence를 연속 수행한 live local E2E는
 아직 사용자 청취 확인과 함께 실행하지 않았다. 따라서 이 문서는 live hardware
 완료 증거가 아니라 현재 코드의 fail-closed 계약이다.

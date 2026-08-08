@@ -58,6 +58,7 @@ from .config import (
     SPEAKER_VERIFICATION_MODEL,
     SPEAKER_VERIFICATION_THRESHOLD,
 )
+from .conversation_ingress_recovery import final_text_sha256
 from .host_supervisor_client import LOCAL_BRIDGE_RESTART_EXIT_CODE
 from .fast_action_runtime import detect_minecraft_runtime_command
 from .host_vision_bridge import HostVisionBridge
@@ -180,6 +181,19 @@ VOICE_CAPTURE_HOST_LEASE_PATH = (
 LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
 LOCAL_VOICE_BOT_CONNECT_MAX_RETRIES = 8
 LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC = 0.5
+LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA = (
+    "local_bridge.conversation-delivery-binding.v1"
+)
+LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA = (
+    "local_bridge.conversation-delivery-ack.v1"
+)
+LOCAL_BRIDGE_DELIVERY_ACK_RECEIPT_SCHEMA = (
+    "local_bridge.conversation-delivery-ack-receipt.v1"
+)
+_LOCAL_BRIDGE_DELIVERY_HASH = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_LOCAL_BRIDGE_DELIVERY_OUTCOMES = frozenset(
+    {"played", "failed", "partial", "cancelled"}
+)
 
 
 class LocalVoiceAdmissionDrop(RuntimeError):
@@ -208,6 +222,7 @@ class LocalMemoryHandoff:
 class LocalChatReply:
     text: str
     memory_handoff: LocalMemoryHandoff
+    playback_ack: dict[str, Any] | None = None
 
 
 def parse_local_memory_handoff(payload: Any) -> LocalMemoryHandoff:
@@ -229,6 +244,55 @@ def parse_local_memory_handoff(payload: Any) -> LocalMemoryHandoff:
     if state == "not_used" and raw_boundary is None:
         return LocalMemoryHandoff(state="not_used", position=None)
     raise MemoryDeletionJournalIntegrityError()
+
+
+def parse_local_playback_ack_binding(
+    payload: Any,
+    *,
+    bridge_instance_id: str,
+    turn_id: str,
+    assistant_text: str | None,
+    allow_pending: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        raise MemoryDeletionJournalIntegrityError()
+    ingress = payload.get("ingress")
+    if ingress is None:
+        return None
+    if not isinstance(ingress, dict):
+        raise MemoryDeletionJournalIntegrityError()
+    binding = ingress.get("playbackAck")
+    if binding is None:
+        return None
+    if not isinstance(binding, dict) or set(binding) != {
+        "schema",
+        "bridgeInstanceId",
+        "turnId",
+        "assistantHash",
+        "required",
+        "contentFree",
+    }:
+        raise MemoryDeletionJournalIntegrityError()
+    assistant_hash = clean_text(binding.get("assistantHash"))
+    if (
+        binding.get("schema") != LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA
+        or clean_text(binding.get("bridgeInstanceId"))
+        != bridge_instance_id
+        or clean_text(binding.get("turnId")) != turn_id
+        or not (
+            (allow_pending and not assistant_hash)
+            or (
+                assistant_text is not None
+                and _LOCAL_BRIDGE_DELIVERY_HASH.fullmatch(assistant_hash)
+                is not None
+                and assistant_hash == final_text_sha256(assistant_text)
+            )
+        )
+        or binding.get("required") is not True
+        or binding.get("contentFree") is not True
+    ):
+        raise MemoryDeletionJournalIntegrityError()
+    return dict(binding)
 
 
 def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
@@ -293,6 +357,8 @@ class LocalIoBridge:
         self.runtime_errors = RuntimeErrorCounter()
         self.last_latency: dict[str, Any] = {}
         self.last_tts_playback: dict[str, Any] = {}
+        self.pending_conversation_delivery_acks: list[dict[str, Any]] = []
+        self.active_conversation_playback_ack: dict[str, Any] | None = None
         self.started_at = time.time()
         self.output_device = normalize_output_device(LOCAL_TTS_OUTPUT_DEVICE)
         self.output_ready = False
@@ -753,12 +819,13 @@ class LocalIoBridge:
                 self.mic_control_state = "failed"
                 self.mic_control_error = "mic_control_failed"
                 self.ready = False
+                self.runtime_errors.record("mic_control_failed", exc)
                 if not enabled:
                     self.mic_capture_stopped = bool(
                         self.service is None
                         or self.service.capture_stopped
                     )
-                self.last_error = f"mic_control_failed: {exc!r}"
+                self.last_error = "mic_control_failed"
             finally:
                 self.mic_control_request_revision = revision
                 self.mic_control_action_id = action_id
@@ -768,7 +835,7 @@ class LocalIoBridge:
             print(
                 "[LOCAL BRIDGE] mic_control_applied "
                 f"enabled={self.mic_enabled} ready={self.ready} revision={revision} "
-                f"error={self.last_error or 'none'}",
+                f"error={self.mic_control_error or 'none'}",
                 flush=True,
             )
 
@@ -1217,6 +1284,157 @@ class LocalIoBridge:
             payload["validation"] = validation
         return payload
 
+    def _playback_ack_from_response(
+        self,
+        payload: Any,
+        *,
+        grant: dict[str, Any],
+        assistant_text: str | None,
+        allow_pending: bool = False,
+    ) -> dict[str, Any] | None:
+        if (
+            clean_text(grant.get("mode")).lower() == "validation"
+            or bool(grant.get("validation"))
+            or self.active_validation is not None
+        ):
+            return None
+        return parse_local_playback_ack_binding(
+            payload,
+            bridge_instance_id=self.bridge_instance_id,
+            turn_id=clean_text(grant.get("turnId")),
+            assistant_text=assistant_text,
+            allow_pending=allow_pending,
+        )
+
+    def _remember_conversation_playback_ack(
+        self,
+        binding: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if binding is None:
+            return self.active_conversation_playback_ack
+        current = self.active_conversation_playback_ack
+        if current is not None and (
+            current["bridgeInstanceId"] != binding["bridgeInstanceId"]
+            or current["turnId"] != binding["turnId"]
+            or (
+                current["assistantHash"]
+                and current["assistantHash"] != binding["assistantHash"]
+            )
+        ):
+            raise MemoryDeletionJournalIntegrityError()
+        self.active_conversation_playback_ack = dict(binding)
+        return self.active_conversation_playback_ack
+
+    def _queue_conversation_delivery_ack(
+        self,
+        binding: dict[str, Any] | None,
+        *,
+        outcome: str,
+    ) -> None:
+        if binding is None:
+            return
+        normalized_outcome = clean_text(outcome).lower()
+        if normalized_outcome not in _LOCAL_BRIDGE_DELIVERY_OUTCOMES:
+            raise ValueError("invalid_conversation_delivery_outcome")
+        if not binding.get("assistantHash") and normalized_outcome == "played":
+            return
+        ack = {
+            "schema": LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
+            "bridgeInstanceId": binding["bridgeInstanceId"],
+            "turnId": binding["turnId"],
+            "assistantHash": binding["assistantHash"],
+            "outcome": normalized_outcome,
+            "contentFree": True,
+        }
+        for index, pending in enumerate(
+            self.pending_conversation_delivery_acks
+        ):
+            if (
+                pending["bridgeInstanceId"] == ack["bridgeInstanceId"]
+                and pending["turnId"] == ack["turnId"]
+                and pending["assistantHash"] == ack["assistantHash"]
+            ):
+                if normalized_outcome == "cancelled":
+                    self.pending_conversation_delivery_acks[index] = ack
+                return
+        self.pending_conversation_delivery_acks.append(ack)
+
+    async def _report_conversation_delivery(
+        self,
+        binding: dict[str, Any] | None,
+        *,
+        outcome: str,
+    ) -> None:
+        if binding is None:
+            return
+        self._queue_conversation_delivery_ack(binding, outcome=outcome)
+        try:
+            await self._post_status()
+        except Exception:
+            # The content-free ACK remains queued for the next heartbeat.
+            return
+
+    def _playback_outcome(self, *, completed: bool) -> str:
+        if self.playback_cancelled_for_turn:
+            return "cancelled"
+        if completed:
+            return "played"
+        if self.playback_started_for_turn:
+            return "partial"
+        return "failed"
+
+    def _consume_conversation_delivery_ack_receipt(
+        self,
+        data: dict[str, Any],
+        *,
+        sent_ack: dict[str, Any] | None,
+    ) -> None:
+        if sent_ack is None:
+            return
+        receipt = data.get("conversationDeliveryAckReceipt")
+        if not isinstance(receipt, dict) or set(receipt) != {
+            "schema",
+            "accepted",
+            "duplicate",
+            "retryable",
+            "errorCode",
+            "contentFree",
+        }:
+            return
+        accepted = receipt.get("accepted")
+        duplicate = receipt.get("duplicate")
+        retryable = receipt.get("retryable")
+        error_code = receipt.get("errorCode")
+        if (
+            receipt.get("schema")
+            != LOCAL_BRIDGE_DELIVERY_ACK_RECEIPT_SCHEMA
+            or type(accepted) is not bool
+            or type(duplicate) is not bool
+            or type(retryable) is not bool
+            or not isinstance(error_code, str)
+            or receipt.get("contentFree") is not True
+            or (accepted and (retryable or error_code))
+            or (not accepted and (duplicate or not error_code))
+        ):
+            return
+        if retryable:
+            return
+        if (
+            self.pending_conversation_delivery_acks
+            and self.pending_conversation_delivery_acks[0] == sent_ack
+        ):
+            self.pending_conversation_delivery_acks.pop(0)
+            active = self.active_conversation_playback_ack
+            if active is not None and all(
+                active[field] == sent_ack[field]
+                for field in (
+                    "bridgeInstanceId",
+                    "turnId",
+                    "assistantHash",
+                )
+            ):
+                self.active_conversation_playback_ack = None
+
     def _local_voice_connection_retry_allowed(
         self,
         grant: dict[str, Any],
@@ -1626,6 +1844,7 @@ class LocalIoBridge:
         self.playback_cancelled_for_turn = False
         self.reply_started_for_turn = False
         self.reply_final_for_turn = False
+        self.active_conversation_playback_ack = None
         stt_ms: float | None = None
         chat_ms: float | None = None
         tts_ms: float | None = None
@@ -1752,6 +1971,10 @@ class LocalIoBridge:
                     stage_started = time.perf_counter()
                     await self._speak_chat_reply(chat_result)
                     tts_ms = (time.perf_counter() - stage_started) * 1000.0
+                elif reply:
+                    await self._report_chat_reply_playback_failure(
+                        chat_result
+                    )
             if reply:
                 self._mark_reply_final_once()
             if self.playback_started_for_turn and not self.playback_cancelled_for_turn:
@@ -1785,8 +2008,16 @@ class LocalIoBridge:
                     meta=meta,
                     reason="turn_cancelled",
                 )
+            await self._report_conversation_delivery(
+                self.active_conversation_playback_ack,
+                outcome="cancelled",
+            )
             raise
         except Exception as exc:
+            await self._report_conversation_delivery(
+                self.active_conversation_playback_ack,
+                outcome=self._playback_outcome(completed=False),
+            )
             self.runtime_errors.record("turn_pipeline_failed", exc)
             self.last_error = "turn_pipeline_failed"
             self._emit_validation(
@@ -1815,7 +2046,10 @@ class LocalIoBridge:
                 f"total_ms={self.last_latency['totalMs']}",
                 flush=True,
             )
-            await self._post_status()
+            try:
+                await self._post_status()
+            finally:
+                self.active_conversation_playback_ack = None
 
     async def _transcribe(self, pcm_bytes: bytes) -> str:
         audio16k = np.asarray(prepare_stt_audio(pcm_bytes), dtype=np.float32)
@@ -1863,12 +2097,42 @@ class LocalIoBridge:
             return LocalChatReply(
                 text=reply,
                 memory_handoff=parse_local_memory_handoff(data),
+                playback_ack=self._playback_ack_from_response(
+                    data,
+                    grant=grant,
+                    assistant_text=reply,
+                ),
             )
 
     async def _speak_chat_reply(self, result: LocalChatReply) -> None:
+        self._remember_conversation_playback_ack(result.playback_ack)
+
+        async def speak_and_report() -> None:
+            play_count = self.play_count
+            try:
+                await self._speak(result.text)
+            except asyncio.CancelledError:
+                await self._report_conversation_delivery(
+                    result.playback_ack,
+                    outcome="cancelled",
+                )
+                raise
+            except Exception:
+                await self._report_conversation_delivery(
+                    result.playback_ack,
+                    outcome=self._playback_outcome(completed=False),
+                )
+                raise
+            await self._report_conversation_delivery(
+                result.playback_ack,
+                outcome=self._playback_outcome(
+                    completed=self.play_count == play_count + 1,
+                ),
+            )
+
         handoff = result.memory_handoff
         if handoff.state == "not_used":
-            await self._speak(result.text)
+            await speak_and_report()
             return
         if handoff.position is None:
             raise MemoryDeletionJournalIntegrityError()
@@ -1877,7 +2141,34 @@ class LocalIoBridge:
             required=True,
             index_dir=Path(MEMORY_ROOT) / "memory_index",
         ):
-            await self._speak(result.text)
+            await speak_and_report()
+
+    async def _report_chat_reply_playback_failure(
+        self,
+        result: LocalChatReply,
+    ) -> None:
+        if result.playback_ack is None:
+            return
+        self._remember_conversation_playback_ack(result.playback_ack)
+
+        async def report() -> None:
+            await self._report_conversation_delivery(
+                result.playback_ack,
+                outcome="failed",
+            )
+
+        handoff = result.memory_handoff
+        if handoff.state == "not_used":
+            await report()
+            return
+        if handoff.position is None:
+            raise MemoryDeletionJournalIntegrityError()
+        with memory_exposure_guard(
+            expected_position=handoff.position,
+            required=True,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        ):
+            await report()
 
     async def _chat_stream_and_speak(
         self,
@@ -1896,11 +2187,21 @@ class LocalIoBridge:
                 text,
                 grant=grant,
             )
+        except asyncio.CancelledError:
+            await self._report_conversation_delivery(
+                self.active_conversation_playback_ack,
+                outcome="cancelled",
+            )
+            raise
         except LocalVoiceAdmissionDrop:
             raise
         except LocalChatStreamFailure:
             raise
         except Exception as exc:
+            await self._report_conversation_delivery(
+                self.active_conversation_playback_ack,
+                outcome=self._playback_outcome(completed=False),
+            )
             raise LocalChatStreamFailure(
                 bot_dispatched=bool(grant.get("_botDispatched")),
             ) from exc
@@ -1991,6 +2292,7 @@ class LocalIoBridge:
         progress_count = 0
         final_reply = ""
         memory_handoff: LocalMemoryHandoff | None = None
+        playback_ack: dict[str, Any] | None = None
         buffered_tts_commands: list[dict[str, str]] = []
         done_seen = False
         chat_done_ms: float | None = None
@@ -2083,6 +2385,52 @@ class LocalIoBridge:
             await ensure_tts_receiver()
             await websocket.send_json(command)
 
+        async def finish_tts_playback(*, send_buffered: bool) -> None:
+            nonlocal receiver
+            try:
+                receiver = await ensure_tts_receiver()
+                if send_buffered:
+                    for command in buffered_tts_commands:
+                        await websocket.send_json(command)
+                await websocket.send_json({"type": "flush"})
+                await receiver
+                if audio_bytes <= 0 or played_bytes <= 0:
+                    raise RuntimeError(
+                        "voxcpm_stream_empty_audio "
+                        f"audio_bytes={audio_bytes} "
+                        f"played_bytes={played_bytes}"
+                    )
+            except asyncio.CancelledError:
+                await self._report_conversation_delivery(
+                    playback_ack,
+                    outcome="cancelled",
+                )
+                raise
+            except Exception:
+                await self._report_conversation_delivery(
+                    playback_ack,
+                    outcome=self._playback_outcome(completed=False),
+                )
+                raise
+
+            self.play_count += 1
+            self.last_error = ""
+            self.last_tts_playback = {
+                "voice": "clone:evelyn",
+                "audioBytes": audio_bytes,
+                "playedBytes": played_bytes,
+                "firstPlaybackMs": (
+                    round(first_playback_ms, 1)
+                    if first_playback_ms is not None
+                    else None
+                ),
+                "inputStreaming": True,
+            }
+            await self._report_conversation_delivery(
+                playback_ack,
+                outcome=self._playback_outcome(completed=True),
+            )
+
         try:
             await self._post_status()
             websocket = await self.session.ws_connect(
@@ -2132,6 +2480,19 @@ class LocalIoBridge:
                     if not isinstance(event, dict):
                         raise MemoryDeletionJournalIntegrityError()
                     event_type = clean_text(event.get("type"))
+                    if event_type != "done":
+                        pending_ack = self._playback_ack_from_response(
+                            event,
+                            grant=grant,
+                            assistant_text=None,
+                            allow_pending=True,
+                        )
+                        if pending_ack is not None:
+                            playback_ack = (
+                                self._remember_conversation_playback_ack(
+                                    pending_ack
+                                )
+                            )
                     if event_type == "memory_boundary":
                         if memory_handoff is not None:
                             raise MemoryDeletionJournalIntegrityError()
@@ -2181,6 +2542,21 @@ class LocalIoBridge:
                             raise MemoryDeletionJournalIntegrityError()
                         done_seen = True
                         final_reply = clean_text(event.get("reply"))
+                        final_playback_ack = self._playback_ack_from_response(
+                            event,
+                            grant=grant,
+                            assistant_text=final_reply,
+                        )
+                        if (
+                            playback_ack is not None
+                            and final_playback_ack is None
+                        ):
+                            raise MemoryDeletionJournalIntegrityError()
+                        playback_ack = (
+                            self._remember_conversation_playback_ack(
+                                final_playback_ack
+                            )
+                        )
                         if final_reply:
                             self._mark_reply_final_once()
                         chat_done_ms = (time.perf_counter() - started_at) * 1000.0
@@ -2198,29 +2574,9 @@ class LocalIoBridge:
                     required=True,
                     index_dir=Path(MEMORY_ROOT) / "memory_index",
                 ):
-                    receiver = await ensure_tts_receiver()
-                    for command in buffered_tts_commands:
-                        await websocket.send_json(command)
-                    await websocket.send_json({"type": "flush"})
-                    await receiver
+                    await finish_tts_playback(send_buffered=True)
             else:
-                receiver = await ensure_tts_receiver()
-                await websocket.send_json({"type": "flush"})
-                await receiver
-            if audio_bytes <= 0 or played_bytes <= 0:
-                raise RuntimeError(
-                    f"voxcpm_stream_empty_audio audio_bytes={audio_bytes} played_bytes={played_bytes}"
-                )
-
-            self.play_count += 1
-            self.last_error = ""
-            self.last_tts_playback = {
-                "voice": "clone:evelyn",
-                "audioBytes": audio_bytes,
-                "playedBytes": played_bytes,
-                "firstPlaybackMs": round(first_playback_ms, 1) if first_playback_ms is not None else None,
-                "inputStreaming": True,
-            }
+                await finish_tts_playback(send_buffered=False)
             elapsed_ms = (time.perf_counter() - started_at) * 1000.0
             print(
                 "[LOCAL BRIDGE] delta_stream_reply "
@@ -2272,8 +2628,31 @@ class LocalIoBridge:
         first_sentence_ms: float | None = None
         final_reply = ""
         memory_handoff: LocalMemoryHandoff | None = None
+        playback_ack: dict[str, Any] | None = None
         buffered_sentences: list[str] = []
+        played_sentence_count = 0
         done_seen = False
+
+        async def speak_sentence(sentence: str) -> None:
+            nonlocal played_sentence_count, tts_ms
+            play_count = self.play_count
+            speak_started = time.perf_counter()
+            await self._speak(sentence)
+            tts_ms += (time.perf_counter() - speak_started) * 1000.0
+            if self.play_count == play_count + 1:
+                played_sentence_count += 1
+
+        async def report_stream_outcome() -> None:
+            await self._report_conversation_delivery(
+                playback_ack,
+                outcome=self._playback_outcome(
+                    completed=(
+                        sentence_count > 0
+                        and played_sentence_count == sentence_count
+                    ),
+                ),
+            )
+
         payload = await self._local_voice_chat_payload(text, grant)
         grant["_botDispatched"] = True
         async with self._local_voice_bot_response(
@@ -2309,6 +2688,19 @@ class LocalIoBridge:
                 if not isinstance(event, dict):
                     raise MemoryDeletionJournalIntegrityError()
                 event_type = clean_text(event.get("type"))
+                if event_type != "done":
+                    pending_ack = self._playback_ack_from_response(
+                        event,
+                        grant=grant,
+                        assistant_text=None,
+                        allow_pending=True,
+                    )
+                    if pending_ack is not None:
+                        playback_ack = (
+                            self._remember_conversation_playback_ack(
+                                pending_ack
+                            )
+                        )
                 if event_type == "memory_boundary":
                     if memory_handoff is not None:
                         raise MemoryDeletionJournalIntegrityError()
@@ -2326,9 +2718,7 @@ class LocalIoBridge:
                     if memory_handoff.state == "bound":
                         buffered_sentences.append(sentence)
                     else:
-                        speak_started = time.perf_counter()
-                        await self._speak(sentence)
-                        tts_ms += (time.perf_counter() - speak_started) * 1000.0
+                        await speak_sentence(sentence)
                     continue
                 if event_type == "done":
                     if done_seen:
@@ -2337,6 +2727,21 @@ class LocalIoBridge:
                         raise MemoryDeletionJournalIntegrityError()
                     done_seen = True
                     final_reply = clean_text(event.get("reply"))
+                    final_playback_ack = self._playback_ack_from_response(
+                        event,
+                        grant=grant,
+                        assistant_text=final_reply,
+                    )
+                    if (
+                        playback_ack is not None
+                        and final_playback_ack is None
+                    ):
+                        raise MemoryDeletionJournalIntegrityError()
+                    playback_ack = (
+                        self._remember_conversation_playback_ack(
+                            final_playback_ack
+                        )
+                    )
                     if final_reply:
                         self._mark_reply_final_once()
                     continue
@@ -2352,12 +2757,24 @@ class LocalIoBridge:
                 required=True,
                 index_dir=Path(MEMORY_ROOT) / "memory_index",
             ):
-                for sentence in buffered_sentences:
-                    speak_started = time.perf_counter()
-                    await self._speak(sentence)
-                    tts_ms += (
-                        time.perf_counter() - speak_started
-                    ) * 1000.0
+                try:
+                    for sentence in buffered_sentences:
+                        await speak_sentence(sentence)
+                except asyncio.CancelledError:
+                    await self._report_conversation_delivery(
+                        playback_ack,
+                        outcome="cancelled",
+                    )
+                    raise
+                except Exception:
+                    await self._report_conversation_delivery(
+                        playback_ack,
+                        outcome=self._playback_outcome(completed=False),
+                    )
+                    raise
+                await report_stream_outcome()
+        else:
+            await report_stream_outcome()
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         chat_ms = max(0.0, elapsed_ms - tts_ms)
         print(
@@ -2866,6 +3283,7 @@ class LocalIoBridge:
         }
         if extra:
             payload.update(extra)
+        payload.pop("conversationDeliveryAck", None)
         payload = sign_voice_capture_artifact(
             payload,
             auth_scope=BRIDGE_STATUS_AUTH_SCOPE,
@@ -2903,10 +3321,18 @@ class LocalIoBridge:
             )
         except Exception as exc:
             self.runtime_errors.record("silence_liveness_emit_failed", exc)
+        sent_delivery_ack = (
+            dict(self.pending_conversation_delivery_acks[0])
+            if self.pending_conversation_delivery_acks
+            else None
+        )
+        http_payload = dict(payload)
+        if sent_delivery_ack is not None:
+            http_payload["conversationDeliveryAck"] = sent_delivery_ack
         try:
             async with self.session.post(
                 f"{BOT_API_BASE}/api/local-bridge/status",
-                json=payload,
+                json=http_payload,
                 headers={
                     LOCAL_BRIDGE_STATUS_AUTH_HEADER: (
                         LOCAL_BRIDGE_STATUS_AUTH_TOKEN
@@ -2935,6 +3361,10 @@ class LocalIoBridge:
                     and float(acknowledged["startedAt"]) == self.started_at
                 ):
                     return False
+                self._consume_conversation_delivery_ack_receipt(
+                    data,
+                    sent_ack=sent_delivery_ack,
+                )
                 self._handle_control_response(data)
                 return True
         except Exception:

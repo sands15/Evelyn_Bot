@@ -778,6 +778,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_failure_emits_only_fixed_error_code(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas
         recorded: list[tuple[str, str]] = []
+        discarded: list[tuple[str, str]] = []
 
         class ContinuityOwner:
             enabled = True
@@ -833,6 +834,11 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
             @staticmethod
             def mark_ingress_delivery_ambiguous(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def discard_failed_ingress(entry_id, *, assistant_hash):
+                discarded.append((entry_id, assistant_hash))
                 return {}
 
             @staticmethod
@@ -908,13 +914,19 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(error["continuity"]["durable"])
         self.assertTrue(error["continuity"]["pendingDelivery"])
+        self.assertEqual(recorded, [])
+        self.assertEqual(len(discarded), 1)
         self.assertEqual(
-            recorded,
-            [("실패 테스트", error["message"])],
+            discarded[0][1],
+            fast_api.final_text_sha256(error["message"]),
         )
-        self.assertEqual(
-            fast_api.CHAT_MESSAGES[-1]["text"],
+        self.assertNotIn(
             error["message"],
+            [
+                message.get("text")
+                for message in fast_api.CHAT_MESSAGES
+                if message.get("role") == "assistant"
+            ],
         )
         public_text = json.dumps(events, ensure_ascii=False)
         self.assertNotIn("stream-secret", public_text)

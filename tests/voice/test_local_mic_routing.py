@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 import runpy
 import sys
@@ -378,7 +379,7 @@ class LocalMicRoutingTests(unittest.TestCase):
                 self.assertEqual(bridge.mic_control_action_id, f"{19:032x}")
                 self.assertEqual(bridge.mic_control_state, "failed")
                 self.assertEqual(bridge.mic_control_error, "mic_control_failed")
-                self.assertIn("local_bridge_lifecycle_stopping", bridge.last_error)
+                self.assertEqual(bridge.last_error, "mic_control_failed")
 
     def test_local_io_bridge_enqueues_control_page_speak_requests(self) -> None:
         bridge = LocalIoBridge()
@@ -427,6 +428,59 @@ class LocalMicRoutingTests(unittest.TestCase):
         bridge._chat_stream_and_speak.assert_not_awaited()  # type: ignore[union-attr]
         bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
         self.assertEqual(bridge.last_latency["ttsMs"], 0.0)
+
+    def test_tts_disabled_reports_bound_reply_as_failed(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge.mic_enabled = True
+            bridge.mic_capture_stopped = False
+            turn_id = "tts-disabled-turn"
+            reply = "재생되지 않은 응답"
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            bridge._transcribe = AsyncMock(  # type: ignore[method-assign]
+                return_value="안녕 이블린"
+            )
+            bridge._chat = AsyncMock(  # type: ignore[method-assign]
+                return_value=local_io_bridge.LocalChatReply(
+                    text=reply,
+                    memory_handoff=local_io_bridge.LocalMemoryHandoff(
+                        state="not_used",
+                        position=None,
+                    ),
+                    playback_ack={
+                        "schema": (
+                            local_io_bridge.LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA
+                        ),
+                        "bridgeInstanceId": bridge.bridge_instance_id,
+                        "turnId": turn_id,
+                        "assistantHash": (
+                            local_io_bridge.final_text_sha256(reply)
+                        ),
+                        "required": True,
+                        "contentFree": True,
+                    },
+                )
+            )
+            bridge._speak = AsyncMock()  # type: ignore[method-assign]
+            install_admission_grant(bridge)
+            with patch.object(
+                local_io_bridge,
+                "LOCAL_BRIDGE_TTS_ENABLED",
+                False,
+            ):
+                await bridge._handle_segment(
+                    b"pcm",
+                    {"source": "test", "turnId": turn_id},
+                )
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
+        self.assertEqual(
+            bridge.pending_conversation_delivery_acks[0]["outcome"],
+            "failed",
+        )
 
     def test_local_io_bridge_redacts_turn_pipeline_error_from_status_and_log(self) -> None:
         private_error = "PRIVATE_STT_RESPONSE_CANARY"
@@ -626,7 +680,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIs(bridge.service, service)
         self.assertFalse(bridge.mic_capture_stopped)
         self.assertFalse(bridge.ready)
-        self.assertIn("local_mic_stop_timeout", bridge.last_error)
+        self.assertEqual(bridge.last_error, "mic_control_failed")
 
     def test_local_io_bridge_enable_retry_retires_not_ready_service_before_replacement(
         self,
@@ -1488,6 +1542,16 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.voice_capture_fence_digest, "")
         self.assertEqual(bridge.mic_control_state, "failed")
+        self.assertEqual(bridge.last_error, "mic_control_failed")
+        self.assertNotIn(
+            "private stop failure",
+            json.dumps(
+                {
+                    "lastError": bridge.last_error,
+                    **bridge.runtime_errors.snapshot(),
+                }
+            ),
+        )
 
     async def test_stop_failure_fail_safe_forces_process_exit(self):
         with patch.object(local_io_bridge.os, "_exit") as exit_process:

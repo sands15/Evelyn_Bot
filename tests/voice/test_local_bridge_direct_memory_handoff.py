@@ -375,6 +375,52 @@ class LocalBridgeDirectMemoryHandoffTests(
         return events
 
     @staticmethod
+    def playback_binding(
+        bridge: local_io_bridge.LocalIoBridge,
+        *,
+        turn_id: str,
+        reply: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "schema": local_io_bridge.LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA,
+            "bridgeInstanceId": bridge.bridge_instance_id,
+            "turnId": turn_id,
+            "assistantHash": (
+                local_io_bridge.final_text_sha256(reply)
+                if reply is not None
+                else ""
+            ),
+            "required": True,
+            "contentFree": True,
+        }
+
+    @classmethod
+    def playback_bound_events(
+        cls,
+        bridge: local_io_bridge.LocalIoBridge,
+        position: memory_exposure.MemoryExposurePosition,
+        *,
+        delta: bool,
+        turn_id: str,
+    ) -> list[dict[str, Any]]:
+        events = cls.bound_events(position, delta=delta)
+        events[0]["ingress"] = {
+            "playbackAck": cls.playback_binding(
+                bridge,
+                turn_id=turn_id,
+                reply=None,
+            )
+        }
+        events[-1]["ingress"] = {
+            "playbackAck": cls.playback_binding(
+                bridge,
+                turn_id=turn_id,
+                reply="안녕.",
+            )
+        }
+        return events
+
+    @staticmethod
     def configured_bridge() -> local_io_bridge.LocalIoBridge:
         bridge = local_io_bridge.LocalIoBridge()
         bridge._post_status = AsyncMock()
@@ -422,10 +468,26 @@ class LocalBridgeDirectMemoryHandoffTests(
             }
             spoken: list[tuple[str, bool, bool]] = []
             guard_entries: list[dict[str, Any]] = []
+            ack_posts: list[tuple[str, bool]] = []
 
             bridge = self.configured_bridge()
+            turn_id = "sentence-turn"
+
+            async def post_status() -> bool:
+                if bridge.pending_conversation_delivery_acks:
+                    ack_posts.append(
+                        (
+                            bridge.pending_conversation_delivery_acks[0][
+                                "outcome"
+                            ],
+                            bool(state["guard_active"]),
+                        )
+                    )
+                return True
 
             async def speak(text: str) -> None:
+                bridge.play_count += 1
+                bridge.playback_started_for_turn = True
                 spoken.append(
                     (
                         text,
@@ -434,9 +496,15 @@ class LocalBridgeDirectMemoryHandoffTests(
                     )
                 )
 
+            bridge._post_status = AsyncMock(side_effect=post_status)
             bridge._speak = AsyncMock(side_effect=speak)
             response = _StreamingResponse(
-                self.bound_events(position, delta=False),
+                self.playback_bound_events(
+                    bridge,
+                    position,
+                    delta=False,
+                    turn_id=turn_id,
+                ),
                 state=state,
                 on_exit=lambda: self.assertEqual(spoken, []),
             )
@@ -449,7 +517,7 @@ class LocalBridgeDirectMemoryHandoffTests(
             ):
                 result = await bridge._chat_sentence_stream_and_speak(
                     "test",
-                    grant={},
+                    grant={"turnId": turn_id, "mode": "wake"},
                 )
 
             self.assertEqual(result["reply"], "안녕.")
@@ -466,6 +534,11 @@ class LocalBridgeDirectMemoryHandoffTests(
                 position,
             )
             self.assertTrue(guard_entries[0]["required"])
+            self.assertEqual(ack_posts, [("played", True)])
+            self.assertEqual(
+                bridge.pending_conversation_delivery_acks[0]["outcome"],
+                "played",
+            )
 
     async def test_sentence_stale_at_eof_never_speaks(self) -> None:
         for mode in ("version", "tombstone"):
@@ -530,6 +603,22 @@ class LocalBridgeDirectMemoryHandoffTests(
             websocket = _WebSocket(state=state)
             sound_device = _SoundDevice(state=state)
             bridge = self.configured_bridge()
+            turn_id = "delta-turn"
+            ack_posts: list[tuple[str, bool]] = []
+
+            async def post_status() -> bool:
+                if bridge.pending_conversation_delivery_acks:
+                    ack_posts.append(
+                        (
+                            bridge.pending_conversation_delivery_acks[0][
+                                "outcome"
+                            ],
+                            bool(state["guard_active"]),
+                        )
+                    )
+                return True
+
+            bridge._post_status = AsyncMock(side_effect=post_status)
 
             def assert_nothing_synthesized_before_exit() -> None:
                 self.assertEqual(
@@ -539,7 +628,12 @@ class LocalBridgeDirectMemoryHandoffTests(
                 self.assertEqual(sound_device.stream.writes, [])
 
             response = _StreamingResponse(
-                self.bound_events(position, delta=True),
+                self.playback_bound_events(
+                    bridge,
+                    position,
+                    delta=True,
+                    turn_id=turn_id,
+                ),
                 state=state,
                 on_exit=assert_nothing_synthesized_before_exit,
             )
@@ -556,7 +650,7 @@ class LocalBridgeDirectMemoryHandoffTests(
             ):
                 result = await bridge._chat_delta_stream_and_speak(
                     "test",
-                    grant={},
+                    grant={"turnId": turn_id, "mode": "wake"},
                 )
 
             self.assertEqual(result["reply"], "안녕.")
@@ -579,6 +673,11 @@ class LocalBridgeDirectMemoryHandoffTests(
                 )
             )
             self.assertEqual(len(guard_entries), 1)
+            self.assertEqual(ack_posts[0], ("played", True))
+            self.assertEqual(
+                bridge.pending_conversation_delivery_acks[0]["outcome"],
+                "played",
+            )
 
     async def test_delta_stale_at_eof_never_synthesizes_or_plays(
         self,
@@ -638,6 +737,182 @@ class LocalBridgeDirectMemoryHandoffTests(
                     self.assertEqual(sound_device.stream.writes, [])
                     bridge._mark_playback_started_once.assert_not_called()
                     self.assertEqual(len(guard_entries), 1)
+
+    async def test_json_bound_reports_played_inside_memory_guard(self) -> None:
+        with self.isolated_roots() as (bot_memory, _artifacts):
+            index_dir = bot_memory / "memory_index"
+            self.write_memory_version(index_dir, 1)
+            position = self.exposure_position(index_dir, version=1)
+            wire = memory_exposure.memory_exposure_position_to_dict(position)
+            state = {
+                "response_open": False,
+                "response_exited": True,
+                "guard_active": False,
+            }
+            guard_entries: list[dict[str, Any]] = []
+            ack_posts: list[tuple[str, bool]] = []
+            bridge = self.configured_bridge()
+            turn_id = "json-turn"
+            reply = "안녕."
+
+            async def speak(_text: str) -> None:
+                bridge.play_count += 1
+                bridge.playback_started_for_turn = True
+
+            async def post_status() -> bool:
+                if bridge.pending_conversation_delivery_acks:
+                    ack_posts.append(
+                        (
+                            bridge.pending_conversation_delivery_acks[0][
+                                "outcome"
+                            ],
+                            bool(state["guard_active"]),
+                        )
+                    )
+                return True
+
+            payload = {
+                "ok": True,
+                "reply": reply,
+                "memoryState": "bound",
+                "memoryBoundary": wire,
+                "ingress": {
+                    "playbackAck": self.playback_binding(
+                        bridge,
+                        turn_id=turn_id,
+                        reply=reply,
+                    )
+                },
+            }
+            bridge.session = _Session(_JsonResponse(payload))
+            bridge._speak = AsyncMock(side_effect=speak)
+            bridge._post_status = AsyncMock(side_effect=post_status)
+            chat_reply = await bridge._chat(
+                "test",
+                grant={"turnId": turn_id, "mode": "wake"},
+            )
+
+            with patch.object(
+                local_io_bridge,
+                "memory_exposure_guard",
+                self.observed_guard(state, guard_entries),
+            ):
+                await bridge._speak_chat_reply(chat_reply)
+
+            self.assertEqual(ack_posts, [("played", True)])
+            self.assertEqual(len(guard_entries), 1)
+            self.assertEqual(
+                bridge.pending_conversation_delivery_acks[0]["outcome"],
+                "played",
+            )
+
+    async def test_pending_stream_binding_never_reports_success(self) -> None:
+        for expected_outcome in ("failed", "partial", "cancelled"):
+            with self.subTest(outcome=expected_outcome):
+                bridge = self.configured_bridge()
+                turn_id = f"{expected_outcome}-turn"
+                pending_binding = self.playback_binding(
+                    bridge,
+                    turn_id=turn_id,
+                    reply=None,
+                )
+
+                async def stop_stream(*_args, **_kwargs):
+                    bridge._remember_conversation_playback_ack(
+                        pending_binding
+                    )
+                    bridge.playback_started_for_turn = (
+                        expected_outcome == "partial"
+                    )
+                    if expected_outcome == "cancelled":
+                        raise asyncio.CancelledError()
+                    raise RuntimeError("PRIVATE playback failure")
+
+                bridge._chat_sentence_stream_and_speak = AsyncMock(
+                    side_effect=stop_stream
+                )
+                grant = {"turnId": turn_id, "mode": "wake"}
+                with patch.object(
+                    local_io_bridge,
+                    "LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",
+                    False,
+                ):
+                    if expected_outcome == "cancelled":
+                        with self.assertRaises(asyncio.CancelledError):
+                            await bridge._chat_stream_and_speak(
+                                "test",
+                                grant=grant,
+                            )
+                    else:
+                        with self.assertRaises(
+                            local_io_bridge.LocalChatStreamFailure
+                        ):
+                            await bridge._chat_stream_and_speak(
+                                "test",
+                                grant=grant,
+                            )
+
+                self.assertEqual(
+                    bridge.pending_conversation_delivery_acks,
+                    [
+                        {
+                            "schema": (
+                                local_io_bridge.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA
+                            ),
+                            "bridgeInstanceId": bridge.bridge_instance_id,
+                            "turnId": turn_id,
+                            "assistantHash": "",
+                            "outcome": expected_outcome,
+                            "contentFree": True,
+                        }
+                    ],
+                )
+
+    def test_validation_response_does_not_create_playback_ack(self) -> None:
+        bridge = self.configured_bridge()
+        turn_id = "validation-turn"
+        reply = "검증 응답"
+        payload = {
+            "ingress": {
+                "playbackAck": self.playback_binding(
+                    bridge,
+                    turn_id=turn_id,
+                    reply=reply,
+                )
+            }
+        }
+
+        binding = bridge._playback_ack_from_response(
+            payload,
+            grant={"turnId": turn_id, "mode": "validation"},
+            assistant_text=reply,
+        )
+
+        self.assertIsNone(binding)
+        self.assertEqual(bridge.pending_conversation_delivery_acks, [])
+
+    def test_pending_partial_ack_is_upgraded_to_cancelled(self) -> None:
+        bridge = self.configured_bridge()
+        binding = self.playback_binding(
+            bridge,
+            turn_id="cancel-upgrade-turn",
+            reply=None,
+        )
+
+        bridge._queue_conversation_delivery_ack(
+            binding,
+            outcome="partial",
+        )
+        bridge._queue_conversation_delivery_ack(
+            binding,
+            outcome="cancelled",
+        )
+
+        self.assertEqual(len(bridge.pending_conversation_delivery_acks), 1)
+        self.assertEqual(
+            bridge.pending_conversation_delivery_acks[0]["outcome"],
+            "cancelled",
+        )
 
     async def test_non_stream_chat_missing_or_malformed_boundary_fails_closed(
         self,

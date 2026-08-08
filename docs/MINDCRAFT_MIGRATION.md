@@ -92,14 +92,21 @@ identity transform for local Qwen. The Python owner sends the Node child's
 stdout and stderr to `DEVNULL`. This prevents new child output capture but does
 not remove legacy logs or data.
 
-This is not durable, rollback-safe, or integrated with Evelyn's core
-deletion/edit exposure. The remaining P1 is a fixed-route authenticated Bot API
-broker that reuses `memory_exposure_request`, holds its lease through a delivery
-ACK, and carries strict compact receipts on structured assistant turns. No
-Docker image, live Minecraft session, or live clear was validated in this
-increment. Recovery correlation currently uses command codes, so exact
-same-command/different-target correlation remains P1. `!clearChat` is not a
-permanent autonomy stop; use `!endGoal` for that intent.
+The Node planner no longer calls model endpoints directly. Its structured local,
+router, subgoal, and recovery requests use one token-file-authenticated Bot API
+broker; the server chooses fixed upstreams, reuses the core conversation filter
+and `memory_exposure_request`, and holds that lease through the Node frame
+consumer's exact `delivered|discarded` ACK. Broker request projection rows carry
+strict `not_used` receipts because this runtime does not receive core memory
+input; any other returned receipt state is rejected. The ACK proves frame
+consumption, not history append, chat delivery, or world action. The process-local
+generation fence separately continues through the awaited final route/action sink.
+
+This is still not durable or rollback-safe and does not provide bound-receipt
+restart history or legacy cleanup. No Docker image, live Minecraft session, or
+live clear was validated in this increment. Recovery correlation currently uses
+command codes, so exact same-command/different-target correlation remains P1.
+`!clearChat` is not a permanent autonomy stop; use `!endGoal` for that intent.
 
 ## Runtime generated-code lint gate
 

@@ -38,6 +38,11 @@ services:
       MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
       SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
       ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
+      MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"
+      MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"
+      MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"
+      MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"
+      MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"
       OMNIVOICE_SERVER_URL: "http://tts:8880"
       STT_SERVICE_URL: "http://stt:8892"
       VISION_SERVICE_URL: "http://vision:8891"
@@ -62,6 +67,7 @@ services:
       - ./external:/app/external
       - ./assets:/app/assets
       - ./docs:/app/docs
+      - mindcraft_llm_broker_token:/mindcraft-llm-broker
     ports:
       - "127.0.0.1:8798:8798"
     healthcheck:
@@ -670,13 +676,8 @@ services:
       MINDCRAFT_GOAL_MANAGER_STATE_PATH: "/app/runtime_artifacts/mindcraft/goal_manager_state.json"
       MINDCRAFT_GOAL_MANAGER_MODE: "gated"
       MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"
-      MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"
-      MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"
-      MINDCRAFT_LOCAL_TIMEOUT_SEC: "90"
-      MINDCRAFT_LOCAL_MAX_TOKENS: "160"
-      MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"
-      MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"
-      MINDCRAFT_ROUTER_TIMEOUT_SEC: "4"
+      MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"
+      MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"
       MINDCRAFT_ALLOWED_PLAYERS: "${MINDCRAFT_ALLOWED_PLAYERS:-}"
       MINDSERVER_PORT: "8080"
       MINEFLAYER_HOST: "host.docker.internal"
@@ -692,6 +693,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
+      bot_api:
+        condition: service_healthy
       router_llm:
         condition: service_healthy
       minecraft_llm:
@@ -700,6 +703,7 @@ services:
       - ./bot_profiles:/app/bot_profiles
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs
+      - mindcraft_llm_broker_token:/mindcraft-llm-broker:ro
     ports:
       - "127.0.0.1:8765:8765"
     command: ["python3", "-m", "evelyn_core.mindcraft_service", "--host", "0.0.0.0", "--port", "8765"]
@@ -712,6 +716,7 @@ services:
 
 volumes:
   codex_gateway_token:
+  mindcraft_llm_broker_token:
 
 networks:
   vision_isolated:

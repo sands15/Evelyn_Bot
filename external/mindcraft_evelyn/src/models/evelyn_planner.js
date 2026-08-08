@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import minecraftData from 'minecraft-data';
 import { getCommand } from '../agent/commands/index.js';
 import { itemMatchesTarget } from '../agent/evelyn_world_state.js';
@@ -7,16 +9,18 @@ import {
     isMindcraftHistoryBoundaryError,
     withMindcraftHistoryExposure,
 } from '../utils/evelyn_history_boundary.js';
-import { CodexGateway } from './codex_gateway.js';
 
-const DEFAULT_LOCAL_URL = 'http://minecraft_llm:9823/v1/chat/completions';
-const DEFAULT_LOCAL_MODEL = 'Qwen3-14B-Q4_K_M.gguf';
-const DEFAULT_ROUTER_URL = 'http://router_llm:9822/v1/chat/completions';
-const DEFAULT_ROUTER_MODEL = 'gemma-4-E2B-it-Q4_K_M.gguf';
+const DEFAULT_BROKER_URL = 'http://bot_api:8798/internal/mindcraft-llm';
+const DEFAULT_BROKER_TOKEN_FILE = '/mindcraft-llm-broker/token';
+const BROKER_REQUEST_SCHEMA = 'mindcraft.llm-request.v1';
+const BROKER_RESULT_SCHEMA = 'mindcraft.llm-result.v1';
+const BROKER_DELIVERY_LEASE_SCHEMA = 'mindcraft.llm-delivery-lease.v1';
+const BROKER_DELIVERY_ACK_SCHEMA = 'mindcraft.llm-delivery-ack.v1';
+const BROKER_TOKEN_HEADER = 'X-Evelyn-Mindcraft-LLM-Token';
+const BROKER_MAX_FRAME_BYTES = 256 * 1024;
+const BROKER_REQUEST_TIMEOUT_MS = 100 * 1000;
+const BROKER_ACK_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_GOAL_STATE_PATH = '/app/runtime_artifacts/mindcraft/goal_manager_state.json';
-const ACTION_TOKEN_LIMIT = 64;
-const MEMORY_TOKEN_LIMIT = 256;
-const SUBGOAL_TOKEN_LIMIT = 512;
 const RECOVERY_PLAN_TTL_MS = 5 * 60 * 1000;
 const ACTION_MODE_TTL_MS = 15 * 60 * 1000;
 const ALWAYS_ALLOWED_COMMANDS = new Set(['!stop', '!stats', '!inventory', '!nearbyBlocks', '!craftable']);
@@ -36,6 +40,20 @@ function positiveNumber(value, fallback) {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function localEmbedding(text) {
+    const vector = new Array(128).fill(0);
+    for (const token of String(text || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu) || []) {
+        let hash = 2166136261;
+        for (const char of token) {
+            hash ^= char.codePointAt(0);
+            hash = Math.imul(hash, 16777619);
+        }
+        vector[(hash >>> 0) % vector.length] += 1;
+    }
+    const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
+    return vector.map((value) => value / norm);
+}
+
 function compactTurns(turns, maxTurns = 8, maxCharsPerTurn = 1800) {
     return (Array.isArray(turns) ? turns : [])
         .slice(-maxTurns)
@@ -53,10 +71,9 @@ function formatTurns(turns) {
         .join('\n');
 }
 
-function responseContent(payload) {
-    const content = payload?.choices?.[0]?.message?.content;
+function cleanResponseContent(content) {
     if (typeof content !== 'string' || !content.trim()) {
-        throw new Error('LLM response did not contain message content');
+        throw brokerError('mindcraft_llm_result_invalid');
     }
     return content
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -74,23 +91,253 @@ function enforceCommandPolicy(content) {
     return normalized;
 }
 
-async function postJson(url, body, timeoutSec) {
-    assertMindcraftHistoryCurrent();
+function brokerError(code) {
+    const error = new Error(code);
+    error.code = code;
+    return error;
+}
+
+function exactKeys(value, keys) {
+    return value && typeof value === 'object' && !Array.isArray(value) &&
+        Object.keys(value).sort().join('\n') === [...keys].sort().join('\n');
+}
+
+function notUsedReceiptRef() {
+    return {
+        schema: 'conversation.memory-receipt-ref.v1',
+        state: 'not_used',
+        memoryVersion: 0,
+        suppliedNoteIds: [],
+        suppliedNoteCount: 0,
+        contentFree: true,
+    };
+}
+
+function receiptIsNotUsed(value) {
+    return exactKeys(value, [
+        'schema', 'state', 'memoryVersion', 'suppliedNoteIds',
+        'suppliedNoteCount', 'contentFree',
+    ]) && value.schema === 'conversation.memory-receipt-ref.v1' &&
+        value.state === 'not_used' && value.memoryVersion === 0 &&
+        Array.isArray(value.suppliedNoteIds) && value.suppliedNoteIds.length === 0 &&
+        value.suppliedNoteCount === 0 && value.contentFree === true;
+}
+
+function brokerUrl() {
+    try {
+        const parsed = new URL(process.env.MINDCRAFT_LLM_BROKER_URL || DEFAULT_BROKER_URL);
+        if (
+            !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password ||
+            parsed.pathname !== '/internal/mindcraft-llm' || parsed.search || parsed.hash
+        ) {
+            throw new Error();
+        }
+        return parsed.href;
+    } catch {
+        throw brokerError('mindcraft_llm_broker_url_invalid');
+    }
+}
+
+function brokerToken() {
+    const tokenPath = process.env.MINDCRAFT_LLM_BROKER_TOKEN_FILE || DEFAULT_BROKER_TOKEN_FILE;
+    try {
+        if (!path.isAbsolute(tokenPath)) throw new Error();
+        const token = fs.readFileSync(tokenPath, 'utf8').trim();
+        if (!/^[A-Za-z0-9_-]{43,128}$/.test(token)) throw new Error();
+        return token;
+    } catch {
+        throw brokerError('mindcraft_llm_broker_token_invalid');
+    }
+}
+
+function brokerMessages(messages) {
+    if (!Array.isArray(messages) || !messages.length || messages.length > 24) {
+        throw brokerError('mindcraft_llm_request_invalid');
+    }
+    return messages.map((message) => {
+        const role = String(message?.role || '');
+        const content = String(message?.content || '');
+        if (!['assistant', 'system', 'user'].includes(role) || !content) {
+            throw brokerError('mindcraft_llm_request_invalid');
+        }
+        return {role, content, memoryReceiptRef: notUsedReceiptRef()};
+    });
+}
+
+function validateBrokerFrame(frame, requestId) {
+    if (
+        !exactKeys(frame, ['schema', 'requestId', 'content', 'memoryReceiptRef', 'deliveryLease']) ||
+        frame.schema !== BROKER_RESULT_SCHEMA || frame.requestId !== requestId ||
+        typeof frame.content !== 'string' || !frame.content.trim() ||
+        !receiptIsNotUsed(frame.memoryReceiptRef)
+    ) {
+        throw brokerError('mindcraft_llm_result_invalid');
+    }
+    const lease = frame.deliveryLease;
+    if (
+        !exactKeys(lease, ['schema', 'leaseId', 'ttlMs', 'contentFree']) ||
+        lease.schema !== BROKER_DELIVERY_LEASE_SCHEMA ||
+        !/^[0-9a-f]{64}$/.test(String(lease.leaseId || '')) ||
+        !Number.isSafeInteger(lease.ttlMs) || lease.ttlMs <= 0 || lease.contentFree !== true
+    ) {
+        throw brokerError('mindcraft_llm_result_invalid');
+    }
+    return frame;
+}
+
+async function readBrokerFrame(response, requestId) {
+    const mediaType = String(response.headers?.get?.('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
+    if (mediaType !== 'application/x-ndjson') {
+        await response.body?.cancel?.().catch(() => {});
+        throw brokerError('mindcraft_llm_result_invalid');
+    }
+    const reader = response.body?.getReader?.();
+    if (!reader) throw brokerError('mindcraft_llm_result_invalid');
+    try {
+        let bytes = new Uint8Array();
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) throw brokerError('mindcraft_llm_result_invalid');
+            const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+            const combined = new Uint8Array(bytes.length + chunk.length);
+            combined.set(bytes);
+            combined.set(chunk, bytes.length);
+            if (combined.length > BROKER_MAX_FRAME_BYTES) {
+                throw brokerError('mindcraft_llm_result_invalid');
+            }
+            const newline = combined.indexOf(10);
+            if (newline < 0) {
+                bytes = combined;
+                continue;
+            }
+            let frame;
+            try {
+                frame = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(combined.slice(0, newline)));
+            } catch {
+                throw brokerError('mindcraft_llm_result_invalid');
+            }
+            return {
+                frame: validateBrokerFrame(frame, requestId),
+                reader,
+                trailing: combined.slice(newline + 1),
+            };
+        }
+    } catch (error) {
+        await reader.cancel().catch(() => {});
+        throw error;
+    }
+}
+
+async function drainBrokerStream(reader, trailing) {
+    if (trailing.length) throw brokerError('mindcraft_llm_result_invalid');
+    while (true) {
+        const {done, value} = await reader.read();
+        if (done) return;
+        if (value?.length) throw brokerError('mindcraft_llm_result_invalid');
+    }
+}
+
+async function postBrokerAck(url, token, requestId, leaseId, outcome) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
+    const timer = setTimeout(() => controller.abort(), BROKER_ACK_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${url}/ack`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                [BROKER_TOKEN_HEADER]: token,
+            },
+            body: JSON.stringify({
+                schema: BROKER_DELIVERY_ACK_SCHEMA,
+                requestId,
+                leaseId,
+                outcome,
+                contentFree: true,
+            }),
+            redirect: 'error',
+            signal: controller.signal,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (
+            !response.ok || !exactKeys(payload, ['ok', 'contentFree']) ||
+            payload.ok !== true || payload.contentFree !== true
+        ) {
+            throw brokerError('mindcraft_llm_delivery_ack_invalid');
+        }
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function completeBrokerDelivery(url, token, requestId, reader, trailing, leaseId, outcome) {
+    await Promise.all([
+        postBrokerAck(url, token, requestId, leaseId, outcome),
+        drainBrokerStream(reader, trailing),
+    ]);
+}
+
+async function requestBroker(requestKind, messages, consume) {
+    assertMindcraftHistoryCurrent();
+    const url = brokerUrl();
+    const token = brokerToken();
+    const requestId = randomUUID();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BROKER_REQUEST_TIMEOUT_MS);
+    let reader = null;
     try {
         const response = await fetch(url, {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body),
-            signal: controller.signal
+            headers: {
+                'Content-Type': 'application/json',
+                [BROKER_TOKEN_HEADER]: token,
+            },
+            body: JSON.stringify({
+                schema: BROKER_REQUEST_SCHEMA,
+                requestId,
+                requestKind,
+                messages: brokerMessages(messages),
+                historyReceiptRef: notUsedReceiptRef(),
+            }),
+            redirect: 'error',
+            signal: controller.signal,
         });
-        const payload = await response.json().catch(() => ({}));
-        assertMindcraftHistoryCurrent();
         if (!response.ok) {
-            throw new Error(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
+            await response.body?.cancel?.().catch(() => {});
+            throw brokerError('mindcraft_llm_broker_failed');
         }
-        return payload;
+        const opened = await readBrokerFrame(response, requestId);
+        reader = opened.reader;
+        let result;
+        try {
+            assertMindcraftHistoryCurrent();
+            result = consume(opened.frame.content);
+            assertMindcraftHistoryCurrent();
+        } catch (error) {
+            try {
+                await completeBrokerDelivery(
+                    url, token, requestId, reader, opened.trailing,
+                    opened.frame.deliveryLease.leaseId, 'discarded',
+                );
+            } catch {
+                await reader.cancel().catch(() => {});
+            }
+            throw error;
+        }
+        await completeBrokerDelivery(
+            url, token, requestId, reader, opened.trailing,
+            opened.frame.deliveryLease.leaseId, 'delivered',
+        );
+        assertMindcraftHistoryCurrent();
+        return result;
+    } catch (error) {
+        await reader?.cancel().catch(() => {});
+        if (isMindcraftHistoryBoundaryError(error) || String(error?.code || '').startsWith('mindcraft_')) {
+            throw error;
+        }
+        throw brokerError('mindcraft_llm_broker_failed');
     } finally {
         clearTimeout(timer);
     }
@@ -478,7 +725,7 @@ export function parseRecoveryPlan(content, systemMessage, policy = null) {
     if (steps.length < 1) return null;
 
     return {
-        reason: String(parsed?.reason || 'Codex recovery plan').slice(0, 300),
+        reason: String(parsed?.reason || 'Broker recovery plan').slice(0, 300),
         steps,
         successSignals: Array.isArray(parsed?.success_signals) ? parsed.success_signals.slice(0, 4) : [],
         abortSignals: Array.isArray(parsed?.abort_signals) ? parsed.abort_signals.slice(0, 4) : []
@@ -488,19 +735,11 @@ export function parseRecoveryPlan(content, systemMessage, policy = null) {
 export class EvelynPlanner {
     static prefix = 'evelyn-planner';
 
-    constructor(modelName, url) {
-        this.localModel = modelName || process.env.MINDCRAFT_LOCAL_MODEL || DEFAULT_LOCAL_MODEL;
-        this.localUrl = url || process.env.MINDCRAFT_LOCAL_LLM_URL || DEFAULT_LOCAL_URL;
-        this.localTimeoutSec = positiveNumber(process.env.MINDCRAFT_LOCAL_TIMEOUT_SEC, 90);
-        this.localMaxTokens = Math.floor(positiveNumber(process.env.MINDCRAFT_LOCAL_MAX_TOKENS, 160));
-        this.routerUrl = process.env.MINDCRAFT_ROUTER_URL || DEFAULT_ROUTER_URL;
-        this.routerModel = process.env.MINDCRAFT_ROUTER_MODEL || DEFAULT_ROUTER_MODEL;
-        this.routerTimeoutSec = positiveNumber(process.env.MINDCRAFT_ROUTER_TIMEOUT_SEC, 4);
+    constructor() {
         this.codexEnabled = /^(?:1|true|yes|on)$/i.test(
             String(process.env.MINDCRAFT_CODEX_ENABLED || '')
         );
         this.codexCooldownMs = positiveNumber(process.env.MINDCRAFT_CODEX_COOLDOWN_SEC, 30) * 1000;
-        this.codex = new CodexGateway(process.env.MINDCRAFT_CODEX_MODEL);
         this.lastCodexAt = 0;
         this.recoveryPlan = null;
         this.probeIndex = 0;
@@ -524,14 +763,6 @@ export class EvelynPlanner {
         this.persistPlannerState();
     }
 
-    maxTokensFor(kind) {
-        if (kind === 'action') return ACTION_TOKEN_LIMIT;
-        if (kind === 'memory') return MEMORY_TOKEN_LIMIT;
-        if (kind === 'subgoal') return SUBGOAL_TOKEN_LIMIT;
-        if (kind === 'classifier') return 8;
-        return this.localMaxTokens;
-    }
-
     async proposeSubgoals(context) {
         const prompt = [
             'You choose short, verifiable Minecraft survival subgoals for Evelyn.',
@@ -549,19 +780,15 @@ export class EvelynPlanner {
             'Return JSON only with this schema:',
             '{"candidates":[{"id":"short_id","kind":"obtain","target":"#logs","quantity":3,"reason":"brief","success":{"kind":"inventory","target":"#logs","count":3},"action_budget":8,"unlock_score":5,"risk":"low"}]}'
         ].join('\n');
-        const payload = await postJson(this.localUrl, {
-            model: this.localModel,
-            messages: [
+        const candidates = await requestBroker(
+            'subgoal',
+            [
                 {role: 'system', content: prompt},
                 {role: 'user', content: JSON.stringify(context)}
             ],
-            temperature: 0.05,
-            top_p: 0.8,
-            max_tokens: this.maxTokensFor('subgoal'),
-            chat_template_kwargs: {enable_thinking: false}
-        }, this.localTimeoutSec);
-        const candidates = parseSubgoalCandidates(responseContent(payload));
-        console.log(`[Evelyn Mindcraft] local subgoal candidates=${candidates.length} model=${this.localModel}`);
+            (content) => parseSubgoalCandidates(content),
+        );
+        console.log(`[Evelyn Mindcraft] local subgoal candidates=${candidates.length}`);
         return candidates;
     }
 
@@ -586,8 +813,11 @@ export class EvelynPlanner {
         ].join('\n');
         this.lastCodexAt = Date.now();
         this.persistPlannerState();
-        const raw = await this.codex.sendPrompt(prompt, 'mindcraft-strategic-subgoal');
-        const candidates = parseSubgoalCandidates(raw);
+        const candidates = await requestBroker(
+            'subgoal',
+            [{role: 'system', content: prompt}],
+            (content) => parseSubgoalCandidates(cleanResponseContent(content)),
+        );
         console.log(`[Evelyn Mindcraft] strategic subgoal candidates=${candidates.length}`);
         return candidates;
     }
@@ -596,9 +826,9 @@ export class EvelynPlanner {
         if (!this.codexEnabled) return 'local';
         const recent = compactTurns(turns, 5, 900);
         try {
-            const payload = await postJson(this.routerUrl, {
-                model: this.routerModel,
-                messages: [
+            return await requestBroker(
+                'router',
+                [
                     {
                         role: 'system',
                         content: [
@@ -610,11 +840,8 @@ export class EvelynPlanner {
                     },
                     {role: 'user', content: JSON.stringify(recent)}
                 ],
-                temperature: 0,
-                max_tokens: 24,
-                chat_template_kwargs: {enable_thinking: false}
-            }, this.routerTimeoutSec);
-            return parseRoute(responseContent(payload));
+                (content) => parseRoute(cleanResponseContent(content)),
+            );
         } catch (error) {
             if (isMindcraftHistoryBoundaryError(error)) throw error;
             console.warn('[Evelyn Mindcraft] Router unavailable; using local planner:', error?.message || error);
@@ -626,23 +853,21 @@ export class EvelynPlanner {
         const system = [String(systemMessage || ''), String(extraInstruction || '')]
             .filter(Boolean)
             .join('\n\n');
-        const payload = await postJson(this.localUrl, {
-            model: this.localModel,
-            messages: [
+        const brokerKind = ['action', 'classifier', 'memory'].includes(kind) ? kind : 'chat';
+        return requestBroker(
+            brokerKind,
+            [
                 {role: 'system', content: system},
                 ...compactTurns(turns)
             ],
-            temperature: kind === 'action' ? 0.05 : 0.1,
-            top_p: 0.8,
-            max_tokens: this.maxTokensFor(kind),
-            stop: stopSeq ? [stopSeq] : undefined,
-            chat_template_kwargs: {enable_thinking: false}
-        }, this.localTimeoutSec);
-        const content = enforceCommandPolicy(responseContent(payload));
-        if (kind === 'memory' && content === '!stop') {
-            throw new Error('mindcraft_memory_summary_unavailable');
-        }
-        return content;
+            (raw) => {
+                const content = enforceCommandPolicy(cleanResponseContent(raw));
+                if (kind === 'memory' && content === '!stop') {
+                    throw brokerError('mindcraft_memory_summary_unavailable');
+                }
+                return content;
+            },
+        );
     }
 
     updateRecoveryPlan() {
@@ -705,17 +930,17 @@ export class EvelynPlanner {
 
         this.lastCodexAt = Date.now();
         this.persistPlannerState();
-        const raw = this.codexEnabled
-            ? await this.codex.sendPrompt(prompt, 'mindcraft-recovery-plan')
-            : responseContent(await postJson(this.localUrl, {
-                model: this.localModel,
-                messages: [{role: 'system', content: prompt}],
-                temperature: 0.05,
-                top_p: 0.8,
-                max_tokens: SUBGOAL_TOKEN_LIMIT,
-                chat_template_kwargs: {enable_thinking: false}
-            }, this.localTimeoutSec));
-        const parsed = parseRecoveryPlan(raw, systemMessage, policy);
+        const parsed = await requestBroker(
+            'recovery',
+            [{role: 'system', content: prompt}],
+            (content) => {
+                const plan = parseRecoveryPlan(
+                    cleanResponseContent(content), systemMessage, policy,
+                );
+                if (!plan) throw brokerError('mindcraft_recovery_plan_invalid');
+                return plan;
+            },
+        );
         if (!parsed) {
             throw new Error('Recovery response did not contain a valid documented command plan');
         }
@@ -730,7 +955,7 @@ export class EvelynPlanner {
         };
         this.persistPlannerState();
         console.log(
-            `[Evelyn Mindcraft] planner route=${this.codexEnabled ? 'codex' : 'local'} reason=${reason} recovery_steps=${parsed.steps.length}`
+            `[Evelyn Mindcraft] planner route=broker reason=${reason} recovery_steps=${parsed.steps.length}`
         );
         return this.recoveryPlan;
     }
@@ -855,7 +1080,7 @@ export class EvelynPlanner {
                     `local_output_invalid:${validation.reason}`
                 );
             }
-            console.log('[Evelyn Mindcraft] planner route=local gate=simple model=' + this.localModel);
+            console.log('[Evelyn Mindcraft] planner route=local gate=simple');
             return validation.command;
         } catch (error) {
             if (isMindcraftHistoryBoundaryError(error)) throw error;
@@ -889,9 +1114,6 @@ export class EvelynPlanner {
         if (shouldConsultRouter(kind, turns)) {
             const route = await this.chooseRoute(turns);
             console.log(`[Evelyn Mindcraft] planner gate=router kind=${kind} decision=${route}`);
-            if (route === 'codex') {
-                return this.codex.sendRequest(turns, systemMessage);
-            }
         }
 
         try {
@@ -903,7 +1125,6 @@ export class EvelynPlanner {
             console.error('[Evelyn Mindcraft] Local utility request failed:', error?.message || error);
             if (kind === 'memory') throw new Error('mindcraft_memory_summary_unavailable');
             if (kind === 'classifier') return 'ignore';
-            if (this.codexEnabled) return this.codex.sendRequest(turns, systemMessage);
             return '지금은 안전하게 판단할 수 없어 멈출게. !stop';
         }
     }
@@ -913,6 +1134,6 @@ export class EvelynPlanner {
     }
 
     async embed(text) {
-        return this.codex.embed(text);
+        return localEmbedding(text);
     }
 }

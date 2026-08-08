@@ -25,11 +25,11 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
-- 2026-08-09 기본 Minecraft 판단은 local Qwen, Codex는 off를 유지한다. Mindcraft
-  history는 bounded process-local 상태이며 `load_memory=false`이고 host memory mount가 없다.
-  whole-turn·inter-agent exposure는 final sink까지 clear를 막고 goal/status의
-  execution·gate·observation 원문은 저장하지 않는다.
-  core deletion/edit broker·receipt/ACK, recovery exact correlation과 legacy cleanup은 P1이다.
+- 2026-08-09 Mindcraft history는 bounded process-local·no-mount이며 Codex는 off다.
+  Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다.
+  broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final
+  route/action sink까지 유지한다. durable bound-receipt history, recovery exact correlation,
+  legacy cleanup과 Docker·Minecraft live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
   edit·provenance·post-tombstone cleanup 503은 강제 재조회 뒤 자동 재시도하지 않는다.
   replica 검증은 통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 P1이다.
@@ -61,8 +61,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 assistant 원문을 일반 history에 남기지 않는다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,138개(skip 22), 관련 집중 검증과 JS 구문이 통과했다. 현재
-  마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
+- CI-equivalent 전체 3,190개(skip 22), continuity 87개, Mindcraft 56개,
+  voice 633개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙
 
