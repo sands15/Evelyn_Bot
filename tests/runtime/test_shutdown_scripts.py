@@ -522,6 +522,10 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'docker\\Dockerfile.omnivoice'", builder)
         self.assertIn("--build-context", builder)
         self.assertIn("omnivoice_source=", builder)
+        self.assertIn(
+            "@($definition['BuildContexts'] | Where-Object { $_ })",
+            builder,
+        )
         self.assertIn("'evelyn-fast-control-vision'", builder)
         self.assertIn("'evelyn-fast-control-vision_runtime'", builder)
         self.assertIn("'docker\\Dockerfile.vision-ingress'", builder)

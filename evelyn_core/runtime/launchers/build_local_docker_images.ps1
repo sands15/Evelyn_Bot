@@ -186,7 +186,7 @@ try {
                 Invoke-DockerBuild `
                     -Dockerfile $dockerfile `
                     -Image $image `
-                    -BuildContexts @($definition.BuildContexts)
+                    -BuildContexts @($definition['BuildContexts'] | Where-Object { $_ })
             }
         }
     } finally {
