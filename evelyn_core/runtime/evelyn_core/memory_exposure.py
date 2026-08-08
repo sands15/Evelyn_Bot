@@ -14,7 +14,7 @@ from .memory_deletion_journal import (
     MEMORY_DELETE_TOMBSTONE_WRITER_LOCK_NAME,
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
-    memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
     memory_deletion_note_id_is_canonical,
     read_memory_deletion_tombstones,
 )
@@ -358,7 +358,7 @@ def memory_exposure_guard(
         if deletion_position is None:
             yield None
             return
-        with memory_deletion_journal_guard(
+        with memory_deletion_journal_read_guard(
             target_index_dir,
             expected_position=deletion_position,
             require_stable=True,
@@ -382,7 +382,7 @@ def memory_exposure_guard(
     # The deletion lease is intentionally acquired first. Memory corrections
     # and tombstones share it, so neither coordinate can change between this
     # comparison and the end of response consumption.
-    with memory_deletion_journal_guard(
+    with memory_deletion_journal_read_guard(
         target_index_dir,
         expected_position=exposure.deletion_position,
         require_stable=True,

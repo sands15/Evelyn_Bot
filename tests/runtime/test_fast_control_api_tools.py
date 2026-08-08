@@ -22,6 +22,8 @@ except ModuleNotFoundError:
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 from evelyn_core import explicit_memory_confirmation as explicit_memory  # noqa: E402
+from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
+from evelyn_core import memory_exposure  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -583,6 +585,82 @@ class FastControlApiToolTests(unittest.TestCase):
             expected,
         )
         self.assertEqual(bridge.calls, ["새 질문", "새 질문"])
+
+    def test_bound_history_does_not_wrap_write_backed_context_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            memory_root = Path(temporary) / "bot_memory"
+            index_dir = memory_root / "memory_index"
+            position = memory_exposure.MemoryExposurePosition(
+                deletion_position=(
+                    deletion_journal.memory_deletion_journal_position(
+                        index_dir
+                    )
+                ),
+                memory_version=0,
+                supplied_note_ids=("concept-0123456789abcdef",),
+            )
+
+            def recent_messages(_text, *, limit):
+                self.assertEqual(limit, 8)
+                memory_exposure.capture_memory_exposure_position(position)
+                fast_api.FAST_MEMORY_EXPOSURE_POSITION.set(position)
+                return [{"role": "assistant", "content": "bound history"}]
+
+            async def build_request(**kwargs):
+                def acquire_writer() -> None:
+                    with deletion_journal.memory_deletion_journal_guard(
+                        index_dir
+                    ):
+                        pass
+
+                await asyncio.to_thread(acquire_writer)
+                return SimpleNamespace(
+                    messages=[
+                        {"role": "system", "content": "system"},
+                        {"role": "user", "content": "기억을 찾아줘"},
+                    ],
+                    context=SimpleNamespace(
+                        required_evidence_failure_reply="",
+                        grounded_evidence_reply="",
+                        memory_receipt={"state": "not_requested"},
+                    ),
+                    memory_deletion_position=position.deletion_position,
+                    memory_exposure_position=position,
+                )
+
+            try:
+                with patch.object(
+                    fast_api,
+                    "MEMORY_ROOT",
+                    memory_root,
+                ), patch.object(
+                    fast_api,
+                    "recent_chat_messages_for_planner",
+                    side_effect=recent_messages,
+                ), patch.object(
+                    fast_api,
+                    "build_fast_main_llm_request",
+                    side_effect=build_request,
+                ):
+                    async def build_and_capture():
+                        result = await fast_api.build_main_llm_request_payload(
+                            "기억을 찾아줘",
+                            source="control_page",
+                        )
+                        return (
+                            result[0],
+                            fast_api.FAST_MEMORY_EXPOSURE_POSITION.get(),
+                        )
+
+                    payload, retained_position = asyncio.run(
+                        build_and_capture()
+                    )
+            finally:
+                memory_exposure.reset_memory_exposure_position()
+                fast_api.FAST_MEMORY_EXPOSURE_POSITION.set(None)
+
+        self.assertEqual(payload["messages"][-1]["content"], "기억을 찾아줘")
+        self.assertEqual(retained_position, position)
 
     def test_voice_validation_payload_isolated_from_context_providers(
         self,

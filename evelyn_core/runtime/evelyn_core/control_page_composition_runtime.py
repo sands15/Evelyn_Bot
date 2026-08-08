@@ -89,8 +89,8 @@ from .control_page_memory_http import (
 )
 from .conversation_memory_receipt import not_used_memory_receipt_ref
 from .memory_deletion_journal import (
-    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_error_code,
 )
 from .memory_exposure import (
     current_memory_exposure_position,
@@ -460,10 +460,10 @@ class ControlPageHttpComposition:
         guild = self.deps.select_guild(parse_control_page_guild_id(request.query.get("guildId")))
         try:
             payload = await self.deps.build_state(guild)
-        except MemoryDeletionJournalIntegrityError:
+        except MemoryDeletionJournalIntegrityError as exc:
             payload = {
                 "ok": False,
-                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "error": memory_deletion_journal_error_code(exc),
             }
             return control_page_memory_guarded_json_response(
                 payload,
@@ -500,10 +500,10 @@ class ControlPageHttpComposition:
                 refresh_runtime_services=self.deps.refresh_runtime_services,
                 build_state=self.deps.build_state,
             )
-        except MemoryDeletionJournalIntegrityError:
+        except MemoryDeletionJournalIntegrityError as exc:
             response_payload = {
                 "ok": False,
-                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "error": memory_deletion_journal_error_code(exc),
             }
             status = 503
             reset_memory_exposure_position()

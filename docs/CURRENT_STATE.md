@@ -1966,3 +1966,26 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   POST와 장애 유도, 이미지 교체는 하지 않았으므로 전이의 live 재현은 아직 수행하지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.
+
+## 2026-08-08 deletion journal shared exposure lease
+
+- 삭제 journal writer와 같은 lock file·byte range에 shared reader lease를 추가했다.
+  Windows는 `LockFileEx`, POSIX는 `flock(LOCK_SH)`를 사용하고 process 안에서는
+  thread와 async task를 함께 식별한 reader owner 집합을 유지한다. nested reader와
+  writer→reader 재진입은 허용하지만 reader→writer upgrade는 fail-fast한다.
+- 이미 materialize된 Main/Voice/Search/Discord/Control Page/TTS memory exposure와 실제
+  HTTP response, deletion-only JSON LLM outbound, route LLM, conversation receipt
+  screening은 shared lease를 사용한다. 두 reader는 process·교차 process에서 공존하고,
+  한 reader라도 남아 있으면 삭제 writer는 journal을 바꾸지 않고 고정 busy 오류를 반환한다.
+- 정상 경합은 `memory_deletion_journal_busy`로 무결성 손상과 분리했다. 8798과 8799는
+  exact no-store 503의 두 필드만 반환하고 Control Page는 잠시 뒤 재시도를 안내한다.
+  OS 오류, lock owner, path, note ID와 원문은 응답에 포함하지 않는다.
+- repair가 필요한 snapshot은 shared lease를 놓고 writer에서 재검증·repair한 뒤 reader를
+  다시 얻는다. index sync, retrieval-cache migration/write와 실제 cognitive·memory
+  artifact commit은 writer로 유지했다. fresh write-backed recall/index/cache는 active
+  reader와 busy가 될 수 있다. semantic consolidation/recomposition의 Sub-LLM 구간도
+  호출당 최대 45초, recomposition 기본 최대 4회 동안 writer를 유지한다. 이 장기
+  maintenance busy와 journal rotation, 외부 anchor 운영 검증은 계속 남는다.
+- Windows 교차-process reader-reader/reader-writer, async owner 수명, 재진입·upgrade,
+  동시 response 소비와 8798·8799/API/UI privacy projection을 synthetic data로 검증했다.
+  실제 사용자 기억과 live Discord·마이크·Minecraft·Docker 서비스는 건드리지 않았다.

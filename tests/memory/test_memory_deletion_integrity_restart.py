@@ -27,6 +27,7 @@ from evelyn_core.assistant_contracts import MemoryRecallRequest  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MEMORY_DELETE_TOMBSTONE_CHAIN_HEAD_NAME,
     MEMORY_DELETE_TOMBSTONE_JOURNAL_NAME,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
@@ -46,6 +47,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
 
 
 INTEGRITY_ERROR = "memory_deletion_journal_integrity_failed"
+BUSY_ERROR = "memory_deletion_journal_busy"
 
 FAIL_CLOSED_WORKER = textwrap.dedent(
     """
@@ -456,7 +458,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                     worker.start()
                     self.assertTrue(entered.wait(timeout=5))
                     with self.assertRaises(
-                        MemoryDeletionJournalIntegrityError
+                        MemoryDeletionJournalBusyError
                     ) as blocked:
                         delete_memory_vault_user_note(
                             note.note_id,
@@ -464,7 +466,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                             reason="privacy_request",
                             root=root,
                         )
-                    self.assertEqual(str(blocked.exception), INTEGRITY_ERROR)
+                    self.assertEqual(str(blocked.exception), BUSY_ERROR)
             finally:
                 release.set()
                 worker.join(timeout=5)
@@ -622,7 +624,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                     worker.start()
                     self.assertTrue(entered.wait(timeout=5))
                     with self.assertRaises(
-                        MemoryDeletionJournalIntegrityError
+                        MemoryDeletionJournalBusyError
                     ) as blocked:
                         delete_memory_vault_user_note(
                             note.note_id,
@@ -630,7 +632,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                             reason="privacy_request",
                             root=root,
                         )
-                    self.assertEqual(str(blocked.exception), INTEGRITY_ERROR)
+                    self.assertEqual(str(blocked.exception), BUSY_ERROR)
             finally:
                 release.set()
                 worker.join(timeout=5)
@@ -699,7 +701,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                 worker.start()
                 self.assertTrue(entered.wait(timeout=5))
                 with self.assertRaises(
-                    MemoryDeletionJournalIntegrityError
+                    MemoryDeletionJournalBusyError
                 ) as blocked:
                     delete_memory_vault_user_note(
                         source_note.note_id,
@@ -707,7 +709,7 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                         reason="privacy_request",
                         root=root,
                     )
-                self.assertEqual(str(blocked.exception), INTEGRITY_ERROR)
+                self.assertEqual(str(blocked.exception), BUSY_ERROR)
             finally:
                 release.set()
                 worker.join(timeout=5)

@@ -30,6 +30,7 @@ from .memory_deletion_journal import (
     MEMORY_DELETE_TOMBSTONE_V1_SCHEMA,
     MemoryDeletionJournalIntegrityError,
     append_memory_deletion_tombstone,
+    memory_deletion_journal_error_code,
     memory_deletion_ledger_note_id,
     memory_deletion_journal_guard,
     memory_deletion_journal_state,
@@ -215,15 +216,13 @@ def _memory_deletion_linearized_recall(
                 result = operation(request, *args, **kwargs)
                 read_memory_deletion_tombstones(index_dir)
                 return result
-        except MemoryDeletionJournalIntegrityError:
+        except MemoryDeletionJournalIntegrityError as exc:
             return MemoryRecallResult(
                 turn_id=request.turn_id,
                 ok=False,
                 context_text="",
                 latency_ms=(time.monotonic() - started) * 1000.0,
-                error_text=(
-                    "memory_deletion_journal_integrity_failed"
-                ),
+                error_text=memory_deletion_journal_error_code(exc),
             )
 
     return wrapped
@@ -3564,13 +3563,13 @@ def recall_memory_vault(
                 "rendered_note_ids": rendered_note_ids,
             },
         )
-    except MemoryDeletionJournalIntegrityError:
+    except MemoryDeletionJournalIntegrityError as exc:
         return MemoryRecallResult(
             turn_id=request.turn_id,
             ok=False,
             context_text="",
             latency_ms=(time.monotonic() - started) * 1000.0,
-            error_text="memory_deletion_journal_integrity_failed",
+            error_text=memory_deletion_journal_error_code(exc),
         )
     except Exception as exc:
         return MemoryRecallResult(
@@ -7786,10 +7785,10 @@ def delete_memory_vault_user_note(
                 source_file_deleted = True
             except OSError:
                 pass
-    except MemoryDeletionJournalIntegrityError:
+    except MemoryDeletionJournalIntegrityError as exc:
         return {
             "ok": False,
-            "error": "memory_deletion_journal_integrity_failed",
+            "error": memory_deletion_journal_error_code(exc),
         }
     except Exception as exc:
         return {
@@ -7819,10 +7818,10 @@ def delete_memory_vault_user_note(
         )
     try:
         version = sync_memory_vault_index(root=root)
-    except MemoryDeletionJournalIntegrityError:
+    except MemoryDeletionJournalIntegrityError as exc:
         return {
             "ok": False,
-            "error": "memory_deletion_journal_integrity_failed",
+            "error": memory_deletion_journal_error_code(exc),
         }
     except Exception:
         version = 0
@@ -7840,10 +7839,10 @@ def delete_memory_vault_user_note(
         cleanup_errors.append("memory_delete_source_cleanup_failed")
     try:
         refresh_memory_hot_context(root=root)
-    except MemoryDeletionJournalIntegrityError:
+    except MemoryDeletionJournalIntegrityError as exc:
         return {
             "ok": False,
-            "error": "memory_deletion_journal_integrity_failed",
+            "error": memory_deletion_journal_error_code(exc),
         }
     except Exception:
         cleanup_errors.append("memory_delete_hot_context_cleanup_failed")

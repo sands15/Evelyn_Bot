@@ -1038,11 +1038,115 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(
             result["type"],
-            "MemoryDeletionJournalIntegrityError",
+            "MemoryDeletionJournalBusyError",
         )
         self.assertEqual(
             result["error"],
-            journal.MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+        )
+
+    def test_shared_readers_coexist_across_processes(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                script = (
+                    "import json,sys;"
+                    f"sys.path.insert(0,{str(RUNTIME_ROOT)!r});"
+                    "from pathlib import Path;"
+                    "from evelyn_core import memory_deletion_journal as j;"
+                    f"p=Path({str(index_dir)!r});"
+                    "\ntry:\n"
+                    " with j.memory_deletion_journal_read_guard(p) as position:\n"
+                    "  print(json.dumps({'ok':True,'sequence':position.sequence}))\n"
+                    "except Exception as exc:\n"
+                    " print(json.dumps({'ok':False,'type':type(exc).__name__,'error':str(exc)}))"
+                )
+                with journal.memory_deletion_journal_read_guard(index_dir):
+                    child = subprocess.run(
+                        [sys.executable, "-c", script],
+                        cwd=str(REPO_ROOT),
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=True,
+                    )
+                result = json.loads(child.stdout)
+
+        self.assertEqual(result, {"ok": True, "sequence": 0})
+
+    def test_shared_reader_blocks_competing_process_writer(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                payload = self.tombstone("concept-child-reader")
+                script = (
+                    "import json,sys;"
+                    f"sys.path.insert(0,{str(RUNTIME_ROOT)!r});"
+                    "from pathlib import Path;"
+                    "from evelyn_core import memory_deletion_journal as j;"
+                    f"p={payload!r};"
+                    "\ntry:\n"
+                    f" j.append_memory_deletion_tombstone(Path({str(index_dir)!r}),p)\n"
+                    " print(json.dumps({'ok':True}))\n"
+                    "except Exception as exc:\n"
+                    " print(json.dumps({'ok':False,'type':type(exc).__name__,'error':str(exc)}))"
+                )
+                with journal.memory_deletion_journal_read_guard(index_dir):
+                    child = subprocess.run(
+                        [sys.executable, "-c", script],
+                        cwd=str(REPO_ROOT),
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=True,
+                    )
+                result = json.loads(child.stdout)
+                rows = journal.read_memory_deletion_tombstones(index_dir)
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "type": "MemoryDeletionJournalBusyError",
+                "error": journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+            },
+        )
+        self.assertEqual(rows, [])
+
+    def test_writer_blocks_competing_process_reader(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                script = (
+                    "import json,sys;"
+                    f"sys.path.insert(0,{str(RUNTIME_ROOT)!r});"
+                    "from pathlib import Path;"
+                    "from evelyn_core import memory_deletion_journal as j;"
+                    f"p=Path({str(index_dir)!r});"
+                    "\ntry:\n"
+                    " with j.memory_deletion_journal_read_guard(p):\n"
+                    "  print(json.dumps({'ok':True}))\n"
+                    "except Exception as exc:\n"
+                    " print(json.dumps({'ok':False,'type':type(exc).__name__,'error':str(exc)}))"
+                )
+                with journal._writer_guard(index_dir):
+                    child = subprocess.run(
+                        [sys.executable, "-c", script],
+                        cwd=str(REPO_ROOT),
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=True,
+                    )
+                result = json.loads(child.stdout)
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "type": "MemoryDeletionJournalBusyError",
+                "error": journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+            },
         )
 
     def test_public_read_guard_linearizes_against_append(self) -> None:
@@ -1060,7 +1164,7 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
                         return type(exc).__name__, str(exc)
                     return "ok", ""
 
-                with journal.memory_deletion_journal_guard(index_dir):
+                with journal.memory_deletion_journal_read_guard(index_dir):
                     with ThreadPoolExecutor(max_workers=1) as executor:
                         result = executor.submit(
                             append_from_other_thread
@@ -1082,8 +1186,8 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
         self.assertEqual(
             result,
             (
-                "MemoryDeletionJournalIntegrityError",
-                journal.MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "MemoryDeletionJournalBusyError",
+                journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
             ),
         )
         self.assertNotIn("concept-private-canary", raw)
@@ -1211,9 +1315,105 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
         self.assertEqual(
             result,
             (
-                "MemoryDeletionJournalIntegrityError",
-                journal.MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "MemoryDeletionJournalBusyError",
+                journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
             ),
+        )
+
+    def test_async_readers_keep_independent_ownership(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+
+                async def exercise() -> tuple[type[BaseException], type[BaseException]]:
+                    entered = [asyncio.Event(), asyncio.Event()]
+                    release = [asyncio.Event(), asyncio.Event()]
+
+                    async def holder(index: int) -> None:
+                        with journal.memory_deletion_journal_read_guard(
+                            index_dir
+                        ):
+                            entered[index].set()
+                            await release[index].wait()
+
+                    tasks = [
+                        asyncio.create_task(holder(0)),
+                        asyncio.create_task(holder(1)),
+                    ]
+                    await entered[0].wait()
+                    await entered[1].wait()
+                    with self.assertRaises(
+                        journal.MemoryDeletionJournalBusyError
+                    ) as both_busy:
+                        journal.append_memory_deletion_tombstone(
+                            index_dir,
+                            self.tombstone("concept-both-readers"),
+                        )
+                    release[0].set()
+                    await tasks[0]
+                    with self.assertRaises(
+                        journal.MemoryDeletionJournalBusyError
+                    ) as one_busy:
+                        journal.append_memory_deletion_tombstone(
+                            index_dir,
+                            self.tombstone("concept-one-reader"),
+                        )
+                    release[1].set()
+                    await tasks[1]
+                    journal.append_memory_deletion_tombstone(
+                        index_dir,
+                        self.tombstone("concept-readers-done"),
+                    )
+                    return type(both_busy.exception), type(one_busy.exception)
+
+                result = asyncio.run(exercise())
+                rows = journal.read_memory_deletion_tombstones(index_dir)
+
+        self.assertEqual(
+            result,
+            (
+                journal.MemoryDeletionJournalBusyError,
+                journal.MemoryDeletionJournalBusyError,
+            ),
+        )
+        self.assertEqual(
+            [row["noteId"] for row in rows],
+            [self.ledger_id("concept-readers-done")],
+        )
+
+    def test_read_reentrancy_and_upgrade_contract(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                with journal.memory_deletion_journal_read_guard(
+                    index_dir
+                ) as outer:
+                    with journal.memory_deletion_journal_read_guard(
+                        index_dir,
+                        expected_position=outer,
+                    ) as nested:
+                        self.assertEqual(nested, outer)
+                    with self.assertRaises(
+                        journal.MemoryDeletionJournalBusyError
+                    ):
+                        journal.append_memory_deletion_tombstone(
+                            index_dir,
+                            self.tombstone("concept-upgrade"),
+                        )
+                with journal.memory_deletion_journal_guard(index_dir):
+                    with journal.memory_deletion_journal_read_guard(
+                        index_dir
+                    ):
+                        pass
+
+    def test_busy_exception_never_echoes_details(self) -> None:
+        exception = journal.MemoryDeletionJournalBusyError(
+            "private transcript canary",
+            path="C:/private/path",
+        )
+        self.assertEqual(
+            str(exception),
+            journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
         )
 
     def test_exception_and_input_rejection_never_echo_details(self) -> None:

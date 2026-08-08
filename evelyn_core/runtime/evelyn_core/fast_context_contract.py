@@ -622,10 +622,11 @@ async def build_fast_control_context(
     if vision_decisions:
         run_ocr = any(decision.tool_name == "vision_ocr" for decision in vision_decisions)
         try:
-            vision_result = await (vision_provider or request_host_vision)(
-                decision_text,
-                run_ocr=run_ocr,
-            )
+            with memory_exposure_guard():
+                vision_result = await (vision_provider or request_host_vision)(
+                    decision_text,
+                    run_ocr=run_ocr,
+                )
             if not isinstance(vision_result, HostVisionResult):
                 raise TypeError("invalid_host_vision_result")
             vision_evidence = vision_evidence_from_payload(
@@ -648,6 +649,8 @@ async def build_fast_control_context(
                 scene_chars=vision_result.scene_chars,
                 ocr_chars=vision_result.ocr_chars,
             )
+        except MemoryDeletionJournalIntegrityError:
+            raise
         except Exception:
             vision_result = None
             vision_evidence = VisionEvidence(

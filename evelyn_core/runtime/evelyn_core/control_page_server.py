@@ -42,7 +42,9 @@ from .memory_provenance_correction import (
     preview_memory_provenance_correction_undo,
 )
 from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_BUSY_ERROR,
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 from .memory_exposure import MemoryExposurePosition
@@ -324,12 +326,14 @@ def proxy_json_response(
             payload = json.loads(text)
         except (TypeError, ValueError, RecursionError):
             payload = None
-        if (
-            isinstance(payload, dict)
-            and payload.get("error")
-            == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
-        ):
-            raise MemoryDeletionJournalIntegrityError()
+        if isinstance(payload, dict):
+            if payload.get("error") == MEMORY_DELETION_JOURNAL_BUSY_ERROR:
+                raise MemoryDeletionJournalBusyError()
+            if (
+                payload.get("error")
+                == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+            ):
+                raise MemoryDeletionJournalIntegrityError()
     if memory_handoff_present:
         try:
             payload = json.loads(text)
@@ -2834,6 +2838,7 @@ def memory_note_action_status(result: dict[str, Any]) -> int:
         return 500
     if error in {
         "memory_edit_cleanup_required",
+        MEMORY_DELETION_JOURNAL_BUSY_ERROR,
         MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     }:
         return 503
@@ -2850,6 +2855,7 @@ def memory_note_delete_status(result: dict[str, Any]) -> int:
         return 500
     if error in {
         "memory_delete_cleanup_required",
+        MEMORY_DELETION_JOURNAL_BUSY_ERROR,
         MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     }:
         return 503
@@ -2877,6 +2883,7 @@ def memory_provenance_backfill_status(
         return 500
     if error in {
         "memory_provenance_backfill_cleanup_required",
+        MEMORY_DELETION_JOURNAL_BUSY_ERROR,
         MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     }:
         return 503
@@ -2915,6 +2922,7 @@ def memory_provenance_correction_status(
         return 500
     if error in {
         "memory_provenance_correction_cleanup_required",
+        MEMORY_DELETION_JOURNAL_BUSY_ERROR,
         MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     }:
         return 503

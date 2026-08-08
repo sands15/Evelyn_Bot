@@ -8,8 +8,8 @@ from typing import Any, Mapping
 from aiohttp import web
 
 from .memory_deletion_journal import (
-    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_error_code,
 )
 from .memory_exposure import (
     MemoryExposurePosition,
@@ -137,14 +137,17 @@ class ControlPageMemoryGuardedJsonResponse(web.Response):
             exc.__traceback__ if exc is not None else None,
         )
 
-    def _replace_with_integrity_failure(self) -> None:
+    def _replace_with_integrity_failure(
+        self,
+        error: MemoryDeletionJournalIntegrityError,
+    ) -> None:
         self._memory_expected_position = None
         self._memory_guard_disabled = True
         self.set_status(503)
         self.text = json.dumps(
             {
                 "ok": False,
-                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "error": memory_deletion_journal_error_code(error),
             },
             ensure_ascii=False,
         )
@@ -155,8 +158,8 @@ class ControlPageMemoryGuardedJsonResponse(web.Response):
     async def prepare(self, request: web.BaseRequest) -> Any:
         try:
             self._enter_memory_guard()
-        except MemoryDeletionJournalIntegrityError:
-            self._replace_with_integrity_failure()
+        except MemoryDeletionJournalIntegrityError as exc:
+            self._replace_with_integrity_failure(exc)
         try:
             return await super().prepare(request)
         except BaseException as exc:

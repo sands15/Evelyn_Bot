@@ -65,6 +65,31 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
         control_page_server.bot_state_last_success_at = 0.0
 
+    async def test_proxy_preserves_busy_sentinel_without_private_fields(
+        self,
+    ) -> None:
+        private_canary = "PRIVATE_BUSY_DETAIL_MUST_NOT_ESCAPE"
+        with self.assertRaises(
+            deletion_journal.MemoryDeletionJournalBusyError
+        ) as raised:
+            control_page_server.proxy_json_response(
+                status=503,
+                text=json.dumps(
+                    {
+                        "ok": False,
+                        "error": "memory_deletion_journal_busy",
+                        "detail": private_canary,
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            deletion_journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+        )
+        self.assertNotIn(private_canary, str(raised.exception))
+
     async def test_chat_proxy_preserves_upstream_ingress_503(self) -> None:
         class _ChatRequest:
             async def json(self) -> dict[str, str]:

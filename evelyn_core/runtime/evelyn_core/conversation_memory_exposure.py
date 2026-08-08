@@ -12,7 +12,7 @@ from .conversation_memory_receipt import (
 from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
-    memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
     read_memory_deletion_tombstones,
 )
 from .memory_exposure import (
@@ -169,7 +169,7 @@ def filter_conversation_history_for_memory_exposure(
     current_position: MemoryDeletionPosition | None = None
     tombstoned_ids: frozenset[str] = frozenset()
     if bound_refs:
-        with memory_deletion_journal_guard(
+        with memory_deletion_journal_read_guard(
             Path(memory_index_dir),
             require_stable=True,
         ) as current_position:

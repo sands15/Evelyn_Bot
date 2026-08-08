@@ -34,8 +34,10 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_JOURNAL_BUSY_ERROR,
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MEMORY_DELETION_POSITION_SCHEMA,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
 )
@@ -186,6 +188,52 @@ class FastControlDeliveryMemoryBoundaryTests(
                 "ok": False,
                 "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
             },
+        )
+        self.assertNotIn(STALE_CANARY, body)
+        self.assertNotIn(NOTE_ID, body)
+
+    async def test_prepare_busy_failure_becomes_exact_no_store_503(
+        self,
+    ) -> None:
+        position = self.exposure_position()
+
+        @contextmanager
+        def fail_bound_guard(
+            *,
+            expected_position=None,
+            required=False,
+            **_kwargs,
+        ):
+            if required or expected_position is not None:
+                raise MemoryDeletionJournalBusyError(STALE_CANARY)
+            yield
+
+        async def handler(_request: web.Request) -> web.StreamResponse:
+            return fast_api.memory_guarded_json_response(
+                {"ok": True, "reply": STALE_CANARY},
+                expected_position=position,
+            )
+
+        app = web.Application()
+        app.router.add_get("/guarded", handler)
+        client = TestClient(TestServer(app))
+        with patch.object(
+            fast_api,
+            "memory_exposure_guard",
+            new=fail_bound_guard,
+        ):
+            await client.start_server()
+            try:
+                response = await client.get("/guarded")
+                body = await response.text()
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(
+            json.loads(body),
+            {"ok": False, "error": MEMORY_DELETION_JOURNAL_BUSY_ERROR},
         )
         self.assertNotIn(STALE_CANARY, body)
         self.assertNotIn(NOTE_ID, body)
@@ -362,6 +410,25 @@ class FastControlDeliveryMemoryBoundaryTests(
             response._memory_expected_position,
             position,
         )
+
+    async def test_public_projection_preserves_busy_for_retry(self) -> None:
+        with patch.object(
+            fast_api,
+            "filter_conversation_history_for_memory_exposure",
+            side_effect=MemoryDeletionJournalBusyError(STALE_CANARY),
+        ):
+            with self.assertRaises(MemoryDeletionJournalBusyError) as raised:
+                fast_api._memory_safe_public_rows(
+                    [{"role": "user", "text": STALE_CANARY}],
+                    memory_index_dir=self.bot_memory / "memory_index",
+                )
+
+        self.assertIs(type(raised.exception), MemoryDeletionJournalBusyError)
+        self.assertEqual(
+            str(raised.exception),
+            MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+        )
+        self.assertNotIn(STALE_CANARY, str(raised.exception))
 
     async def test_action_events_response_guards_projection_exposure(
         self,

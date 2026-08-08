@@ -10,7 +10,7 @@ from . import config as runtime_config
 from .context_pipeline import ContextPolicy
 from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
-    memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
 )
 from .memory_exposure import (
     MemoryExposurePosition,
@@ -96,7 +96,7 @@ async def classify_llm_route_from_runtime(
         else Path(runtime_config.MEMORY_ROOT) / "memory_index"
     )
     build_guard = (
-        memory_deletion_journal_guard(
+        memory_deletion_journal_read_guard(
             deletion_index_dir,
             require_stable=True,
         )

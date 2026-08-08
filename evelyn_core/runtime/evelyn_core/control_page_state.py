@@ -28,8 +28,10 @@ from .minecraft_mode_composition import (
 )
 from .minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot
 from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_BUSY_ERROR,
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_error_code,
 )
 from .public_error_contract import public_error_code, public_failure_message
 from .text import clean_text
@@ -1047,7 +1049,10 @@ def control_page_result_status(result: dict[str, Any], *, ok_status: int = 200, 
         return int(ok_status)
     if (
         clean_text(str(result.get("error") or ""))
-        == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+        in {
+            MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+            MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+        }
     ):
         return 503
     return int(error_status)
@@ -1070,10 +1075,10 @@ def handle_control_page_memory_note_action_request(
                 "expected_content_hash"
             ),
         )
-    except MemoryDeletionJournalIntegrityError:
+    except MemoryDeletionJournalIntegrityError as exc:
         return {
             "ok": False,
-            "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+            "error": memory_deletion_journal_error_code(exc),
         }, 503
     error = clean_text(str(result.get("error") or ""))
     status = (
@@ -1098,6 +1103,7 @@ def handle_control_page_memory_note_action_request(
         if error
         in {
             "memory_edit_cleanup_required",
+            MEMORY_DELETION_JOURNAL_BUSY_ERROR,
             MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
         }
         else 404

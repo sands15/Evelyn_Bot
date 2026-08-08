@@ -31,6 +31,11 @@ from evelyn_core.memory_deletion_outbound import (  # noqa: E402
     capture_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
 )
+from evelyn_core.memory_exposure import (  # noqa: E402
+    MemoryExposurePosition,
+    capture_memory_exposure_position,
+    reset_memory_exposure_position,
+)
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
 
@@ -609,6 +614,55 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             TEST_DELETION_POSITION.position_digest,
             serialized_messages,
+        )
+
+    async def test_fast_request_combines_prebuilt_and_recalled_exposure(self) -> None:
+        existing_note = "opaque-" + ("c" * 64)
+        recalled_note = "opaque-" + ("d" * 64)
+        capture_memory_exposure_position(
+            MemoryExposurePosition(
+                deletion_position=TEST_DELETION_POSITION,
+                memory_version=9,
+                supplied_note_ids=(existing_note,),
+            )
+        )
+
+        async def grounded_memory(_text: str):
+            return (
+                "PRIVATE_GROUNDED_MEMORY",
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "memoryVersion": 9,
+                    "noteIds": [recalled_note],
+                    "deletionBoundary": capture_test_deletion_boundary(),
+                },
+            )
+
+        try:
+            request = await build_fast_main_llm_request(
+                base_system_prompt="base",
+                recent_messages=[
+                    {"role": "assistant", "content": "prior bound reply"},
+                ],
+                user_text="memory previous preference?",
+                final_user_text="answer",
+                source="control_page",
+                runtime_health_provider=fake_runtime_health,
+                memory_provider=grounded_memory,
+            )
+        finally:
+            reset_memory_exposure_position()
+
+        self.assertEqual(
+            request.memory_exposure_position,
+            MemoryExposurePosition(
+                deletion_position=TEST_DELETION_POSITION,
+                memory_version=9,
+                supplied_note_ids=tuple(
+                    sorted((existing_note, recalled_note))
+                ),
+            ),
         )
 
     async def test_fast_main_preserves_unanswered_turn_and_adds_fixed_rule(self) -> None:

@@ -282,6 +282,31 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("stateRefreshGeneration += 1;\n      sending = true;", self.html)
         self.assertIn("stateRefreshGeneration += 1;\n        sending = false;", self.html)
 
+    def test_busy_memory_state_keeps_last_ui_and_retries(self) -> None:
+        fetch_contract = self.html.split(
+            "async function fetchApi", 1
+        )[1].split("function shouldPreserveChatHistory", 1)[0]
+        self.assertIn(
+            'evelynErrorCode === "memory_deletion_journal_busy"',
+            fetch_contract,
+        )
+        self.assertIn(
+            'apiError.evelynErrorCode = evelynErrorCode;',
+            fetch_contract,
+        )
+        refresh_contract = self.html.split(
+            "async function refreshState", 1
+        )[1].split("function renderSuggestions", 1)[0]
+        busy_branch = refresh_contract.index(
+            'error.evelynErrorCode || "") === "memory_deletion_journal_busy"'
+        )
+        generic_failure = refresh_contract.index("setBootProgress(0,")
+        self.assertLess(busy_branch, generic_failure)
+        self.assertIn(
+            "scheduleBootProgressPolling(null);\n          return;",
+            refresh_contract[busy_branch:generic_failure],
+        )
+
     def test_chat_continuity_transition_table_executes(self) -> None:
         node = shutil.which("node")
         if not node:

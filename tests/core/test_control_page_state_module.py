@@ -73,6 +73,7 @@ from evelyn_core.control_page_state import (  # noqa: E402
     sanitize_control_page_welcome_text_payload,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
@@ -670,6 +671,16 @@ class ControlPageStateModuleTests(unittest.TestCase):
             ),
             503,
         )
+        self.assertEqual(
+            control_page_result_status(
+                {
+                    "ok": False,
+                    "error": "memory_deletion_journal_busy",
+                },
+                error_status=404,
+            ),
+            503,
+        )
 
     def test_memory_note_action_integrity_failure_is_service_unavailable(
         self,
@@ -697,6 +708,26 @@ class ControlPageStateModuleTests(unittest.TestCase):
             },
         )
         self.assertNotIn(private_detail, str(result))
+
+        def fail_busy(*_args, **_kwargs):
+            raise MemoryDeletionJournalBusyError(private_detail)
+
+        busy_result, busy_status = (
+            handle_control_page_memory_note_action_request(
+                "private-note-id",
+                {
+                    "action": "edit",
+                    "body": "must never be returned",
+                },
+                update_note=fail_busy,
+            )
+        )
+        self.assertEqual(busy_status, 503)
+        self.assertEqual(
+            busy_result,
+            {"ok": False, "error": "memory_deletion_journal_busy"},
+        )
+        self.assertNotIn(private_detail, str(busy_result))
 
     def test_control_page_chat_request_handler_orchestrates_logs_refresh_and_state(self) -> None:
         guild = SimpleNamespace(id=7)

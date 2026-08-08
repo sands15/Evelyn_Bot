@@ -25,8 +25,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 최근 확인
 
-- 2026-08-08 자율행동 history와 legacy memory layer를 삭제 guard에 연결하고 receipt 없는
-  파생 재사용·질문 복제·reset 및 파생 철회 재쓰기 비결정성을 닫았다(memory 269·전체 3078 통과).
+- 2026-08-08 이미 materialize된 response/outbound reader를 shared lease로 바꿔 동시
+  기억 조회를 허용하고 정상 lock 경합을 retryable busy 503으로 분리했다. fresh write-backed
+  recall과 최대 45–180초 semantic maintenance writer는 남은 P1이다.
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
@@ -55,9 +56,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상·누락·역전된 consent/heartbeat와 Control Page hard-crash는 exact ACK,
   서명 상태와 watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- 관련 CI-equivalent 전체 discover 3078개(skip 21), hardening 267개(skip 1),
-  `compileall`, `pip check`, JS 구문과 Compose config가 통과했다. 현재 마이크는
-  동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
+- CI-equivalent 전체 3,096개(skip 21), 관련 집중 검증과 JS 구문이 통과했다. 현재
+  마이크는 동의 경계로 OFF이며 Discord와 Minecraft도 기동하지 않았다.
 
 ## 작업 원칙
 

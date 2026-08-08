@@ -21,6 +21,9 @@ from evelyn_core.assistant_contracts import (  # noqa: E402
     MemoryRecallResult,
 )
 from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
+from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
+)
 from evelyn_core.conversation_memory_exposure import (  # noqa: E402
     filter_conversation_history_for_memory_exposure,
 )
@@ -64,6 +67,31 @@ from evelyn_core.memory_vault import (  # noqa: E402
 
 
 class MemoryVaultTests(unittest.TestCase):
+    def test_recall_projects_busy_without_private_details(self) -> None:
+        private_detail = "private recall lock path"
+        request = MemoryRecallRequest(
+            turn_id="turn-busy",
+            session_key="session-busy",
+            guild_id=None,
+            user_text="fixed synthetic query",
+            topic_id=None,
+            source="test",
+            max_items=1,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            memory_vault_module,
+            "sync_memory_vault_index",
+            side_effect=MemoryDeletionJournalBusyError(private_detail),
+        ):
+            result = recall_memory_vault(request, root=Path(tmp))
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_text,
+            "memory_deletion_journal_busy",
+        )
+        self.assertNotIn(private_detail, str(result))
+
     def test_recall_receipt_normalizes_private_retrieval_mode(
         self,
     ) -> None:
@@ -1943,6 +1971,52 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("user-request", row[1])
         self.assertIn("daily-source", row[2])
         self.assertIn("evidence-hash", row[3])
+
+    def test_delete_projects_busy_without_private_details(self) -> None:
+        private_detail = "private delete lock path"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Busy Deletion Canary",
+                body="synthetic deletion body",
+                source="control-page-user",
+                source_refs=["user-request"],
+                root=root,
+            )
+            note = parse_memory_note(path)
+            update_memory_vault_user_note(
+                note.note_id,
+                "confirm",
+                expected_content_hash=note.source_hash,
+                root=root,
+            )
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                reason="privacy_request",
+                root=root,
+                now=lambda: 100.0,
+            )
+            with patch.object(
+                memory_vault_module,
+                "_append_memory_deletion_tombstone",
+                side_effect=MemoryDeletionJournalBusyError(
+                    private_detail
+                ),
+            ):
+                result = delete_memory_vault_user_note(
+                    note.note_id,
+                    str(preview["confirmToken"]),
+                    reason="privacy_request",
+                    root=root,
+                    now=lambda: 101.0,
+                )
+
+        self.assertEqual(
+            result,
+            {"ok": False, "error": "memory_deletion_journal_busy"},
+        )
+        self.assertNotIn(private_detail, str(result))
 
     def test_permanent_delete_removes_source_index_cache_and_user_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

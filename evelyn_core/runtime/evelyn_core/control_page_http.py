@@ -11,8 +11,11 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from .memory_deletion_journal import (
+    MEMORY_DELETION_JOURNAL_BUSY_ERROR,
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_error_code,
 )
 
 
@@ -177,11 +180,19 @@ def control_page_security_error(error: str, *, status: int = 403) -> web.Respons
 
 
 def memory_deletion_journal_integrity_response() -> web.Response:
+    return memory_deletion_journal_error_response(
+        MemoryDeletionJournalIntegrityError()
+    )
+
+
+def memory_deletion_journal_error_response(
+    error: MemoryDeletionJournalIntegrityError,
+) -> web.Response:
     return add_control_page_no_store_headers(
         control_page_json_response(
             {
                 "ok": False,
-                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "error": memory_deletion_journal_error_code(error),
             },
             status=503,
         )
@@ -208,7 +219,11 @@ def normalize_memory_deletion_journal_integrity_response(
     if not isinstance(body, (bytes, bytearray, memoryview)):
         return response
     encoded = bytes(body)
-    if MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR.encode("ascii") not in encoded:
+    error_codes = {
+        MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+        MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    }
+    if not any(code.encode("ascii") in encoded for code in error_codes):
         return response
     try:
         payload = json.loads(encoded.decode("utf-8", errors="strict"))
@@ -216,10 +231,14 @@ def normalize_memory_deletion_journal_integrity_response(
         return response
     if (
         isinstance(payload, dict)
-        and payload.get("error")
-        == MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
+        and payload.get("error") in error_codes
     ):
-        return memory_deletion_journal_integrity_response()
+        error = (
+            MemoryDeletionJournalBusyError()
+            if payload["error"] == MEMORY_DELETION_JOURNAL_BUSY_ERROR
+            else MemoryDeletionJournalIntegrityError()
+        )
+        return memory_deletion_journal_error_response(error)
     return response
 
 
@@ -257,8 +276,8 @@ async def control_page_cors_middleware(
     else:
         try:
             response = await handler(request)
-        except MemoryDeletionJournalIntegrityError:
-            response = memory_deletion_journal_integrity_response()
+        except MemoryDeletionJournalIntegrityError as exc:
+            response = memory_deletion_journal_error_response(exc)
     response = normalize_memory_deletion_journal_integrity_response(
         response
     )
@@ -278,8 +297,8 @@ async def reject_browser_origin_middleware(
             return control_page_security_error("json_content_type_required", status=415)
     try:
         response = await handler(request)
-    except MemoryDeletionJournalIntegrityError:
-        response = memory_deletion_journal_integrity_response()
+    except MemoryDeletionJournalIntegrityError as exc:
+        response = memory_deletion_journal_error_response(exc)
     return normalize_memory_deletion_journal_integrity_response(response)
 
 
@@ -298,6 +317,7 @@ __all__ = [
     "control_page_file_response",
     "control_page_json_response",
     "memory_deletion_journal_integrity_response",
+    "memory_deletion_journal_error_response",
     "normalize_memory_deletion_journal_integrity_response",
     "resolve_control_page_asset_path",
     "reject_browser_origin_middleware",

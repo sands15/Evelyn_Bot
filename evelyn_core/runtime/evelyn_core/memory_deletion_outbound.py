@@ -9,7 +9,7 @@ from .config import MEMORY_ROOT
 from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
     MemoryDeletionPosition,
-    memory_deletion_journal_guard,
+    memory_deletion_journal_read_guard,
 )
 
 
@@ -76,7 +76,7 @@ def memory_deletion_outbound_guard(
         if index_dir is not None
         else Path(MEMORY_ROOT) / "memory_index"
     )
-    with memory_deletion_journal_guard(
+    with memory_deletion_journal_read_guard(
         target_index_dir,
         expected_position=position,
         require_stable=True,

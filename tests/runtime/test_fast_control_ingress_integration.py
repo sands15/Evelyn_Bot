@@ -39,6 +39,8 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 from evelyn_core.voice_validation import (  # noqa: E402
@@ -2957,7 +2959,7 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 fast_api,
-                "memory_deletion_journal_guard",
+                "memory_deletion_journal_read_guard",
                 side_effect=lambda *_args, **_kwargs: nullcontext(None),
             ),
             patch.object(
@@ -2983,6 +2985,53 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rejection)
         self.assertEqual(cached[0]["assistantText"], "캐시 답변")
         self.assertIn(("replay", owner.claim["entryId"]), owner.events)
+
+    async def test_completed_retry_keeps_journal_busy_retryable(self) -> None:
+        private_canary = "private replay detail"
+        owner = _IngressOwner(
+            {
+                "entryId": "ingress-" + "4" * 64,
+                "turnId": "journal-turn-4",
+                "phase": "completed",
+                "shouldProcess": False,
+            }
+        )
+        owner.replay_record = {
+            "entryId": owner.claim["entryId"],
+            "phase": "completed",
+            "assistantText": private_canary,
+            "memoryReceiptRef": not_used_memory_receipt_ref(),
+        }
+
+        with patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            owner,
+        ), patch.object(
+            fast_api,
+            "memory_deletion_journal_read_guard",
+            side_effect=MemoryDeletionJournalBusyError(
+                private_canary
+            ),
+        ):
+            with self.assertRaises(
+                MemoryDeletionJournalBusyError
+            ) as raised:
+                fast_api._prepare_fast_control_ingress(
+                    {"requestId": "browser-request-busy"},
+                    accepted_text="질문",
+                    source="control_page",
+                )
+
+        self.assertIs(
+            type(raised.exception),
+            MemoryDeletionJournalBusyError,
+        )
+        self.assertEqual(
+            str(raised.exception),
+            MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+        )
+        self.assertNotIn(private_canary, str(raised.exception))
 
     async def test_nonstream_integrity_error_does_not_enter_stream_path(self) -> None:
         owner = _IngressOwner()

@@ -234,7 +234,9 @@ Main Control Page와 Fast Control Page의 memory-bound JSON response는 handler
 position을 재검사하고 `write_eof` 종료까지 lease를 유지한다. stale로
 판정되면 응답 본문을 쓰기 전 exact
 `memory_deletion_journal_integrity_failed` 503과 `Cache-Control: no-store`로
-닫힌다. Fast chat stream도 첫 content event 전 `memory_boundary`를 먼저
+닫힌다. 호환되지 않는 writer가 lease를 보유한 일시적 경쟁이면 exact
+`memory_deletion_journal_busy` 503과 `Cache-Control: no-store`로 반환해
+사용자가 잠시 뒤 재시도할 수 있게 한다. Fast chat stream도 첫 content event 전 `memory_boundary`를 먼저
 전송하고 terminal event에서 같은 경계를 재확인한다.
 
 공개 Control Page의 8798→8799 프록시는 내부 응답을 단순 복사하지 않는다.
@@ -250,7 +252,7 @@ validator를 사용한다. `bound` receipt의 memory version과 정렬된 note I
 exposure와 정확히 같아야 하며, `bound`인데 exposure가 없거나 nonempty exposure에
 `not_used`가 붙는 경우도 persistence·continuity·TTS·공개 반환 전에 거부한다.
 
-Discord/in-process TTS는 producer가 잡고 있는 exclusive exposure lease와
+Discord/in-process TTS는 producer가 잡고 있는 exposure lease와
 playback task의 lease를 겹치지 않게 handoff한다. streaming chunk를 먼저
 buffer하고 producer close 후 playback owner가 동일 position을 새로 검증해
 합성·재생한다. Windows Local I/O Bridge의 direct Fast stream은 `bound`
@@ -655,11 +657,19 @@ keyed head와 외부 anchor가 모두 검증된 경우에만 참이다. 외부 a
 
 ### Exposure linearization
 
+memory response, outbound LLM과 conversation-history exposure처럼 deletion
+journal을 쓰지 않는 긴 구간은 같은 OS lock byte의 shared reader lease 안에서
+journal을 검증하고 결과가 경계를 벗어나기 직전에 다시 검증한다. 여러 reader는
+동시에 진행할 수 있지만 deletion writer는 모든 reader가 끝날 때까지 진입하지
+못한다. reader에서 writer로의 lock upgrade는 허용하지 않는다. 검증 중 복구가
+필요하면 shared lease를 놓고 writer lease에서 상태를 다시 검사·복구한 뒤 shared
+lease를 새로 얻는다.
+
 recall, 전체 vault context 조립, graph/snapshot/detail, hot context, provenance
-preview/apply, index/cache rebuild와 memory write는 deletion writer lease 안에서
-journal을 검증하고 결과가 경계를 벗어나기 직전에 다시 검증한다. 정상 삭제는
-노출 전 또는 노출 후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로
-그 본문을 반환할 수 없다.
+preview/apply, index/cache rebuild와 memory write처럼 동기화·cache·artifact write를
+포함하는 경로는 deletion writer lease를 유지한다. 정상 삭제는 노출 전 또는 노출
+후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로 그 본문을 반환할 수
+없다.
 
 semantic consolidation과 derivation recomposition은 source의 현재 tombstone과
 content hash를 writer lease 안에서 다시 검사한 뒤 그 lease를 Sub-LLM 호출이
@@ -761,7 +771,11 @@ hot context에는 deletion journal과 chain head 각각의 수정 시각·크기
   `tombstoned=true`, `cleanupErrors=[...]`
 - deletion-ledger 무결성/내구 commit 실패로 분류되기 전의 예기치 않은 사전
   실패: HTTP 500, `error=memory_delete_failed`
-- deletion ledger가 손상됐거나 writer/exposure lease를 획득하지 못함:
+- 정상 lock 경쟁으로 reader/writer lease를 즉시 획득하지 못함:
+  HTTP 503, exact
+  `{ "ok": false, "error": "memory_deletion_journal_busy" }`; mutation 없음,
+  잠시 뒤 재시도 가능
+- deletion ledger가 손상됐거나 stale position·내구성 검증이 실패함:
   HTTP 503, exact
   `{ "ok": false, "error": "memory_deletion_journal_integrity_failed" }`
 - preview 뒤 파생 영향 그래프 변경:
@@ -771,11 +785,11 @@ hot context에는 deletion journal과 chain head 각각의 수정 시각·크기
 fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과 인덱스가
 정리됐는지 확인한다.
 
-integrity 503에는 parser 원문, 예외 메시지, source/title/body, transcript,
-host path를 넣지 않고 `Cache-Control: no-store`를 적용한다. recall의 같은 실패도
+busy와 integrity 503에는 parser 원문, 예외 메시지, source/title/body, transcript,
+host path나 sibling field를 넣지 않고 `Cache-Control: no-store`를 적용한다. recall의 같은 실패도
 빈 context/facts/sources와 고정 error code만 반환한다. Bot API chat state
-handler도 이 오류를 generic `control_page_chat_failed`로 바꾸지 않고 최외곽
-middleware까지 다시 던지며, 공개 Control Page proxy는 같은 exact 503과
+handler도 두 오류를 generic `control_page_chat_failed`로 바꾸지 않고 최외곽
+middleware까지 다시 던지며, 공개 Control Page proxy는 각각 같은 exact 503과
 `no-store`를 보존한다.
 
 ## Storage
@@ -843,6 +857,8 @@ prompt block과 user state가 의도적으로 남아 있다.
 - exact 1-event crash recovery와 그 이상의 lag 거부
 - signed head와 외부 anchor의 과거 journal+head replay 탐지
 - writer allowlist가 아니라 OS single-writer lease를 무시한 경쟁 append 거부
+- Windows `LockFileEx`와 POSIX `LOCK_SH`에서 별도 프로세스 reader 공존,
+  reader/writer 상호 차단, async owner별 해제와 reader→writer upgrade 거부
 - fresh-process torn/missing/lag 상태와 same-ID resurrection 차단
 - cached recall, 전체 vault context, semantic Sub-LLM, derivation recomposition
   경계의 concurrent delete 선형화
@@ -855,7 +871,8 @@ prompt block과 user state가 의도적으로 남아 있다.
   build와 Main/Voice/Fast HTTP admission 사이 삭제 시 POST 0회 fail-closed
 - unlink 실패 시 source Markdown의 title/body가 content-free stub으로 먼저
   redaction되는 계약
-- public API의 exact content-free 503와 integrity status projection
+- public API와 8798→8799 proxy의 exact content-free busy/integrity 503,
+  `no-store`, private sibling 제거와 retry UI projection
 
 `tests.memory.test_memory_edit_restart`는 사용자 편집 뒤 새 Python
 프로세스에서 note detail과 recall을 다시 열어 수정 본문,

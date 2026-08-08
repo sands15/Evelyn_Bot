@@ -896,11 +896,22 @@ key/anchor bootstrap이나 삭제를 실행하지 않았다.
 명시적으로 조율해야 한다. witness가 남아 있는데 journal/head/anchor가 사라지면
 완전 미초기화로 오인하지 않고 integrity failure다.
 
-두 번째 위험은 현재 exposure guard가 shared reader가 아니라 nonblocking
-exclusive writer lease를 재사용한다는 점이다. privacy 선형성은 강하지만 동시에
-두 recall/snapshot이 겹치거나 semantic Sub-LLM·Main LLM 응답이 길어지면 정상 요청도
-`memory_deletion_journal_integrity_failed` 503으로 분류될 수 있다. 64 MiB journal
-상한에 도달했을 때 검증 가능한 compaction/rotation도 아직 없다.
+장기 exposure·HTTP response·deletion-only outbound guard는 이제 같은 lock file의
+shared reader lease를 사용한다. Windows는 `LockFileEx` shared byte-range, POSIX는
+`LOCK_SH`, process 안에서는 thread+async-task별 reader owner 집합으로 겹친 조회를
+분리한다. reader끼리는 공존하고 삭제 writer는 마지막 reader가 끝날 때까지
+fail-fast한다. 정상 lock 경합은 무결성 손상과 분리된 고정
+`memory_deletion_journal_busy` 503으로 8798·8799와 Control Page에 전달한다.
+
+남은 두 번째 위험은 index sync, retrieval-cache migration/write, cognitive·memory
+artifact commit처럼 실제 쓰기가 섞인 snapshot/recall 경로다. 이 경로를 무리하게
+shared로 바꾸면 reader→writer upgrade나 동시 파일 쓰기 경쟁이 생기므로 exclusive
+lease를 사용한다. 따라서 이미 materialize된 exposure·outbound response reader끼리는
+공존하지만 fresh write-backed recall/index/cache는 active reader와 retryable busy가
+될 수 있다. semantic consolidation과 derivation recomposition의 outer writer는
+Sub-LLM 호출당 최대 45초를 감싸며 recomposition은 기본 최대 4회라 별도의 장기
+exclusive maintenance 위험이다. bounded 자동 재시도와 64 MiB journal 상한의 검증
+가능한 compaction/rotation도 아직 없다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
@@ -944,18 +955,19 @@ browser `prepare` 직전에 exposure를 다시 검증한다. state 재직렬화�
 exposure의 state/version/note ID 불일치를 assistant persistence·continuity·TTS
 전에 거부한다.
 
-따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation이 아니라,
-위에 기록한 exclusive reader lease의 shared-reader 가용성과 64 MiB journal
-rotation 공백이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
+따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation이나 materialize된 response의
+exclusive lease가 아니라, 위에 기록한 fresh write-backed recall/index/cache busy,
+장기 semantic maintenance writer와 64 MiB journal rotation 공백이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
 계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
 계속 남는다.
 
 다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
-one-shot bootstrap과 pair replay를 먼저 검증한다. 그 다음 Windows shared
-byte-range/POSIX `LOCK_SH`와 in-process reader count를 도입해 여러 exposure는
-공존시키고 삭제 writer만 배타화하며, 정상 경합은 별도
-`memory_deletion_journal_busy` retry 계약으로 분리한다. chain과 외부 anchor를
-잃지 않는 checkpointed rotation도 그 계약과 함께 설계한다.
+one-shot bootstrap과 pair replay를 먼저 검증한다. write-backed recall은 sync/cache
+mutation과 stable read 단계를 분리하거나 별도 atomic serializer를 둔 뒤에만 shared로
+옮긴다. semantic maintenance는 source validation+LLM shared phase와 apply writer phase를
+나누고 commit 직전 hash/tombstone을 다시 검증한다. bounded busy 재시도를 실제 UI
+전이로 검증하고, chain과 외부 anchor를 잃지
+않는 checkpointed rotation도 함께 설계한다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 

@@ -19,6 +19,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core import control_page_server, memory_vault  # noqa: E402
 from evelyn_core.control_page_http import CONTROL_PAGE_CSRF_HEADER  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 
@@ -179,39 +180,47 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        for method, path, target, body in cases:
-            with self.subTest(method=method, path=path), patch.object(
-                control_page_server,
-                target,
-                side_effect=MemoryDeletionJournalIntegrityError(
-                    private_detail
-                ),
-            ):
-                headers = (
-                    self.headers()
-                    if method == "POST"
-                    else {"Origin": self.origin}
-                )
-                response = await self.client.request(
-                    method,
-                    path,
-                    headers=headers,
-                    json=body,
-                )
-                payload = await response.json()
+        error_cases = (
+            (
+                MemoryDeletionJournalIntegrityError,
+                "memory_deletion_journal_integrity_failed",
+            ),
+            (
+                MemoryDeletionJournalBusyError,
+                "memory_deletion_journal_busy",
+            ),
+        )
+        for error_type, expected_code in error_cases:
+            for method, path, target, body in cases:
+                with self.subTest(
+                    error=expected_code,
+                    method=method,
+                    path=path,
+                ), patch.object(
+                    control_page_server,
+                    target,
+                    side_effect=error_type(private_detail),
+                ):
+                    headers = (
+                        self.headers()
+                        if method == "POST"
+                        else {"Origin": self.origin}
+                    )
+                    response = await self.client.request(
+                        method,
+                        path,
+                        headers=headers,
+                        json=body,
+                    )
+                    payload = await response.json()
 
-            self.assertEqual(response.status, 503)
-            self.assertEqual(
-                payload,
-                {
-                    "ok": False,
-                    "error": (
-                        "memory_deletion_journal_integrity_failed"
-                    ),
-                },
-            )
-            self.assertNotIn(private_detail, await response.text())
-            self.assertNotIn("private-note-body", await response.text())
+                self.assertEqual(response.status, 503)
+                self.assertEqual(
+                    payload,
+                    {"ok": False, "error": expected_code},
+                )
+                self.assertNotIn(private_detail, await response.text())
+                self.assertNotIn("private-note-body", await response.text())
 
     async def test_end_to_end_api_removes_source_and_keeps_content_free_tombstone(
         self,
@@ -327,6 +336,30 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             control_page_server.memory_note_action_status(result),
+            503,
+        )
+        busy_result = {
+            "ok": False,
+            "error": "memory_deletion_journal_busy",
+        }
+        self.assertEqual(
+            control_page_server.memory_note_action_status(busy_result),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_note_delete_status(busy_result),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_provenance_backfill_status(
+                busy_result
+            ),
+            503,
+        )
+        self.assertEqual(
+            control_page_server.memory_provenance_correction_status(
+                busy_result
+            ),
             503,
         )
         self.assertEqual(

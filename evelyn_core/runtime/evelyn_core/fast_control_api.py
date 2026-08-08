@@ -123,9 +123,10 @@ from .minecraft_world_lease_http_runtime import (
     MinecraftWorldLeaseHttpRuntime,
 )
 from .memory_deletion_journal import (
-    MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
-    memory_deletion_journal_guard,
+    memory_deletion_journal_error_code,
+    memory_deletion_journal_read_guard,
 )
 from .memory_deletion_outbound import (
     capture_memory_deletion_outbound_position,
@@ -506,7 +507,10 @@ class MemoryGuardedJsonResponse(web.Response):
             control_page_memory_handoff_headers(expected_position)
         )
 
-    def _replace_with_integrity_failure(self) -> None:
+    def _replace_with_integrity_failure(
+        self,
+        error: MemoryDeletionJournalIntegrityError,
+    ) -> None:
         """Discard the original body before any response headers are sent."""
 
         self._memory_expected_position = None
@@ -518,7 +522,7 @@ class MemoryGuardedJsonResponse(web.Response):
         self.text = json.dumps(
             {
                 "ok": False,
-                "error": MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+                "error": memory_deletion_journal_error_code(error),
             },
             ensure_ascii=False,
         )
@@ -642,12 +646,12 @@ class MemoryGuardedJsonResponse(web.Response):
             self._enter_memory_guard()
             self._run_before_write()
             return await super().prepare(request)
-        except MemoryDeletionJournalIntegrityError:
+        except MemoryDeletionJournalIntegrityError as exc:
             self._exit_memory_guard()
             if self.prepared:
                 self._run_after_terminal()
                 raise
-            self._replace_with_integrity_failure()
+            self._replace_with_integrity_failure(exc)
             try:
                 return await super().prepare(request)
             except BaseException:
@@ -1685,7 +1689,7 @@ def _prepare_fast_control_ingress(
                 "conversation_ingress_replay_unattributed"
             )
         memory_index_dir = Path(MEMORY_ROOT) / "memory_index"
-        with memory_deletion_journal_guard(
+        with memory_deletion_journal_read_guard(
             memory_index_dir,
             require_stable=True,
         ) as deletion_position:
@@ -1704,6 +1708,8 @@ def _prepare_fast_control_ingress(
         ):
             pass
         return claim, (record, exposure), None
+    except MemoryDeletionJournalBusyError:
+        raise
     except (
         ConversationIngressRecoveryError,
         MemoryDeletionJournalIntegrityError,
@@ -2853,6 +2859,8 @@ def drain_local_bridge_speak_requests() -> list[dict[str, Any]]:
                 index_dir=Path(MEMORY_ROOT) / "memory_index",
             ):
                 requests.append(request)
+        except MemoryDeletionJournalBusyError:
+            raise
         except MemoryDeletionJournalIntegrityError:
             continue
     LOCAL_BRIDGE_SPEAK_QUEUE.clear()
@@ -4168,6 +4176,8 @@ def _memory_safe_public_rows(
             outcome.memory_exposure_position,
         )
         return [dict(row) for row in outcome.messages]
+    except MemoryDeletionJournalBusyError:
+        raise
     except MemoryDeletionJournalIntegrityError:
         # A broken or unavailable index must not make a bound reply public.
         # Preserve user rows and assistant rows explicitly proven independent
@@ -4434,25 +4444,21 @@ async def build_main_llm_request_payload(
         combined_prebuild_exposure
     )
     final_user_text = build_fast_main_llm_user_text(text)
-    with memory_exposure_guard(
-        expected_position=combined_prebuild_exposure,
-        required=(combined_prebuild_exposure is not None),
-    ):
-        llm_request = await build_fast_main_llm_request(
-            base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
-            recent_messages=recent_messages,
-            user_text=text,
-            final_user_text=final_user_text,
-            source=source,
-            tool_user_text=(
-                tool_plan.query
-                if tool_plan is not None
-                else None
-            ),
-            local_bridge_status_provider=(
-                local_bridge_status_snapshot
-            ),
-        )
+    llm_request = await build_fast_main_llm_request(
+        base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
+        recent_messages=recent_messages,
+        user_text=text,
+        final_user_text=final_user_text,
+        source=source,
+        tool_user_text=(
+            tool_plan.query
+            if tool_plan is not None
+            else None
+        ),
+        local_bridge_status_provider=(
+            local_bridge_status_snapshot
+        ),
+    )
     payload = {
         "model": MODEL_NAME,
         "messages": llm_request.messages,

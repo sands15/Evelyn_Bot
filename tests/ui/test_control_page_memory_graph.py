@@ -187,6 +187,11 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             "memory_deletion_journal_integrity_failed",
             self.html,
         )
+        self.assertIn("memory_deletion_journal_busy", self.html)
+        self.assertIn(
+            "다른 기억 조회나 삭제가 끝나는 중이야. 잠깐 뒤 다시 시도해줘.",
+            self.html,
+        )
         self.assertIn(
             "memory_delete_cleanup_required",
             self.html,

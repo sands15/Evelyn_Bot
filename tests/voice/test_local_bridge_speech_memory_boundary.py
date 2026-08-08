@@ -250,6 +250,39 @@ class LocalBridgeSpeechMemoryBoundaryTests(
                         [],
                     )
 
+    def test_drain_preserves_queue_while_deletion_journal_is_busy(self) -> None:
+        private_canary = "private speech must stay queued"
+        with self.isolated_roots() as (bot_memory, _runtime_artifacts):
+            index_dir = bot_memory / "memory_index"
+            self.write_memory_version(index_dir, 1)
+            position = self.exposure_position(index_dir, version=1)
+            memory_exposure.capture_memory_exposure_position(position)
+            queued = fast_api.queue_local_bridge_speech(
+                private_canary,
+                source="unit",
+            )
+            before = [dict(item) for item in fast_api.LOCAL_BRIDGE_SPEAK_QUEUE]
+
+            with patch.object(
+                fast_api,
+                "memory_exposure_guard",
+                side_effect=deletion_journal.MemoryDeletionJournalBusyError(
+                    private_canary
+                ),
+            ):
+                with self.assertRaises(
+                    deletion_journal.MemoryDeletionJournalBusyError
+                ) as raised:
+                    fast_api.drain_local_bridge_speak_requests()
+
+            self.assertIsNotNone(queued)
+            self.assertEqual(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE, before)
+            self.assertEqual(
+                str(raised.exception),
+                deletion_journal.MEMORY_DELETION_JOURNAL_BUSY_ERROR,
+            )
+            self.assertNotIn(private_canary, str(raised.exception))
+
     async def test_local_worker_never_speaks_stale_boundary(self) -> None:
         with self.isolated_roots() as (bot_memory, _runtime_artifacts):
             index_dir = bot_memory / "memory_index"

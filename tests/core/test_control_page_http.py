@@ -33,6 +33,7 @@ from evelyn_core.control_page_http import (  # noqa: E402
     request_control_page_host_is_allowed,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
 )
 
@@ -242,6 +243,64 @@ class ControlPageHttpTests(unittest.TestCase):
             },
         )
         self.assertNotIn(private_detail, response.text)
+
+    def test_busy_failure_is_exact_retryable_content_free_503(self) -> None:
+        private_detail = "private transcript and lock path"
+
+        class Request:
+            method = "GET"
+            path = "/api/control-page/memory"
+            headers = {
+                "Host": "127.0.0.1:8799",
+                "Origin": "http://127.0.0.1:8799",
+            }
+            scheme = "http"
+
+        async def handler(_request):
+            raise MemoryDeletionJournalBusyError(private_detail)
+
+        response = asyncio.run(
+            control_page_cors_middleware(Request(), handler)
+        )
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text),
+            {"ok": False, "error": "memory_deletion_journal_busy"},
+        )
+        self.assertNotIn(private_detail, response.text)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            CONTROL_PAGE_NO_STORE_HEADERS["Cache-Control"],
+        )
+
+        class InternalRequest:
+            method = "GET"
+            path = "/api/control-page/memory"
+            headers = {}
+
+        async def result_handler(_request):
+            return control_page_json_response(
+                {
+                    "ok": False,
+                    "error": "memory_deletion_journal_busy",
+                    "detail": private_detail,
+                },
+                status=418,
+            )
+
+        internal = asyncio.run(
+            reject_browser_origin_middleware(
+                InternalRequest(),
+                result_handler,
+            )
+        )
+        self.assertEqual(internal.status, 503)
+        self.assertEqual(
+            json.loads(internal.text),
+            {"ok": False, "error": "memory_deletion_journal_busy"},
+        )
+        self.assertNotIn(private_detail, internal.text)
 
     def test_result_shaped_integrity_failure_is_collapsed_at_cors_boundary(
         self,

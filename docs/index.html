@@ -3906,6 +3906,7 @@
           const failure = await response.json();
           const candidate = String(failure && failure.error || "");
           if ([
+            "memory_deletion_journal_busy",
             "memory_deletion_journal_integrity_failed",
             "memory_delete_cleanup_required"
           ].includes(candidate)) {
@@ -3914,7 +3915,11 @@
         } catch {
           // Preserve only explicitly allowlisted public codes.
         }
-        const apiError = new Error(`api_error:${response.status}`);
+        const apiError = new Error(
+          evelynErrorCode === "memory_deletion_journal_busy"
+            ? "다른 기억 조회나 삭제가 끝나는 중이야. 잠깐 뒤 다시 시도해줘."
+            : `api_error:${response.status}`
+        );
         apiError.evelynErrorCode = evelynErrorCode;
         throw apiError;
       }
@@ -4023,6 +4028,10 @@
           stateRefreshGeneration,
           sending
         )) return;
+        if (String(error.evelynErrorCode || "") === "memory_deletion_journal_busy") {
+          scheduleBootProgressPolling(null);
+          return;
+        }
         if (showConnectionErrors || !initialStateLoaded) {
           setBootProgress(0, `API 연결 확인 중: ${error.message}`);
           setBubble(`컨트롤 페이지 API 연결 확인 중: ${error.message}`);

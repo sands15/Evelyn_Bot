@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
@@ -59,6 +60,7 @@ MEMORY_DELETE_TOMBSTONE_EXTERNAL_INITIALIZATION_NAME = (
 MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR = (
     "memory_deletion_journal_integrity_failed"
 )
+MEMORY_DELETION_JOURNAL_BUSY_ERROR = "memory_deletion_journal_busy"
 MEMORY_DELETION_POSITION_SCHEMA = "memory.deletion.position.v1"
 MEMORY_DELETE_TOMBSTONE_CHAIN_GENESIS = "0" * 64
 MEMORY_DELETE_TOMBSTONE_AUTH_SCOPE = "memory.deletion-journal"
@@ -212,6 +214,7 @@ _ALLOWED_REASONS = {
 
 _process_lock = threading.RLock()
 _writer_owners: dict[str, tuple[int, int]] = {}
+_reader_owners: dict[str, set[tuple[int, int]]] = {}
 
 
 class MemoryDeletionJournalIntegrityError(RuntimeError):
@@ -221,6 +224,14 @@ class MemoryDeletionJournalIntegrityError(RuntimeError):
 
     def __init__(self, *_details: object, **_metadata: object) -> None:
         super().__init__(self.code)
+
+
+class MemoryDeletionJournalBusyError(
+    MemoryDeletionJournalIntegrityError
+):
+    """A content-free, retryable deletion-ledger lock conflict."""
+
+    code = MEMORY_DELETION_JOURNAL_BUSY_ERROR
 
 
 @dataclass(frozen=True)
@@ -262,6 +273,22 @@ def _integrity_failure(
     # can contain memory text or host information and are not part of the
     # public failure contract.
     return MemoryDeletionJournalIntegrityError()
+
+
+def _busy_failure(
+    _cause: BaseException | None = None,
+) -> MemoryDeletionJournalBusyError:
+    return MemoryDeletionJournalBusyError()
+
+
+def memory_deletion_journal_error_code(
+    error: BaseException,
+) -> str:
+    """Project one of the two fixed, content-free public error codes."""
+
+    if isinstance(error, MemoryDeletionJournalBusyError):
+        return MEMORY_DELETION_JOURNAL_BUSY_ERROR
+    return MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR
 
 
 def _paths(index_dir: Path) -> _JournalPaths:
@@ -1313,34 +1340,119 @@ def _writer_owner() -> tuple[int, int]:
     )
 
 
-def _lock_writer_handle(handle: Any) -> None:
-    if os.name == "nt":
-        import msvcrt
+def _lock_windows_handle(
+    handle: Any,
+    *,
+    exclusive: bool,
+) -> object:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
 
-        handle.seek(0)
-        if handle.read(1) == b"":
-            handle.seek(0)
-            handle.write(b"\0")
-            handle.flush()
-            os.fsync(handle.fileno())
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        return
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    overlapped = _Overlapped()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    lock_file = kernel32.LockFileEx
+    lock_file.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    lock_file.restype = wintypes.BOOL
+    flags = 0x00000001 | (0x00000002 if exclusive else 0)
+    locked = lock_file(
+        wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+        flags,
+        0,
+        1,
+        0,
+        ctypes.byref(overlapped),
+    )
+    if not locked:
+        error_code = ctypes.get_last_error()
+        if error_code == 33:
+            raise _busy_failure()
+        raise OSError(error_code, "file lock failed")
+    return overlapped
+
+
+def _unlock_windows_handle(handle: Any, token: object | None) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    unlock_file = kernel32.UnlockFileEx
+    unlock_file.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    unlock_file.restype = wintypes.BOOL
+    if token is None or not unlock_file(
+        wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+        0,
+        1,
+        0,
+        ctypes.byref(token),
+    ):
+        raise OSError(ctypes.get_last_error(), "file unlock failed")
+
+
+def _lock_writer_handle(handle: Any) -> object | None:
+    if os.name == "nt":
+        return _lock_windows_handle(handle, exclusive=True)
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return None
 
 
-def _unlock_writer_handle(handle: Any) -> None:
+def _unlock_writer_handle(handle: Any, token: object | None) -> None:
     if os.name == "nt":
-        import msvcrt
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        _unlock_windows_handle(handle, token)
         return
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_reader_handle(handle: Any) -> object | None:
+    if os.name == "nt":
+        return _lock_windows_handle(handle, exclusive=False)
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    return None
+
+
+def _unlock_reader_handle(handle: Any, token: object | None) -> None:
+    if os.name == "nt":
+        _unlock_windows_handle(handle, token)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_contention(error: OSError) -> bool:
+    return isinstance(error, BlockingIOError) or error.errno in {
+        errno.EACCES,
+        errno.EAGAIN,
+    }
 
 
 @contextlib.contextmanager
@@ -1353,14 +1465,15 @@ def _writer_guard(index_dir: Path):
         current_owner = _writer_owners.get(root_key)
         if current_owner == owner:
             reentrant = True
-        elif current_owner is not None:
-            raise _integrity_failure()
+        elif current_owner is not None or _reader_owners.get(root_key):
+            raise _busy_failure()
         else:
             _writer_owners[root_key] = owner
     if reentrant:
         yield
         return
     locked = False
+    token: object | None = None
     try:
         try:
             paths.index_dir.mkdir(parents=True, exist_ok=True)
@@ -1368,16 +1481,20 @@ def _writer_guard(index_dir: Path):
                 raise _integrity_failure()
             with paths.writer_lock.open("a+b") as handle:
                 try:
-                    _lock_writer_handle(handle)
+                    token = _lock_writer_handle(handle)
                     locked = True
+                except MemoryDeletionJournalBusyError:
+                    raise
                 except OSError as exc:
+                    if _lock_contention(exc):
+                        raise _busy_failure(exc) from None
                     raise _integrity_failure(exc) from None
                 try:
                     yield
                 finally:
                     if locked:
                         with contextlib.suppress(OSError):
-                            _unlock_writer_handle(handle)
+                            _unlock_writer_handle(handle, token)
         except MemoryDeletionJournalIntegrityError:
             raise
         except OSError as exc:
@@ -1386,6 +1503,60 @@ def _writer_guard(index_dir: Path):
         with _process_lock:
             if _writer_owners.get(root_key) == owner:
                 _writer_owners.pop(root_key, None)
+
+
+@contextlib.contextmanager
+def _reader_guard(index_dir: Path):
+    paths = _paths(index_dir)
+    root_key = str(paths.index_dir)
+    owner = _writer_owner()
+    reentrant = False
+    with _process_lock:
+        current_writer = _writer_owners.get(root_key)
+        readers = _reader_owners.get(root_key, set())
+        if current_writer == owner or owner in readers:
+            reentrant = True
+        elif current_writer is not None:
+            raise _busy_failure()
+        else:
+            _reader_owners.setdefault(root_key, set()).add(owner)
+    if reentrant:
+        yield
+        return
+    locked = False
+    token: object | None = None
+    try:
+        try:
+            paths.index_dir.mkdir(parents=True, exist_ok=True)
+            if paths.writer_lock.is_symlink():
+                raise _integrity_failure()
+            with paths.writer_lock.open("a+b") as handle:
+                try:
+                    token = _lock_reader_handle(handle)
+                    locked = True
+                except MemoryDeletionJournalBusyError:
+                    raise
+                except OSError as exc:
+                    if _lock_contention(exc):
+                        raise _busy_failure(exc) from None
+                    raise _integrity_failure(exc) from None
+                try:
+                    yield
+                finally:
+                    if locked:
+                        with contextlib.suppress(OSError):
+                            _unlock_reader_handle(handle, token)
+        except MemoryDeletionJournalIntegrityError:
+            raise
+        except OSError as exc:
+            raise _integrity_failure(exc) from None
+    finally:
+        with _process_lock:
+            readers = _reader_owners.get(root_key)
+            if readers is not None:
+                readers.discard(owner)
+                if not readers:
+                    _reader_owners.pop(root_key, None)
 
 
 def _repair_snapshot(
@@ -1451,6 +1622,22 @@ def _needs_repair(snapshot: _JournalSnapshot) -> bool:
             and bool(snapshot.events)
         )
     )
+
+
+@contextlib.contextmanager
+def _validated_reader_guard(paths: _JournalPaths):
+    while True:
+        with _reader_guard(paths.index_dir):
+            with _process_lock:
+                snapshot = _journal_snapshot(paths)
+            if not _needs_repair(snapshot):
+                yield snapshot
+                return
+        with _writer_guard(paths.index_dir):
+            with _process_lock:
+                snapshot = _journal_snapshot(paths)
+                if _needs_repair(snapshot):
+                    _repair_snapshot(paths, snapshot)
 
 
 def _snapshot_position(snapshot: _JournalSnapshot) -> tuple[Any, ...]:
@@ -1541,16 +1728,8 @@ def read_memory_deletion_tombstones(
     """
 
     paths = _paths(index_dir)
-    with _process_lock:
-        snapshot = _journal_snapshot(paths)
-    if _needs_repair(snapshot):
-        with _writer_guard(paths.index_dir):
-            with _process_lock:
-                snapshot = _repair_snapshot(
-                    paths,
-                    _journal_snapshot(paths),
-                )
-    return [dict(event) for event in snapshot.events]
+    with _validated_reader_guard(paths) as snapshot:
+        return [dict(event) for event in snapshot.events]
 
 
 def memory_deletion_journal_position(
@@ -1559,12 +1738,39 @@ def memory_deletion_journal_position(
     """Return the validated, content-free position of one deletion ledger."""
 
     paths = _paths(index_dir)
-    with _writer_guard(paths.index_dir):
+    with _validated_reader_guard(paths) as snapshot:
+        return _public_position(paths, snapshot)
+
+
+@contextlib.contextmanager
+def memory_deletion_journal_read_guard(
+    index_dir: Path,
+    *,
+    expected_position: MemoryDeletionPosition | None = None,
+    require_stable: bool = True,
+):
+    """Hold a shared deletion lease across a memory exposure boundary."""
+
+    paths = _paths(index_dir)
+    with _validated_reader_guard(paths) as snapshot:
+        initial_position = _snapshot_position(snapshot)
+        public_position = _public_position(paths, snapshot)
+        if expected_position is not None and not _positions_match(
+            expected_position,
+            public_position,
+        ):
+            raise _integrity_failure()
+        yield public_position
         with _process_lock:
-            snapshot = _journal_snapshot(paths)
-            if _needs_repair(snapshot):
-                snapshot = _repair_snapshot(paths, snapshot)
-            return _public_position(paths, snapshot)
+            final_snapshot = _journal_snapshot(paths)
+            if _needs_repair(final_snapshot):
+                raise _integrity_failure()
+            if (
+                require_stable
+                and _snapshot_position(final_snapshot)
+                != initial_position
+            ):
+                raise _integrity_failure()
 
 
 @contextlib.contextmanager
@@ -1574,12 +1780,10 @@ def memory_deletion_journal_guard(
     expected_position: MemoryDeletionPosition | None = None,
     require_stable: bool = True,
 ):
-    """Hold the deletion writer lease across a memory exposure boundary.
+    """Hold the exclusive deletion writer lease across a mutation boundary.
 
-    Recall/detail/snapshot callers can wrap validation plus all content reads
-    in this guard. A deletion append then either linearizes before the guarded
-    read or fails closed while the read lease is held; it cannot commit in the
-    gap between tombstone validation and content exposure.
+    Read-only response and outbound exposure callers must use
+    ``memory_deletion_journal_read_guard`` so independent readers can coexist.
     """
 
     paths = _paths(index_dir)
@@ -1744,12 +1948,8 @@ def memory_deletion_journal_status(
     """Return content-free integrity and rollback-protection status."""
 
     paths = _paths(index_dir)
-    with _writer_guard(paths.index_dir):
-        with _process_lock:
-            snapshot = _journal_snapshot(paths)
-            if _needs_repair(snapshot):
-                snapshot = _repair_snapshot(paths, snapshot)
-            authenticity = _load_authenticity(paths)
+    with _validated_reader_guard(paths) as snapshot:
+        authenticity = _load_authenticity(paths)
     initialized = bool(
         snapshot.journal_exists
         or snapshot.head is not None
@@ -1785,6 +1985,7 @@ def memory_deletion_journal_status(
 
 
 __all__ = [
+    "MEMORY_DELETION_JOURNAL_BUSY_ERROR",
     "MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR",
     "MEMORY_DELETION_POSITION_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_AUTH_SCOPE",
@@ -1805,12 +2006,15 @@ __all__ = [
     "MEMORY_DELETE_TOMBSTONE_V1_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_V2_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_WRITER_LOCK_NAME",
+    "MemoryDeletionJournalBusyError",
     "MemoryDeletionJournalIntegrityError",
     "MemoryDeletionPosition",
     "append_memory_deletion_tombstone",
     "canonicalize_memory_deletion_tombstone_payload",
     "memory_deletion_journal_position",
+    "memory_deletion_journal_read_guard",
     "memory_deletion_journal_guard",
+    "memory_deletion_journal_error_code",
     "memory_deletion_journal_state",
     "memory_deletion_journal_status",
     "memory_deletion_ledger_note_id",

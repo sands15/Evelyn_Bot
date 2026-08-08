@@ -584,6 +584,68 @@ class MemoryExposureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_concurrent_response_consumers_share_the_read_lease(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                self.write_memory_version(index_dir, "1")
+                with self.unconfigured_authenticity():
+                    exposure.capture_memory_exposure_position(
+                        self.make_position(index_dir, version=1)
+                    )
+                    entered = [asyncio.Event(), asyncio.Event()]
+                    release = [asyncio.Event(), asyncio.Event()]
+
+                    def request_factory(*_args, **_kwargs):
+                        return _Response()
+
+                    async def consume(index: int) -> None:
+                        async with exposure.memory_exposure_request(
+                            request_factory,
+                            "http://llm.invalid/v1/chat/completions",
+                            memory_boundary_required=True,
+                            memory_index_dir=index_dir,
+                        ):
+                            entered[index].set()
+                            await release[index].wait()
+
+                    tasks = [
+                        asyncio.create_task(consume(0)),
+                        asyncio.create_task(consume(1)),
+                    ]
+                    await entered[0].wait()
+                    await entered[1].wait()
+
+                    def correct_to(version: int) -> None:
+                        with journal.memory_deletion_journal_guard(
+                            index_dir,
+                            require_stable=True,
+                        ):
+                            self.replace_memory_version(
+                                index_dir,
+                                str(version),
+                            )
+
+                    with self.assertRaises(
+                        journal.MemoryDeletionJournalBusyError
+                    ):
+                        correct_to(2)
+                    release[0].set()
+                    await tasks[0]
+                    with self.assertRaises(
+                        journal.MemoryDeletionJournalBusyError
+                    ):
+                        correct_to(2)
+                    release[1].set()
+                    await tasks[1]
+                    correct_to(2)
+                    self.assertEqual(
+                        exposure.read_memory_version(index_dir),
+                        2,
+                    )
+
+        asyncio.run(run())
+
     def test_legacy_deletion_capture_requires_explicit_compatibility_mode(
         self,
     ) -> None:
