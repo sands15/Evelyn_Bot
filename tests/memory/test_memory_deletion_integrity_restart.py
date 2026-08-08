@@ -700,6 +700,10 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
             try:
                 worker.start()
                 self.assertTrue(entered.wait(timeout=5))
+                with deletion_journal.memory_deletion_journal_read_guard(
+                    memory_vault.memory_index_dir(root)
+                ):
+                    pass
                 with self.assertRaises(
                     MemoryDeletionJournalBusyError
                 ) as blocked:
@@ -755,6 +759,106 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
                 after,
             )
             self.assertEqual(calls_after_delete, [])
+
+    def test_semantic_handoff_discards_deleted_source_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            day = "2026-08-02"
+            source_path = write_memory_vault_note(
+                note_type="daily",
+                title="Semantic handoff source",
+                body="semantic handoff source body " * 12,
+                storage_key=day,
+                source="conversation-turn-log",
+                root=root,
+            )
+            source_note = parse_memory_note(source_path)
+            preview = preview_memory_vault_user_note_deletion(
+                source_note.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(preview.get("ok"), preview)
+
+            handoff_entered = threading.Event()
+            release_handoff = threading.Event()
+            stale_canary = "SEMANTIC STALE RESULT MUST NOT COMMIT"
+            outcome: dict[str, Any] = {}
+
+            class BlockingResult(dict[str, Any]):
+                def get(
+                    self,
+                    key: str,
+                    default: Any = None,
+                ) -> Any:
+                    if key == "notes":
+                        handoff_entered.set()
+                        release_handoff.wait(timeout=5)
+                    return super().get(key, default)
+
+            def worker() -> None:
+                try:
+                    outcome["result"] = (
+                        run_semantic_memory_consolidation_once(
+                            1,
+                            root=root,
+                            day_key=day,
+                            sub_llm_health={"available": True},
+                            llm_client=lambda _messages: BlockingResult(
+                                notes=[
+                                    {
+                                        "type": "concept",
+                                        "title": "Stale semantic result",
+                                        "body": stale_canary,
+                                    }
+                                ]
+                            ),
+                            min_chars=1,
+                        )
+                    )
+                except BaseException as exc:
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=worker)
+            try:
+                thread.start()
+                self.assertTrue(
+                    handoff_entered.wait(timeout=5)
+                )
+                deleted = delete_memory_vault_user_note(
+                    source_note.note_id,
+                    preview["confirmToken"],
+                    reason="privacy_request",
+                    root=root,
+                )
+                self.assertTrue(deleted.get("ok"), deleted)
+                release_handoff.set()
+                thread.join(timeout=5)
+            finally:
+                release_handoff.set()
+                thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            result = outcome["result"]
+            self.assertIsInstance(result, dict)
+            assert isinstance(result, dict)
+            self.assertEqual(
+                result.get("status"),
+                "skipped_source_deleted_or_changed",
+                result,
+            )
+            self.assertEqual(result.get("created_notes"), [])
+            canary_bytes = stale_canary.encode("utf-8")
+            for path in root.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(
+                        canary_bytes,
+                        path.read_bytes(),
+                        str(path),
+                    )
 
     def test_torn_malformed_journal_fails_closed_after_restart(
         self,

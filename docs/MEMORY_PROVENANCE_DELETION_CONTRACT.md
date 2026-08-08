@@ -671,10 +671,20 @@ preview/apply, index/cache rebuild와 memory write처럼 동기화·cache·artif
 후로만 선형화되며, 이미 읽은 본문 뒤에 삭제가 성공한 상태로 그 본문을 반환할 수
 없다.
 
-semantic consolidation과 derivation recomposition은 source의 현재 tombstone과
-content hash를 writer lease 안에서 다시 검사한 뒤 그 lease를 Sub-LLM 호출이
-끝날 때까지 유지한다. 결과 write 전에도 source/target을 다시 검사한다. 따라서
-삭제 성공 뒤 source 본문을 Sub-LLM에 새로 전송하거나 중단된 결과를 쓰지 않는다.
+semantic consolidation은 fresh shared reader lease 안에서 현재 source의 tombstone과
+전체 content hash를 확인하고 Sub-LLM 요청·전체 응답을 수행한다. shared lease를 완전히
+놓은 뒤 fresh writer에서 source hash를 다시 확인하고, 같을 때만 note batch와 후속
+index sync를 같은 writer phase에서 완료한다.
+
+derivation recomposition은 짧은 writer phase에서 현재 journal position과 exact
+revocation state를 캡처하고, writer를 놓은 뒤 target/source 후보와 hash를 수집한다.
+fresh shared reader lease 안에서 position·revocation·hash를 모두 다시 확인한 뒤
+Sub-LLM 요청·전체 응답을 수행하고, 응답 뒤 shared lease를 완전히 놓는다. fresh
+writer에서는 pre-sync 후 tombstone, exact revocation entry, target/source hash와
+live/quarantine source 집합을 다시 계산하며, 같을 때만 note write와 후속
+index/revocation sync를 같은 writer phase에서 완료한다. 두 경로 모두 일반 reader와
+공존하지만 삭제·편집 writer는 shared phase 동안 fail-fast busy다. handoff 중 삭제나
+사용자 편집이 먼저 성공하면 current state가 이기며 모델 결과는 쓰지 않는다.
 
 전체 legacy+vault memory context build는 하나의 검증된
 `memory.deletion.position.v1`에서 수행한다. 공개 memory receipt에는 sequence와
@@ -736,7 +746,8 @@ Sub-LLM이 준비되면 maintenance/activation 경로가 quarantine note를
 - 현재 살아 있는 source note만 ID, type, title, body, content hash와 함께
   로컬 Sub-LLM에 전달한다.
 - 응답은 새 title/body/tags/links/confidence만 받는다.
-- LLM 처리 중 target이나 source hash가 바뀌면 결과를 쓰지 않는다.
+- LLM 처리 중 tombstone, target/source hash, quarantine, revocation entry나 live-source
+  집합이 바뀌면 결과를 쓰지 않는다.
 - 성공 시 `source=sub-llm-partial-recomposition`, 살아 있는
   `derived_from`, 새 evidence hash, 증가한 revision과
   `revocation_resolved_at`을 원자적으로 기록한다.

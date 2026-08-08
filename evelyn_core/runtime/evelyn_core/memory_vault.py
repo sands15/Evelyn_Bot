@@ -33,6 +33,8 @@ from .memory_deletion_journal import (
     memory_deletion_journal_error_code,
     memory_deletion_ledger_note_id,
     memory_deletion_journal_guard,
+    memory_deletion_journal_position,
+    memory_deletion_journal_read_guard,
     memory_deletion_journal_state,
     memory_deletion_journal_status,
     normalize_memory_deletion_note_type,
@@ -2712,7 +2714,6 @@ def request_sub_llm_json(
     return _json_object_from_text(text)
 
 
-@_memory_deletion_linearized
 def run_semantic_memory_consolidation_once(
     guild_id: int,
     *,
@@ -2741,7 +2742,20 @@ def run_semantic_memory_consolidation_once(
             "created_notes": [],
             "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
         }
-    source_text = source_path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        source_text = source_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except FileNotFoundError:
+        return {
+            "status": "skipped_missing_daily_note",
+            "created_notes": [],
+            "latency_ms": round(
+                (time.monotonic() - started) * 1000.0,
+                1,
+            ),
+        }
     source_note = parse_memory_note(source_path, source_text)
     source_body = clean_text(source_note.body)
     if len(source_body) < min_chars:
@@ -2778,7 +2792,7 @@ def run_semantic_memory_consolidation_once(
     ]
 
     try:
-        with memory_deletion_journal_guard(
+        with memory_deletion_journal_read_guard(
             memory_index_dir(root)
         ):
             current_source = _memory_vault_find_note(
@@ -2821,40 +2835,74 @@ def run_semantic_memory_consolidation_once(
         notes = []
 
     created: list[str] = []
-    for item in notes[:SEMANTIC_CONSOLIDATION_MAX_NOTES]:
-        if not isinstance(item, dict):
-            continue
-        note_type = clean_text(str(item.get("type") or "episode")).lower()
-        if note_type not in {"episode", "concept", "procedure", "project"}:
-            note_type = "episode"
-        title = clean_text(str(item.get("title") or "Semantic Memory Consolidation"))[:120]
-        body = clean_text(str(item.get("body") or ""))
-        if len(body) < 20:
-            continue
-        tags = list(_as_list(item.get("tags")))[:12]
-        links = list(_as_list(item.get("links")))
-        links.append(f"daily/{day}")
-        try:
-            importance = max(0.0, min(1.0, float(item.get("importance", 0.55) or 0.55)))
-        except Exception:
-            importance = 0.55
-        confidence = clean_text(str(item.get("confidence") or "medium")) or "medium"
-        try:
-            with memory_deletion_journal_guard(
-                memory_index_dir(root)
-            ):
-                current_source = _memory_vault_find_note(
-                    source_note.note_id,
-                    root=root,
+    with memory_deletion_journal_guard(
+        memory_index_dir(root),
+        require_stable=False,
+    ):
+        current_source = _memory_vault_find_note(
+            source_note.note_id,
+            root=root,
+        )
+        if (
+            current_source is None
+            or not secrets.compare_digest(
+                current_source[1].source_hash,
+                source_note.source_hash,
+            )
+        ):
+            return {
+                "status": "skipped_source_deleted_or_changed",
+                "created_notes": [],
+                "latency_ms": round(
+                    (time.monotonic() - started) * 1000.0,
+                    1,
+                ),
+            }
+        for item in notes[:SEMANTIC_CONSOLIDATION_MAX_NOTES]:
+            if not isinstance(item, dict):
+                continue
+            note_type = clean_text(
+                str(item.get("type") or "episode")
+            ).lower()
+            if note_type not in {
+                "episode",
+                "concept",
+                "procedure",
+                "project",
+            }:
+                note_type = "episode"
+            title = clean_text(
+                str(
+                    item.get("title")
+                    or "Semantic Memory Consolidation"
                 )
-                if (
-                    current_source is None
-                    or not secrets.compare_digest(
-                        current_source[1].source_hash,
-                        source_note.source_hash,
-                    )
-                ):
-                    break
+            )[:120]
+            body = clean_text(str(item.get("body") or ""))
+            if len(body) < 20:
+                continue
+            tags = list(_as_list(item.get("tags")))[:12]
+            links = list(_as_list(item.get("links")))
+            links.append(f"daily/{day}")
+            try:
+                importance = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(
+                            item.get("importance", 0.55)
+                            or 0.55
+                        ),
+                    ),
+                )
+            except Exception:
+                importance = 0.55
+            confidence = (
+                clean_text(
+                    str(item.get("confidence") or "medium")
+                )
+                or "medium"
+            )
+            try:
                 path = write_memory_vault_note(
                     note_type=note_type,
                     title=title,
@@ -2869,11 +2917,11 @@ def run_semantic_memory_consolidation_once(
                     confidence=confidence,
                     root=root,
                 )
-        except MemoryNoteDeletedError:
-            continue
-        created.append(str(path))
+            except MemoryNoteDeletedError:
+                continue
+            created.append(str(path))
 
-    sync_memory_vault_index(root=root)
+        sync_memory_vault_index(root=root)
     return {
         "status": "created" if created else "no_notes_created",
         "created_notes": created,
@@ -2972,7 +3020,6 @@ def _write_recomposed_memory_note(
     return parse_memory_note(path, content)
 
 
-@_memory_deletion_linearized
 def run_memory_derivation_recomposition_once(
     *,
     root: Path | None = None,
@@ -2984,13 +3031,18 @@ def run_memory_derivation_recomposition_once(
     """Rebuild quarantined notes from remaining live sources only."""
 
     started = time.monotonic()
-    sync_memory_vault_index(root=root)
+    index_dir = memory_index_dir(root)
+    with memory_deletion_journal_guard(
+        index_dir,
+        require_stable=False,
+    ):
+        sync_memory_vault_index(root=root)
+        entries = _read_memory_derivation_revocations(root)
     health = (
         sub_llm_health
         if isinstance(sub_llm_health, dict)
         else probe_sub_llm_dependency()
     )
-    entries = _read_memory_derivation_revocations(root)
     if not entries:
         return {
             "schema": MEMORY_DERIVATION_RECOMPOSITION_SCHEMA,
@@ -3019,8 +3071,22 @@ def run_memory_derivation_recomposition_once(
     attempted_note_ids: set[str] = set()
     attempts = max(1, min(20, int(max_notes or 1)))
     for _index in range(attempts):
-        sync_memory_vault_index(root=root)
-        entries = _read_memory_derivation_revocations(root)
+        with memory_deletion_journal_guard(
+            index_dir,
+            require_stable=False,
+        ):
+            sync_memory_vault_index(root=root)
+            entries = _read_memory_derivation_revocations(
+                root
+            )
+            selection_position = (
+                memory_deletion_journal_position(index_dir)
+            )
+            revocation_digest = (
+                _memory_derivation_revocation_file_digest(
+                    root
+                )
+            )
         if not entries:
             break
         _nodes, note_sources = _memory_derivation_nodes(
@@ -3128,19 +3194,55 @@ def run_memory_derivation_recomposition_once(
             },
         ]
         try:
-            with memory_deletion_journal_guard(
-                memory_index_dir(root)
-            ):
-                sources_current = all(
-                    (
-                        current_source := _memory_vault_find_note(
-                            source_id,
-                            root=root,
-                        )
+            with memory_deletion_journal_read_guard(
+                index_dir
+            ) as current_position:
+                if (
+                    current_position != selection_position
+                    or not secrets.compare_digest(
+                        _memory_derivation_revocation_file_digest(
+                            root
+                        ),
+                        revocation_digest,
                     )
-                    is not None
+                ):
+                    errors.append(
+                        {
+                            "noteId": note_id,
+                            "error": (
+                                "memory_recomposition_source_changed"
+                            ),
+                        }
+                    )
+                    continue
+                _current_nodes, current_sources = (
+                    _memory_derivation_nodes(root=root)
+                )
+                current_target = current_sources.get(
+                    note_id
+                )
+                if (
+                    current_target is None
+                    or not secrets.compare_digest(
+                        current_target[1].source_hash,
+                        target_hash,
+                    )
+                ):
+                    errors.append(
+                        {
+                            "noteId": note_id,
+                            "error": (
+                                "memory_recomposition_target_changed"
+                            ),
+                        }
+                    )
+                    continue
+                sources_current = all(
+                    source_id in current_sources
                     and secrets.compare_digest(
-                        current_source[1].source_hash,
+                        current_sources[
+                            source_id
+                        ][1].source_hash,
                         source_versions[source_id],
                     )
                     for source_id in live_source_ids
@@ -3199,12 +3301,27 @@ def run_memory_derivation_recomposition_once(
         tags = list(_as_list(item.get("tags")))
         links = list(_as_list(item.get("links")))
 
-        with (
-            memory_deletion_journal_guard(
-                memory_index_dir(root)
-            ),
-            _memory_edit_lock,
+        with memory_deletion_journal_guard(
+            index_dir,
+            require_stable=False,
         ):
+            sync_memory_vault_index(root=root)
+            current_entries = (
+                _read_memory_derivation_revocations(root)
+            )
+            if current_entries.get(note_id) != revocation:
+                errors.append(
+                    {
+                        "noteId": note_id,
+                        "error": (
+                            "memory_recomposition_state_changed"
+                        ),
+                    }
+                )
+                continue
+            _current_nodes, current_note_sources = (
+                _memory_derivation_nodes(root=root)
+            )
             current = _memory_vault_find_note(
                 note_id,
                 root=root,
@@ -3225,13 +3342,50 @@ def run_memory_derivation_recomposition_once(
                     }
                 )
                 continue
+            current_dependencies = list(
+                _as_list(
+                    current_note.metadata.get(
+                        "derived_from"
+                    )
+                )
+            )
+            current_quarantined_ids = set(
+                current_entries
+            )
+            current_live_source_ids = [
+                source_id
+                for source_id in current_dependencies
+                if (
+                    source_id in current_note_sources
+                    and source_id
+                    not in current_quarantined_ids
+                )
+            ]
+            current_blocked_source_ids = [
+                source_id
+                for source_id in current_dependencies
+                if source_id in current_quarantined_ids
+            ]
+            if (
+                current_live_source_ids
+                != live_source_ids
+                or current_blocked_source_ids
+            ):
+                errors.append(
+                    {
+                        "noteId": note_id,
+                        "error": (
+                            "memory_recomposition_state_changed"
+                        ),
+                    }
+                )
+                continue
             sources_changed = False
             for source_id, expected_hash in (
                 source_versions.items()
             ):
-                current_source = _memory_vault_find_note(
-                    source_id,
-                    root=root,
+                current_source = current_note_sources.get(
+                    source_id
                 )
                 if (
                     current_source is None
@@ -3239,6 +3393,7 @@ def run_memory_derivation_recomposition_once(
                         current_source[1].source_hash,
                         expected_hash,
                     )
+                    or source_id in current_quarantined_ids
                 ):
                     sources_changed = True
                     break
@@ -3253,28 +3408,29 @@ def run_memory_derivation_recomposition_once(
                 )
                 continue
             try:
-                _write_recomposed_memory_note(
-                    current_path,
-                    current_raw,
-                    current_note,
-                    title=next_title,
-                    body=next_body,
-                    tags=tags,
-                    links=links,
-                    confidence=confidence,
-                    source_note_ids=live_source_ids,
-                    source_hashes=[
-                        source_versions[source_id]
-                        for source_id in live_source_ids
-                    ],
-                    revoked_source_ids=list(
-                        revocation.get(
-                            "revokedSourceIds"
-                        )
-                        or []
-                    ),
-                )
-                _read_memory_deletion_tombstones(root)
+                with _memory_edit_lock:
+                    _write_recomposed_memory_note(
+                        current_path,
+                        current_raw,
+                        current_note,
+                        title=next_title,
+                        body=next_body,
+                        tags=tags,
+                        links=links,
+                        confidence=confidence,
+                        source_note_ids=live_source_ids,
+                        source_hashes=[
+                            source_versions[source_id]
+                            for source_id in live_source_ids
+                        ],
+                        revoked_source_ids=list(
+                            revocation.get(
+                                "revokedSourceIds"
+                            )
+                            or []
+                        ),
+                    )
+                sync_memory_vault_index(root=root)
             except (OSError, ValueError) as exc:
                 errors.append(
                     {
@@ -3285,10 +3441,14 @@ def run_memory_derivation_recomposition_once(
                 continue
         recomposed.append(note_id)
 
-    sync_memory_vault_index(root=root)
-    pending = sorted(
-        _read_memory_derivation_revocations(root)
-    )
+    with memory_deletion_journal_guard(
+        index_dir,
+        require_stable=False,
+    ):
+        sync_memory_vault_index(root=root)
+        pending = sorted(
+            _read_memory_derivation_revocations(root)
+        )
     return {
         "schema": MEMORY_DERIVATION_RECOMPOSITION_SCHEMA,
         "status": (
@@ -5041,6 +5201,18 @@ def _memory_derivation_revocation_file_state(
     except OSError:
         return (-1, -1)
     return (state.st_mtime_ns, state.st_size)
+
+
+def _memory_derivation_revocation_file_digest(
+    root: Path | None = None,
+) -> str:
+    try:
+        raw = _memory_derivation_revocations_path(root).read_bytes()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        raise MemoryDeletionJournalIntegrityError() from None
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _canonical_memory_derivation_revocations_payload(

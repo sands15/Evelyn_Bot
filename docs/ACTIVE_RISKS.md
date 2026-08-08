@@ -908,10 +908,11 @@ artifact commit처럼 실제 쓰기가 섞인 snapshot/recall 경로다. 이 경
 shared로 바꾸면 reader→writer upgrade나 동시 파일 쓰기 경쟁이 생기므로 exclusive
 lease를 사용한다. 따라서 이미 materialize된 exposure·outbound response reader끼리는
 공존하지만 fresh write-backed recall/index/cache는 active reader와 retryable busy가
-될 수 있다. semantic consolidation과 derivation recomposition의 outer writer는
-Sub-LLM 호출당 최대 45초를 감싸며 recomposition은 기본 최대 4회라 별도의 장기
-exclusive maintenance 위험이다. bounded 자동 재시도와 64 MiB journal 상한의 검증
-가능한 compaction/rotation도 아직 없다.
+될 수 있다. semantic consolidation과 derivation recomposition의 Sub-LLM 구간은
+shared reader로 바뀌어 일반 조회와 공존한다. 다만 삭제·편집 writer는 호출당 최대
+45초 동안 retryable busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다.
+bounded 자동 재시도와 64 MiB journal 상한의 검증 가능한 compaction/rotation도
+아직 없다.
 
 generic JSON LLM helper는 경계 없는 non-memory 호출과 required memory 호출을
 구분한다. 현재 cognitive-state, route planning, memory writeback은 builder에서
@@ -957,16 +958,16 @@ exposure의 state/version/note ID 불일치를 assistant persistence·continuity
 
 따라서 이 항목에 남은 삭제 경계 위험은 receipt propagation이나 materialize된 response의
 exclusive lease가 아니라, 위에 기록한 fresh write-backed recall/index/cache busy,
-장기 semantic maintenance writer와 64 MiB journal rotation 공백이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
+Sub-LLM shared phase 중 삭제·편집 writer의 bounded-retry 공백과 64 MiB journal
+rotation이다. 실제 마이크·스피커·Discord 10턴 재생은 이 정적
 계약의 완료 증거가 아니며, 별도의 실제 음성 하드웨어 E2E 위험으로
 계속 남는다.
 
 다음 조치: 운영 key와 외부 anchor를 별도 권한 경로에 provision한 복제 환경에서
 one-shot bootstrap과 pair replay를 먼저 검증한다. write-backed recall은 sync/cache
 mutation과 stable read 단계를 분리하거나 별도 atomic serializer를 둔 뒤에만 shared로
-옮긴다. semantic maintenance는 source validation+LLM shared phase와 apply writer phase를
-나누고 commit 직전 hash/tombstone을 다시 검증한다. bounded busy 재시도를 실제 UI
-전이로 검증하고, chain과 외부 anchor를 잃지
+옮긴다. Sub-LLM shared phase의 bounded busy 재시도를 실제 UI 전이로 검증하고,
+chain과 외부 anchor를 잃지
 않는 checkpointed rotation도 함께 설계한다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성

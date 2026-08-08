@@ -8,6 +8,7 @@ import tempfile
 import textwrap
 import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -28,9 +29,12 @@ from evelyn_core.memory_derivation_revocation import (  # noqa: E402
     resolve_derivation_states,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
+    MemoryDeletionJournalBusyError,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_read_guard,
 )
 from evelyn_core.memory_vault import (  # noqa: E402
+    MemoryVaultNote,
     delete_memory_vault_user_note,
     export_memory_graph,
     memory_note_was_deleted,
@@ -590,15 +594,25 @@ class MemoryDerivationRevocationIntegrationTests(
             try:
                 worker.start()
                 self.assertTrue(entered.wait(timeout=5))
-                with self.assertRaises(
-                    MemoryDeletionJournalIntegrityError
+                with memory_deletion_journal_read_guard(
+                    memory_vault_module.memory_index_dir(
+                        root
+                    )
                 ):
+                    pass
+                with self.assertRaises(
+                    MemoryDeletionJournalBusyError
+                ) as blocked:
                     delete_memory_vault_user_note(
                         source_b.note_id,
                         preview["confirmToken"],
                         reason="privacy_request",
                         root=root,
                     )
+                self.assertEqual(
+                    str(blocked.exception),
+                    "memory_deletion_journal_busy",
+                )
             finally:
                 release.set()
                 worker.join(timeout=5)
@@ -635,6 +649,309 @@ class MemoryDerivationRevocationIntegrationTests(
 
         self.assertEqual(calls_after_delete, [])
         self.assertIn(after["status"], {"clear", "pending"})
+
+    def _run_recomposition_handoff(
+        self,
+        *,
+        root: Path,
+        target_note_id: str,
+        handoff_action: Callable[[], None],
+    ) -> dict[str, object]:
+        handoff_entered = threading.Event()
+        release_handoff = threading.Event()
+        stale_canary = "STALE LLM CANARY MUST NOT COMMIT"
+        outcome: dict[str, object] = {}
+        llm_calls = 0
+
+        def llm_result(
+            _messages: list[dict[str, str]],
+        ) -> dict[str, object]:
+            nonlocal llm_calls
+            llm_calls += 1
+            return {
+                "note": {
+                    "title": "Stale model result",
+                    "body": stale_canary,
+                    "tags": ["stale"],
+                    "links": [],
+                    "confidence": "high",
+                }
+            }
+
+        original_normalize = (
+            memory_vault_module._normalize_memory_edit_body
+        )
+        handoff_paused = False
+
+        def pause_before_apply(value: str) -> str:
+            nonlocal handoff_paused
+            normalized = original_normalize(value)
+            if stale_canary in str(value) and not handoff_paused:
+                handoff_paused = True
+                handoff_entered.set()
+                release_handoff.wait(timeout=5)
+            return normalized
+
+        def worker() -> None:
+            try:
+                outcome["result"] = (
+                    run_memory_derivation_recomposition_once(
+                        root=root,
+                        sub_llm_health={"available": True},
+                        llm_client=llm_result,
+                        max_notes=1,
+                    )
+                )
+            except BaseException as exc:
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=worker)
+        try:
+            with mock.patch.object(
+                memory_vault_module,
+                "_normalize_memory_edit_body",
+                side_effect=pause_before_apply,
+            ):
+                thread.start()
+                self.assertTrue(handoff_entered.wait(timeout=5))
+                handoff_action()
+                release_handoff.set()
+                thread.join(timeout=5)
+        finally:
+            release_handoff.set()
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", outcome)
+        result = outcome["result"]
+        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)
+        self.assertNotIn(
+            target_note_id,
+            result["recomposedNoteIds"],
+        )
+        self.assertEqual(llm_calls, 1)
+        canary_bytes = stale_canary.encode("utf-8")
+        for path in root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(
+                    canary_bytes,
+                    path.read_bytes(),
+                    str(path),
+                )
+        return result
+
+    def test_recomposition_handoff_keeps_target_user_edit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            target = fixture["multi"]
+            target_path = fixture["multi_path"]
+
+            def edit_target() -> None:
+                current = parse_memory_note(target_path)
+                edited = update_memory_vault_user_note(
+                    current.note_id,
+                    "edit",
+                    title="User edit wins",
+                    body="USER EDIT WINS",
+                    expected_content_hash=current.source_hash,
+                    root=root,
+                )
+                self.assertTrue(edited.get("ok"), edited)
+
+            result = self._run_recomposition_handoff(
+                root=root,
+                target_note_id=target.note_id,
+                handoff_action=edit_target,
+            )
+
+            current_target = parse_memory_note(target_path)
+            self.assertEqual(current_target.title, "User edit wins")
+            self.assertIn("USER EDIT WINS", current_target.body)
+            self.assertEqual(
+                current_target.metadata.get("source"),
+                "user-edit",
+            )
+            self.assertEqual(
+                memory_vault_module._as_list(
+                    current_target.metadata.get("derived_from")
+                ),
+                (),
+            )
+            self.assertFalse(
+                memory_note_was_deleted(
+                    fixture["source_b"].note_id,
+                    root=root,
+                )
+            )
+            self.assertNotIn(
+                target.note_id,
+                memory_vault_module._read_memory_derivation_revocations(
+                    root
+                ),
+            )
+            self.assertEqual(
+                result["errors"],
+                [
+                    {
+                        "noteId": target.note_id,
+                        "error": "memory_recomposition_state_changed",
+                    }
+                ],
+            )
+
+    def test_recomposition_handoff_keeps_source_deletion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            self.delete_source_a(fixture, root)
+            source = fixture["source_b"]
+            target = fixture["multi"]
+            preview = preview_memory_vault_user_note_deletion(
+                source.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(preview.get("ok"), preview)
+
+            def delete_source() -> None:
+                deleted = delete_memory_vault_user_note(
+                    source.note_id,
+                    preview["confirmToken"],
+                    reason="privacy_request",
+                    root=root,
+                )
+                self.assertTrue(deleted.get("ok"), deleted)
+
+            result = self._run_recomposition_handoff(
+                root=root,
+                target_note_id=target.note_id,
+                handoff_action=delete_source,
+            )
+
+            self.assertTrue(
+                memory_note_was_deleted(source.note_id, root=root)
+            )
+            self.assertTrue(
+                memory_note_was_deleted(target.note_id, root=root)
+            )
+            self.assertFalse(fixture["multi_path"].exists())
+            self.assertEqual(
+                result["errors"],
+                [
+                    {
+                        "noteId": target.note_id,
+                        "error": "memory_recomposition_state_changed",
+                    }
+                ],
+            )
+
+    def test_recomposition_handoff_rejects_same_hash_new_quarantine(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def add_note(
+                title: str,
+                *sources: MemoryVaultNote,
+            ) -> MemoryVaultNote:
+                path = write_memory_vault_note(
+                    note_type="concept",
+                    title=title,
+                    body=f"{title} source material",
+                    source=(
+                        "sub-llm-semantic-consolidation"
+                        if sources
+                        else "control-page-user"
+                    ),
+                    derived_from=[note.note_id for note in sources],
+                    evidence_hashes=[
+                        note.source_hash for note in sources
+                    ],
+                    root=root,
+                )
+                return parse_memory_note(path)
+
+            revoked = add_note("Revoked source")
+            ancestor = add_note("Ancestor to delete")
+            surviving = add_note("Surviving ancestor")
+            derived = add_note(
+                "Initially live derived source",
+                ancestor,
+                surviving,
+            )
+            target = add_note(
+                "Recomposition target",
+                revoked,
+                derived,
+            )
+            target_path = target.path
+            revoked_preview = preview_memory_vault_user_note_deletion(
+                revoked.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(revoked_preview.get("ok"), revoked_preview)
+            revoked_delete = delete_memory_vault_user_note(
+                revoked.note_id,
+                revoked_preview["confirmToken"],
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(revoked_delete.get("ok"), revoked_delete)
+            target_hash = parse_memory_note(target_path).source_hash
+            ancestor_preview = preview_memory_vault_user_note_deletion(
+                ancestor.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            self.assertTrue(
+                ancestor_preview.get("ok"),
+                ancestor_preview,
+            )
+
+            def delete_ancestor() -> None:
+                deleted = delete_memory_vault_user_note(
+                    ancestor.note_id,
+                    ancestor_preview["confirmToken"],
+                    reason="privacy_request",
+                    root=root,
+                )
+                self.assertTrue(deleted.get("ok"), deleted)
+
+            result = self._run_recomposition_handoff(
+                root=root,
+                target_note_id=target.note_id,
+                handoff_action=delete_ancestor,
+            )
+
+            self.assertEqual(
+                parse_memory_note(target_path).source_hash,
+                target_hash,
+            )
+            revocations = (
+                memory_vault_module._read_memory_derivation_revocations(
+                    root
+                )
+            )
+            self.assertIn(derived.note_id, revocations)
+            self.assertIn(target.note_id, revocations)
+            self.assertEqual(
+                result["errors"],
+                [
+                    {
+                        "noteId": target.note_id,
+                        "error": "memory_recomposition_state_changed",
+                    }
+                ],
+            )
 
     def test_unavailable_sub_llm_keeps_quarantine(
         self,

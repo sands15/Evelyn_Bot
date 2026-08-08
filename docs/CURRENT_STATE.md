@@ -1983,9 +1983,22 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - repair가 필요한 snapshot은 shared lease를 놓고 writer에서 재검증·repair한 뒤 reader를
   다시 얻는다. index sync, retrieval-cache migration/write와 실제 cognitive·memory
   artifact commit은 writer로 유지했다. fresh write-backed recall/index/cache는 active
-  reader와 busy가 될 수 있다. semantic consolidation/recomposition의 Sub-LLM 구간도
-  호출당 최대 45초, recomposition 기본 최대 4회 동안 writer를 유지한다. 이 장기
-  maintenance busy와 journal rotation, 외부 anchor 운영 검증은 계속 남는다.
+  reader와 busy가 될 수 있다.
+- semantic consolidation은 shared phase에서 current source tombstone과 full hash를
+  확인하고 Sub-LLM 응답을 받은 뒤, fresh writer에서 source hash를 다시 확인해 note
+  batch와 index sync를 적용한다. derivation recomposition은 짧은 writer snapshot에서
+  position과 exact revocation digest를 캡처하고, writer를 놓은 뒤 target/source 후보와
+  hash를 수집해 shared phase에서 모두 다시 확인한다. apply writer는 pre-sync 뒤 exact
+  revocation entry, ordered live/quarantine source와 hash를 재계산한다. 두 경로 모두
+  current state가 달라지면 stale result를 버리고, 같을 때만 write와 post-sync를 같은
+  writer 안에서 완료한다.
+- 일반 reader는 최대 45초 Sub-LLM과 공존한다. 삭제·편집 writer는 그 shared phase 동안
+  retryable busy가 될 수 있고 recomposition은 기본 최대 4회 반복한다. bounded retry의
+  live 전이, journal rotation과 외부 anchor 운영 검증은 계속 남는다.
 - Windows 교차-process reader-reader/reader-writer, async owner 수명, 재진입·upgrade,
   동시 response 소비와 8798·8799/API/UI privacy projection을 synthetic data로 검증했다.
-  실제 사용자 기억과 live Discord·마이크·Minecraft·Docker 서비스는 건드리지 않았다.
+  paused Sub-LLM 중 reader 공존·삭제 Busy, shared→writer handoff의 source 삭제와 target
+  user-edit 우선, stale model canary 전 파일 비저장도 실제 thread race로 검증했다.
+- memory 282개(skip 1), core 732개(skip 1), runtime 762개(skip 4)와 CI-equivalent
+  전체 3,100개(skip 21)가 통과했다. 실제 사용자 기억과 live Discord·마이크·Minecraft·
+  Docker 서비스는 사용하거나 변경하지 않았다.
