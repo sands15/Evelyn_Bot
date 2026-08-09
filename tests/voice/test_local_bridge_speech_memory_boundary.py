@@ -327,6 +327,42 @@ class LocalBridgeSpeechMemoryBoundaryTests(
             self.assertEqual(bridge.speak_request_queue.qsize(), 0)
             await bridge.speak_request_queue.join()
 
+    async def test_local_worker_redacts_control_tts_failure(self) -> None:
+        private_canary = "PRIVATE_CONTROL_TTS_ERROR C:/secret/audio-token"
+        error = RuntimeError(private_canary)
+        bridge = object.__new__(local_io_bridge.LocalIoBridge)
+        bridge.speak_request_queue = asyncio.Queue()
+        bridge.speak_request_queue.put_nowait({"text": "speak this"})
+        bridge.active_turn_task = None
+        bridge.last_tts_playback = {}
+        bridge.last_latency = {}
+        bridge.last_error = ""
+        bridge.runtime_errors = Mock()
+        bridge._speak = AsyncMock(side_effect=error)
+        bridge._post_status = AsyncMock()
+
+        with (
+            patch.object(local_io_bridge, "LOCAL_BRIDGE_TTS_ENABLED", True),
+            patch("builtins.print") as print_mock,
+        ):
+            await local_io_bridge.LocalIoBridge._speak_request_worker(
+                bridge
+            )
+
+        printed = " ".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in print_mock.call_args_list
+        )
+        self.assertEqual(bridge.last_error, "control_tts_failed")
+        self.assertIn("errorType=RuntimeError", printed)
+        self.assertNotIn(private_canary, printed)
+        bridge.runtime_errors.record.assert_called_once_with(
+            "control_tts_failed",
+            error,
+        )
+        bridge._post_status.assert_awaited_once_with()
+        await bridge.speak_request_queue.join()
+
 
 if __name__ == "__main__":
     unittest.main()

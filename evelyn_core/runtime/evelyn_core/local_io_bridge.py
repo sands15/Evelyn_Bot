@@ -3498,8 +3498,12 @@ class LocalIoBridge:
                 await self._post_status()
             except Exception as exc:
                 self.runtime_errors.record("control_tts_failed", exc)
-                self.last_error = repr(exc)
-                print(f"[LOCAL BRIDGE] control_tts_failed err={exc!r}", flush=True)
+                self.last_error = "control_tts_failed"
+                print(
+                    "[LOCAL BRIDGE] control_tts_failed "
+                    f"errorType={type(exc).__name__}",
+                    flush=True,
+                )
                 await self._post_status()
             finally:
                 self.speak_request_queue.task_done()
