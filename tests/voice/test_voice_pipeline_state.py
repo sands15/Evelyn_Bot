@@ -217,11 +217,12 @@ class VoicePipelineStateTests(unittest.TestCase):
     def test_save_last_voice_channel_state_from_runtime_reports_failures(self) -> None:
         state = default_voice_pipeline_state()
         logs: list[str] = []
+        private_error = "PRIVATE_VOICE_STATE_SAVE C:/secret/voice-channel.json"
 
         with patch.object(
             voice_pipeline_state_module,
             "save_last_voice_channel_state",
-            side_effect=RuntimeError("disk full"),
+            side_effect=RuntimeError(private_error),
         ):
             ok = save_last_voice_channel_state_from_runtime(
                 Path("root"),
@@ -234,9 +235,11 @@ class VoicePipelineStateTests(unittest.TestCase):
             )
 
         self.assertFalse(ok)
-        self.assertEqual(len(logs), 1)
-        self.assertIn("[VOICE STATE SAVE FAIL]", logs[0])
-        self.assertIn("disk full", logs[0])
+        self.assertEqual(
+            logs,
+            ["[VOICE STATE SAVE FAIL] errorType=RuntimeError"],
+        )
+        self.assertNotIn(private_error, repr(logs))
 
 
 if __name__ == "__main__":

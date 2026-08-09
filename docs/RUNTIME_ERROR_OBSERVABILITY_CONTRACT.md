@@ -127,6 +127,10 @@ exception type과 sample count만 남기며 WAV·enrollment directory 경로를 
 
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 
+Discord last voice-channel state 저장 실패 운영 로그도
+`[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남기며 예외 메시지·경로를
+복제하지 않는다.
+
 - `lastFailure`는 `kind`, `errorType`, 숫자 `at`, `contentFree=true`만 공개한다.
 - voice rejoin 오류는 `voice_rearm_failed`와 검증된 예외 클래스 이름만 공개한다.
 - turn summary의 `error`는 고정 코드 또는 예외 클래스 이름이며 임의 문자열은

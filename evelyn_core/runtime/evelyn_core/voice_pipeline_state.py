@@ -205,7 +205,7 @@ def save_last_voice_channel_state_from_runtime(
         )
     except Exception as exc:
         if log is not None:
-            log(f"[VOICE STATE SAVE FAIL] err={exc!r}")
+            log(f"[VOICE STATE SAVE FAIL] errorType={type(exc).__name__}")
         return False
     return True
 

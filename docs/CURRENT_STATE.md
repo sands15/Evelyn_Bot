@@ -2200,7 +2200,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   disconnect 자체가 실패하면 현재 stale 객체에 한해 Discord registry cleanup을 수행한다.
   disconnect 도중 replacement가 설치된 경우에도 current client를 다시 확인해 끊지 않고
   재사용한다. 실제 connected same-channel client만 listener rearm·warmup·last-channel
-  저장 성공 경계를 통과한다.
+  저장 성공 경계를 통과한다. last voice-channel state 저장 실패 운영 로그도
+  `[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남긴다.
 - 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
   해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
   실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.

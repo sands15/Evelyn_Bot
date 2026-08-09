@@ -363,6 +363,8 @@ stale 정리부터 replacement 생성·재사용까지 guild lock 안에서 직�
 client와 disconnect 도중 설치된 replacement를 재확인·재사용해 동시 재연결이 첫 성공을
 끊지 않는다. 실제
 `is_connected()`가 true인 client만 listener callback, warmup과 last-channel success를 갱신한다.
+last voice-channel state 저장 실패 운영 로그도
+`[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남긴다.
 
 재시작 때 아직 재생을 시도하지 않은 voice search follow-up은 음성 연결이 없다는
 이유만으로 `delivery_uncertain`에 고정하지 않는다. recovery claim만 해제하고
