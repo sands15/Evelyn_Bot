@@ -334,12 +334,22 @@ class VoiceSupportComposition:
             await voice_client.disconnect(force=True)
             voice_client = None
 
-        if voice_client is None:
-            voice_client = await self.connect_evelyn_voice_client(target_channel)
-        elif voice_client.is_internal_voice_reconnect_active():
+        if (
+            isinstance(voice_client, self.deps.voice_client_type)
+            and voice_client.is_internal_voice_reconnect_active()
+        ):
             waited_voice_client = await self.wait_for_internal_voice_reconnect(target_channel)
             if waited_voice_client is not None:
                 voice_client = waited_voice_client
+
+        if (
+            isinstance(voice_client, self.deps.voice_client_type)
+            and not voice_client.is_connected()
+        ):
+            voice_client = None
+
+        if voice_client is None:
+            voice_client = await self.connect_evelyn_voice_client(target_channel)
         elif voice_client.channel != target_channel:
             await voice_client.move_to(target_channel)
 

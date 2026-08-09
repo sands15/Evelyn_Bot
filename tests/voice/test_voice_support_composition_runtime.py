@@ -255,11 +255,12 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             manual_disconnect=False,
         )
 
-    async def test_failed_internal_reconnect_does_not_rearm_stale_client(self) -> None:
+    async def test_failed_internal_reconnect_replaces_stale_client(self) -> None:
         channel = FakeVoiceChannel()
-        voice_client = FakeVoiceClient(channel, connected=False)
-        voice_client.is_internal_voice_reconnect_active = Mock(return_value=True)
-        guild = FakeGuild(voice_client)
+        stale_voice_client = FakeVoiceClient(channel, connected=False)
+        stale_voice_client.is_internal_voice_reconnect_active = Mock(return_value=True)
+        replacement = FakeVoiceClient(channel, connected=True)
+        guild = FakeGuild(stale_voice_client)
         warmup = AsyncMock()
         save = Mock()
         deps = self.build_deps(
@@ -268,15 +269,35 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         composition = VoiceSupportComposition(deps)
         composition.wait_for_internal_voice_reconnect = AsyncMock(return_value=None)
+        composition.connect_evelyn_voice_client = AsyncMock(return_value=replacement)
 
         result = await composition.ensure_listening_voice_client(guild, channel)
 
-        self.assertIsNone(result)
+        self.assertIs(result, replacement)
         composition.wait_for_internal_voice_reconnect.assert_awaited_once_with(channel)
-        self.assertEqual(voice_client.listen_calls, 0)
-        self.assertIsNone(voice_client.on_user_audio)
-        warmup.assert_not_awaited()
-        save.assert_not_called()
+        composition.connect_evelyn_voice_client.assert_awaited_once_with(channel)
+        self.assertEqual(replacement.listen_calls, 1)
+        self.assertIsNotNone(replacement.on_user_audio)
+        warmup.assert_awaited_once_with(reason="voice_connect", key="voice:11:22")
+        save.assert_called_once_with(
+            guild,
+            channel,
+            reason="ensure_listening",
+            manual_disconnect=False,
+        )
+
+    async def test_disconnected_same_channel_client_is_replaced(self) -> None:
+        channel = FakeVoiceChannel()
+        stale_voice_client = FakeVoiceClient(channel, connected=False)
+        replacement = FakeVoiceClient(channel, connected=True, healthy=True)
+        guild = FakeGuild(stale_voice_client)
+        composition = VoiceSupportComposition(self.build_deps())
+        composition.connect_evelyn_voice_client = AsyncMock(return_value=replacement)
+
+        result = await composition.ensure_listening_voice_client(guild, channel)
+
+        self.assertIs(result, replacement)
+        composition.connect_evelyn_voice_client.assert_awaited_once_with(channel)
 
     async def test_restore_failure_exposes_only_code_and_type(self) -> None:
         channel = FakeVoiceChannel()

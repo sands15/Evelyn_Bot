@@ -55,6 +55,32 @@ async def connect_evelyn_voice_client_from_runtime(
         reused_vc = await wait_for_internal_voice_reconnect_from_runtime(target_channel, deps=deps)
         if reused_vc is not None:
             return reused_vc
+        connected_vc = target_channel.guild.voice_client
+        if (
+            isinstance(connected_vc, deps.voice_client_type)
+            and connected_vc.is_connected()
+            and connected_vc.channel == target_channel
+        ):
+            return connected_vc
+        if (
+            isinstance(connected_vc, deps.voice_client_type)
+            and not connected_vc.is_connected()
+        ):
+            try:
+                await connected_vc.disconnect(force=True)
+            except Exception:
+                try:
+                    if target_channel.guild.voice_client is connected_vc:
+                        connected_vc.cleanup()
+                except Exception:
+                    pass
+            connected_vc = target_channel.guild.voice_client
+            if (
+                isinstance(connected_vc, deps.voice_client_type)
+                and connected_vc.is_connected()
+                and connected_vc.channel == target_channel
+            ):
+                return connected_vc
 
         last_error: Exception | None = None
 

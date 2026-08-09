@@ -2140,8 +2140,13 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   cleanup 실패 응답이 철회 전 `active=true`를 재사용하지 않는다.
 - Runtime Health의 모든 probe는 manifest `timeout_ms`로 제한된다. 멈춘 runner는
   content-free `timeout` 결과로 끝나며 required service readiness를 얻지 못한다.
-- Discord voice reconnect wait가 client를 반환하지 못하면 stale client를 rearm·warmup·
-  저장·반환하지 않는다. 실제 connected client만 성공 경계를 통과한다.
+- Discord voice reconnect wait가 client를 반환하지 못하거나 같은 채널 client가 이미
+  disconnected면 stale client를 강제 정리하고 기존 connect 경로로 새 client를 만든다.
+  stale 정리부터 replacement 생성·재사용까지 guild connect lock 안에서 직렬화하고,
+  disconnect 자체가 실패하면 현재 stale 객체에 한해 Discord registry cleanup을 수행한다.
+  disconnect 도중 replacement가 설치된 경우에도 current client를 다시 확인해 끊지 않고
+  재사용한다. 실제 connected same-channel client만 listener rearm·warmup·last-channel
+  저장 성공 경계를 통과한다.
 - 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
   해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
   실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.

@@ -318,9 +318,13 @@ ordering과 latency를 확인할 수 있어 live E2E가 단순 응답 의미 추
 저장하지 않는다. 현재 owner가 손상되면 정상인 상대 owner도 주입하지 않아
 검증할 수 없는 reset 경계를 우회하지 않는다.
 
-Discord voice 재무장도 내부 reconnect wait가 client를 반환하지 못하면 기존 stale
-client를 성공으로 저장·반환하지 않는다. 실제 `is_connected()`가 true인 client만
-listener callback, warmup과 last-channel success를 갱신한다.
+Discord voice 재무장도 내부 reconnect wait가 client를 반환하지 못하거나 같은 채널
+client가 disconnected면 stale client를 강제 정리하고 기존 connect 경로로 교체한다.
+stale 정리부터 replacement 생성·재사용까지 guild lock 안에서 직렬화하고 disconnect
+오류는 현재 stale 객체의 registry cleanup으로 수렴한다. 이미 연결된 same-channel
+client와 disconnect 도중 설치된 replacement를 재확인·재사용해 동시 재연결이 첫 성공을
+끊지 않는다. 실제
+`is_connected()`가 true인 client만 listener callback, warmup과 last-channel success를 갱신한다.
 
 재시작 때 아직 재생을 시도하지 않은 voice search follow-up은 음성 연결이 없다는
 이유만으로 `delivery_uncertain`에 고정하지 않는다. recovery claim만 해제하고

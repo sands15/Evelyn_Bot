@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -26,14 +27,18 @@ class FakeVoiceClient:
         reconnect_active: bool = False,
         reconnect_result: bool = False,
         listener_healthy: bool = False,
+        disconnect_error: Exception | None = None,
     ) -> None:
         self.channel = channel
         self.reconnect_active = reconnect_active
         self.reconnect_result = reconnect_result
         self.listener_healthy = listener_healthy
+        self.disconnect_error = disconnect_error
+        self.disconnect_replacement = None
         self.connected = True
         self.listen_calls = 0
         self.disconnect_calls: list[bool] = []
+        self.cleanup_calls = 0
         self.wait_timeouts: list[float] = []
         self.on_user_audio = None
 
@@ -55,6 +60,17 @@ class FakeVoiceClient:
 
     async def disconnect(self, *, force: bool) -> None:
         self.disconnect_calls.append(force)
+        if self.disconnect_replacement is not None and self.channel is not None:
+            self.channel.guild.voice_client = self.disconnect_replacement
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
+        if self.channel is not None and self.channel.guild.voice_client is self:
+            self.channel.guild.voice_client = None
+
+    def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        if self.channel is not None:
+            self.channel.guild.voice_client = None
 
 
 class FakeGuild:
@@ -73,12 +89,16 @@ class FakeChannel:
         self.name = name
         self.connect_results: list[object] = []
         self.connect_calls: list[dict] = []
+        self.reject_when_registered = False
 
     async def connect(self, **kwargs):
         self.connect_calls.append(kwargs)
+        if self.reject_when_registered and self.guild.voice_client is not None:
+            raise RuntimeError("already connected")
         result = self.connect_results.pop(0)
         if isinstance(result, Exception):
             raise result
+        self.guild.voice_client = result
         return result
 
 
@@ -136,10 +156,80 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertIn(77, self.locks)
 
+    async def test_connect_serializes_stale_cleanup_and_reuses_replacement(self) -> None:
+        guild = FakeGuild()
+        channel = FakeChannel(guild)
+        channel.reject_when_registered = True
+        stale = FakeVoiceClient(channel=channel)
+        stale.connected = False
+        guild.voice_client = stale
+        replacement = FakeVoiceClient(channel=channel, listener_healthy=True)
+        channel.connect_results = [replacement]
+        deps = self.build_deps()
+
+        first, second = await asyncio.gather(
+            connect_evelyn_voice_client_from_runtime(channel, deps=deps),
+            connect_evelyn_voice_client_from_runtime(channel, deps=deps),
+        )
+
+        self.assertIs(first, replacement)
+        self.assertIs(second, replacement)
+        self.assertEqual(len(channel.connect_calls), 1)
+        self.assertEqual(stale.disconnect_calls, [True])
+        self.assertEqual(replacement.disconnect_calls, [])
+
+    async def test_connect_cleans_registry_when_stale_disconnect_fails(self) -> None:
+        guild = FakeGuild()
+        channel = FakeChannel(guild)
+        channel.reject_when_registered = True
+        stale = FakeVoiceClient(
+            channel=channel,
+            disconnect_error=RuntimeError("stale disconnect failed"),
+        )
+        stale.connected = False
+        guild.voice_client = stale
+        replacement = FakeVoiceClient(channel=channel, listener_healthy=True)
+        channel.connect_results = [replacement]
+
+        result = await connect_evelyn_voice_client_from_runtime(
+            channel,
+            deps=self.build_deps(),
+        )
+
+        self.assertIs(result, replacement)
+        self.assertEqual(stale.disconnect_calls, [True])
+        self.assertEqual(stale.cleanup_calls, 1)
+        self.assertEqual(len(channel.connect_calls), 1)
+
+    async def test_connect_reuses_replacement_installed_during_stale_disconnect(self) -> None:
+        guild = FakeGuild()
+        channel = FakeChannel(guild)
+        channel.reject_when_registered = True
+        stale = FakeVoiceClient(
+            channel=channel,
+            disconnect_error=RuntimeError("stale disconnect failed"),
+        )
+        stale.connected = False
+        replacement = FakeVoiceClient(channel=channel, listener_healthy=True)
+        stale.disconnect_replacement = replacement
+        guild.voice_client = stale
+
+        result = await connect_evelyn_voice_client_from_runtime(
+            channel,
+            deps=self.build_deps(),
+        )
+
+        self.assertIs(result, replacement)
+        self.assertEqual(stale.disconnect_calls, [True])
+        self.assertEqual(stale.cleanup_calls, 0)
+        self.assertEqual(replacement.disconnect_calls, [])
+        self.assertEqual(channel.connect_calls, [])
+
     async def test_failed_attempt_cleans_stale_state_and_retries(self) -> None:
         guild = FakeGuild()
         channel = FakeChannel(guild)
         stale = FakeVoiceClient(channel=channel)
+        stale.connected = False
         guild.voice_client = stale
         connected = FakeVoiceClient(channel=channel, listener_healthy=True)
         channel.connect_results = [RuntimeError("first failed"), connected]
