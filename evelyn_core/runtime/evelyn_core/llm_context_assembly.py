@@ -506,10 +506,10 @@ async def prepare_llm_messages_from_runtime(
                 user_text,
                 metrics=vision_runtime_metrics,
             )
-        except Exception as exc:
-            vision_runtime_metrics.setdefault("meta", {})["vision_runtime_error"] = deps.clean_text(
-                repr(exc)
-            )[:240]
+        except Exception:
+            vision_runtime_metrics.setdefault("meta", {})[
+                "vision_runtime_error"
+            ] = "vision_runtime_error"
             record_vision_evidence(
                 vision_runtime_metrics,
                 VisionEvidence(state="failed", reason_code="vision_runtime_error"),

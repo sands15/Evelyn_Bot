@@ -140,15 +140,20 @@ class ToolUseDecision:
     evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        tool_name = clean_text(self.tool_name)
+        status = clean_text(self.status)
+        evidence = clean_block_text(self.evidence)
+        if status == "failed":
+            evidence = f"{tool_name or 'tool'}_failed"
         return {
-            "tool_name": clean_text(self.tool_name),
+            "tool_name": tool_name,
             "reason": clean_text(self.reason),
             "risk": clean_text(self.risk),
             "cost": clean_text(self.cost),
             "auto_allowed": bool(self.auto_allowed),
             "required_before_answer": bool(self.required_before_answer),
-            "status": clean_text(self.status),
-            "evidence": clean_block_text(self.evidence),
+            "status": status,
+            "evidence": evidence,
         }
 
 

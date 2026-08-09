@@ -380,6 +380,7 @@ def _local_ack_runtime_patches(
         "resolve_pre_llm_reply": AsyncMock(return_value=None),
         "prepare_tool_plan_background_action": Mock(return_value=None),
         "prepare_registered_background_action": Mock(return_value=None),
+        "ask_main_llm": AsyncMock(return_value="테스트 응답"),
         "should_suppress_tts_for_command": Mock(return_value=False),
         "should_queue_local_bridge_speech": Mock(return_value=False),
         "cached_fast_runtime_health": AsyncMock(return_value={}),

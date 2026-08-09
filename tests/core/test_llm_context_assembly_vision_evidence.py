@@ -838,8 +838,10 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertNotIn("status=executed;", system_context)
 
     async def test_unexpected_vision_runtime_error_degrades_without_losing_turn(self) -> None:
+        private_canary = "PRIVATE_VISION_ERROR C:/secret/decoder-token"
+
         async def broken_vision(_user_text: str, *, metrics: dict | None = None) -> str:
-            raise ValueError("decoder exploded")
+            raise ValueError(private_canary)
 
         metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
         messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
@@ -851,8 +853,12 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         system_context = messages[0]["content"]
         self.assertIn("reason=vision_runtime_error", system_context)
         self.assertIn("status=failed_or_unavailable", system_context)
-        self.assertNotIn("decoder exploded", system_context)
-        self.assertIn("decoder exploded", metrics["meta"]["vision_runtime_error"])
+        self.assertNotIn(private_canary, system_context)
+        self.assertEqual(
+            metrics["meta"]["vision_runtime_error"],
+            "vision_runtime_error",
+        )
+        self.assertNotIn(private_canary, str(metrics))
         self.assertEqual(
             metrics["meta"]["context_pipeline"]["vision_evidence_state"],
             "failed",

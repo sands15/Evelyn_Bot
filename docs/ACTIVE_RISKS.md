@@ -272,6 +272,8 @@ Voice search follow-up의 최초 전달과 재시작 복구도 별도 playback m
 `delivery_uncertain`으로 남겨 자동 재전송하지 않는다. Router fallback metadata와
 Local Bridge turn과 TTS warmup status/log도 upstream 예외 원문 대신 고정 코드와
 exception type만 보존한다. warmup의 non-200 HTTP body는 읽지 않는다.
+Main/Fast의 failed tool evidence와 Main vision runtime metrics도 fixed code만
+직렬화해 다음 LLM prompt와 turn metrics에 예외 문장·경로를 복제하지 않는다.
 
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,

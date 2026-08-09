@@ -251,6 +251,9 @@ Phase 1 is the stable contract that later phases will wire into.
 - Router LLM output now requests a `context_policy` object and normalizes it through `ContextPolicy.from_mapping()` before prompt assembly.
 - Router route response budget now defaults to `220` tokens so the policy JSON is not truncated.
 - Runtime state, skill graph hints, and vision hints now have first-class packet sections.
+- Failed Main/Fast tool decisions serialize only `<tool_name>_failed`, and
+  unexpected Main vision failures expose only `vision_runtime_error`; raw
+  exception evidence does not enter the next prompt or turn metrics.
 - Main과 Fast Control은 공통 `conversation.unanswered-user.v1` system-context
   규칙으로 마지막 history row가 `user`인 미응답 턴을 명시한다. 판정은 restart
   restore와 cross-surface merge 뒤에 수행하며 metrics/turn summary에는 사용자

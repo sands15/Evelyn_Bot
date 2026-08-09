@@ -13,6 +13,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.context_pipeline import (
     ContextBuilder,
     ContextPolicy,
+    ToolUseDecision,
     build_basic_context_packet,
     build_conversation_state_context,
     build_context_policy_for_turn,
@@ -235,6 +236,26 @@ class ContextPipelineToolPolicyTests(unittest.TestCase):
         self.assertIn("Required tool evidence is a hard gate", rendered)
         self.assertIn("do not answer from guesswork", rendered)
         self.assertIn("local_file_or_log_read", rendered)
+
+    def test_failed_tool_evidence_is_content_free(self) -> None:
+        private_path = "C:/secret/runtime-token"
+        private_canary = f"PRIVATE_TOOL_FAILURE_CANARY {private_path}"
+        decision = ToolUseDecision(
+            tool_name="runtime_status",
+            reason="runtime check",
+            status="failed",
+            evidence=repr(RuntimeError(private_canary)),
+        )
+
+        projected = decision.to_dict()
+        rendered = render_tool_use_context([decision])
+
+        self.assertEqual(projected["evidence"], "runtime_status_failed")
+        self.assertIn("evidence=runtime_status_failed", rendered)
+        self.assertNotIn(private_canary, str(projected))
+        self.assertNotIn(private_canary, rendered)
+        self.assertNotIn(private_path, str(projected))
+        self.assertNotIn(private_path, rendered)
 
 
 if __name__ == "__main__":
