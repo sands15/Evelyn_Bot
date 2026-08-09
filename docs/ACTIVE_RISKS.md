@@ -296,6 +296,8 @@ Control Page server-start 실패는 startup detail에
 `Control Page start failed`다.
 Control Page welcome LLM non-200 body도 읽지 않으며 failure model-call turn trace와
 operation log에는 exception type만 남기고 fallback welcome을 유지한다.
+Control Page tool-router failure operation log도 exception type만 남기고, 기존 `None`
+반환 뒤 text/search fallback을 유지한다.
 Speaker verification probe embedding 실패 detail도 fixed
 `speaker_verification_failed:<type>`만 validation event·metrics에 전달하며, enrollment
 skip·success 로그도 exception type과 sample count만 남긴다.

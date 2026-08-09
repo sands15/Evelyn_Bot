@@ -224,7 +224,7 @@ async def decide_control_page_tool_call_from_runtime(
         raise
     except Exception as exc:
         if deps.log is not None:
-            deps.log(f"[CONTROL PAGE TOOL ROUTER] failed: {exc!r}")
+            deps.log(f"[CONTROL PAGE TOOL ROUTER] failed errorType={type(exc).__name__}")
         return None
 
 

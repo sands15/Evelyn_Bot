@@ -170,6 +170,24 @@ class ControlPageToolRuntimeTests(unittest.TestCase):
         self.assertIn("control_page.memory_panel", calls[0]["messages"][0]["content"])
         self.assertEqual(state["history"][0]["session_key"], "session")
 
+    def test_decide_control_page_tool_call_redacts_router_failure(self) -> None:
+        marker = "PRIVATE_CONTROL_PAGE_TOOL_ROUTER_CANARY:/synthetic/router-token.json"
+        logs: list[str] = []
+
+        async def fail_router(*_args, **_kwargs):
+            raise RuntimeError(marker)
+
+        deps, _state = _deps(ask_router_llm=fail_router, log=logs.append)
+
+        result = asyncio.run(self._run_decision(deps))
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            logs,
+            ["[CONTROL PAGE TOOL ROUTER] failed errorType=RuntimeError"],
+        )
+        self.assertNotIn(marker, repr(logs))
+
     async def _run_execute(self, decision: dict[str, object], deps: ControlPageToolRuntimeDeps, guild=None) -> str:
         return await execute_control_page_tool_from_runtime(guild, decision, deps=deps)
 
