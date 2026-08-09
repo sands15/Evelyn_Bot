@@ -139,6 +139,9 @@ Discord last voice-channel state 저장 실패 운영 로그도
   delivery 실패는 고정 코드별 카운터를 유지한다.
 - wake/STT/TTS/rejoin 로그와 validation observer로 전달되는 오류 필드에는 예외
   메시지 대신 고정 코드와 클래스 이름만 넣는다.
+- Voice validation observer 자체 실패 로그는
+  `[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남기며, 이후 public
+  turn-trace projection은 계속한다.
 - Opus load·STT warmup의 startup component detail에는 고정 code와 exception
   class만 넣는다. Control Page `bootProgress.steps[].detail`과 외부 wrapper traceback에
   upstream 예외 메시지·경로를 복제하지 않는다.

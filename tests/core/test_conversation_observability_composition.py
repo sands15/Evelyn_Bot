@@ -95,6 +95,25 @@ class ConversationObservabilityCompositionTests(unittest.TestCase):
             },
         )
 
+    def test_voice_validation_observer_failure_logs_only_exception_type(self) -> None:
+        private_error = "PRIVATE_VALIDATION_OBSERVER C:/secret/voice-event.jsonl"
+        observer = Mock(side_effect=RuntimeError(private_error))
+        composition, deps, *_ = self.build_composition(
+            voice_validation_observer=observer
+        )
+
+        composition.log_turn_event(
+            "voice_turn_summary",
+            turn_id="turn-1",
+            playback_failed=True,
+        )
+
+        deps.original_print.assert_called_once_with(
+            "[VOICE VALIDATION OBSERVER ERROR] errorType=RuntimeError"
+        )
+        self.assertNotIn(private_error, repr(deps.original_print.call_args_list))
+        deps.write_turn_trace_event.assert_called_once()
+
     def test_validation_attempt_token_is_only_visible_to_internal_observer(self) -> None:
         observer = Mock()
         composition, deps, *_ = self.build_composition(

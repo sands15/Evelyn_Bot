@@ -281,6 +281,9 @@ Local Bridge turn과 TTS warmup/control status·log도 upstream 예외 원문 �
 Control Page 상태와 Main dependency context를 닫는다. warmup의 non-200 HTTP body는 읽지 않는다.
 Discord `vc.play`·`after` callback·stream source 실패도 turn trace에 fixed
 `discord_playback_failed`와 exception type만 남긴다.
+Voice validation observer 자체 실패 로그도 fixed
+`[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남기며, 예외
+메시지·경로를 운영 로그에 복제하지 않는다.
 Opus load·STT warmup 실패는 startup state와 Control Page boot progress에 fixed
 code/type만 남기고, 외부 wrapper의 원인 traceback도 억제한다.
 Main LLM warmup non-200 body는 읽지 않고 startup state와 외부 wrapper에 각각

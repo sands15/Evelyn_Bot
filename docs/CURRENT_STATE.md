@@ -233,7 +233,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     message만 남긴다.
   - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다. Router
     fallback metadata는 `router_failed`, Local Bridge turn status는
-    `turn_pipeline_failed`, control TTS status는 `control_tts_failed`만 보존한다.
+    `turn_pipeline_failed`, control TTS status는 `control_tts_failed`만 보존한다. Voice
+    validation observer 실패 로그도 fixed
+    `[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남기고 이어지는 turn
+    trace writer 호출은 유지한다.
   - Main/Fast tool decision의 `failed` evidence는 serialization에서
     `<tool_name>_failed`로 고정한다. Main vision 예외 metrics도
     `vision_runtime_error`만 남긴다. background Vision Watch의 분석·capture 실패도

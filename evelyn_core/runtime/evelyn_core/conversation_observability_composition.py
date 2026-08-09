@@ -87,7 +87,10 @@ class ConversationObservabilityComposition:
             try:
                 deps.voice_validation_observer(event, dict(payload))
             except Exception as exc:
-                deps.original_print(f"[VOICE VALIDATION OBSERVER ERROR] {exc!r}")
+                deps.original_print(
+                    "[VOICE VALIDATION OBSERVER ERROR] "
+                    f"errorType={type(exc).__name__}"
+                )
         deps.write_turn_trace_event(
             event,
             public_payload,
