@@ -1233,8 +1233,9 @@ context builder가 schema·owner·code·bucket allowlist를 다시 검사한다.
 목록만 허용한다. 실행 실패는 content-free audit 결과로 기록되지만 성공
 evidence가 아니며, legacy 상태와 최종 consumer도 독립적으로 재검사한다.
 
-2026-08-09 memory write-behind의 step/event-log 실패도 payload·30일 보존 JSONL·
+2026-08-09 memory write-behind의 step/event-log 실패는 payload·30일 보존 JSONL·
 운영 로그에 예외 원문을 복사하지 않고 고정 code와 exception type만 남긴다.
+daily vault mirror 실패 로그도 fixed prefix와 exception type만 남긴다.
 
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.

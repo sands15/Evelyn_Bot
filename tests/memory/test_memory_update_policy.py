@@ -186,9 +186,10 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
 
     def test_write_memory_turn_records_marks_vault_failure(self) -> None:
         logs = []
+        private_error = "PRIVATE_TOKEN=C:/private/memory-note.md"
 
         def fail_vault(*args, **kwargs) -> None:
-            raise RuntimeError("vault down")
+            raise RuntimeError(private_error)
 
         result = write_memory_turn_records(
             123,
@@ -201,7 +202,14 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.vault_mirrored)
-        self.assertIn("[MEMORY VAULT] daily mirror failed:", logs[0])
+        self.assertEqual(
+            logs,
+            [
+                "[MEMORY VAULT] daily mirror failed: "
+                "errorType=RuntimeError"
+            ],
+        )
+        self.assertNotIn(private_error, logs[0])
 
     def test_schedule_passes_turn_scope_id_into_raw_memory_records(self) -> None:
         captured = {}

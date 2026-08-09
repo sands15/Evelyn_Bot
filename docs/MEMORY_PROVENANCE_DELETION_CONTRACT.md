@@ -821,6 +821,7 @@ hot context에는 deletion journal과 chain head 각각의 수정 시각·크기
 사용할 수 있지만 note ID는
 `daily-YYYY-MM-DD-continuation-N`으로 바뀐다. 삭제된 원문은 복원하지 않고
 삭제 이후의 새 대화만 새 identity에 기록한다.
+daily vault mirror 실패 로그에는 예외 메시지·경로 대신 exception type만 남긴다.
 
 ## API result semantics
 

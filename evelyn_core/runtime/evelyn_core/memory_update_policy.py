@@ -175,7 +175,7 @@ def write_memory_turn_records(
     except Exception as exc:
         vault_mirrored = False
         if log is not None:
-            log(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
+            log(f"[MEMORY VAULT] daily mirror failed: errorType={type(exc).__name__}")
 
     return MemoryTurnWriteResult(
         memory_user_text=memory_user_text,

@@ -411,7 +411,7 @@ def append_raw_transcript_rows(
                     scope_key=scope_key,
                 )
             except Exception as exc:
-                print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
+                print(f"[MEMORY VAULT] daily mirror failed: errorType={type(exc).__name__}")
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:

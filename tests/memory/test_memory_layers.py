@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -38,6 +39,27 @@ class TemporaryMemoryRoot:
 
 
 class MemoryLayersTests(unittest.TestCase):
+    def test_raw_writer_redacts_daily_mirror_failure(self) -> None:
+        private_error = "PRIVATE_TOKEN=C:/private/memory-note.md"
+        with (
+            TemporaryMemoryRoot(),
+            patch.object(
+                memory,
+                "append_turn_rows_to_memory_vault",
+                side_effect=RuntimeError(private_error),
+            ),
+            patch("builtins.print") as log,
+        ):
+            memory.append_raw_transcript_rows(
+                123,
+                [{"role": "user", "text": "hello"}],
+            )
+
+        log.assert_called_once_with(
+            "[MEMORY VAULT] daily mirror failed: errorType=RuntimeError"
+        )
+        self.assertNotIn(private_error, str(log.call_args))
+
     def test_collect_memory_layers_reads_all_requested_scopes(self) -> None:
         with TemporaryMemoryRoot():
             scopes = [
