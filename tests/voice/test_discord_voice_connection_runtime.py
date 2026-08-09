@@ -232,7 +232,8 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         stale.connected = False
         guild.voice_client = stale
         connected = FakeVoiceClient(channel=channel, listener_healthy=True)
-        channel.connect_results = [RuntimeError("first failed"), connected]
+        private = "PRIVATE_VOICE_CONNECT_RETRY:C:\\secret\\voice-token.json"
+        channel.connect_results = [RuntimeError(private), connected]
 
         result = await connect_evelyn_voice_client_from_runtime(channel, deps=self.build_deps())
 
@@ -245,6 +246,33 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertEqual(self.sleeps, [0.25])
         self.assertEqual(len(channel.connect_calls), 2)
+        self.assertIn(
+            "[VOICE CONNECT FAIL] attempt=1/2 channel=general errorType=RuntimeError",
+            self.logs,
+        )
+        self.assertNotIn(private, repr(self.logs))
+
+    async def test_exhausted_retries_raise_fixed_failure(self) -> None:
+        guild = FakeGuild()
+        channel = FakeChannel(guild)
+        private_one = "PRIVATE_VOICE_CONNECT_ONE:C:\\secret\\one.json"
+        private_two = "PRIVATE_VOICE_CONNECT_TWO:C:\\secret\\two.json"
+        channel.connect_results = [RuntimeError(private_one), ValueError(private_two)]
+
+        with self.assertRaisesRegex(RuntimeError, "^voice_connect_failed$") as raised:
+            await connect_evelyn_voice_client_from_runtime(channel, deps=self.build_deps())
+
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertNotIn(private_one, repr(self.logs))
+        self.assertNotIn(private_two, repr(self.logs))
+        self.assertEqual(
+            [line for line in self.logs if line.startswith("[VOICE CONNECT FAIL]")],
+            [
+                "[VOICE CONNECT FAIL] attempt=1/2 channel=general errorType=RuntimeError",
+                "[VOICE CONNECT FAIL] attempt=2/2 channel=general errorType=ValueError",
+            ],
+        )
 
     def test_main_delegates_voice_connect_and_reconnect_to_runtime_module(self) -> None:
         source = (

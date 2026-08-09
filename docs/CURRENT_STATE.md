@@ -2205,6 +2205,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   재사용한다. 실제 connected same-channel client만 listener rearm·warmup·last-channel
   저장 성공 경계를 통과한다. last voice-channel state 저장 실패 운영 로그도
   `[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남긴다.
+  Discord voice connect retry 실패 로그는 기존 attempt/channel metadata와 exception
+  type만 남기고, 모든 retry가 실패하면 원문 대신 fixed `voice_connect_failed` wrapper만
+  caller에 전달한다.
 - 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
   해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
   실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.

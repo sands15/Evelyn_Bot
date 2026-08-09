@@ -139,6 +139,10 @@ Discord last voice-channel state 저장 실패 운영 로그도
   delivery 실패는 고정 코드별 카운터를 유지한다.
 - wake/STT/TTS/rejoin 로그와 validation observer로 전달되는 오류 필드에는 예외
   메시지 대신 고정 코드와 클래스 이름만 넣는다.
+- Discord voice connect retry 실패 로그에는 기존 attempt/channel metadata와 exception
+  type만 남긴다.
+  retries를 소진한 final wrapper는 upstream 예외 메시지·경로를 caller나 운영 로그에
+  전달하지 않는다.
 - Voice validation observer 자체 실패 로그는
   `[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남기며, 이후 public
   turn-trace projection은 계속한다.

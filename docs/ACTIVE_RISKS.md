@@ -368,6 +368,8 @@ client와 disconnect 도중 설치된 replacement를 재확인·재사용해 동
 `is_connected()`가 true인 client만 listener callback, warmup과 last-channel success를 갱신한다.
 last voice-channel state 저장 실패 운영 로그도
 `[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남긴다.
+Discord voice connect retry 실패 로그도 기존 attempt/channel metadata와 exception type만
+남기며, retry를 모두 소진하면 fixed `voice_connect_failed` wrapper만 caller에 전달한다.
 
 재시작 때 아직 재생을 시도하지 않은 voice search follow-up은 음성 연결이 없다는
 이유만으로 `delivery_uncertain`에 고정하지 않는다. recovery claim만 해제하고

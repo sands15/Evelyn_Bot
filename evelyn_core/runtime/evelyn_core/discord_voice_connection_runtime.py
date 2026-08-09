@@ -106,7 +106,7 @@ async def connect_evelyn_voice_client_from_runtime(
                 last_error = exc
                 deps.log(
                     f"[VOICE CONNECT FAIL] attempt={attempt}/{deps.voice_connect_retries} "
-                    f"channel={target_channel.name} err={exc!r}"
+                    f"channel={target_channel.name} errorType={type(exc).__name__}"
                 )
 
                 reused_vc = await wait_for_internal_voice_reconnect_from_runtime(target_channel, deps=deps)
@@ -133,7 +133,7 @@ async def connect_evelyn_voice_client_from_runtime(
                     await deps.sleep(deps.voice_connect_retry_delay_sec)
 
         assert last_error is not None
-        raise last_error
+        raise RuntimeError("voice_connect_failed") from None
 
 
 __all__ = [
