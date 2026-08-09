@@ -1931,6 +1931,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     engine start·stop도 task cancel과 executor cleanup, 상태 commit이 끝날 때까지 같은
     engine lock을 유지한다. disabled stale loop와 실패한 cleanup은 재시작 전에 정리하며,
     start 호출자 취소는 새 loop를 만들지 않고 재전파한다.
+    typed Minecraft executor는 readiness 뒤 connected 상태 재검사와 inflight 게시를
+    disconnect와 같은 lock으로 선형화해 stop 완료 뒤 새 world dispatch를 막는다.
   - 실행 중 trusted planner는 현재 grant에 포함된 step의 연속 prefix만 만든다.
     첫 미허가 step에서 멈추므로 안전 선행조건을 건너뛰지 않고, prefix가 비면
     executor·authorization audit 호출 없이 다음 관찰을 기다린다. 음식이 생긴 뒤에는

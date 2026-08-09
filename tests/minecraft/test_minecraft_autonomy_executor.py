@@ -325,6 +325,35 @@ class MinecraftAutonomyExecutorTests(
             "grant-1",
         )
 
+    async def test_disconnect_blocks_action_waiting_on_readiness(
+        self,
+    ) -> None:
+        await self.executor.connect()
+        readiness_started = asyncio.Event()
+        release_readiness = asyncio.Event()
+
+        async def delayed_readiness() -> dict:
+            readiness_started.set()
+            await release_readiness.wait()
+            return copy.deepcopy(self.runtime)
+
+        self.executor.deps.get_runtime_status.side_effect = delayed_readiness
+        action = asyncio.create_task(
+            self.executor.execute_step(
+                self.step(),
+                context=self.context(),
+            )
+        )
+        await readiness_started.wait()
+
+        await self.executor.disconnect()
+        release_readiness.set()
+        result = await action
+
+        self.assertEqual(result["reason"], "minecraft_executor_disabled")
+        self.execute_action.assert_not_awaited()
+        self.assertEqual(self.executor._inflight_action_run_id, "")
+
     async def test_connected_executor_accepts_exact_stopped_repeat_gateway(
         self,
     ) -> None:

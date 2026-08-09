@@ -132,6 +132,7 @@ class MinecraftAutonomyExecutor:
         self._inflight_action_run_id = ""
         self._inflight_action_request: dict[str, Any] | None = None
         self._inflight_lease: dict[str, Any] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._execute_lock = asyncio.Lock()
 
     async def _readiness_boundary(
@@ -178,13 +179,14 @@ class MinecraftAutonomyExecutor:
         )
 
     async def connect(self) -> None:
-        lease, lease_error = self._lease()
-        if lease is None:
-            raise RuntimeError(lease_error)
-        runtime, readiness_error = await self._readiness_boundary()
-        if runtime is None:
-            raise RuntimeError(readiness_error)
-        self._connected = True
+        async with self._lifecycle_lock:
+            lease, lease_error = self._lease()
+            if lease is None:
+                raise RuntimeError(lease_error)
+            runtime, readiness_error = await self._readiness_boundary()
+            if runtime is None:
+                raise RuntimeError(readiness_error)
+            self._connected = True
 
     async def _cancel_inflight_verified(
         self,
@@ -287,18 +289,19 @@ class MinecraftAutonomyExecutor:
         self._inflight_lease = None
 
     async def disconnect(self) -> None:
-        action_run_id = self._inflight_action_run_id
-        cancellation_requested = False
-        if action_run_id:
-            cancellation_requested = (
-                await self._cancel_inflight_verified(
-                    action_run_id
+        async with self._lifecycle_lock:
+            self._connected = False
+            action_run_id = self._inflight_action_run_id
+            cancellation_requested = False
+            if action_run_id:
+                cancellation_requested = (
+                    await self._cancel_inflight_verified(
+                        action_run_id
+                    )
                 )
-            )
-            self._clear_inflight()
-        self._connected = False
-        if cancellation_requested:
-            raise asyncio.CancelledError()
+                self._clear_inflight()
+            if cancellation_requested:
+                raise asyncio.CancelledError()
 
     async def observe(self) -> dict[str, Any]:
         lease, lease_error = self._lease()
@@ -370,9 +373,12 @@ class MinecraftAutonomyExecutor:
             )
             if runtime is None:
                 return _blocked(readiness_error)
-            self._inflight_action_run_id = context.action_run_id
-            self._inflight_action_request = dict(request)
-            self._inflight_lease = dict(before_lease)
+            async with self._lifecycle_lock:
+                if not self._connected:
+                    return _blocked("minecraft_executor_disabled")
+                self._inflight_action_run_id = context.action_run_id
+                self._inflight_action_request = dict(request)
+                self._inflight_lease = dict(before_lease)
             try:
                 result = await self.deps.execute_action(
                     self.guild_id,

@@ -48,6 +48,8 @@ route enable·disable과 lifecycle connect·disconnect는 같은 guild router lo
 engine start·stop은 engine lock 아래 task cancel, executor cleanup, 상태 commit까지 직렬화한다.
 disabled stale loop나 실패한 cleanup이 남으면 이를 먼저 정리하고 성공한 뒤에만 새 loop를 시작한다.
 stale child 취소만 내부 처리하고 start 호출자 자신의 취소는 재전파한다.
+Minecraft executor는 readiness 확인 뒤 disconnect currentness와 inflight 등록을 같은
+admission lock에서 선형화한다. stop이 먼저 완료되면 world action을 dispatch하지 않는다.
 
 현재 Control Page의 Minecraft 변경은 CSRF 보호를 통과한 명시적 사용자 요청
 경계에서만 실행한다. Control Page에는 일반 assistant 자율 루프를 시작하는
