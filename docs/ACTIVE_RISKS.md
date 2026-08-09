@@ -74,7 +74,8 @@ inactive authority 및 verified global stop을 함께 요구한다.
 restart 비복구, 변경성 Discord 명령 권한 검사와 미검증 결과의 plan 진행
 차단은 구현되어 있다. action별 exact evidence allowlist, 실행 뒤 동일 grant
 재검사, 실행 중 만료·교체의 cursor 차단, retry budget 비증거화, audit journal
-flush/fsync와 기록 실패 시 전체 grant 폐기도 구현됐다. Minecraft 접속·종료·
+flush/fsync와 outcome 기록 실패는 현재 성공을 unverified로 바꾸고 전체 grant를
+폐기한다. append 직전 grant가 바뀐 non-current outcome도 cursor 유지·engine 중단으로 닫는다. Minecraft 접속·종료·
 목표 변경은 명시적 outcome marker와 실제 상태 증거가 없으면 성공 문구를
 만들지 않는다.
 

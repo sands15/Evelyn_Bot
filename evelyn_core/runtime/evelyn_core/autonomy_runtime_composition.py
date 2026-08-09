@@ -57,7 +57,10 @@ class AutonomyRuntimeCompositionDeps:
     autonomy_poll_interval_sec: float
     get_authorized_actions: Callable[[int], list[str]]
     authorize_action: Callable[[int, str], dict[str, Any]]
-    record_action_outcome: Callable[[int, str, dict[str, Any]], None]
+    record_action_outcome: Callable[
+        [int, str, dict[str, Any]],
+        dict[str, bool] | bool | None,
+    ]
     commit_session_continuity: Callable[..., Any]
     log: Callable[..., Any]
     build_minecraft_executor: Callable[[int], Any] | None = None

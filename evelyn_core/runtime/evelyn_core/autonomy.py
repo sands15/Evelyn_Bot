@@ -157,7 +157,7 @@ class AutonomyEngine:
         authorize_action: Callable[..., dict[str, Any]] | None = None,
         record_action_outcome: Callable[
             [int, str, dict[str, Any]],
-            None,
+            dict[str, bool] | bool | None,
         ]
         | None = None,
         memory_index_dir: Path | None = None,
@@ -945,6 +945,7 @@ class AutonomyEngine:
         *,
         authorization_grant_id: str = "",
         action_run_id: str = "",
+        plan: AutonomyPlan | None = None,
     ) -> dict[str, Any]:
         if self.record_action_outcome is not None and action_key:
             audit_result = dict(result)
@@ -952,11 +953,51 @@ class AutonomyEngine:
                 authorization_grant_id
             )
             audit_result["_action_run_id"] = action_run_id
-            self.record_action_outcome(
+            recorded = self.record_action_outcome(
                 self.guild_id,
                 action_key,
                 audit_result,
             )
+            failure_reason = ""
+            if recorded is False or (
+                isinstance(recorded, dict)
+                and recorded.get("recorded") is not True
+            ):
+                failure_reason = "authorization_audit_unavailable"
+            elif (
+                isinstance(recorded, dict)
+                and authorization_grant_id
+                and recorded.get("authorizationCurrent") is not True
+            ):
+                failure_reason = str(result.get("reason") or "")
+                if failure_reason not in {
+                    "authorization_required",
+                    "authorization_scope_denied",
+                    "authorization_action_unsupported",
+                    "authorization_audit_unavailable",
+                    "authorization_changed_during_action",
+                }:
+                    failure_reason = "authorization_changed_during_action"
+            elif (
+                plan is not None
+                and isinstance(recorded, dict)
+                and recorded.get("verified") is not True
+            ):
+                failure_reason = "outcome_unverified"
+            if failure_reason:
+                self.state.enabled = False
+                self.state.status = "authorization_required"
+                self.state.allowed_actions = []
+                return {
+                    "status": "unverified",
+                    "reason": failure_reason,
+                    "reportedStatus": result.get("status"),
+                    "step": result.get("step"),
+                    "verified": False,
+                }
+        if plan is not None:
+            plan.cursor += 1
+            plan.updated_at = time.time()
         return result
 
     def _authorization_remains_current(
@@ -1118,8 +1159,6 @@ class AutonomyEngine:
                 and step.get("action") == "equip_shield"
                 and result.get("reason") == "shield_not_in_inventory"
             ):
-                plan.cursor += 1
-                plan.updated_at = time.time()
                 return self._record_action_result(
                     action_key,
                     {
@@ -1133,14 +1172,13 @@ class AutonomyEngine:
                     },
                     authorization_grant_id=authorization_grant_id,
                     action_run_id=action_run_id,
+                    plan=plan,
                 )
             if (
                 verified_outcome
                 and step.get("action") == "avoid_hazard"
                 and result.get("reason") == "no_immediate_hazard"
             ):
-                plan.cursor += 1
-                plan.updated_at = time.time()
                 return self._record_action_result(
                     action_key,
                     {
@@ -1154,14 +1192,13 @@ class AutonomyEngine:
                     },
                     authorization_grant_id=authorization_grant_id,
                     action_run_id=action_run_id,
+                    plan=plan,
                 )
             if (
                 verified_outcome
                 and step.get("action") == "retreat"
                 and result.get("reason") == "no_hostile_nearby"
             ):
-                plan.cursor += 1
-                plan.updated_at = time.time()
                 return self._record_action_result(
                     action_key,
                     {
@@ -1175,6 +1212,7 @@ class AutonomyEngine:
                     },
                     authorization_grant_id=authorization_grant_id,
                     action_run_id=action_run_id,
+                    plan=plan,
                 )
             if (
                 verified_outcome
@@ -1185,8 +1223,6 @@ class AutonomyEngine:
                     "target_entity_unreachable",
                 }
             ):
-                plan.cursor += 1
-                plan.updated_at = time.time()
                 return self._record_action_result(
                     action_key,
                     {
@@ -1200,6 +1236,7 @@ class AutonomyEngine:
                     },
                     authorization_grant_id=authorization_grant_id,
                     action_run_id=action_run_id,
+                    plan=plan,
                 )
             if (
                 verified_outcome
@@ -1211,8 +1248,6 @@ class AutonomyEngine:
                 }
                 and result.get("reason") == "no_food_in_inventory"
             ):
-                plan.cursor += 1
-                plan.updated_at = time.time()
                 return self._record_action_result(
                     action_key,
                     {
@@ -1226,6 +1261,7 @@ class AutonomyEngine:
                     },
                     authorization_grant_id=authorization_grant_id,
                     action_run_id=action_run_id,
+                    plan=plan,
                 )
             if result.get("status") in {"ok", "done", "completed"}:
                 if not verified_outcome:
@@ -1243,13 +1279,17 @@ class AutonomyEngine:
                         ),
                         action_run_id=action_run_id,
                     )
-                plan.cursor += 1
-                plan.updated_at = time.time()
             return self._record_action_result(
                 action_key,
                 result,
                 authorization_grant_id=authorization_grant_id,
                 action_run_id=action_run_id,
+                plan=(
+                    plan
+                    if result.get("status") in {"ok", "done", "completed"}
+                    and verified_outcome
+                    else None
+                ),
             )
         return self._record_action_result(
             action_key,

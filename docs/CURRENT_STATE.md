@@ -256,7 +256,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - retry budget 소진은 `verified=false`인 blocked 결과이며 성공·skip으로
     변환하지 않는다.
   - 승인·결정·결과 event는 flush/fsync 뒤 반환한다. journal을 기록할 수
-    없으면 새 실행을 허용하지 않고 모든 grant를 폐기한다.
+    없으면 현재 성공 결과도 `authorization_audit_unavailable`인 unverified로
+    바꾸고 모든 grant를 폐기한다. outcome append 직전 grant가 바뀌어 durable
+    event의 `verified/authorizationCurrent`가 false여도 cursor를 유지하고 engine을
+    중단하므로 새 실행을 허용하지 않는다.
   - Discord `자율상태`는 현재 guild의 승인 활성 여부, 남은 TTL, audit
     readiness와 strict evidence policy를 표시하되 issuer와 grant ID는
     공개하지 않는다.

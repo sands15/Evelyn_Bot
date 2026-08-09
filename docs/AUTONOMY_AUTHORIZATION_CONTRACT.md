@@ -312,6 +312,8 @@ assistant의 exact outcome을 같은 grant·lease·actionRunId·goalRunId·contr
 - 실제 새 Python 프로세스의 crash/restart grant 비복구
 - 민감 payload가 없는 상태와 JSONL 감사 이벤트
 - audit journal의 flush/fsync와 write 실패 시 grant 전부 fail-closed
+- verified action 뒤 outcome append 실패 또는 post-check race의 non-current outcome 시
+  unverified 결과, cursor 유지와 engine 중단
 - callback 부재와 evidence 누락의 fail-closed 처리
 - action별 evidence 교차 제출 거부와 전체 supported action policy coverage
 - 실행 중 grant 교체·만료 시 cursor 유지 및 원래 grant ID 감사

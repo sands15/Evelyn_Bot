@@ -809,6 +809,175 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.cursor, 1)
         self.assertEqual(verified["status"], "ok")
 
+    async def test_outcome_audit_failure_does_not_advance_minecraft_plan(
+        self,
+    ) -> None:
+        executor = MinecraftExecutor(
+            hunger=8,
+            result={
+                "status": "ok",
+                "verified": True,
+                "evidence_code": (
+                    "minecraft_find_food_source_completed"
+                ),
+            },
+        )
+        engine = self.minecraft_engine(executor)
+        plan = AutonomyPlan(
+            goal_kind="eat",
+            summary="find food",
+            steps=[
+                {
+                    "domain": "minecraft",
+                    "action": "find_food_source",
+                }
+            ],
+        )
+        append_event = self.manager._append_event
+
+        def fail_outcome_audit(
+            event: str,
+            **kwargs: object,
+        ) -> bool:
+            if event == "action_outcome":
+                return False
+            return append_event(event, **kwargs)
+
+        with patch.object(
+            self.manager,
+            "_append_event",
+            side_effect=fail_outcome_audit,
+        ):
+            result = await engine.execute_next_step(plan)
+
+        self.assertEqual(executor.execute_count, 1)
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(
+            result["reason"],
+            "authorization_audit_unavailable",
+        )
+        self.assertFalse(result["verified"])
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "authorization_required")
+        self.assertEqual(engine.state.allowed_actions, [])
+        self.assertEqual(self.manager.authorized_actions(7), [])
+        self.assertFalse(self.manager.status()["auditReady"])
+        self.assertFalse(
+            any(
+                row["event"] == "action_outcome"
+                for row in self.read_events()
+            )
+        )
+
+    async def test_outcome_revoked_before_record_does_not_advance_plan(
+        self,
+    ) -> None:
+        executor = DummyExecutor()
+        engine = self.engine(executor)
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        def revoke_before_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, object],
+        ) -> dict[str, bool]:
+            self.manager.revoke(guild_id)
+            return self.manager.record_outcome(
+                guild_id,
+                action,
+                result,
+            )
+
+        engine.record_action_outcome = revoke_before_outcome
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(executor.execute_count, 1)
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(
+            result["reason"],
+            "authorization_changed_during_action",
+        )
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertFalse(outcome["verified"])
+        self.assertFalse(outcome["authorizationCurrent"])
+
+    async def test_failed_outcome_with_expired_grant_stops_engine(
+        self,
+    ) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+            ttl_sec=60.0,
+        )
+
+        class ExpiringFailureExecutor(DummyExecutor):
+            async def execute_step(
+                inner_self,
+                step: dict,
+            ) -> dict:
+                inner_self.execute_count += 1
+                self.clock.value = 1061.0
+                return {
+                    "status": "failed",
+                    "reason": "synthetic_failure",
+                    "verified": False,
+                }
+
+        executor = ExpiringFailureExecutor()
+        engine = self.engine(executor)
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(executor.execute_count, 1)
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(
+            result["reason"],
+            "authorization_changed_during_action",
+        )
+        self.assertEqual(result["reportedStatus"], "failed")
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "authorization_required")
+        self.assertEqual(engine.state.allowed_actions, [])
+        self.assertEqual(self.manager.authorized_actions(7), [])
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertFalse(outcome["verified"])
+        self.assertFalse(outcome["authorizationCurrent"])
+
     async def test_each_execution_correlates_both_checks_and_outcome(
         self,
     ) -> None:

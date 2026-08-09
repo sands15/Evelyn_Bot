@@ -594,7 +594,7 @@ class AutonomyAuthorizationManager:
         guild_id: int,
         action: str,
         result: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, bool]:
         from .autonomy_outcome_evidence import (
             AUTONOMY_SUCCESS_STATUSES,
             autonomy_outcome_verified,
@@ -604,7 +604,11 @@ class AutonomyAuthorizationManager:
         resolved_action = str(action or "").strip()
         with self._lock:
             if not self._prune_expired():
-                return
+                return {
+                    "recorded": False,
+                    "verified": False,
+                    "authorizationCurrent": False,
+                }
             grant = (
                 self._grants.get(resolved_guild_id)
                 if resolved_guild_id is not None
@@ -663,8 +667,17 @@ class AutonomyAuthorizationManager:
                 action_run_id=action_run_id,
             ):
                 self._fail_closed_for_audit()
-                return
+                return {
+                    "recorded": False,
+                    "verified": False,
+                    "authorizationCurrent": False,
+                }
             self._write_status()
+            return {
+                "recorded": True,
+                "verified": verified,
+                "authorizationCurrent": authorization_current,
+            }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
