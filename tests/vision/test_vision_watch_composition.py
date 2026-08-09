@@ -38,6 +38,65 @@ class VisionWatchCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["capture_black"])
         deps.get_http_session.assert_not_awaited()
 
+    async def test_analysis_failure_redacts_upstream_body(self):
+        private_error = "PRIVATE_VISION_RESPONSE:/synthetic/vision-token.json"
+        response = AsyncMock()
+        response.status = 503
+        response.text = AsyncMock(return_value=private_error)
+        response.__aenter__.return_value = response
+        session = Mock()
+        session.post.return_value = response
+        update_analysis = Mock(return_value={"analysis_error": "redacted"})
+        composition, _deps = self.build(
+            to_thread=AsyncMock(
+                return_value={
+                    "capture_black": False,
+                    "changed": True,
+                    "analyzed_at": 0.0,
+                    "image_path": "/synthetic/frame.png",
+                }
+            ),
+            get_http_session=AsyncMock(return_value=session),
+            update_analysis=update_analysis,
+        )
+
+        result = await composition.run_vision_watch_once()
+
+        self.assertEqual(result, {"analysis_error": "redacted"})
+        response.text.assert_not_awaited()
+        update_analysis.assert_called_once_with(
+            error="vision_analysis_failed:RuntimeError",
+            run_ocr=True,
+        )
+        self.assertNotIn(private_error, repr(update_analysis.call_args))
+
+    async def test_watch_loop_redacts_capture_failure(self):
+        private_error = "PRIVATE_VISION_CAPTURE:/synthetic/display.json"
+        marks: list[tuple[str, str, str]] = []
+        logs: list[str] = []
+        composition, _deps = self.build(
+            to_thread=AsyncMock(side_effect=RuntimeError(private_error)),
+            mark_startup_component=lambda key, status, detail="": marks.append(
+                (key, status, detail)
+            ),
+            log=lambda message: logs.append(str(message)),
+            sleep=AsyncMock(side_effect=asyncio.CancelledError),
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await composition.vision_watch_loop()
+
+        self.assertEqual(
+            marks[-1],
+            ("vision_watch", "failed", "vision_watch_failed:RuntimeError"),
+        )
+        self.assertEqual(
+            logs[-1],
+            "[VISION WATCH] errorCode=vision_watch_failed errorType=RuntimeError",
+        )
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(logs))
+
     def test_start_is_single_flight_and_stop_cancels(self):
         task = Mock(); task.done.return_value = False
         composition, deps = self.build(create_task=Mock(return_value=task))

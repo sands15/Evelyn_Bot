@@ -1,7 +1,7 @@
 # Vision Evidence Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-09 KST
 
 ## Purpose
 
@@ -77,6 +77,12 @@ The actual scene/OCR observation may be present in the ephemeral prompt. Tool
 decision evidence and context benchmark rows contain only provenance,
 availability, confidence, freshness, and latency fields; they do not duplicate
 screen scene or OCR text.
+
+Background vision-watch analysis and capture failures use only fixed
+`vision_analysis_failed:<exception-type>` or `vision_watch_failed:<exception-type>`
+markers. Non-200 upstream response bodies are not read, and exception messages or
+paths do not enter its durable state, Control Page projection, startup detail/log,
+or soft LLM context.
 
 ## Observability
 

@@ -230,7 +230,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `turn_pipeline_failed`, control TTS status는 `control_tts_failed`만 보존한다.
   - Main/Fast tool decision의 `failed` evidence는 serialization에서
     `<tool_name>_failed`로 고정한다. Main vision 예외 metrics도
-    `vision_runtime_error`만 남겨 다음 prompt와 turn metrics에 원문을 복사하지 않는다.
+    `vision_runtime_error`만 남긴다. background Vision Watch의 분석·capture 실패도
+    fixed code/type만 artifact·Control Page·soft context에 투영해 원문을 복사하지 않는다.
   - Control Page legacy runtime service probe의 Bot API TCP/HTTP, Voyager,
     Codex와 전체 refresh 오류도 exact allowlist 코드만 공개한다. 최종 payload
     builder가 알 수 없는 error/login 문자열을 generic 코드로 바꾸므로 내부

@@ -87,14 +87,17 @@ class VisionWatchComposition:
                 timeout=timeout,
             ) as response:
                 if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(
-                        f"vision service {response.status}: {error_text[:240]}"
+                    return deps.update_analysis(
+                        error="vision_analysis_failed:RuntimeError",
+                        run_ocr=run_ocr,
                     )
                 data = await response.json()
             return deps.update_analysis(data=data, run_ocr=run_ocr)
         except Exception as exc:
-            return deps.update_analysis(error=repr(exc), run_ocr=run_ocr)
+            return deps.update_analysis(
+                error=f"vision_analysis_failed:{type(exc).__name__}",
+                run_ocr=run_ocr,
+            )
 
     async def vision_watch_loop(self) -> None:
         deps = self.deps
@@ -119,8 +122,15 @@ class VisionWatchComposition:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                deps.mark_startup_component("vision_watch", "failed", repr(exc))
-                deps.log(f"[VISION WATCH] error={exc!r}")
+                deps.mark_startup_component(
+                    "vision_watch",
+                    "failed",
+                    f"vision_watch_failed:{type(exc).__name__}",
+                )
+                deps.log(
+                    "[VISION WATCH] errorCode=vision_watch_failed "
+                    f"errorType={type(exc).__name__}"
+                )
             await deps.sleep(deps.interval_sec)
 
     def ensure_vision_watch_started(self) -> None:

@@ -285,6 +285,8 @@ Opus load·STT warmup 실패는 startup state와 Control Page boot progress에 f
 code/type만 남기고, 외부 wrapper의 원인 traceback도 억제한다.
 Main/Fast의 failed tool evidence와 Main vision runtime metrics도 fixed code만
 직렬화해 다음 LLM prompt와 turn metrics에 예외 문장·경로를 복제하지 않는다.
+Background Vision Watch도 non-200 body를 읽지 않고 분석·capture 실패를 fixed
+code/type으로만 artifact, Control Page와 soft vision context에 전달한다.
 
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,
