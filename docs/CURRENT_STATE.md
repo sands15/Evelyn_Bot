@@ -850,8 +850,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     head mismatch는 `memory_deletion_journal_integrity_failed`로 fail-closed한다.
   - Windows는 write-through replace, POSIX는 rename 뒤 parent-directory `fsync`를
     완료해야 durable head로 인정한다.
-  - tombstone 뒤 source Markdown은 content-free stub으로 durable 교체를 시도한
-    다음 unlink하며, 현재 journal/head가 유지되는 동안 index/recall/context에서
+  - tombstone 뒤 source Markdown은 content-free stub으로 durable 교체가 성공한
+    뒤에만 unlink한다. direct 또는 cascade redaction이 실패하면 원본을 남기고
+    cleanup-required로 보고하며, journal/head가 유지되는 동안 index/recall/context에서
     본문을 노출하지 않는다.
   - 임의 front-matter ID는 삭제 ledger 경계에서 domain-separated
     `opaque-<64hex>`로 바꾸고 note/source type은 닫힌 enum으로 정규화한다.
@@ -2199,7 +2200,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - edit/backfill/manual/correction/undo는 적용된 cleanup code에서 4개 memory snapshot을
   무효화하고 강제 재조회한 뒤 적용 사실과 자동 재시도 금지를 표시한다. busy와
   integrity 503은 적용 성공으로 오인하지 않는다.
-- 삭제 tombstone과 source redaction/unlink 뒤 index 또는 hot-context 정리가
+- 삭제 tombstone 뒤 direct·cascade source는 durable redaction 성공 뒤에만 unlink한다.
+  redaction이나 source cleanup이 남으면 전체 tombstone source를 최종 재조정한 뒤
+  `memory_delete_cleanup_required`, `tombstoned=true`로 보고한다. redaction/unlink 뒤 index 또는 hot-context 정리가
   integrity-class 오류를 내면, deletion ledger의 최종 재검증이 통과한 경우만
   `memory_delete_cleanup_required`, `tombstoned=true`를 보존한다. ledger 자체가
   손상됐으면 기존 exact/content-free integrity 503으로 fail-closed한다.

@@ -615,7 +615,8 @@ apply가 최종 내용을 검증한 뒤에는 다음 순서를 지킨다.
    operation으로 간주하지 않는다.
 5. journal commit 뒤 source Markdown을 먼저 content-free deletion stub으로
    durable replace하고 unlink한다. unlink가 지연되거나 되돌아가도 note body는
-   다시 나타나지 않는다.
+   다시 나타나지 않는다. durable replace가 실패하면 direct·cascade source를
+   unlink하지 않으며, 최종 재조정 뒤에도 남으면 cleanup-required로 보고한다.
 6. user state, SQLite/FTS/vector rows, recall cache, hot context를 정리한다.
 7. `derivedFrom`을 따라 파생 기억을 연쇄 철회 또는 격리한다. 연쇄 철회 source도
    같은 redaction-before-unlink 경계를 사용한다.
@@ -824,7 +825,7 @@ hot context에는 deletion journal과 chain head 각각의 수정 시각·크기
 ## API result semantics
 
 - 완전 정리: HTTP 200, `ok=true`, `deleted=true`, `tombstoned=true`
-- tombstone은 내구성 있게 기록됐지만 파생 정리가 남음:
+- tombstone은 내구성 있게 기록됐지만 source redaction/unlink 또는 파생 정리가 남음:
   HTTP 503, `ok=false`, `error=memory_delete_cleanup_required`,
   `tombstoned=true`, `cleanupErrors=[...]`
 - tombstone 뒤 index/hot-context 정리가 integrity-class 오류를 내더라도 deletion
@@ -941,8 +942,10 @@ prompt block과 user state가 의도적으로 남아 있다.
   이전 receipt-bound assistant history 제거
 - 전체 legacy+vault context position capture, content-free receipt projection,
   build와 Main/Voice/Fast HTTP admission 사이 삭제 시 POST 0회 fail-closed
-- unlink 실패 시 source Markdown의 title/body가 content-free stub으로 먼저
-  redaction되는 계약
+- durable source redaction 실패 시 direct/cascade Markdown을 unlink하지 않고
+  cleanup-required로 남기는 계약
+- durable redaction 성공 뒤 unlink 실패 시 source Markdown의 title/body가
+  content-free stub으로 남는 계약
 - public API와 8798→8799 proxy의 exact content-free busy/integrity 503,
   `no-store`, private sibling 제거와 retry UI projection
 

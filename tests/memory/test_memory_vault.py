@@ -2426,6 +2426,77 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertNotIn(title, recall.context_text)
         self.assertNotIn(body, recall.context_text)
 
+    def test_delete_keeps_unredacted_direct_and_cascade_sources(
+        self,
+    ) -> None:
+        for failed_source in ("direct", "cascade"):
+            with self.subTest(failed_source=failed_source):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    path = write_memory_vault_note(
+                        note_type="project",
+                        title="Durable Redaction Failure",
+                        body="synthetic private body",
+                        source="control-page-user",
+                        root=root,
+                    )
+                    note = parse_memory_note(path)
+                    failed_path = path
+                    failed_note = note
+                    if failed_source == "cascade":
+                        failed_path = write_memory_vault_note(
+                            note_type="concept",
+                            title="Derived Durable Redaction Failure",
+                            body="synthetic derived private body",
+                            source="sub-llm-semantic-consolidation",
+                            derived_from=[note.note_id],
+                            evidence_hashes=[note.source_hash],
+                            root=root,
+                        )
+                        failed_note = parse_memory_note(failed_path)
+                    preview = preview_memory_vault_user_note_deletion(
+                        note.note_id,
+                        reason="privacy_request",
+                        root=root,
+                    )
+
+                    with patch.object(
+                        memory_vault_module,
+                        "_redact_memory_note_before_unlink",
+                        side_effect=lambda target, _note: (
+                            target != failed_path
+                        ),
+                    ):
+                        result = delete_memory_vault_user_note(
+                            note.note_id,
+                            preview["confirmToken"],
+                            reason="privacy_request",
+                            root=root,
+                        )
+
+                    failed_source_exists = failed_path.exists()
+                    deletion_current = memory_note_was_deleted(
+                        failed_note.note_id,
+                        root=root,
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"],
+                    "memory_delete_cleanup_required",
+                )
+                self.assertTrue(result["tombstoned"])
+                self.assertEqual(
+                    result["sourceFileDeleted"],
+                    failed_source == "cascade",
+                )
+                self.assertIn(
+                    "memory_delete_source_cleanup_failed",
+                    result["cleanupErrors"],
+                )
+                self.assertTrue(failed_source_exists)
+                self.assertTrue(deletion_current)
+
     def test_post_tombstone_cleanup_integrity_reports_applied_cleanup(
         self,
     ) -> None:

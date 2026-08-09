@@ -952,6 +952,8 @@ legacy raw-prefix pin, sequence/hash chain, durable head, OS single-writer lease
 정확한 1-event crash recovery가 적용됐다. Windows write-through replace와 POSIX
 parent-directory fsync 뒤에만 durable commit으로 인정하고, source Markdown은
 tombstone commit 뒤 content-free stub으로 먼저 durable redaction한 다음 unlink한다.
+direct·cascade redaction이 실패하면 source를 unlink하지 않고, 최종 재조정 뒤에도
+cleanup이 남으면 기존 content-free `memory_delete_cleanup_required`로 반환한다.
 recall/context/Control Page/provenance/Sub-LLM 경계도 삭제와 선형화됐다. 전체
 legacy+vault context에서 캡처한 root-bound position은 Main non-stream, Voice
 stream/legacy response와 Fast Control의 실제 HTTP sink에서 request 시작 전에
@@ -1008,7 +1010,9 @@ busy와 confirm token 작업은 재실행하지 않는다. 2초를 넘는 경합
 자동 재시도 금지를 표시한다. 남은 공백은 이 busy 전이의 live 확인과 64 MiB journal
 상한의 검증 가능한 rotation이다.
 
-삭제도 tombstone과 source redaction/unlink가 끝난 뒤 index/hot-context cleanup이
+삭제도 direct·cascade source의 durable redaction 성공 뒤에만 unlink한다. 전체
+tombstone source의 최종 재조정에도 cleanup이 남으면 cleanup-required로 닫고,
+source redaction/unlink가 끝난 뒤 index/hot-context cleanup이
 integrity-class 오류를 내면 ledger 최종 재검증이 성공한 경우에만
 `memory_delete_cleanup_required`, `tombstoned=true`로 보고한다. 실제 ledger 손상은
 최종 guard에서 다시 raise되어 sibling field 없는 exact integrity 503으로 유지된다.

@@ -31,7 +31,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   route/action sink까지 유지한다. recovery step은 exact history snapshot의 process-local
   one-shot issuance만 소비한다. Minecraft Autonomy plan은 current grant의 연속 prefix만 만들고, route와 engine lifecycle은 cleanup까지 직렬화되며 `자율정지`는 intent를 보존한다. durable bound-receipt history, legacy cleanup과 live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
-  edit·provenance·post-tombstone cleanup 503은 강제 재조회 뒤 자동 재시도하지 않고, 손상 full receipt는 `unattributed`로 강등한다.
+  direct·cascade source는 durable redaction 성공 뒤에만 unlink하고, applied-cleanup 503은 강제 재조회 뒤 자동 재시도하지 않으며 손상 full receipt는 `unattributed`로 강등한다.
   replica 검증은 통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 P1이다.
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
@@ -61,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,216개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
+- CI-equivalent 전체 3,217개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 639개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

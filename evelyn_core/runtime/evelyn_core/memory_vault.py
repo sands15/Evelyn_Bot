@@ -7312,7 +7312,9 @@ def _reconcile_memory_deletion_tombstones(
             clean_text(str(note.metadata.get("source") or ""))
             != "deletion-redaction"
         ):
-            _redact_memory_note_before_unlink(path, note)
+            if not _redact_memory_note_before_unlink(path, note):
+                cleanup_error_count += 1
+                continue
         try:
             path.unlink()
             source_file_count += 1
@@ -8494,17 +8496,17 @@ def delete_memory_vault_user_note(
                 tombstone,
                 root=root,
             )
-            _redact_memory_note_before_unlink(
+            if _redact_memory_note_before_unlink(
                 resolved_path,
                 current_note,
-            )
-            try:
-                resolved_path.unlink()
-                source_file_deleted = True
-            except FileNotFoundError:
-                source_file_deleted = True
-            except OSError:
-                pass
+            ):
+                try:
+                    resolved_path.unlink()
+                    source_file_deleted = True
+                except FileNotFoundError:
+                    source_file_deleted = True
+                except OSError:
+                    pass
     except MemoryDeletionJournalIntegrityError as exc:
         return {
             "ok": False,
@@ -8538,6 +8540,13 @@ def delete_memory_vault_user_note(
         )
     try:
         version = sync_memory_vault_index(root=root)
+        deletion_cleanup = _reconcile_memory_deletion_tombstones(
+            root=root,
+        )
+        if int(deletion_cleanup.get("cleanupErrorCount") or 0) > 0:
+            cleanup_errors.append(
+                "memory_delete_source_cleanup_failed"
+            )
     except MemoryDeletionJournalIntegrityError as exc:
         version = 0
         cleanup_errors.append(
