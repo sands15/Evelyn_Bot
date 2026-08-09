@@ -49,6 +49,15 @@ index f5a8e3d..af937fb 100644
       
              process.exit(1);
          };
+@@ -83,7 +84,7 @@ export class Agent {
+         this.bot.on('error', (err) => {
+             if (String(err).includes('Duplicate') || String(err).includes('ECONNREFUSED')) {
+                  onDisconnect('Error', err);
+             } else {
+-                 log(this.name, `[LoginGuard] Connection Error: ${String(err)}`);
++                 log(this.name, '[LoginGuard] Connection Error: minecraft_runtime_error');
+             }
+         });
 @@ -94,11 +94,13 @@ export class Agent {
              console.log(this.name, 'logged in!');
              serverProxy.login();
@@ -152,14 +161,25 @@ index f5a8e3d..af937fb 100644
 +                recoveryIssuance?.discard();
 +            }
          }
-@@ -519,5 +546,6 @@ export class Agent {
+@@ -451,10 +464,6 @@ export class Agent {
+             }
+             prev_health = this.bot.health;
+         });
+-        // Logging callbacks
+-        this.bot.on('error' , (err) => {
+-            console.error('Error event!', err);
+-        });
+         // Use connection handler for runtime disconnects
+         this.bot.on('end', (reason) => {
+             if (!this._disconnectHandled) {
+@@ -519,5 +542,6 @@ export class Agent {
      async update(delta) {
          await this.bot.modes.update();
 +        await this.goal_manager.update(delta);
          this.self_prompter.update(delta);
          await this.checkTaskDone();
      }
-@@ -531,7 +559,17 @@ export class Agent {
+@@ -531,7 +555,17 @@ export class Agent {
  
      cleanKill(msg='Killing agent process...', code=1) {
          this.history.add('system', msg);

@@ -59,6 +59,14 @@ test('disconnect output excludes server-provided reason text', () => {
     }
 });
 
+test('Agent error output excludes raw Mineflayer errors', () => {
+    const source = fs.readFileSync('/app/mindcraft/src/agent/agent.js', 'utf8');
+
+    assert.match(source, /\[LoginGuard\] Connection Error: minecraft_runtime_error/);
+    assert.equal(source.includes('${String(err)}'), false);
+    assert.equal(source.includes("console.error('Error event!', err)"), false);
+});
+
 const ACTION_SYSTEM = [
     'Available documented commands:',
     '!inventory !nearbyBlocks !stats !craftable !moveAway',

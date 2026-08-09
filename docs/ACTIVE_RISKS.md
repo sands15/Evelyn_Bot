@@ -304,8 +304,8 @@ code/type으로만 artifact, Control Page와 soft vision context에 전달한다
 Minecraft live status fallback도 upstream error는 fixed `minecraft_status_failed`, local
 client·observer 예외는 `minecraft_status_failed:<type>`으로 Main LLM context, snapshot
 cache와 Control Page에 전달한다.
-Mindcraft disconnect/kick raw reason은 classification에만 사용하며 console·MindServer
-`bot-output`과 handler return에는 fixed classified message만 공개한다.
+Mindcraft disconnect/kick/error raw input은 classification에만 사용하며 console·MindServer
+`bot-output`과 handler/listener output에는 fixed classified message만 공개한다.
 
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,

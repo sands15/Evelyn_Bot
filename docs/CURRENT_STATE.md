@@ -228,9 +228,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     snapshot cache와 Control Page에 전달한다.
   - status와 task event의 오류 코드는 구문 검증하며 알 수 없는 문자열은
     surface별 고정 fallback으로 바꾼다.
-  - Mindcraft connection handler는 Minecraft server의 kick/end reason을 내부 분류에만
-    사용하고 console·MindServer `bot-output`·caller return에는 fixed classified
-    message만 남긴다.
+  - Mindcraft connection handler와 bot error listener는 disconnect/kick/error input을
+    내부 분류에만 사용한다. console·MindServer
+    `bot-output`과 handler/listener output에는 fixed classified message만 남긴다.
   - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다. Router
     fallback metadata는 `router_failed`, Local Bridge turn status는
     `turn_pipeline_failed`, control TTS status는 `control_tts_failed`만 보존한다. Voice

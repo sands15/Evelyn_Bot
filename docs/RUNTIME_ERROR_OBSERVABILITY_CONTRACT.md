@@ -95,9 +95,9 @@ Minecraft live status fallback은 upstream error를 fixed `minecraft_status_fail
 client·observer 예외를 `minecraft_status_failed:<exception-type>`으로 Main LLM context,
 snapshot cache와 Control Page에 공개한다.
 
-Mindcraft connection handler는 Minecraft server가 제공한 kick/end reason을 분류에만
-사용한다. console·MindServer `bot-output`과 caller 반환에는 fixed classification
-message만 남기고 raw reason을 복제하지 않는다.
+Mindcraft connection handler와 bot error listener는 disconnect/kick/error input을
+분류에만 사용한다. console·MindServer `bot-output`과
+handler/listener output에는 fixed classification message만 남기고 raw input을 복제하지 않는다.
 
 Summary LLM primary·compact retry 실패 로그는 고정 prefix와 exception type만 남기며,
 memory prompt·응답·예외 메시지·경로를 운영 로그에 복제하지 않는다.
