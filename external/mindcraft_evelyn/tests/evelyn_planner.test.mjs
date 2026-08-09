@@ -13,6 +13,7 @@ import {
 } from '/app/mindcraft/src/models/evelyn_planner.js';
 import { Prompter } from '/app/mindcraft/src/models/prompter.js';
 import { Agent } from '/app/mindcraft/src/agent/agent.js';
+import { handleDisconnection } from '/app/mindcraft/src/agent/connection_handler.js';
 import convoManager from '/app/mindcraft/src/agent/conversation.js';
 import { EvelynGoalManager } from '/app/mindcraft/src/agent/evelyn_goal_manager.js';
 import { History } from '/app/mindcraft/src/agent/history.js';
@@ -23,6 +24,40 @@ import {
 } from '/app/mindcraft/src/utils/evelyn_history_boundary.js';
 
 setSettings({max_messages: 8});
+
+test('disconnect output excludes server-provided reason text', () => {
+    const privateKnown = 'PRIVATE_MINECRAFT_KICK_KNOWN_token-7f19';
+    const privateUnknown = 'PRIVATE_MINECRAFT_KICK_UNKNOWN_token-8a20';
+    const logs = [];
+    const originalError = console.error;
+    console.error = (...args) => logs.push(args.map(String).join(' '));
+    try {
+        const known = handleDisconnection(
+            'Evelyn',
+            {text: `Timed out while contacting ${privateKnown}`},
+            'Kicked'
+        );
+        const unknown = handleDisconnection('Evelyn', {text: privateUnknown}, 'Kicked');
+
+        assert.deepEqual(known, {
+            type: 'network_error',
+            msg: '[LoginGuard] Kicked: Network Error: Connection timed out or was lost.',
+            isFatal: false,
+            event: 'Kicked'
+        });
+        assert.deepEqual(unknown, {
+            type: 'other',
+            msg: '[LoginGuard] Kicked: Unclassified connection failure.',
+            isFatal: true,
+            event: 'Kicked'
+        });
+        const visible = JSON.stringify({known, unknown, logs});
+        assert.doesNotMatch(visible, new RegExp(privateKnown));
+        assert.doesNotMatch(visible, new RegExp(privateUnknown));
+    } finally {
+        console.error = originalError;
+    }
+});
 
 const ACTION_SYSTEM = [
     'Available documented commands:',

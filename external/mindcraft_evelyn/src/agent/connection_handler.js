@@ -103,9 +103,17 @@ export function parseKickReason(reason) {
 
 export function handleDisconnection(agentName, reason, event = 'Disconnected') {
     const parsed = parseKickReason(reason);
-    const finalMsg = `[LoginGuard] ${event}: ${parsed.msg} | raw=${parsed.raw}`;
+    const safeMessage = parsed.type === 'other'
+        ? 'Unclassified connection failure.'
+        : parsed.msg;
+    const finalMsg = `[LoginGuard] ${event}: ${safeMessage}`;
     log(agentName, finalMsg);
-    return {...parsed, msg: finalMsg, event};
+    return {
+        type: parsed.type,
+        msg: finalMsg,
+        isFatal: parsed.isFatal,
+        event
+    };
 }
 
 export function validateNameFormat(name) {
