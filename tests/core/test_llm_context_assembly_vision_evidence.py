@@ -864,6 +864,49 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             "failed",
         )
 
+    async def test_minecraft_observation_error_is_content_free_in_prompt(self) -> None:
+        private_canary = "PRIVATE_MINECRAFT_CONTEXT C:/secret/runtime-token"
+        attached = []
+
+        async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            return ""
+
+        async def broken_minecraft(_guild_id: int | None):
+            raise RuntimeError(private_canary)
+
+        def attach(state, **kwargs):
+            attached.append((dict(state), dict(kwargs)))
+            return {**state, "runtime_snapshot": {"age_sec": 0.0, "freshness": "error"}}
+
+        deps = replace(
+            self.build_deps(no_vision),
+            build_context_policy_for_turn=lambda **_kwargs: ContextPolicy(
+                needs_minecraft_state=True,
+                priority="accuracy",
+            ),
+            observe_live_minecraft_state=broken_minecraft,
+            attach_minecraft_runtime_snapshot=attach,
+            build_minecraft_skill_context=lambda *_args, minecraft_state=None, **_kwargs: (
+                f"minecraft_state={minecraft_state}"
+            ),
+        )
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+
+        messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
+            "마인크래프트 상태 알려줘",
+            deps=deps,
+            guild_id=7,
+            metrics=metrics,
+        )
+
+        self.assertEqual(attached[0][0]["last_error"], "minecraft_status_failed:RuntimeError")
+        self.assertEqual(attached[0][1]["last_error"], "minecraft_status_failed:RuntimeError")
+        self.assertIn("minecraft_status_failed:RuntimeError", messages[0]["content"])
+        self.assertTrue(metrics["meta"]["context_pipeline"]["minecraft_context"])
+        self.assertNotIn(private_canary, repr(attached))
+        self.assertNotIn(private_canary, repr(messages))
+        self.assertNotIn(private_canary, repr(metrics))
+
 
 if __name__ == "__main__":
     unittest.main()

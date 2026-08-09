@@ -33,6 +33,21 @@ class ControlPageMinecraftLiveSnapshotRuntimeDeps:
     expired_after_sec: float
 
 
+def _redact_minecraft_snapshot_error(
+    state: dict[str, Any],
+    *,
+    local_error_type: str = "",
+) -> str:
+    error_code = (
+        f"minecraft_status_failed:{local_error_type}"
+        if local_error_type
+        else "minecraft_status_failed" if state.get("last_error") else ""
+    )
+    if error_code:
+        state["last_error"] = error_code
+    return error_code
+
+
 async def observe_live_minecraft_state_from_runtime(
     guild_id: int | None,
     *,
@@ -48,6 +63,7 @@ async def observe_live_minecraft_state_from_runtime(
         observed = status.get("observation") if isinstance(status.get("observation"), dict) else None
         merged = deps.merge_voyager_status_into_state(status, observed)
         if isinstance(merged, dict):
+            snapshot_error = _redact_minecraft_snapshot_error(merged)
             has_context = bool(
                 status.get("running")
                 or status.get("connected")
@@ -67,6 +83,7 @@ async def observe_live_minecraft_state_from_runtime(
                     observed_at=deps.now(),
                     stale_after_sec=deps.stale_after_sec,
                     expired_after_sec=deps.expired_after_sec,
+                    last_error=snapshot_error or None,
                 )
     try:
         observed = await client.observe(ensure_service=False)
@@ -80,6 +97,7 @@ async def observe_live_minecraft_state_from_runtime(
         else None
     )
     if isinstance(merged, dict):
+        snapshot_error = _redact_minecraft_snapshot_error(merged)
         return deps.attach_minecraft_runtime_snapshot(
             merged,
             source="live_observe",
@@ -87,6 +105,7 @@ async def observe_live_minecraft_state_from_runtime(
             observed_at=deps.now(),
             stale_after_sec=deps.stale_after_sec,
             expired_after_sec=deps.expired_after_sec,
+            last_error=snapshot_error or None,
         )
     return None
 
@@ -98,19 +117,21 @@ async def get_control_page_minecraft_snapshot_from_runtime(
 ) -> dict[str, Any]:
     client = deps.get_minecraft_client()
     raw_status: dict[str, Any] = {}
-    last_error = ""
+    last_error_type = ""
     try:
         maybe_status = await client.status()
         if isinstance(maybe_status, dict):
             raw_status = maybe_status
     except Exception as exc:
-        last_error = repr(exc)
+        last_error_type = type(exc).__name__
     observation = raw_status.get("observation") if isinstance(raw_status.get("observation"), dict) else {}
     merged = deps.merge_voyager_status_into_state(raw_status, observation) or {}
     if not merged:
         merged = await deps.observe_live_minecraft_state(guild_id) or {}
-    if last_error and not merged.get("last_error"):
-        merged["last_error"] = last_error
+    snapshot_error = _redact_minecraft_snapshot_error(
+        merged,
+        local_error_type=last_error_type,
+    )
     merged["inventory_top"] = deps.normalize_inventory_top_entries(
         merged.get("inventory") or observation.get("inventory")
     )
@@ -147,7 +168,7 @@ async def get_control_page_minecraft_snapshot_from_runtime(
         observed_at=deps.now(),
         stale_after_sec=deps.stale_after_sec,
         expired_after_sec=deps.expired_after_sec,
-        last_error=last_error or None,
+        last_error=snapshot_error or None,
     )
 
 

@@ -91,6 +91,10 @@ additive 필드로 기록한다.
 기존 서비스 heartbeat의 `lastError` 호환 필드는 유지하지만 새 합성기는 해당 값을
 공개 응답으로 복사하지 않고 현재 오류 존재 여부 판정에만 사용한다.
 
+Minecraft live status fallback은 upstream error를 fixed `minecraft_status_failed`, local
+client·observer 예외를 `minecraft_status_failed:<exception-type>`으로 Main LLM context,
+snapshot cache와 Control Page에 공개한다.
+
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 
 - `lastFailure`는 `kind`, `errorType`, 숫자 `at`, `contentFree=true`만 공개한다.

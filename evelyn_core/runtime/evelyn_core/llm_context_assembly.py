@@ -423,15 +423,16 @@ async def prepare_llm_messages_from_runtime(
     if guild_id is not None and (context_policy.needs_minecraft_state or context_policy.needs_skill_graph):
         try:
             live_context_minecraft_state = await deps.observe_live_minecraft_state(guild_id)
-        except Exception as e:
+        except Exception as exc:
+            error_code = f"minecraft_status_failed:{type(exc).__name__}"
             live_context_minecraft_state = deps.attach_minecraft_runtime_snapshot(
-                {"last_error": deps.clean_text(repr(e))[:160]},
+                {"last_error": error_code},
                 source="context_error",
                 now=time.time(),
                 observed_at=time.time(),
                 stale_after_sec=deps.control_page_minecraft_cache_refresh_sec,
                 expired_after_sec=deps.control_page_minecraft_cache_max_stale_sec,
-                last_error=deps.clean_text(repr(e))[:160],
+                last_error=error_code,
             )
         if metrics is not None and isinstance(live_context_minecraft_state, dict):
             runtime_snapshot = live_context_minecraft_state.get("runtime_snapshot")

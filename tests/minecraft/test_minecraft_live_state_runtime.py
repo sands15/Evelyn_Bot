@@ -67,21 +67,42 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_status_with_context_returns_live_status_snapshot(self) -> None:
-        self.client.status_value = {"running": True, "goal": "wood", "observation": {"position": {"x": 1}}}
+        private_error = "PRIVATE_MINECRAFT_CONTEXT:/synthetic/status-token.json"
+        self.client.status_value = {
+            "running": True,
+            "goal": "wood",
+            "last_error": private_error,
+            "observation": {"position": {"x": 1}},
+        }
 
         result = await observe_live_minecraft_state_from_runtime(77, deps=self.observation_deps())
 
         self.assertEqual(result["snapshot_source"], "live_status")
+        self.assertEqual(result["last_error"], "minecraft_status_failed")
+        self.assertEqual(self.attach_calls[0][0]["last_error"], "minecraft_status_failed")
+        self.assertEqual(self.attach_calls[0][1]["last_error"], "minecraft_status_failed")
+        self.assertNotIn(private_error, repr(result))
+        self.assertNotIn(private_error, repr(self.attach_calls))
         self.assertEqual(self.client.observe_calls, [])
         self.assertEqual(self.attach_calls[0][1]["stale_after_sec"], 2.0)
 
     async def test_empty_status_falls_back_to_live_observe(self) -> None:
+        private_error = "PRIVATE_MINECRAFT_OBSERVE:/synthetic/observe-token.json"
         self.client.status_value = {}
-        self.client.observation_value = {"connected": True, "position": {"x": 2}}
+        self.client.observation_value = {
+            "connected": True,
+            "position": {"x": 2},
+            "last_error": private_error,
+        }
 
         result = await observe_live_minecraft_state_from_runtime(None, deps=self.observation_deps())
 
         self.assertEqual(result["snapshot_source"], "live_observe")
+        self.assertEqual(result["last_error"], "minecraft_status_failed")
+        self.assertEqual(self.attach_calls[0][0]["last_error"], "minecraft_status_failed")
+        self.assertEqual(self.attach_calls[0][1]["last_error"], "minecraft_status_failed")
+        self.assertNotIn(private_error, repr(result))
+        self.assertNotIn(private_error, repr(self.attach_calls))
         self.assertEqual(self.client.observe_calls, [{"ensure_service": False}])
 
     async def test_status_and_observe_failures_return_none(self) -> None:
@@ -115,6 +136,7 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_control_snapshot_normalizes_live_status_fields(self) -> None:
+        private_error = "PRIVATE_MINECRAFT_UPSTREAM:/synthetic/runner-token.json"
         self.client.status_value = {
             "connected": True,
             "goal": " wood ",
@@ -124,6 +146,7 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "last_progress_message": " one log ",
             "completed_tasks": [1, 2],
             "failed_tasks": [3],
+            "last_error": private_error,
             "activity": ["a", "b", "c"],
             "observation": {
                 "inventory": ["oak", "stone", "dirt"],
@@ -142,10 +165,18 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["failed_count"], 1)
         self.assertEqual(result["goal"], "wood")
         self.assertEqual(result["position_text"], "pos:{'x': 3}")
+        self.assertEqual(result["last_error"], "minecraft_status_failed")
+        self.assertEqual(
+            self.attach_calls[0][1]["last_error"],
+            "minecraft_status_failed",
+        )
+        self.assertNotIn(private_error, repr(result))
+        self.assertNotIn(private_error, repr(self.attach_calls))
         self.assertEqual(result["snapshot_source"], "control_page_live")
 
-    async def test_control_snapshot_preserves_status_error_on_fallback(self) -> None:
-        self.client.status_error = RuntimeError("status down")
+    async def test_control_snapshot_redacts_status_error_on_fallback(self) -> None:
+        private_error = "PRIVATE_MINECRAFT_STATUS:/synthetic/server-token.json"
+        self.client.status_error = RuntimeError(private_error)
         fallback = {"connected": True, "inventory": ["oak"]}
 
         result = await get_control_page_minecraft_snapshot_from_runtime(
@@ -153,8 +184,13 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             deps=self.snapshot_deps(fallback=fallback),
         )
 
-        self.assertIn("status down", result["last_error"])
-        self.assertIn("status down", self.attach_calls[0][1]["last_error"])
+        self.assertEqual(result["last_error"], "minecraft_status_failed:RuntimeError")
+        self.assertEqual(
+            self.attach_calls[0][1]["last_error"],
+            "minecraft_status_failed:RuntimeError",
+        )
+        self.assertNotIn(private_error, repr(result))
+        self.assertNotIn(private_error, repr(self.attach_calls))
         self.assertEqual(result["inventory_top"], ["oak"])
 
     def test_main_binds_minecraft_observation_and_delegates_snapshot(self) -> None:

@@ -287,6 +287,9 @@ Main/Fast의 failed tool evidence와 Main vision runtime metrics도 fixed code�
 직렬화해 다음 LLM prompt와 turn metrics에 예외 문장·경로를 복제하지 않는다.
 Background Vision Watch도 non-200 body를 읽지 않고 분석·capture 실패를 fixed
 code/type으로만 artifact, Control Page와 soft vision context에 전달한다.
+Minecraft live status fallback도 upstream error는 fixed `minecraft_status_failed`, local
+client·observer 예외는 `minecraft_status_failed:<type>`으로 Main LLM context, snapshot
+cache와 Control Page에 전달한다.
 
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,

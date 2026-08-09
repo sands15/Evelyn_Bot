@@ -223,6 +223,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - Discord 명령/text, Control Page, Fast Control chat/stream/background
     action, runtime repair, mic/bridge와 Minecraft snapshot이 예외 메시지,
     내부 URL, filesystem 경로, token-like 문자열을 응답에 복사하지 않는다.
+    Minecraft status fallback은 upstream error를 `minecraft_status_failed`, local
+    exception을 `minecraft_status_failed:<exception-type>`으로 Main LLM context,
+    snapshot cache와 Control Page에 전달한다.
   - status와 task event의 오류 코드는 구문 검증하며 알 수 없는 문자열은
     surface별 고정 fallback으로 바꾼다.
   - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다. Router
