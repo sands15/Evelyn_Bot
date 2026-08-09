@@ -1902,6 +1902,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `자율시작`이 route를 다시 검증한 경우에만 exact allowlist
     `minecraft:find_food_source`를 grant에 추가한다. route가 없거나 재검증에
     실패하면 assistant scope만 발급한다.
+  - 실행 중 trusted planner는 현재 grant에 포함된 step의 연속 prefix만 만든다.
+    첫 미허가 step에서 멈추므로 안전 선행조건을 건너뛰지 않고, prefix가 비면
+    executor·authorization audit 호출 없이 다음 관찰을 기다린다. 음식이 생긴 뒤에는
+    `find_food_source`를 반복하지 않는다. stale·직접 주입 plan의 강제 거부는 유지한다.
   - Mindcraft action gateway의 content-free world-effect projector와 validation
     observer는 같은 shared artifact의 exact grant·lease·actionRun·goalRun·contract
     증거를 상관시킨다. source 배선은 연결됐지만 실제 Discord와 Minecraft world에서

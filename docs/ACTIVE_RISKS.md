@@ -42,6 +42,11 @@ executor builder를 production `RoutedAutonomyExecutor`에 전달한다. Discord
 `minecraft:find_food_source` 하나이며, route 검증 실패 시에는 기존처럼
 `assistant:*` scope만 발급한다.
 
+trusted planner도 현재 grant의 연속 prefix까지만 계획한다. 정상 세계의
+`gather_logs`나 food 확보 뒤의 `consume_food`가 scope denial로 전체 loop를 끄던
+경로는 executor 호출 없는 대기로 바뀌었다. stale·직접 주입 plan은 계속
+`authorization_scope_denied`로 engine을 중단한다. 실제 world 검증은 남아 있다.
+
 Mindcraft action gateway는 exact grant·lease·actionRun·goalRun·contract binding으로
 content-free world-effect projector를 arm한다. projector의 durable
 `effect_verified` event와 owner의 dispatch·completion, assistant의 exact outcome을

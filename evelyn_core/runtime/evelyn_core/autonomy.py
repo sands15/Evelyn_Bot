@@ -706,10 +706,10 @@ class AutonomyEngine:
                         {"domain": domain, "action": "heal_or_regroup"},
                     ])
             elif goal.kind == "eat":
-                steps = [
-                    {"domain": domain, "action": "find_food_source"},
-                    {"domain": domain, "action": "consume_food"},
-                ]
+                steps = []
+                if self._minecraft_food_item_count(inventory) <= 0:
+                    steps.append({"domain": domain, "action": "find_food_source"})
+                steps.append({"domain": domain, "action": "consume_food"})
             elif goal.kind == "tooling":
                 tool_stage = clean_text(str(goal.metadata.get("tool_stage", "wood"))) or "wood"
                 if tool_stage == "stone":
@@ -821,6 +821,15 @@ class AutonomyEngine:
             ping_text = clean_text(str(goal.metadata.get("text", "")))
             if ping_text:
                 steps[0]["text"] = ping_text
+        if self.state.enabled:
+            allowed_steps = []
+            for step in steps:
+                if self._action_key(step) not in self.state.allowed_actions:
+                    break
+                allowed_steps.append(step)
+            steps = allowed_steps
+            if not steps:
+                return None
         return AutonomyPlan(goal_kind=goal.kind, summary=goal.summary, steps=steps, cursor=0)
 
     def should_replan(self, step_result: dict[str, Any] | None) -> bool:

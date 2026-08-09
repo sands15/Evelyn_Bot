@@ -32,6 +32,7 @@ from evelyn_core.autonomy_outcome_evidence import (  # noqa: E402
     autonomy_outcome_verified,
     expected_autonomy_evidence_codes,
 )
+from evelyn_core.self_model import EvelynSelfState  # noqa: E402
 
 
 class FakeClock:
@@ -68,6 +69,34 @@ class DummyExecutor:
     async def execute_step(self, step: dict) -> dict:
         self.execute_count += 1
         return dict(self.result)
+
+
+class MinecraftExecutor(DummyExecutor):
+    def __init__(
+        self,
+        *,
+        hunger: float = 20,
+        inventory: dict[str, int] | None = None,
+        result: dict | None = None,
+    ) -> None:
+        super().__init__(result)
+        self.hunger = hunger
+        self.inventory = inventory or {}
+
+    async def observe(self) -> dict:
+        return {
+            "active_environment": "minecraft",
+            "environments": {
+                "minecraft": {
+                    "connected": True,
+                    "health": 20,
+                    "hunger": self.hunger,
+                    "inventory": dict(self.inventory),
+                    "hostiles_nearby": [],
+                    "immediate_hazards": [],
+                }
+            },
+        }
 
 
 class AutonomyAuthorizationManagerTests(unittest.TestCase):
@@ -434,6 +463,23 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         engine.persist_state = lambda: None
         return engine
 
+    def minecraft_engine(self, executor: DummyExecutor) -> AutonomyEngine:
+        scopes = [
+            *ASSISTANT_AUTONOMY_ACTIONS,
+            "minecraft:find_food_source",
+        ]
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=scopes,
+        )
+        engine = self.engine(executor)
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = scopes
+        return engine
+
     async def test_disconnect_failure_keeps_retry_state(self) -> None:
         class FlakyDisconnectExecutor(DummyExecutor):
             def __init__(inner_self) -> None:
@@ -478,6 +524,82 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.state.enabled)
         self.assertEqual(engine.state.status, "authorization_required")
         self.assertEqual(executor.connect_count, 0)
+
+    async def test_generated_minecraft_plan_waits_outside_current_grant(
+        self,
+    ) -> None:
+        executor = MinecraftExecutor()
+        engine = self.minecraft_engine(executor)
+
+        with patch(
+            "evelyn_core.autonomy.update_self_state_from_observation",
+            return_value=EvelynSelfState(),
+        ):
+            cycle = await engine.run_cycle()
+
+        self.assertEqual(cycle.selected_goal.kind, "progress")
+        self.assertIsNone(cycle.planned)
+        self.assertEqual(cycle.step_result, {})
+        self.assertTrue(engine.state.enabled)
+        self.assertEqual(engine.state.status, "running")
+        self.assertEqual(executor.execute_count, 0)
+
+    async def test_food_plan_runs_only_currently_authorized_prefix(
+        self,
+    ) -> None:
+        executor = MinecraftExecutor(
+            hunger=8,
+            result={
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "minecraft_find_food_source_completed",
+            },
+        )
+        engine = self.minecraft_engine(executor)
+
+        with patch(
+            "evelyn_core.autonomy.update_self_state_from_observation",
+            return_value=EvelynSelfState(),
+        ):
+            first = await engine.run_cycle()
+            executor.inventory = {"bread": 1}
+            second = await engine.run_cycle()
+
+        self.assertEqual(
+            [step["action"] for step in first.planned.steps],
+            ["find_food_source"],
+        )
+        self.assertEqual(first.planned.cursor, 1)
+        self.assertIsNone(second.planned)
+        self.assertEqual(second.step_result, {})
+        self.assertEqual(executor.execute_count, 1)
+        self.assertTrue(engine.state.enabled)
+        self.assertEqual(engine.state.status, "running")
+
+    async def test_injected_minecraft_plan_outside_grant_still_denies(
+        self,
+    ) -> None:
+        executor = DummyExecutor()
+        engine = self.minecraft_engine(executor)
+        plan = AutonomyPlan(
+            goal_kind="progress",
+            summary="gather logs",
+            steps=[
+                {
+                    "domain": "minecraft",
+                    "action": "gather_logs",
+                }
+            ],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "authorization_scope_denied")
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.allowed_actions, [])
+        self.assertEqual(plan.cursor, 0)
+        self.assertEqual(executor.execute_count, 0)
 
     async def test_verified_outcome_advances_but_unverified_does_not(
         self,

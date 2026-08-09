@@ -29,7 +29,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다.
   broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final
   route/action sink까지 유지한다. recovery step은 exact history snapshot의 process-local
-  one-shot issuance만 소비한다. durable bound-receipt history, legacy cleanup과 Docker·Minecraft live 검증은 남아 있다.
+  one-shot issuance만 소비한다. Minecraft Autonomy plan은 current grant의 연속 prefix만 만들며, durable bound-receipt history, legacy cleanup과 live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
   edit·provenance·post-tombstone cleanup 503은 강제 재조회 뒤 자동 재시도하지 않는다.
   replica 검증은 통과했지만 host ACL·Docker mount, live busy 전이와 rotation은 P1이다.
@@ -61,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션도 `active_until` 뒤 text/voice admission에서 만료된다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,191개(skip 22), continuity 87개, Mindcraft 56개,
+- CI-equivalent 전체 3,194개(skip 22), continuity 87개, Mindcraft 56개,
   voice 633개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙
