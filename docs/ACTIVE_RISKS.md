@@ -1043,6 +1043,8 @@ token·raw command는 durable projection에 남지 않는다. 이는 restart res
 세 번째였던 일반 대화 receipt 미전파 위험은 이 branch에서 닫혔다.
 compact `bound|not_used|unattributed` receipt를 process-local history에만 두지
 않고 durable checkpoint, restart restore, session·cross-surface merge까지 전파한다.
+Discord 명령의 전달 완료 답변도 `not_used`로 기록해 필터가 assistant 행을
+제거하고 직전 명령을 미응답으로 되살리던 경로를 닫았다.
 Main/Fast/Voice/Search/tool과 production autonomy가 history를 재사용하기 전에 누락·손상·
 `unattributed`·stale version·tombstoned-note assistant row를 fail-closed로
 제거하고, persona/cognitive/router의 history-derived 상태도 strict receipt가

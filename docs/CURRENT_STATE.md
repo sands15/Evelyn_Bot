@@ -153,6 +153,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     post-delivery context owner를 통과한다. 성공한 plain-text 전송만
     history와 checkpoint에 한 번 기록하며, 전송 실패는 기록하지 않고
     Minecraft의 이전 수동 기록도 제거해 이중 commit을 막는다.
+    이 응답은 저장 기억을 사용하지 않은 `not_used` receipt로 기록되어 공용
+    history filter 뒤에도 assistant 완료 행이 남고 미응답 user tail로 오인되지 않는다.
   - 실제 Control Page가 호출하는 standalone Bot API도 더 이상
     process-local `CHAT_MESSAGES`만 사용하지 않는다. 별도 single-writer
     `fast_control_continuity` v2 chain에 일반·stream·background의 정상·고정

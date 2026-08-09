@@ -376,7 +376,8 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 - 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.
   Discord 명령은 composition이 주입한 단일 context owner가 성공한 plain-text
   `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
-  Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다.
+  Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다. 저장 기억을 쓰지
+  않은 명령 답변은 `not_used` receipt로 기록해 완료 assistant 행을 보존한다.
 - Discord 명령 전송 자체가 실패하면 history와 checkpoint를 변경하지 않는다.
   전송 성공 뒤 continuity 기록이 실패해도 이미 전달된 응답을 재전송하거나
   command 실패로 바꾸지 않고 고정 event와 exception type만 기록한다.

@@ -14,6 +14,7 @@ from .conversation_memory_exposure import (
 )
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_receipt,
+    not_used_memory_receipt_ref,
     unattributed_memory_receipt_ref,
 )
 from .memory_exposure import current_memory_exposure_position
@@ -345,6 +346,7 @@ class SessionStateStore:
             normal_ttl_sec=normal_ttl_sec,
             question_ttl_sec=question_ttl_sec,
             topic_id=build_topic_id(user_text, answer_text),
+            memory_receipt=not_used_memory_receipt_ref(),
             now_monotonic=now_monotonic,
         )
 

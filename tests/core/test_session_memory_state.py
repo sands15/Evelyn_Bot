@@ -28,6 +28,10 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
     unattributed_memory_receipt_ref,
 )
+from evelyn_core.conversation_memory_exposure import (  # noqa: E402
+    filter_conversation_history_for_memory_exposure,
+)
+from evelyn_core.context_pipeline import has_unanswered_user_turn  # noqa: E402
 from evelyn_core import memory_deletion_journal as journal  # noqa: E402
 from evelyn_core import memory_exposure  # noqa: E402
 from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
@@ -345,17 +349,32 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertFalse(finished.awaiting_user_reply)
         self.assertEqual(finished.ttl_sec, 90.0)
         self.assertEqual(store.followup_targets["s1"], {"channel_id": 22, "message_id": 33})
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key="s1",
+            guild_id=1,
+        )
         self.assertEqual(
-            store.get_conversation_history(system_prompt="system", session_key="s1", guild_id=1)[-2:],
+            history[-2:],
             [
                 {"role": "user", "content": "마크상태"},
                 {
                     "role": "assistant",
                     "content": "status reply",
-                    "memoryReceiptRef": unattributed_ref(),
+                    "memoryReceiptRef": not_used_memory_receipt_ref(),
                 },
             ],
         )
+        filtered = filter_conversation_history_for_memory_exposure(
+            history,
+            memory_index_dir=self.memory_index_dir,
+        )
+        self.assertEqual(
+            [row.get("role") for row in filtered.messages],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(filtered.dropped_unattributed_count, 0)
+        self.assertFalse(has_unanswered_user_turn(list(filtered.messages)))
         self.assertEqual(store.active_until["s1"], 110.0)
         self.assertEqual(store.topic_ids["s1"], build_topic_id("마크상태", "status reply"))
 
