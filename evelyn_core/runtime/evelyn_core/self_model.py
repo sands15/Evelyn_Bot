@@ -209,7 +209,12 @@ def record_self_identity_turn(
     try:
         _append_jsonl(queue_path or SELF_IDENTITY_REVIEW_QUEUE_PATH, row)
     except Exception as exc:
-        return {"recorded": False, "reason": "write_failed", "error": repr(exc)}
+        return {
+            "recorded": False,
+            "reason": "write_failed",
+            "error": "self_identity_write_failed",
+            "errorType": type(exc).__name__,
+        }
     return {"recorded": True, "labels": labels}
 
 

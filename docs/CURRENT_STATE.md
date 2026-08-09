@@ -479,7 +479,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `long_term_memory_update_failed` 예외를 기존 failed 상태 경계로 전달한다.
     turn task detach는 성공·실패 모두 유지한다. step/event-log 실패 payload·30일
     보존 JSONL·운영 로그에는 예외 원문 대신 고정 error code와 exception type만
-    남기며, daily vault mirror 실패 로그도 fixed prefix와 exception type만 남긴다.
+    남긴다. self-identity review queue write 실패가 turn trace decision으로 전달될
+    때도 fixed code/type만 남기며, daily vault mirror 실패 로그도 fixed prefix와
+    exception type만 남긴다.
   - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
     단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가

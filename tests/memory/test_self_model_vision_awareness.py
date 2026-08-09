@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -174,6 +175,33 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
             self.assertIn("tone_feedback", context)
             self.assertIn("suffix_balance", context)
             self.assertIn("말투가 아직 친근하지 않아", context)
+
+    def test_identity_review_write_failure_is_content_free(self) -> None:
+        private_error = "PRIVATE_IDENTITY_ERROR:/synthetic/identity-review.jsonl"
+        with (
+            TemporaryDirectory() as tmp,
+            patch(
+                "evelyn_core.self_model._append_jsonl",
+                side_effect=RuntimeError(private_error),
+            ),
+        ):
+            decision = record_self_identity_turn(
+                "정체성 반응을 더 자연스럽게 바꿔줘.",
+                "알겠어.",
+                source="test",
+                queue_path=Path(tmp) / "identity_queue.jsonl",
+            )
+
+        self.assertEqual(
+            decision,
+            {
+                "recorded": False,
+                "reason": "write_failed",
+                "error": "self_identity_write_failed",
+                "errorType": "RuntimeError",
+            },
+        )
+        self.assertNotIn(private_error, repr(decision))
 
     def test_self_judgment_detects_identity_and_stance_topic(self) -> None:
         state = EvelynSelfState(mood="curious", curiosity=0.7, restraint=0.35)
