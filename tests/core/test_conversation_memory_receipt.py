@@ -84,6 +84,75 @@ class ConversationMemoryReceiptTests(unittest.TestCase):
         self.assertEqual(unused_ref["memoryVersion"], 4)
         self.assertEqual(unused_ref["suppliedNoteIds"], [])
 
+    def test_contradictory_unused_receipt_fails_closed(self) -> None:
+        contradictory = {
+            "schema": "memory.context-receipt.v1",
+            "state": "empty",
+            "groundingState": "empty",
+            "memoryVersion": 4,
+            "suppliedNoteIds": [NOTE_A],
+            "suppliedNoteCount": 1,
+            "contentFree": True,
+        }
+
+        receipt_ref = memory_receipt_ref_from_receipt(contradictory)
+
+        self.assertEqual(receipt_ref["state"], "unattributed")
+        self.assertEqual(receipt_ref["memoryVersion"], 4)
+        self.assertEqual(receipt_ref["suppliedNoteIds"], [])
+
+    def test_missing_and_unavailable_receipts_remain_not_used(self) -> None:
+        unavailable = {
+            "schema": "memory.context-receipt.v1",
+            "state": "unavailable",
+            "groundingState": "empty",
+            "contentFree": True,
+        }
+
+        self.assertEqual(
+            memory_receipt_ref_from_receipt(None)["state"],
+            "not_used",
+        )
+        self.assertEqual(
+            memory_receipt_ref_from_receipt(unavailable)["state"],
+            "not_used",
+        )
+        self.assertEqual(
+            memory_receipt_ref_from_receipt("malformed")["state"],
+            "unattributed",
+        )
+
+    def test_unhashable_receipt_state_fails_closed(self) -> None:
+        for state in ([], {}):
+            with self.subTest(state=state):
+                malformed_ref = {
+                    "schema": CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA,
+                    "state": state,
+                    "memoryVersion": 0,
+                    "suppliedNoteIds": [],
+                    "suppliedNoteCount": 0,
+                    "contentFree": True,
+                }
+                self.assertIsNone(
+                    sanitize_memory_receipt_ref(malformed_ref)
+                )
+                receipt_ref = memory_receipt_ref_from_receipt(malformed_ref)
+                self.assertEqual(
+                    receipt_ref["state"],
+                    "unattributed",
+                )
+
+    def test_metrics_missing_receipt_fails_closed(self) -> None:
+        for context_pipeline in ({}, {"memory_receipt": None}):
+            with self.subTest(context_pipeline=context_pipeline):
+                receipt_ref = memory_receipt_ref_from_metrics(
+                    {"meta": {"context_pipeline": context_pipeline}}
+                )
+                self.assertEqual(
+                    receipt_ref["state"],
+                    "unattributed",
+                )
+
     def test_legacy_dependency_signals_fail_closed(self) -> None:
         mixed = {
             **full_receipt(NOTE_A),

@@ -1659,6 +1659,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   memory version과 canonical supplied-note ID에 묶이고, `not_used`는 저장
   기억 비사용이 명시적으로 증명된 row만 표시하며, 누락·손상·
   표현 불가능한 legacy 의존성은 `unattributed`로 fail-closed한다.
+  full receipt의 비사용 판정도 exact schema/content-free 상태, 알려진 no-memory state,
+  빈 note ID/count만 허용한다. metrics 누락·null, non-mapping, 모순된 ID/count·grounding·
+  version과 손상 compact state는 `unattributed`이며 parser 예외로 turn을 중단하지 않는다.
   receipt는 durable continuity, restart restore, session merge와 Control Page·Discord
   text·Discord voice cross-surface merge까지 보존된다. 공개 chat/state/action
   projection은 receipt와 note ID를 제거한다.

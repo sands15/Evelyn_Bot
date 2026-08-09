@@ -168,6 +168,7 @@ def sanitize_memory_receipt_ref(
     if (
         value.get("schema")
         != CONVERSATION_MEMORY_RECEIPT_REF_SCHEMA
+        or not isinstance(state, str)
         or state not in MEMORY_RECEIPT_REF_STATES
         or isinstance(memory_version, bool)
         or not isinstance(memory_version, int)
@@ -202,8 +203,10 @@ def memory_receipt_ref_from_receipt(
     compact = sanitize_memory_receipt_ref(receipt)
     if compact is not None:
         return compact
-    if not isinstance(receipt, Mapping):
+    if receipt is None:
         return _ref("not_used")
+    if not isinstance(receipt, Mapping):
+        return _ref("unattributed")
 
     memory_version = _memory_version(receipt.get("memoryVersion"))
     if (
@@ -219,9 +222,46 @@ def memory_receipt_ref_from_receipt(
             "unattributed",
             memory_version=memory_version,
         )
-    if receipt.get("state") != "provided":
+    state = receipt.get("state")
+    if state != "provided":
+        grounding_state = receipt.get("groundingState")
+        raw_memory_version = receipt.get("memoryVersion")
+        raw_note_ids = receipt.get("suppliedNoteIds")
+        supplied_count = receipt.get("suppliedNoteCount")
+        valid_memory_version = raw_memory_version is None or (
+            isinstance(raw_memory_version, int)
+            and not isinstance(raw_memory_version, bool)
+            and raw_memory_version >= 0
+        )
+        valid_supplied_count = supplied_count is None or (
+            isinstance(supplied_count, int)
+            and not isinstance(supplied_count, bool)
+            and supplied_count == 0
+        )
+        valid_grounding_states = (
+            (None, "partial", "unattributed")
+            if state == "withheld"
+            else (None, "empty", "unavailable")
+            if state == "unavailable"
+            else (None, state)
+        )
+        explicitly_not_used = bool(
+            receipt.get("schema") == MEMORY_CONTEXT_RECEIPT_SCHEMA
+            and receipt.get("contentFree") is True
+            and isinstance(state, str)
+            and state in {
+                "not_requested",
+                "empty",
+                "unavailable",
+                "withheld",
+            }
+            and grounding_state in valid_grounding_states
+            and valid_memory_version
+            and raw_note_ids in (None, [])
+            and valid_supplied_count
+        )
         return _ref(
-            "not_used",
+            "not_used" if explicitly_not_used else "unattributed",
             memory_version=memory_version,
         )
 
@@ -278,8 +318,11 @@ def memory_receipt_ref_from_metrics(
     context_pipeline = meta.get("context_pipeline")
     if not isinstance(context_pipeline, Mapping):
         return unattributed_memory_receipt_ref()
-    current_ref = memory_receipt_ref_from_receipt(
-        context_pipeline.get("memory_receipt")
+    raw_current_receipt = context_pipeline.get("memory_receipt")
+    current_ref = (
+        memory_receipt_ref_from_receipt(raw_current_receipt)
+        if raw_current_receipt is not None
+        else unattributed_memory_receipt_ref()
     )
     if "conversation_memory_receipt_ref" not in context_pipeline:
         return current_ref

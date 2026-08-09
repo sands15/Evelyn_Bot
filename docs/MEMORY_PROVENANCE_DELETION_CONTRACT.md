@@ -181,6 +181,12 @@ prompt에 남지 않으므로 0이다.
 - `unattributed`: receipt가 누락됐거나 손상됐고, legacy 의존성을 compact
   형식으로 완전히 표현할 수 없거나, 기억 비의존성을 증명할 수 없다.
 
+Full receipt에서 `not_used`를 만들 때도 exact `memory.context-receipt.v1`,
+`contentFree=true`, 알려진 no-memory state와 빈 supplied-note ID/count를 모두
+요구한다. metrics의 receipt 누락·null, non-mapping 입력, 모순된 state·grounding·
+version·ID/count와 손상 compact state는 예외를 내거나 비사용으로 낮추지 않고
+`unattributed`로 fail-closed한다.
+
 사용자 row는 receipt가 필요 없다. assistant row의 compact receipt는
 process-local history에만 남지 않고 durable continuity checkpoint, restart restore,
 session merge와 Control Page·Discord text·Discord voice의 cross-surface merge까지
