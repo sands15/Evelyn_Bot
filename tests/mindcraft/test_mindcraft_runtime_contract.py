@@ -69,6 +69,28 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("!attackPlayer", settings["blocked_actions"])
         self.assertIn("!digDown", settings["blocked_actions"])
 
+    def test_live_start_keeps_running_goal_and_effect_binding(self) -> None:
+        goal_path = Path(self.temp_dir.name) / "goal.json"
+        runtime = mindcraft_service.MindcraftRuntime()
+        process = Mock()
+        process.poll.return_value = None
+        runtime._process = process
+        runtime._manual_stop = False
+        runtime._world_effect_binding = {"grantId": "existing"}
+
+        with patch.object(mindcraft_service, "GOAL_STATE_PATH", goal_path):
+            runtime.persist_goal("collect oak logs")
+            runtime.start(
+                "find a village",
+                world_effect_binding={"grantId": "replacement"},
+            )
+
+            self.assertEqual(runtime.get_goal(), "collect oak logs")
+
+        self.assertIs(runtime._process, process)
+        self.assertEqual(runtime._world_effect_binding, {"grantId": "existing"})
+        self.assertFalse(runtime._manual_stop)
+
     def test_cold_runtime_does_not_auto_start_without_lease(self) -> None:
         runtime = mindcraft_service.MindcraftRuntime()
         runtime._ensure_process_running = Mock()

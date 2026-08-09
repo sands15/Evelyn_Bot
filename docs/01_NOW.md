@@ -28,7 +28,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 2026-08-09 Mindcraft history는 bounded process-local·no-mount이며 Codex는 off다.
   Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다. Minecraft lease 위임은 exact nonnegative JSON integer `guildId`만 받는다.
   broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final route/action sink까지 유지한다.
-  recovery step은 exact history snapshot의 process-local one-shot issuance만 소비하고, 손상 world-effect policy는 validation 예외나 false-ready 대신 fixed blocker로 닫힌다. Disconnect/kick reason과 bot error event도 분류에만 쓰고 output에는 고정 문구만 남긴다. Player chat/whisper는 empty `only_chat_with`에서 차단되고 exact configured name만 허용하며 self-prompt/system autonomous path는 독립적이다. Protocol `PartialReadError`도 전역으로 삼키지 않고 표준 listener dispatch를 유지하며 malformed-packet live recovery 검증은 남아 있다.
+  recovery step은 exact history snapshot의 process-local one-shot issuance만 소비하고, 손상 world-effect policy는 validation 예외나 false-ready 대신 fixed blocker로 닫힌다. Disconnect/kick reason과 bot error event도 분류에만 쓰고 output에는 고정 문구만 남긴다. Player chat/whisper는 empty `only_chat_with`에서 차단되고 exact configured name만 허용하며 self-prompt/system autonomous path는 독립적이다. Protocol `PartialReadError`도 전역으로 삼키지 않고 표준 listener dispatch를 유지한다. 실행 중 `/start`는 goal·effect binding을 재표기하지 않으며 malformed-packet와 goal 전환의 live 검증은 남아 있다.
   Minecraft Autonomy plan은 current grant의 연속 prefix만 만들고, route·engine lifecycle과 world-action admission은 disconnect까지 직렬화되며 `자율정지`는 intent를 보존하고 exact current outcome fsync 뒤에만 cursor를 진행한다. durable bound-receipt history, legacy cleanup과 live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
   direct·cascade source는 durable redaction 성공 뒤에만 unlink하고, applied-cleanup 503은 강제 재조회 뒤 자동 재시도하지 않으며 손상 full receipt는 `unattributed`로 강등한다.
@@ -61,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,237개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
+- CI-equivalent 전체 3,238개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 644개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

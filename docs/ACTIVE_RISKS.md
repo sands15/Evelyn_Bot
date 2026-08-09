@@ -111,6 +111,10 @@ snapshot을 읽고 runner stop 또는 ensure-start effect가 끝날 때까지 �
 오류로 fail-closed한다. 따라서 shutdown·owner handoff와 경합한 이전 epoch의
 자동 재시작 우회는 source 계약에서 차단됐다.
 
+이미 child가 살아 있는 `/start`는 durable goal이나 immutable world-effect binding을
+다시 쓰지 않는다. 이 idempotent 경계는 actual-class offline 회귀로 확인했지만, 실제
+Minecraft에서 repeated start와 `/goal` 전환을 잇는 live E2E는 아직 수행하지 않았다.
+
 2026-08-01 worktree의 추가 source 계약은 world lease event 행을 append 뒤
 flush+`fsync`하며 POSIX의 새 daily file은 parent directory entry까지 sync한다.
 모든 consumer가 exact `auditReady=true`와

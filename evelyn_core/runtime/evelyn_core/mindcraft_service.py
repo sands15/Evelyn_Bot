@@ -873,6 +873,8 @@ class MindcraftRuntime:
     ) -> None:
         with self._lock:
             requested_goal = _clean_goal(goal or self.get_goal())
+            if self.process_alive():
+                return
             self._manual_stop = False
             self._world_effect_binding = (
                 deepcopy(world_effect_binding)
@@ -881,8 +883,6 @@ class MindcraftRuntime:
             )
             if persist_goal_state:
                 self.persist_goal(requested_goal)
-            if self.process_alive():
-                return
             if not (MINDCRAFT_ROOT / "main.js").exists():
                 self.runtime_errors.record(
                     "mindcraft_start_failed",

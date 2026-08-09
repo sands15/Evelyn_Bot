@@ -2178,6 +2178,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - Mindcraft player chat/whisper ingress는 빈 `only_chat_with`를 deny-all로 해석하고 exact
   configured player name만 받는다. 이 gate는 player ingress에만 적용되므로 self-prompt와
   system autonomous `handleMessage` path는 독립적이다.
+- 이미 child가 실행 중인 `/start`는 durable goal과 immutable world-effect binding을
+  바꾸지 않는 no-op이다. 실행 중 목표 변경은 별도 `/goal` restart path를 사용한다.
 - Python status owner와 Node writer는 legacy/free-text 상태를 재사용하지 않고 exact
   content-free projection만 공개·기록한다.
 - Node planner의 local/router/subgoal/recovery 요청은 caller가 URL·model을 고를 수 없는
