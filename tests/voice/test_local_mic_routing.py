@@ -529,6 +529,68 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(bridge._drain_tts_payload.await_count, 2)
         bridge._post_status.assert_awaited_once()
 
+    def test_local_io_bridge_tts_warmup_redacts_upstream_error(self) -> None:
+        private_error = (
+            "PRIVATE_TTS_WARMUP_CANARY "
+            "https://internal.example/token "
+            r"C:\Users\Admin\private.wav"
+        )
+
+        class FailedResponse:
+            status = 500
+
+            def __init__(self) -> None:
+                self.text = AsyncMock(return_value=private_error)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+        class FailedSession:
+            def __init__(self) -> None:
+                self.response = FailedResponse()
+
+            def post(self, _url: str, **_kwargs):
+                return self.response
+
+        async def scenario() -> tuple[LocalIoBridge, FailedResponse, list[str]]:
+            bridge = LocalIoBridge()
+            session = FailedSession()
+            bridge.session = session  # type: ignore[assignment]
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^tts_warmup_failed$",
+            ):
+                await bridge._drain_tts_payload({})
+
+            bridge._drain_tts_payload = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError(private_error)
+            )
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            with (
+                patch("evelyn_core.local_io_bridge.LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC", 0),
+                patch("evelyn_core.local_io_bridge.LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS", 1),
+                patch("evelyn_core.local_io_bridge.asyncio.sleep", new=AsyncMock()),
+                patch("builtins.print") as print_mock,
+            ):
+                await bridge._warmup_tts_after_delay()
+            rendered_logs = [
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            ]
+            return bridge, session.response, rendered_logs
+
+        bridge, response, rendered_logs = asyncio.run(scenario())
+
+        response.text.assert_not_awaited()
+        self.assertEqual(bridge.tts_warmup_error, "tts_warmup_failed")
+        self.assertIn("errorType=RuntimeError", repr(rendered_logs))
+        self.assertNotIn(private_error, repr(rendered_logs))
+        self.assertNotIn(private_error, bridge.tts_warmup_error)
+        bridge._post_status.assert_awaited_once()  # type: ignore[union-attr]
+
     def test_local_io_bridge_applies_mic_enable_request_once(self) -> None:
         async def scenario() -> LocalIoBridge:
             bridge = LocalIoBridge()

@@ -2964,6 +2964,7 @@ class LocalIoBridge:
             return
         started = time.perf_counter()
         last_error = ""
+        last_error_type = ""
         for attempt in range(1, LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS + 1):
             try:
                 audio_bytes = await self._drain_tts_payload(self._build_tts_payload(text))
@@ -2977,13 +2978,23 @@ class LocalIoBridge:
                 return
             except Exception as exc:
                 self.runtime_errors.record("tts_warmup_attempt_failed", exc)
-                last_error = repr(exc)
+                last_error = "tts_warmup_failed"
+                last_error_type = type(exc).__name__
                 if attempt >= LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS:
                     break
-                print(f"[LOCAL BRIDGE] tts_warmup_retry attempt={attempt} err={exc!r}", flush=True)
+                print(
+                    "[LOCAL BRIDGE] tts_warmup_retry "
+                    f"attempt={attempt} errorCode={last_error} "
+                    f"errorType={last_error_type}",
+                    flush=True,
+                )
                 await asyncio.sleep(LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC)
         self.tts_warmup_error = last_error
-        print(f"[LOCAL BRIDGE] tts_warmup_failed err={last_error}", flush=True)
+        print(
+            "[LOCAL BRIDGE] tts_warmup_failed "
+            f"errorCode={last_error} errorType={last_error_type}",
+            flush=True,
+        )
         await self._post_status()
 
     async def _drain_tts_payload(self, payload: dict[str, Any]) -> int:
@@ -2994,8 +3005,7 @@ class LocalIoBridge:
             timeout=aiohttp.ClientTimeout(total=LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC),
         ) as resp:
             if resp.status != 200:
-                detail = await resp.text()
-                raise RuntimeError(f"tts_warmup_failed {resp.status}: {detail[:300]}")
+                raise RuntimeError("tts_warmup_failed")
             audio_bytes = 0
             async for chunk in resp.content.iter_chunked(4096):
                 audio_bytes += len(chunk)

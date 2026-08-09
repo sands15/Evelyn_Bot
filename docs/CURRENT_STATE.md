@@ -1955,8 +1955,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   외부에서 받지 않는다. path-safe builder가 missing/fresh image를 만들며 standalone TTS
   launcher도 image가 없으면 이를 호출한다. client의 clone fallback 로그와 최종
   실패 예외도 upstream HTTP 오류 본문·voice profile을 복사하지 않고 고정
-  `tts_request_failed`·`omnivoice_request_failed`만 남긴다. Supervisor
-  repair는 existing image만 재사용한다.
+  `tts_request_failed`·`omnivoice_request_failed`만 남긴다. Local Bridge warmup도
+  non-200 body를 읽지 않고 status에는 `tts_warmup_failed`, 로그에는 이 코드와
+  exception type만 남긴다. Supervisor repair는 existing image만 재사용한다.
 - 최종 변경 집중 149개와 기존 OmniVoice request/source·VoxCPM profile 계약 17개가 통과했다.
   Local Bridge의 기본 경로 변경 뒤 voice 전체 606개(skip 5)도 통과했다.
   최종 runtime 전체 756개(skip 4)도 실패 없이 통과했다.
