@@ -45,6 +45,9 @@ engine을 시작한다. 시작 실패 시 grant는 즉시 폐기한다. `자율�
 intent는 유지한다. route 비활성화는 명시적 `마크종료`만 수행하며 intent를
 executor cleanup보다 먼저 지워 cleanup 오류가 권한 상태를 되살리지 못하게 한다.
 route enable·disable과 lifecycle connect·disconnect는 같은 guild router lock으로 직렬화한다.
+engine start·stop은 engine lock 아래 task cancel, executor cleanup, 상태 commit까지 직렬화한다.
+disabled stale loop나 실패한 cleanup이 남으면 이를 먼저 정리하고 성공한 뒤에만 새 loop를 시작한다.
+stale child 취소만 내부 처리하고 start 호출자 자신의 취소는 재전파한다.
 
 현재 Control Page의 Minecraft 변경은 CSRF 보호를 통과한 명시적 사용자 요청
 경계에서만 실행한다. Control Page에는 일반 assistant 자율 루프를 시작하는

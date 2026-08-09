@@ -263,7 +263,19 @@ class AutonomyEngine:
     async def start(self) -> None:
         async with self._lock:
             if self._task is not None and not self._task.done():
-                return
+                if self.state.enabled:
+                    return
+                task = self._task
+                self._task = None
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+            if not self.state.enabled and self._executor_connected:
+                await self._disconnect_executor_once()
             self.load_persisted_state()
             authorized_actions = (
                 self.get_authorized_actions(self.guild_id)
@@ -300,14 +312,14 @@ class AutonomyEngine:
             self.persist_state()
             task = self._task
             self._task = None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        await self._disconnect_executor_once()
-        self.state.status = "idle"
-        self.state.updated_at = time.time()
-        self.persist_state()
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await self._disconnect_executor_once()
+            self.state.status = "idle"
+            self.state.updated_at = time.time()
+            self.persist_state()
 
     async def _connect_executor_once(self) -> None:
         if self._executor_connected:

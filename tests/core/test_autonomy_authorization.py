@@ -525,6 +525,171 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.state.status, "authorization_required")
         self.assertEqual(executor.connect_count, 0)
 
+    async def test_start_replaces_live_disabled_loop(self) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = DummyExecutor()
+        engine = self.engine(executor)
+        await engine.start()
+        old_task = engine._task
+        await asyncio.sleep(0)
+
+        engine.state.enabled = False
+        engine.state.status = "authorization_required"
+        await engine.start()
+
+        self.assertIsNotNone(old_task)
+        self.assertTrue(old_task.done())
+        self.assertIsNot(engine._task, old_task)
+        self.assertTrue(engine.state.enabled)
+        self.assertEqual(engine.state.status, "running")
+        self.assertEqual(executor.connect_count, 2)
+        self.assertEqual(executor.disconnect_count, 1)
+        await engine.stop()
+
+    async def test_start_waits_for_inflight_stop_cleanup(self) -> None:
+        class BlockingDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.connected = False
+                inner_self.disconnect_started = asyncio.Event()
+                inner_self.disconnect_release = asyncio.Event()
+                inner_self.events: list[str] = []
+
+            async def connect(inner_self) -> None:
+                await super().connect()
+                inner_self.connected = True
+                inner_self.events.append("connect")
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                inner_self.events.append("disconnect_started")
+                inner_self.disconnect_started.set()
+                await inner_self.disconnect_release.wait()
+                inner_self.connected = False
+                inner_self.events.append("disconnect_finished")
+
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = BlockingDisconnectExecutor()
+        engine = self.engine(executor)
+        await engine.start()
+
+        stop_task = asyncio.create_task(engine.stop())
+        await executor.disconnect_started.wait()
+        start_task = asyncio.create_task(engine.start())
+        await asyncio.sleep(0)
+        start_completed_during_stop = start_task.done()
+
+        executor.disconnect_release.set()
+        await stop_task
+        await start_task
+
+        self.assertFalse(start_completed_during_stop)
+        self.assertEqual(
+            executor.events[:3],
+            ["connect", "disconnect_started", "disconnect_finished"],
+        )
+        self.assertEqual(executor.events[3], "connect")
+        self.assertTrue(executor.connected)
+        self.assertTrue(engine.state.enabled)
+        self.assertEqual(engine.state.status, "running")
+        await engine.stop()
+
+    async def test_start_retries_failed_stop_cleanup_before_reconnect(
+        self,
+    ) -> None:
+        class FlakyDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.disconnect_failures = 2
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                if inner_self.disconnect_failures > 0:
+                    inner_self.disconnect_failures -= 1
+                    raise RuntimeError(
+                        "minecraft_action_cancel_unverified"
+                    )
+
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = FlakyDisconnectExecutor()
+        engine = self.engine(executor)
+        await engine.start()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await engine.stop()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await engine.start()
+
+        self.assertIsNone(engine._task)
+        self.assertFalse(engine.state.enabled)
+        self.assertTrue(engine._executor_connected)
+        await engine.start()
+
+        self.assertTrue(engine.state.enabled)
+        self.assertEqual(engine.state.status, "running")
+        self.assertEqual(executor.disconnect_count, 3)
+        self.assertEqual(executor.connect_count, 2)
+        await engine.stop()
+
+    async def test_start_propagates_cancellation_during_stale_cleanup(
+        self,
+    ) -> None:
+        class BlockingDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.disconnect_started = asyncio.Event()
+                inner_self.disconnect_release = asyncio.Event()
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                inner_self.disconnect_started.set()
+                await inner_self.disconnect_release.wait()
+
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = BlockingDisconnectExecutor()
+        engine = self.engine(executor)
+        await engine.start()
+        self.addAsyncCleanup(engine.stop)
+        await asyncio.sleep(0)
+
+        engine.state.enabled = False
+        engine.state.status = "authorization_required"
+        start_task = asyncio.create_task(engine.start())
+        await executor.disconnect_started.wait()
+        start_task.cancel()
+        executor.disconnect_release.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await start_task
+        self.assertIsNone(engine._task)
+        self.assertFalse(engine.state.enabled)
+
     async def test_generated_minecraft_plan_waits_outside_current_grant(
         self,
     ) -> None:
