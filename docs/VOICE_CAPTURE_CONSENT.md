@@ -99,6 +99,8 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
   요구한다. ON은 `purpose=voice_capture_consent`와 exact `enableFence`가 추가로
   필요하다.
 - `POST /api/local-bridge/status`는 독립된 reporter bearer를 요구한다.
+- Local mic capture 실패의 상태·warning은 fixed code와 exception type만 포함하고,
+  예외 메시지·장치 설정 경로를 heartbeat, Control Page 또는 LLM context에 넣지 않는다.
 - 제어 요청과 ACK는 같은 `revision`, `actionId`, `bridgeInstanceDigest`, `enabled`를
   가져야 한다. waiter가 기다리는 동안 global current request가 바뀌거나 Bridge가
   더 높은 revision을 보고하면 `mic_control_superseded`로 즉시 실패한다.

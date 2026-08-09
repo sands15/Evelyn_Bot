@@ -1121,6 +1121,34 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(service.last_rejected_reason, "too_short")
         self.assertEqual((service.last_segment_filter or {}).get("reason"), "too_short")
 
+    def test_local_mic_capture_failure_is_content_free(self) -> None:
+        private_error = "PRIVATE_MIC_FAILURE:/synthetic/audio-config.json"
+        service = LocalMicCaptureService(on_segment=lambda _pcm, _meta: None)
+
+        with (
+            patch(
+                "evelyn_core.local_mic.sd",
+                SimpleNamespace(
+                    InputStream=Mock(side_effect=RuntimeError(private_error))
+                ),
+            ),
+            self.assertLogs("evelyn_core.local_mic", level="WARNING") as logs,
+        ):
+            self.assertFalse(service._run_stream_once())
+
+        self.assertEqual(
+            service.last_error,
+            "local_mic_capture_failed:RuntimeError",
+        )
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:evelyn_core.local_mic:"
+                "Local mic capture failed: errorType=RuntimeError"
+            ],
+        )
+        self.assertNotIn(private_error, repr((service.last_error, logs.output)))
+
     def test_local_mic_stop_timeout_preserves_thread_until_later_success(self) -> None:
         class FakeThread:
             def __init__(self) -> None:

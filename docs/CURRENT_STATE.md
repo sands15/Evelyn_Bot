@@ -1805,7 +1805,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   OFF가 증가시키는 ON enable fence를 함께 사용한다. 취소·terminal validation·
   malformed upstream·손상 state·Control Page 재시작은 같은 consent lock과 recovery
   경로로 OFF를 재시도한다. Local Bridge는 ambient `LOCAL_MIC_ENABLED`로 캡처를
-  시작하지 않고 일반 `/mic on`도 동의 경로를 우회하지 못한다. focused 159개와
+  시작하지 않고 일반 `/mic on`도 동의 경로를 우회하지 못한다. capture 실패 상태·
+  warning은 fixed code와 exception type만 남겨 Control Page와 Main dependency
+  context에 예외 메시지·경로를 전달하지 않는다. focused 159개와
   runtime 667개(skip 4), voice 전체 568개(skip 5), `test_local*.py` 182개가 통과했고
   Python/Node/PowerShell 구문, standalone Compose config와 clean bundle
   `pip check`도 통과했다.

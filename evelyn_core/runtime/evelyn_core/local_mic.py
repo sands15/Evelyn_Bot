@@ -302,8 +302,9 @@ class LocalMicCaptureService:
                     self._consume_block(block, meta)
             return True
         except Exception as exc:  # pragma: no cover - depends on host audio stack
-            self.last_error = repr(exc)
-            log.warning("Local mic capture failed: %s", exc)
+            error_type = type(exc).__name__
+            self.last_error = f"local_mic_capture_failed:{error_type}"
+            log.warning("Local mic capture failed: errorType=%s", error_type)
             self._capture_ready = False
             return False
         finally:
