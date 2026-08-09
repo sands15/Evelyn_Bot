@@ -340,6 +340,50 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertNotIn("turn:raw-source:user", provenance["source_evidence_ids"])
         self.assertIn("[MEMORY] compact retry 성공", logs)
 
+    def test_summary_retry_failure_logs_only_exception_type(self) -> None:
+        private_error = "PRIVATE_SUMMARY_FAILURE C:/secret/memory-token"
+
+        class ContextTooLarge(RuntimeError):
+            pass
+
+        calls = 0
+        logs = []
+
+        async def fake_ask(_messages, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ContextTooLarge("context limit")
+            raise RuntimeError(private_error)
+
+        with TemporaryMemoryRoot():
+            outcome = asyncio.run(
+                run_long_term_memory_update(
+                    123,
+                    "긴 입력",
+                    "긴 답변",
+                    collect_layers=lambda *args, **kwargs: self._layers(),
+                    ask_summary_llm=fake_ask,
+                    is_context_size_error=lambda exc: isinstance(exc, ContextTooLarge),
+                    should_log_latency=lambda _ms: False,
+                    memory_fact_limit=20,
+                    memory_loop_limit=20,
+                    raw_limit=8,
+                    log=logs.append,
+                )
+            )
+
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(calls, 2)
+        self.assertEqual(
+            logs,
+            [
+                "[MEMORY] compact retry 실패: errorType=RuntimeError",
+                "[MEMORY] 요약 업데이트 실패: errorType=RuntimeError",
+            ],
+        )
+        self.assertNotIn(private_error, repr(logs))
+
     def test_current_exchange_without_turn_id_does_not_borrow_prior_evidence(self) -> None:
         async def fake_ask(messages, **kwargs):
             return {

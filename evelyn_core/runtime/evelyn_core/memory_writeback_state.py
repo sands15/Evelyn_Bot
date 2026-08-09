@@ -383,12 +383,12 @@ async def run_long_term_memory_update(
                 raise
             except Exception as retry_exc:
                 failure = retry_exc
-                emit(f"[MEMORY] compact retry 실패: {retry_exc}")
+                emit(f"[MEMORY] compact retry 실패: errorType={type(retry_exc).__name__}")
             else:
                 emit("[MEMORY] compact retry 성공")
 
     if not isinstance(result, dict):
-        emit(f"[MEMORY] 요약 업데이트 실패: {failure}")
+        emit(f"[MEMORY] 요약 업데이트 실패: errorType={type(failure).__name__}")
         elapsed_ms = (now() - started_at) * 1000.0
         if should_log_latency(elapsed_ms):
             emit(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} failed_after_ms={elapsed_ms:.0f}")

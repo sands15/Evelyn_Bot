@@ -1248,7 +1248,8 @@ evidence가 아니며, legacy 상태와 최종 consumer도 독립적으로 재�
 2026-08-09 memory write-behind의 step/event-log 실패는 payload·30일 보존 JSONL·
 운영 로그에 예외 원문을 복사하지 않고 고정 code와 exception type만 남긴다.
 self-identity review queue write 실패의 turn-trace decision과 daily vault mirror 실패
-로그도 각각 fixed code/type, fixed prefix/type만 남긴다.
+로그도 각각 fixed code/type, fixed prefix/type만 남긴다. Summary LLM primary·compact
+retry 실패 로그도 fixed prefix와 exception type만 남긴다.
 
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.

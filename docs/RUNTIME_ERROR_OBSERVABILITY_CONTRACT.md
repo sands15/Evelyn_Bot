@@ -95,6 +95,9 @@ Minecraft live status fallback은 upstream error를 fixed `minecraft_status_fail
 client·observer 예외를 `minecraft_status_failed:<exception-type>`으로 Main LLM context,
 snapshot cache와 Control Page에 공개한다.
 
+Summary LLM primary·compact retry 실패 로그는 고정 prefix와 exception type만 남기며,
+memory prompt·응답·예외 메시지·경로를 운영 로그에 복제하지 않는다.
+
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 
 - `lastFailure`는 `kind`, `errorType`, 숫자 `at`, `contentFree=true`만 공개한다.
