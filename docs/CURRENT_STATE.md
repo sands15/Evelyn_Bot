@@ -235,6 +235,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `<tool_name>_failed`로 고정한다. Main vision 예외 metrics도
     `vision_runtime_error`만 남긴다. background Vision Watch의 분석·capture 실패도
     fixed code/type만 artifact·Control Page·soft context에 투영해 원문을 복사하지 않는다.
+  - Main LLM warmup non-200 body는 읽지 않고 startup detail에는
+    `llm_warmup_failed`, 외부 wrapper에는 고정 `LLM warmup failed`만 남긴다.
   - Control Page legacy runtime service probe의 Bot API TCP/HTTP, Voyager,
     Codex와 전체 refresh 오류도 exact allowlist 코드만 공개한다. 최종 payload
     builder가 알 수 없는 error/login 문자열을 generic 코드로 바꾸므로 내부

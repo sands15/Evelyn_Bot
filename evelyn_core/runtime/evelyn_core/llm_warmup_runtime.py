@@ -37,9 +37,8 @@ async def warmup_llm_from_runtime(*, deps: LlmWarmupRuntimeDeps) -> None:
     deps.log("[STARTUP] llm_warmup_begin")
     async with session.post(deps.llm_server_url, json=payload, timeout=deps.client_timeout(total=20)) as resp:
         if resp.status != 200:
-            error_text = await resp.text()
-            deps.mark_startup_component("main_warmup", "failed", f"{resp.status}: {error_text[:160]}")
-            raise RuntimeError(f"LLM warmup failed: {resp.status} / {error_text[:300]}")
+            deps.mark_startup_component("main_warmup", "failed", "llm_warmup_failed")
+            raise RuntimeError("LLM warmup failed")
         async for raw_line in resp.content:
             event = deps.decode_sse_stream_line(raw_line)
             if not event or event.get("done"):

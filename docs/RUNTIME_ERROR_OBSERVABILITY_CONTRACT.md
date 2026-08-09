@@ -98,6 +98,9 @@ snapshot cache와 Control Page에 공개한다.
 Summary LLM primary·compact retry 실패 로그는 고정 prefix와 exception type만 남기며,
 memory prompt·응답·예외 메시지·경로를 운영 로그에 복제하지 않는다.
 
+Main LLM warmup non-200 response body는 읽지 않고 startup component detail과 외부
+wrapper에 각각 fixed `llm_warmup_failed`, `LLM warmup failed`만 남긴다.
+
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 
 - `lastFailure`는 `kind`, `errorType`, 숫자 `at`, `contentFree=true`만 공개한다.

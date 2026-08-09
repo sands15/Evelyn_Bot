@@ -27,6 +27,7 @@ class FakeResponse:
     def __init__(self, status: int, *, text: str = "", rows: list[bytes] | None = None) -> None:
         self.status = status
         self._text = text
+        self.text_calls = 0
         self.content = FakeContent(rows or [])
 
     async def __aenter__(self):
@@ -36,6 +37,7 @@ class FakeResponse:
         return None
 
     async def text(self) -> str:
+        self.text_calls += 1
         return self._text
 
 
@@ -106,13 +108,19 @@ class LlmWarmupRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[STARTUP] llm_warmup_done_no_chunk", logs)
 
     async def test_marks_failed_and_raises_on_http_error(self) -> None:
+        private_error = "PRIVATE_LLM_WARMUP_BODY:/synthetic/model-token.json"
         marks: list[tuple[str, str, str]] = []
-        session = FakeSession(FakeResponse(500, text="boom"))
+        response = FakeResponse(500, text=private_error)
+        session = FakeSession(response)
 
-        with self.assertRaisesRegex(RuntimeError, "LLM warmup failed"):
+        with self.assertRaises(RuntimeError) as raised:
             await warmup_llm_from_runtime(deps=self.build_deps(session, marks=marks))
 
-        self.assertEqual(marks[-1], ("main_warmup", "failed", "500: boom"))
+        self.assertEqual(str(raised.exception), "LLM warmup failed")
+        self.assertEqual(marks[-1], ("main_warmup", "failed", "llm_warmup_failed"))
+        self.assertEqual(response.text_calls, 0)
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(raised.exception))
 
 
 if __name__ == "__main__":
