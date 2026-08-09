@@ -40,6 +40,35 @@ class CognitiveRefreshCompositionTests(unittest.IsolatedAsyncioTestCase):
         composition,deps=self.build(); composition.schedule_cognitive_refresh(None,"hello",reason="turn")
         deps.create_scoped_task.assert_not_called()
 
+    async def test_background_failure_logs_only_exception_type(self):
+        private_session = "PRIVATE_COGNITIVE_SESSION"
+        private_error = "PRIVATE_COGNITIVE_EXCEPTION C:/secret/memory-token"
+        current_task = asyncio.current_task()
+        background_tasks = {private_session: current_task}
+        log = Mock()
+        composition, _ = self.build(
+            background_tasks=background_tasks,
+            current_task=lambda: current_task,
+            log=log,
+        )
+        composition.update_cognitive_state = AsyncMock(
+            side_effect=RuntimeError(private_error)
+        )
+
+        await composition.refresh_cognitive_state_in_background(
+            1,
+            "hello",
+            reason="turn",
+            session_memory_key=private_session,
+        )
+
+        log.assert_called_once_with(
+            "[COGNITIVE] background refresh failed errorType=RuntimeError"
+        )
+        self.assertNotIn(private_session, repr(log.call_args_list))
+        self.assertNotIn(private_error, repr(log.call_args_list))
+        self.assertNotIn(private_session, background_tasks)
+
     def test_main_uses_explicit_bindings(self):
         source=(REPO_ROOT/"main.py").read_text(encoding="utf-8")
         self.assertIn("cognitive_refresh_composition = CognitiveRefreshComposition(",source)

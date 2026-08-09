@@ -88,8 +88,7 @@ class CognitiveRefreshComposition:
             raise
         except Exception as exc:
             deps.log(
-                f"[COGNITIVE] background refresh 실패 guild={guild_id} "
-                f"session={task_key!r} reason={reason} err={exc!r}"
+                f"[COGNITIVE] background refresh failed errorType={type(exc).__name__}"
             )
         finally:
             task = deps.background_tasks.get(task_key)

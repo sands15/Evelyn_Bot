@@ -1264,7 +1264,8 @@ self-identity review queue write 실패의 turn-trace decision과 daily vault mi
 로그도 각각 fixed code/type, fixed prefix/type만 남긴다. Summary LLM primary·compact
 retry 실패 로그도 fixed prefix와 exception type만 남긴다. proactive open-question
 promotion과 background vault maintenance 실패 로그의 예외 detail도
-`errorType=<exception-type>`만 남긴다.
+`errorType=<exception-type>`만 남긴다. background cognitive refresh 실패 로그도
+session key·reason·예외 메시지 없이 fixed prefix와 exception type만 남긴다.
 
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.
