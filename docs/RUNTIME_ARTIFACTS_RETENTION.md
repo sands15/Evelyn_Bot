@@ -48,7 +48,8 @@ Environment overrides:
 
 - `logs/*.log*`: keep newest 1, remove logs and rotated backups older than 14 days or over 100 MB total.
 - `turn_trace/*.jsonl`: keep newest 7, remove traces older than 30 days or over 100 MB total.
-  Nested self-identity write failures retain only a fixed code and exception type.
+  Nested self-identity write failures and dynamic Discord playback failures retain only a
+  fixed code and exception type.
 - `autonomy_authorization/events/*.jsonl`: keep newest 7, remove authorization
   audit journals older than 30 days or over 20 MB total.
 - `minecraft_world_lease/events/*.jsonl`: keep newest 7, remove world-action

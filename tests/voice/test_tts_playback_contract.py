@@ -1273,22 +1273,49 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(events[0][1]["turn_id"], "turn-1")
         self.assertEqual(events[-1][0], "discord_playback_finished")
 
-    def test_play_audio_source_raises_after_play_error(self) -> None:
-        class FakeVc:
-            def is_playing(self) -> bool:
-                return False
+    def test_play_audio_source_redacts_dynamic_errors(self) -> None:
+        private_error = "PRIVATE_DISCORD_PLAYBACK:/synthetic/voice-cache.wav"
 
-            def is_paused(self) -> bool:
-                return False
+        for stage in ("vc_play", "after_play", "source_error"):
+            with self.subTest(stage=stage):
+                events: list[tuple[str, dict]] = []
+                configure_tts_playback_logging(
+                    lambda event, **payload: events.append((event, payload))
+                )
+                source = OmniVoicePCMStream() if stage == "source_error" else object()
+                if isinstance(source, OmniVoicePCMStream):
+                    source.error = RuntimeError(private_error)
 
-            def play(self, _source, *, after) -> None:
-                after(RuntimeError("boom"))
+                class FakeVc:
+                    def is_playing(self) -> bool:
+                        return False
 
-        async def runner() -> None:
-            await play_audio_source(FakeVc(), object())  # type: ignore[arg-type]
+                    def is_paused(self) -> bool:
+                        return False
 
-        with self.assertRaisesRegex(RuntimeError, "boom"):
-            asyncio.run(runner())
+                    def play(self, _source, *, after) -> None:
+                        if stage == "vc_play":
+                            raise RuntimeError(private_error)
+                        after(
+                            RuntimeError(private_error)
+                            if stage == "after_play"
+                            else None
+                        )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "PRIVATE_DISCORD_PLAYBACK",
+                ):
+                    asyncio.run(
+                        play_audio_source(FakeVc(), source)  # type: ignore[arg-type]
+                    )
+
+                event, event_payload = events[-1]
+                self.assertEqual(event, "discord_playback_exception")
+                self.assertEqual(event_payload["stage"], stage)
+                self.assertEqual(event_payload["error"], "discord_playback_failed")
+                self.assertEqual(event_payload["error_type"], "RuntimeError")
+                self.assertNotIn(private_error, repr(events))
 
     def test_play_audio_source_stops_stuck_prior_playback_on_timeout(self) -> None:
         class FakeVc:

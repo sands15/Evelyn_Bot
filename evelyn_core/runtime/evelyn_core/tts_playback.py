@@ -1855,21 +1855,42 @@ async def play_audio_source(
     except Exception as exc:
         _log_turn_event(
             "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "vc_play", "error": repr(exc)}, extra=payload),
+            **merge_log_event_payload(
+                explicit={
+                    "stage": "vc_play",
+                    "error": "discord_playback_failed",
+                    "error_type": type(exc).__name__,
+                },
+                extra=payload,
+            ),
         )
         raise
 
     if playback_error[0] is not None:
         _log_turn_event(
             "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "after_play", "error": repr(playback_error[0])}, extra=payload),
+            **merge_log_event_payload(
+                explicit={
+                    "stage": "after_play",
+                    "error": "discord_playback_failed",
+                    "error_type": type(playback_error[0]).__name__,
+                },
+                extra=payload,
+            ),
         )
         raise playback_error[0]
 
     if isinstance(source, (OmniVoicePCMStream, QueuedAudioSource)) and source.error is not None:
         _log_turn_event(
             "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "source_error", "error": repr(source.error)}, extra=payload),
+            **merge_log_event_payload(
+                explicit={
+                    "stage": "source_error",
+                    "error": "discord_playback_failed",
+                    "error_type": type(source.error).__name__,
+                },
+                extra=payload,
+            ),
         )
         raise source.error
 
