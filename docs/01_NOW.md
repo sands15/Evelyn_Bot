@@ -26,7 +26,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 ## 최근 확인
 
 - 2026-08-09 Mindcraft history는 bounded process-local·no-mount이며 Codex는 off다.
-  Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다.
+  Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다. Minecraft lease 위임은 exact nonnegative JSON integer `guildId`만 받는다.
   broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final
   route/action sink까지 유지한다. recovery step은 exact history snapshot의 process-local
   one-shot issuance만 소비한다. Minecraft Autonomy plan은 current grant의 연속 prefix만 만들고, route와 engine lifecycle은 cleanup까지 직렬화되며 `자율정지`는 intent를 보존한다. durable bound-receipt history, legacy cleanup과 live 검증은 남아 있다.
@@ -61,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
-- CI-equivalent 전체 3,210개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
+- CI-equivalent 전체 3,211개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 638개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

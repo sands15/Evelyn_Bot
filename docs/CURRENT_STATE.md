@@ -62,6 +62,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - 내부 mutation endpoint의 unauthenticated 401은 `leaseStatus`를 포함하지
     않는다. remote delegate는 status 누락·손상, 오류, transport failure와
     cancellation에서 기존 active cache를 즉시 inactive error로 지운다.
+    authenticated mutation의 `guildId`도 exact nonnegative JSON integer만
+    허용하며 bool·float·문자열·누락 값은 owner 호출 전에 고정 오류로 거부한다.
   - status와 audit journal에는 raw goal, transcript, Minecraft chat, token과
     임의 arguments를 저장하지 않는다.
   - 직전 durable-audit source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime

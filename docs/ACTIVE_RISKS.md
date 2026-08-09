@@ -121,6 +121,8 @@ status artifact commit 실패도 같은 capability를 제거하고, 실행 중�
 않는다. remote는 authoritative status 누락·손상, 오류, transport failure와
 cancellation에서 stale active cache를 지운다. 이 경계는 raw goal,
 transcript, Minecraft chat과 token을 저장하지 않는다.
+Authenticated mutation도 `guildId`를 exact nonnegative JSON integer로 요구해
+bool·float·문자열·누락 값의 cross-guild 축소 변환을 owner 호출 전에 막는다.
 
 직전 durable-audit source snapshot은 bundled Python의 Minecraft 115개(skip 7), runtime
 513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를 통과했다. 실제 Minecraft

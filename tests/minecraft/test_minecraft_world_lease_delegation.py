@@ -174,6 +174,30 @@ class MinecraftWorldLeaseDelegationTests(
 
         self.assertEqual(owner.calls, [])
 
+    async def test_delegation_rejects_non_exact_guild_ids(self) -> None:
+        owner = FakeOwner()
+
+        for guild_id in (True, False, 7.9, "7", None, -1):
+            with self.subTest(guild_id=guild_id):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minecraft_world_guild_invalid",
+                ):
+                    await execute_minecraft_world_lease_delegation(
+                        owner,
+                        action="disconnect",
+                        payload={"guildId": guild_id},
+                    )
+
+        self.assertEqual(owner.calls, [])
+
+        await execute_minecraft_world_lease_delegation(
+            owner,
+            action="disconnect",
+            payload={"guildId": 0},
+        )
+        self.assertEqual(owner.calls, [("disconnect", 0)])
+
     async def test_action_delegation_is_quick_typed_and_exact(
         self,
     ) -> None:

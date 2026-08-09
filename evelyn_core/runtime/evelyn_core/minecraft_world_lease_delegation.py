@@ -43,15 +43,13 @@ def minecraft_world_lease_delegation_error_code(
 
 
 def _guild_id(value: Any) -> int:
-    try:
-        guild_id = int(value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "minecraft_world_guild_invalid"
-        ) from exc
-    if guild_id < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+    ):
         raise RuntimeError("minecraft_world_guild_invalid")
-    return guild_id
+    return value
 
 
 def _ttl_sec(value: Any) -> float | None:

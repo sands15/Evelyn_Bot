@@ -1,7 +1,7 @@
 # Minecraft World-Action Lease
 
 Document status: **Current implementation contract**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-09 KST
 
 ## Purpose
 
@@ -221,6 +221,9 @@ command, argv, shell, or working-directory fields, and requests carrying a
 browser `Origin` header are rejected. A Discord-process restart closes only its
 remote poller; a Bot API owner restart rotates the token, discards the lease,
 and reconciles any stale runner.
+Every mutation also requires `guildId` to be an exact nonnegative JSON integer;
+booleans, floats, strings, missing values, and negative integers are rejected
+before any owner method is called.
 
 The action delegation payloads are also exact. `action` accepts only `guildId`
 and the unbound typed request; the owner adds the goal-run and lease epoch.
