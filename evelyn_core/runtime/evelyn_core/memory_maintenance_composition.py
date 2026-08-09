@@ -201,7 +201,10 @@ class MemoryMaintenanceComposition:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                deps.log(f"[MEMORY VAULT] maintenance failed guild={guild_id}: {exc!r}")
+                deps.log(
+                    f"[MEMORY VAULT] maintenance failed guild={guild_id} "
+                    f"errorType={type(exc).__name__}"
+                )
             finally:
                 task = deps.background_vault_tasks.get(guild_id)
                 if task is deps.current_task():

@@ -245,7 +245,8 @@ def apply_long_term_memory_result(
                     if log is not None:
                         log(
                             f"[PROACTIVE QUESTIONS] promote failed guild={guild_id} "
-                            f"scope={scope_type}:{scope_key or 'default'} err={exc}"
+                            f"scope={scope_type}:{scope_key or 'default'} "
+                            f"errorType={type(exc).__name__}"
                         )
 
     return applied

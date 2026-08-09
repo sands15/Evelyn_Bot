@@ -210,6 +210,37 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertEqual(facts, [])
         self.assertEqual(questions, [])
 
+    def test_question_promotion_failure_logs_only_exception_type(self) -> None:
+        private_error = "PRIVATE_PROMOTION_EXCEPTION C:/secret/memory-token"
+        logs = []
+
+        with TemporaryMemoryRoot(), patch(
+            "evelyn_core.memory_writeback_state.promote_open_questions",
+            side_effect=RuntimeError(private_error),
+        ):
+            applied = apply_long_term_memory_result(
+                123,
+                {
+                    "summary_update": "",
+                    "durable_facts": [],
+                    "open_questions": [{"type": "next", "text": "다음 후보"}],
+                },
+                memory_fact_limit=20,
+                memory_loop_limit=20,
+                log=logs.append,
+            )
+
+        self.assertEqual(applied["questions_written"], 1)
+        self.assertEqual(applied["question_promote_failures"], 1)
+        self.assertEqual(
+            logs,
+            [
+                "[PROACTIVE QUESTIONS] promote failed guild=123 "
+                "scope=guild:default errorType=RuntimeError"
+            ],
+        )
+        self.assertNotIn(private_error, repr(logs))
+
     def test_run_long_term_memory_update_builds_context_and_writes_result(self) -> None:
         calls = []
         logs = []

@@ -137,6 +137,26 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
             1000.0,
         )
 
+    async def test_vault_maintenance_failure_logs_only_exception_type(self):
+        private_error = "PRIVATE_VAULT_MAINTENANCE C:/secret/memory-token"
+        create_task = Mock(
+            side_effect=lambda coro, turn_scope=None: asyncio.create_task(coro)
+        )
+        log = Mock()
+        composition, deps = self.build(
+            create_scoped_task=create_task,
+            to_thread=AsyncMock(side_effect=RuntimeError(private_error)),
+            log=log,
+        )
+
+        composition.schedule_memory_vault_maintenance(1)
+        await deps.background_vault_tasks[1]
+
+        log.assert_called_once_with(
+            "[MEMORY VAULT] maintenance failed guild=1 errorType=RuntimeError"
+        )
+        self.assertNotIn(private_error, repr(log.call_args_list))
+
     def test_main_uses_lazy_summary_binding(self):
         source=(REPO_ROOT/"main.py").read_text(encoding="utf-8")
         self.assertIn("memory_maintenance_composition = MemoryMaintenanceComposition(",source)

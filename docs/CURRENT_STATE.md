@@ -494,7 +494,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     남긴다. self-identity review queue write 실패가 turn trace decision으로 전달될
     때도 fixed code/type만 남기며, daily vault mirror 실패 로그도 fixed prefix와
     exception type만 남긴다. Summary LLM primary·compact retry 실패 로그도 fixed
-    prefix와 exception type만 남긴다.
+    prefix와 exception type만 남긴다. proactive open-question promotion과 background
+    vault maintenance 실패 로그의 예외 detail도 `errorType=<exception-type>`만 남긴다.
   - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
     단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
