@@ -354,6 +354,19 @@ check(contract.shouldApplyStateResponse(2, 2, false), "current response");
         self.assertIn("runtime.serviceHealth || payload.serviceHealth", self.html)
         self.assertIn("runtimeHealthLine.textContent = runtimeHealthText(state);", self.html)
 
+    def test_discord_mode_toggle_waits_for_service_health_confirmation(self) -> None:
+        self.assertIn('id="discordModeLine"', self.html)
+        self.assertIn('id="discordModeToggleButton"', self.html)
+        self.assertIn('service.id === "discord_bot"', self.html)
+        self.assertIn("function renderDiscordMode(state)", self.html)
+        self.assertIn("renderDiscordMode(state);", self.html)
+        self.assertIn("discordModeTransitionTarget", self.html)
+        self.assertIn('fetchApi("/api/control-page/discord-mode/preview"', self.html)
+        self.assertIn('fetchApi("/api/control-page/discord-mode/apply"', self.html)
+        self.assertIn("preview.confirmToken", self.html)
+        self.assertIn("window.confirm", self.html)
+        self.assertIn("Control Page는 계속 실행돼", self.html)
+
     def test_runtime_health_diagnosis_map_covers_required_codes(self) -> None:
         for code in (
             "CP_UP_BOT_DOWN",

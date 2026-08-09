@@ -18,7 +18,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 현재 초점
 
-- OmniVoice 실제 스피커 청취 확인과 로컬 10-turn·무음 음성 E2E 검증
+- 실사용 로그 기반 오류 수정, Control Page Discord 모드 OFF/ON과 OmniVoice 실제 청취 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
 - Discord 음성의 실제 채널 E2E 검증
 - Conversation Continuity와 local/Discord 음성의 장애·재시작 실환경 검증
@@ -60,7 +60,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   Discord stale voice client는 강제 정리 뒤 표준 연결로 복구하고, 검색 복구·playback timeout·무재생 거부·late-turn fence가 stale 완료를 막는다.
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
-- Supervisor 복구는 목적별 최소 credential과 소유한 프로세스 handle만 사용한다.
+- Supervisor 복구는 목적별 최소 credential과 소유한 process handle만 사용하며 Control Page의 Discord 토글은 core를 유지한 채 `discord_bot`만 전환한다.
 - CI-equivalent 전체 3,238개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 644개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 

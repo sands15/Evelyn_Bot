@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import json
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from pathlib import Path
 
 
@@ -89,6 +89,19 @@ class ControlPageRuntimeHealthContractTests(unittest.TestCase):
         self.assertIn('"event": "apply_response"', self.local_server)
         self.assertIn('"repairLog"', self.local_server)
 
+    def test_discord_mode_has_confirmed_public_endpoints(self) -> None:
+        self.assertIn("async def discord_mode_preview_handler", self.local_server)
+        self.assertIn("async def discord_mode_apply_handler", self.local_server)
+        self.assertIn('"start_discord_bot" if enabled else "stop_discord_bot"', self.local_server)
+        self.assertIn(
+            'app.router.add_post("/api/control-page/discord-mode/preview", discord_mode_preview_handler)',
+            self.local_server,
+        )
+        self.assertIn(
+            'app.router.add_post("/api/control-page/discord-mode/apply", discord_mode_apply_handler)',
+            self.local_server,
+        )
+
     def test_runtime_health_is_cached_for_state_polling(self) -> None:
         self.assertIn("RUNTIME_HEALTH_CACHE_TTL_SEC", self.local_server)
         self.assertIn("RUNTIME_HEALTH_CACHE_MAX_STALE_SEC", self.local_server)
@@ -123,6 +136,102 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["dryRunOnly"])
         self.assertEqual(payload["error"], "repair_execution_not_enabled")
         self.assertIn("Use dryRun=true", payload["message"])
+
+    async def test_discord_mode_preview_maps_exact_boolean_to_fixed_action(self) -> None:
+        client = Mock()
+        client.preview.side_effect = lambda action_id: {
+            "ok": True,
+            "previewToken": f"token-{action_id}",
+            "expiresAt": 1120.0,
+        }
+
+        for enabled, action_id in (
+            (True, "start_discord_bot"),
+            (False, "stop_discord_bot"),
+        ):
+            class _Request:
+                async def json(self) -> dict[str, object]:
+                    return {"enabled": enabled}
+
+            with self.subTest(enabled=enabled), patch.object(
+                control_page_server,
+                "HostSupervisorClient",
+                return_value=client,
+            ):
+                response = await control_page_server.discord_mode_preview_handler(_Request())
+                payload = json.loads(response.text or "{}")
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["ok"], payload)
+            self.assertIs(payload["enabled"], enabled)
+            self.assertEqual(payload["actionId"], action_id)
+            self.assertEqual(payload["confirmToken"], f"token-{action_id}")
+
+        self.assertEqual(
+            [call.args[0] for call in client.preview.call_args_list],
+            ["start_discord_bot", "stop_discord_bot"],
+        )
+
+    async def test_discord_mode_rejects_non_boolean_or_extra_fields(self) -> None:
+        for body in (
+            {},
+            {"enabled": 1},
+            {"enabled": "false"},
+            {"enabled": False, "command": "anything"},
+        ):
+            class _Request:
+                async def json(self) -> dict[str, object]:
+                    return body
+
+            with self.subTest(body=body):
+                response = await control_page_server.discord_mode_preview_handler(_Request())
+                payload = json.loads(response.text or "{}")
+
+            self.assertEqual(response.status, 400)
+            self.assertEqual(payload["error"], "invalid_discord_mode_request")
+
+        class _ApplyRequest:
+            async def json(self) -> dict[str, object]:
+                return {"enabled": False}
+
+        response = await control_page_server.discord_mode_apply_handler(_ApplyRequest())
+        payload = json.loads(response.text or "{}")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload["error"], "invalid_discord_mode_request")
+
+    async def test_discord_mode_apply_is_accepted_then_health_confirms(self) -> None:
+        private = "PRIVATE_HOST_DETAIL"
+        client = Mock()
+        client.apply.return_value = {
+            "ok": True,
+            "status": "stopped",
+            "detail": private,
+        }
+
+        class _Request:
+            async def json(self) -> dict[str, object]:
+                return {"enabled": False, "confirmToken": "one-time-token"}
+
+        with (
+            patch.object(
+                control_page_server,
+                "HostSupervisorClient",
+                return_value=client,
+            ),
+            patch.object(
+                control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE,
+                "clear",
+            ) as clear_cache,
+        ):
+            response = await control_page_server.discord_mode_apply_handler(_Request())
+            payload = json.loads(response.text or "{}")
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(payload["state"], "stopping")
+        self.assertNotIn("ready", payload)
+        self.assertNotIn(private, repr(payload))
+        client.apply.assert_called_once_with("stop_discord_bot", "one-time-token")
+        clear_cache.assert_called_once_with()
 
     async def test_cached_health_returns_browser_safe_projection(self) -> None:
         raw_health = {

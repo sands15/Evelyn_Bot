@@ -18,6 +18,7 @@ ALLOWED_HOST_ACTIONS = frozenset(
     {
         "restart_local_bridge",
         "start_discord_bot",
+        "stop_discord_bot",
         "start_main_llm",
         "start_stt",
         "start_tts",

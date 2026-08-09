@@ -1774,6 +1774,12 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   tool-access 검증 전 not-ready)
 - Control-Page 변경성 요청은 CSRF 세션 계약을 사용한다.
 - 런타임 repair는 preview와 apply를 분리하며, preview만으로 프로세스를 시작하지 않는다.
+- Control Page의 Discord 모드 토글도 CSRF와 Host Supervisor의 일회용 2분
+  preview/apply token을 사용한다. request body는 exact boolean `enabled`만 받고
+  fixed `start_discord_bot|stop_discord_bot`으로 매핑해 임의 command를 받지 않는다.
+- OFF/ON은 별도 Compose `discord_bot`만 전환해 Bot API·Control Page와 로컬 core를
+  유지한다. apply 202는 요청 수락일 뿐이고 UI는 `runtime.serviceHealth` heartbeat로
+  실제 상태를 다시 확인한다. OFF는 `SIGINT`와 30초 grace를 사용한다.
 - Host Vision 요청은 `runtime_artifacts/host_vision/`의 exact-schema queue만
   사용하고, Host Supervisor가 소유한 Local I/O Bridge만 화면을 캡처한다.
 - Host UI Action 요청은 `runtime_artifacts/host_ui_action/`의 exact-schema

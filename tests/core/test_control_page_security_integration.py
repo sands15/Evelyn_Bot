@@ -137,11 +137,18 @@ class RealControlAppSecurityWiringTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Origin": origin},
                 json={},
             )
+            discord_mode_response = await client.post(
+                "/api/control-page/discord-mode/preview",
+                headers={"Origin": origin},
+                json={"enabled": False},
+            )
 
             self.assertEqual(session_response.status, 200)
             self.assertTrue((await session_response.json())["csrfToken"])
             self.assertEqual(shutdown_response.status, 403)
             self.assertEqual((await shutdown_response.json())["error"], "csrf_token_required")
+            self.assertEqual(discord_mode_response.status, 403)
+            self.assertEqual((await discord_mode_response.json())["error"], "csrf_token_required")
         finally:
             await client.close()
 

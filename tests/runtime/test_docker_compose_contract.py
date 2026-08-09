@@ -105,6 +105,12 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("CONTROL_PAGE_ENABLED: \"false\"", source)
         self.assertIn("STT_SERVICE_FALLBACK_LOCAL: \"false\"", source)
         self.assertIn("VISION_WATCH_ENABLED: \"false\"", source)
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split(
+            "\n  main_llm:",
+            1,
+        )[0]
+        self.assertIn("stop_signal: SIGINT", discord_bot)
+        self.assertIn("stop_grace_period: 30s", discord_bot)
 
     def test_app_images_are_built_and_started_with_one_source_revision(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")

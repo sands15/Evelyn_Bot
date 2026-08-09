@@ -619,6 +619,12 @@ Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재�
 fresh heartbeat를 확인한 뒤에만 준비 완료를 보고한다. TTS 음성 프로필의 WAV,
 JSON, `ref_text`도 Docker 시작 전에 검사한다.
 
+Control Page의 Discord OFF/ON은 별도 `discord_bot`만 fixed Host Supervisor action으로
+전환하고 health heartbeat로 완료를 확인한다. OFF에는 Discord.py의 정상 close 경로를
+사용하도록 Compose `SIGINT`와 30초 grace를 설정했지만, 실제 gateway·voice rejoin과
+진행 중 text/voice turn drain은 아직 Docker/Discord live로 검증하지 않았다. 그 전에는
+대화 사이에 전환하고, 실패 시 Discord worker의 error code/type 주변 로그로 재현한다.
+
 현재 source의 TTS readiness는 HTTP 200만으로 통과하지 않고 실제 OmniVoice의
 `status=healthy`, `ready=true`, `model_loaded=true`,
 `model_id=k2-fsa/OmniVoice`,

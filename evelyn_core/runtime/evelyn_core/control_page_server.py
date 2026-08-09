@@ -50,6 +50,7 @@ from .memory_deletion_journal import (
     memory_deletion_journal_guard,
 )
 from .memory_exposure import MemoryExposurePosition
+from .host_supervisor_client import HostSupervisorClient
 from .memory_vault import (
     apply_memory_provenance_backfill,
     delete_memory_vault_user_note,
@@ -1270,6 +1271,140 @@ async def runtime_repair_apply_handler(request: web.Request) -> web.StreamRespon
     error = response.get("error")
     status = 409 if error in {"repair_cooldown_active", "confirm_token_required"} else 400
     return json_response(response, status=status)
+
+
+DISCORD_MODE_PUBLIC_ERRORS = frozenset(
+    {
+        "docker_compose_failed",
+        "host_action_launch_failed",
+        "host_supervisor_timeout",
+        "host_supervisor_unavailable",
+        "preview_token_action_mismatch",
+        "preview_token_expired",
+        "preview_token_invalid",
+        "preview_token_reused",
+        "unsupported_host_action",
+    }
+)
+
+
+def _discord_mode_request(
+    payload: Any,
+    *,
+    require_confirm_token: bool,
+) -> tuple[bool, str] | None:
+    required = {"enabled", "confirmToken"} if require_confirm_token else {"enabled"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        return None
+    enabled = payload.get("enabled")
+    if type(enabled) is not bool:
+        return None
+    confirm_token = str(payload.get("confirmToken") or "").strip()
+    if require_confirm_token and not confirm_token:
+        return None
+    return enabled, confirm_token
+
+
+def _discord_mode_action_id(enabled: bool) -> str:
+    return "start_discord_bot" if enabled else "stop_discord_bot"
+
+
+def _discord_mode_public_error(result: Any) -> str:
+    candidate = str(result.get("error") or "") if isinstance(result, dict) else ""
+    return (
+        candidate
+        if candidate in DISCORD_MODE_PUBLIC_ERRORS
+        else "discord_mode_transition_failed"
+    )
+
+
+async def discord_mode_preview_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        parsed = _discord_mode_request(
+            await request.json(),
+            require_confirm_token=False,
+        )
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return json_response(
+            {"ok": False, "error": "invalid_discord_mode_request"},
+            status=400,
+        )
+    enabled, _ = parsed
+    action_id = _discord_mode_action_id(enabled)
+    preview = await asyncio.to_thread(HostSupervisorClient().preview, action_id)
+    if not preview.get("ok"):
+        error = _discord_mode_public_error(preview)
+        return json_response(
+            {"ok": False, "enabled": enabled, "error": error},
+            status=503 if error.startswith("host_supervisor_") else 409,
+        )
+    confirm_token = str(preview.get("previewToken") or "").strip()
+    if not confirm_token:
+        return json_response(
+            {"ok": False, "enabled": enabled, "error": "discord_mode_transition_failed"},
+            status=503,
+        )
+    return json_response(
+        {
+            "schema": "discord_mode.preview.v1",
+            "ok": True,
+            "enabled": enabled,
+            "actionId": action_id,
+            "confirmToken": confirm_token,
+            "expiresAt": preview.get("expiresAt"),
+            "requiresConfirm": True,
+        }
+    )
+
+
+async def discord_mode_apply_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        parsed = _discord_mode_request(
+            await request.json(),
+            require_confirm_token=True,
+        )
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return json_response(
+            {"ok": False, "error": "invalid_discord_mode_request"},
+            status=400,
+        )
+    enabled, confirm_token = parsed
+    action_id = _discord_mode_action_id(enabled)
+    result = await asyncio.to_thread(
+        HostSupervisorClient().apply,
+        action_id,
+        confirm_token,
+    )
+    if not result.get("ok"):
+        error = _discord_mode_public_error(result)
+        status = (
+            503
+            if error.startswith("host_supervisor_")
+            else 502 if error in {"docker_compose_failed", "host_action_launch_failed"} else 409
+        )
+        return json_response(
+            {"ok": False, "enabled": enabled, "error": error},
+            status=status,
+        )
+    CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
+    return json_response(
+        {
+            "schema": "discord_mode.transition.v1",
+            "ok": True,
+            "enabled": enabled,
+            "state": "starting" if enabled else "stopping",
+            "message": (
+                "Discord 모드를 켜는 중이야."
+                if enabled
+                else "Discord 모드를 끄는 중이야. Control Page와 Evelyn core는 계속 실행돼."
+            ),
+        },
+        status=202,
+    )
 
 
 def _voice_validation_uses_local(session: dict[str, Any]) -> bool:
@@ -3447,6 +3582,8 @@ def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
     app.router.add_get("/api/control-page/runtime-repair", runtime_repair_handler)
     app.router.add_post("/api/control-page/runtime-repair/preview", runtime_repair_preview_handler)
     app.router.add_post("/api/control-page/runtime-repair/apply", runtime_repair_apply_handler)
+    app.router.add_post("/api/control-page/discord-mode/preview", discord_mode_preview_handler)
+    app.router.add_post("/api/control-page/discord-mode/apply", discord_mode_apply_handler)
     app.router.add_get("/api/control-page/storage-retention", storage_retention_handler)
     app.router.add_get(
         "/api/control-page/voice-capture-consent",

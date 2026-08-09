@@ -940,6 +940,27 @@
       font-size: 0.92rem;
     }
 
+    .status-value-action {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .status-toggle {
+      min-height: 28px;
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: var(--panel-strong);
+      font: 800 0.76rem/1 inherit;
+    }
+
+    .status-toggle:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
     .audio-device-panel {
       display: grid;
       gap: 10px;
@@ -2180,7 +2201,14 @@
         <div class="line"><span>TTS</span><strong>대기</strong></div>
         <div class="line"><span>바리인 연속성</span><strong id="voiceBargeInContinuityLine">-</strong></div>
         <div class="line"><span>Runtime</span><strong id="runtimeHealthLine">checking</strong></div>
-        <div class="line"><span>Minecraft</span><strong>꺼짐</strong></div>
+        <div class="line">
+          <span>Discord</span>
+          <span class="status-value-action">
+            <strong id="discordModeLine">확인 중</strong>
+            <button class="status-toggle" id="discordModeToggleButton" type="button" disabled>대기</button>
+          </span>
+        </div>
+        <div class="line"><span>Minecraft</span><strong id="minecraftStatusLine">꺼짐</strong></div>
         <div class="line"><span>최근 학습</span><strong>v46</strong></div>
         <div class="line"><span>GPU 기준</span><strong>RTX 3090</strong></div>
       </div>
@@ -2468,6 +2496,9 @@
     let lastBubble = document.getElementById("lastBubble");
     const voiceBargeInContinuityLine = document.getElementById("voiceBargeInContinuityLine");
     const runtimeHealthLine = document.getElementById("runtimeHealthLine");
+    const discordModeLine = document.getElementById("discordModeLine");
+    const discordModeToggleButton = document.getElementById("discordModeToggleButton");
+    const minecraftStatusLine = document.getElementById("minecraftStatusLine");
     const contractTimelineStatus = document.getElementById("contractTimelineStatus");
     const contractTimelineList = document.getElementById("contractTimelineList");
     const quickCommandRow = document.getElementById("quick-command-row");
@@ -2555,6 +2586,10 @@
     let runtimeRepairPreviewPlan = null;
     let runtimeRepairPreviewBusy = false;
     let runtimeRepairApplyBusy = false;
+    let discordModeBusy = false;
+    let discordModeCurrentEnabled = null;
+    let discordModeTransitionTarget = null;
+    let discordModeTransitionStartedAt = 0;
     const runtimeRepairObservationStartedAt = Date.now();
     const runtimeRepairReadyServices = new Set();
     const runtimeRepairFailureObservations = new Map();
@@ -3911,7 +3946,16 @@
             "memory_delete_cleanup_required",
             "memory_edit_cleanup_required",
             "memory_provenance_backfill_cleanup_required",
-            "memory_provenance_correction_cleanup_required"
+            "memory_provenance_correction_cleanup_required",
+            "discord_mode_transition_failed",
+            "docker_compose_failed",
+            "host_action_launch_failed",
+            "host_supervisor_timeout",
+            "host_supervisor_unavailable",
+            "preview_token_action_mismatch",
+            "preview_token_expired",
+            "preview_token_invalid",
+            "preview_token_reused"
           ].includes(candidate)) {
             evelynErrorCode = candidate;
           }
@@ -3921,6 +3965,8 @@
         const apiError = new Error(
           evelynErrorCode === "memory_deletion_journal_busy"
             ? "다른 기억 조회나 삭제가 끝나는 중이야. 잠깐 뒤 다시 시도해줘."
+            : evelynErrorCode === "host_supervisor_unavailable"
+              ? "Host Supervisor가 꺼져 있어. start_local.bat --background로 Evelyn을 실행해줘."
             : `api_error:${response.status}`
         );
         apiError.evelynErrorCode = evelynErrorCode;
@@ -3933,6 +3979,95 @@
       return window.EvelynBootProgress
         .continuityDecision(hasReachedReadyState, state)
         .preserveChat;
+    }
+
+    function discordModeService(state) {
+      const runtime = state && state.runtime && typeof state.runtime === "object" ? state.runtime : {};
+      const health = runtime.serviceHealth || (state && state.serviceHealth) || null;
+      const services = health && Array.isArray(health.services) ? health.services : [];
+      return services.find((service) => service && service.id === "discord_bot") || null;
+    }
+
+    function paintDiscordMode(enabled, { busy = false, label = "" } = {}) {
+      if (discordModeLine) {
+        discordModeLine.textContent = label || (enabled === true ? "켜짐" : enabled === false ? "꺼짐" : "확인 중");
+      }
+      if (!discordModeToggleButton) return;
+      discordModeToggleButton.disabled = busy || enabled === null;
+      discordModeToggleButton.dataset.enabled = enabled === null ? "" : String(enabled);
+      discordModeToggleButton.textContent = busy
+        ? enabled === true ? "끄는 중" : "켜는 중"
+        : enabled === true ? "끄기" : enabled === false ? "켜기" : "대기";
+    }
+
+    function renderDiscordMode(state) {
+      const service = discordModeService(state);
+      if (!service) {
+        discordModeCurrentEnabled = null;
+        paintDiscordMode(null);
+        return;
+      }
+      discordModeCurrentEnabled = service.ready === true || String(service.state || "").toLowerCase() === "up";
+      if (discordModeTransitionTarget !== null) {
+        if (discordModeCurrentEnabled === discordModeTransitionTarget) {
+          discordModeTransitionTarget = null;
+        } else if (Date.now() - discordModeTransitionStartedAt > 30000) {
+          discordModeTransitionTarget = null;
+        }
+      }
+      if (discordModeTransitionTarget !== null) {
+        paintDiscordMode(
+          discordModeTransitionTarget ? false : true,
+          {
+            busy: true,
+            label: discordModeTransitionTarget ? "켜는 중" : "끄는 중"
+          }
+        );
+        return;
+      }
+      paintDiscordMode(discordModeCurrentEnabled, { busy: discordModeBusy });
+    }
+
+    async function requestDiscordModeToggle() {
+      if (discordModeBusy || discordModeTransitionTarget !== null || discordModeCurrentEnabled === null) return;
+      const enabled = !discordModeCurrentEnabled;
+      discordModeBusy = true;
+      paintDiscordMode(discordModeCurrentEnabled, {
+        busy: true,
+        label: enabled ? "켜기 확인" : "끄기 확인"
+      });
+      try {
+        const preview = await fetchApi("/api/control-page/discord-mode/preview", {
+          method: "POST",
+          body: JSON.stringify({ enabled })
+        });
+        const verb = enabled ? "켤" : "끌";
+        if (!window.confirm(`Discord 모드를 ${verb}까? Evelyn core와 Control Page는 계속 실행돼.`)) {
+          return;
+        }
+        const result = await fetchApi("/api/control-page/discord-mode/apply", {
+          method: "POST",
+          body: JSON.stringify({
+            enabled,
+            confirmToken: preview.confirmToken
+          })
+        });
+        discordModeTransitionTarget = enabled;
+        discordModeTransitionStartedAt = Date.now();
+        paintDiscordMode(!enabled, {
+          busy: true,
+          label: enabled ? "켜는 중" : "끄는 중"
+        });
+        setBubble(result.message || (enabled ? "Discord 모드를 켜는 중이야." : "Discord 모드를 끄는 중이야."));
+        window.setTimeout(() => refreshState({ runInitialPanelCommands: false }), 600);
+      } catch (error) {
+        setBubble(`Discord 모드 전환 실패: ${error.message}`);
+      } finally {
+        discordModeBusy = false;
+        if (discordModeTransitionTarget === null) {
+          paintDiscordMode(discordModeCurrentEnabled);
+        }
+      }
     }
 
     function applyState(state, options = {}) {
@@ -3963,13 +4098,14 @@
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
     if (lines[1]) lines[1].textContent = voiceSpeaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
     if (runtimeHealthLine) runtimeHealthLine.textContent = runtimeHealthText(state);
+    renderDiscordMode(state);
     renderContractTimeline(state);
     renderAudioDevicePanel(state);
     if (voiceBargeInContinuityLine) {
       voiceBargeInContinuityLine.textContent = formatBargeInContinuitySummary(bargeInContinuity, { compact: true });
     }
     renderRuntimeRepairPreview(state);
-      if (lines[3]) lines[3].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
+      if (minecraftStatusLine) minecraftStatusLine.textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
       return preserveChatHistory;
     }
 
@@ -5838,6 +5974,9 @@
       composer.value = pendingChatAtLoad.text;
     }
     sendButton.addEventListener("click", handleSubmit);
+    if (discordModeToggleButton) {
+      discordModeToggleButton.addEventListener("click", requestDiscordModeToggle);
+    }
     if (runtimeRepairPreviewButton) {
       runtimeRepairPreviewButton.addEventListener("click", () => {
         if (runtimeRepairPreviewButton.dataset.runtimeRepairApply) {

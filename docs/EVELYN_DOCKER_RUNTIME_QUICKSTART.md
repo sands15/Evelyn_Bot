@@ -97,6 +97,29 @@ docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --
 docker compose -f docker-compose.fast-control.yml --profile llm --profile tts --profile stt --profile vision --profile voyager --profile discord up -d --no-deps discord_bot
 ```
 
+### 실행 중 Discord 모드 끄기/켜기
+
+`start_local.bat --background`로 시작한 상태에서는 Control Page 오른쪽 상태 패널의
+`Discord` 행에서 `끄기` 또는 `켜기`를 누른다. 확인 창을 승인하면 일회용 2분
+preview token으로 Windows Host Supervisor가 `discord_bot` 서비스만 stop/start한다.
+Bot API, Control Page, LLM과 로컬 음성 core는 재시작하지 않는다.
+
+버튼의 `켜는 중`/`끄는 중`은 요청 수락 상태다. 최종 `켜짐`/`꺼짐`은
+`runtime.serviceHealth`의 `discord_bot` heartbeat를 다음 polling에서 확인한 뒤에만
+표시한다. Host Supervisor가 꺼져 있으면 `start_local.bat --background`로 정상
+launcher를 먼저 실행해야 한다. OFF는 Compose `SIGINT`와 30초 grace를 사용하지만
+실제 진행 중인 Discord 답변의 drain은 아직 live 검증하지 않았으므로 대화 사이에
+전환하는 것이 안전하다. 전체 stack을 다시 시작하면 launcher에서 선택한 profile이
+다시 기준이 되며 이 토글은 별도 desired-state 설정을 저장하지 않는다.
+
+실사용 오류를 전달할 때는 다음처럼 Discord worker의 최근 로그만 확인한다.
+
+```powershell
+docker compose -f docker-compose.fast-control.yml --profile discord logs --tail 200 discord_bot
+```
+
+token이나 대화 원문은 붙이지 말고, 오류 시각과 고정 error code/type 주변만 공유한다.
+
 ## 점검
 
 기본 runtime check:

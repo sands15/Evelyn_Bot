@@ -150,6 +150,8 @@ services:
       args:
         EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
     restart: "no"
+    stop_signal: SIGINT
+    stop_grace_period: 30s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

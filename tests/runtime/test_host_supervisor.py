@@ -229,6 +229,49 @@ class HostSupervisorTests(unittest.TestCase):
             "local-only-disabled",
         )
 
+    def test_stop_discord_action_is_allowlisted_isolated_and_single_use(self):
+        secret = "PRIVATE_DISCORD_TOKEN"
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": secret}, clear=False):
+            preview = self.supervisor.handle_request(
+                self.request(actionId="stop_discord_bot")
+            )
+            applied = self.supervisor.handle_request(
+                self.request(
+                    operation="apply",
+                    actionId="stop_discord_bot",
+                    previewToken=preview["previewToken"],
+                )
+            )
+            reused = self.supervisor.handle_request(
+                self.request(
+                    operation="apply",
+                    actionId="stop_discord_bot",
+                    previewToken=preview["previewToken"],
+                )
+            )
+
+        self.assertTrue(preview["ok"], preview)
+        self.assertTrue(applied["ok"], applied)
+        self.assertEqual(applied["status"], "stopped")
+        command, options = self.commands[-1]
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(self.supervisor.project_root / "docker-compose.fast-control.yml"),
+                "--profile",
+                "discord",
+                "stop",
+                "discord_bot",
+            ],
+        )
+        self.assertEqual(options["env"]["DISCORD_BOT_TOKEN"], "local-only-disabled")
+        self.assertNotIn(secret, repr(options["env"]))
+        self.assertFalse(reused["ok"])
+        self.assertEqual(reused["error"], "preview_token_reused")
+
     def test_preview_token_expires_after_two_minutes(self):
         preview = self.supervisor.handle_request(self.request())
         self.clock.value += 121

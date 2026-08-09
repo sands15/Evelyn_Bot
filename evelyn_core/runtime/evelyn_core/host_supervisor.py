@@ -795,6 +795,17 @@ class HostSupervisor:
         return True
 
     def _docker_action_command(self, action_id: str) -> list[str] | None:
+        if action_id == "stop_discord_bot":
+            return [
+                "docker",
+                "compose",
+                "-f",
+                str(self.project_root / "docker-compose.fast-control.yml"),
+                "--profile",
+                "discord",
+                "stop",
+                "discord_bot",
+            ]
         service_map = {
             "start_discord_bot": ("discord", "discord_bot"),
             "start_main_llm": ("llm", "main_llm"),
@@ -901,9 +912,14 @@ class HostSupervisor:
             }
         if completed.returncode != 0:
             self.runtime_errors.record("docker_compose_failed")
+        succeeded = completed.returncode == 0
         return {
-            "ok": completed.returncode == 0,
-            "status": "started" if completed.returncode == 0 else "failed",
+            "ok": succeeded,
+            "status": (
+                "stopped"
+                if succeeded and action_id == "stop_discord_bot"
+                else "started" if succeeded else "failed"
+            ),
             "exitCode": int(completed.returncode),
             "error": None if completed.returncode == 0 else "docker_compose_failed",
         }
