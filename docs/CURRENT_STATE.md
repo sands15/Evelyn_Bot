@@ -2186,6 +2186,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   기존 failure 경로로 전파되어 room lock과 user-only continuity를 정확히 한 번 정리한다.
   동적 `vc.play`·`after` callback·stream source 실패의 turn trace에는 fixed
   `discord_playback_failed`와 exception type만 남기며, 기존 timeout code도 content-free다.
+- Opus load와 STT warmup 실패는 startup component에 각각 fixed
+  `opus_load_failed:<type>`·`stt_warmup_failed:<type>`만 남긴다. 외부 wrapper도 고정
+  문구를 cause 없이 발생시켜 Control Page boot progress와 traceback에 원문·경로를 복제하지 않는다.
 - Local Bridge는 validation 발화를 STT 서비스에 보낼 때 content-free
   `validation_bound=true`만 전달한다. session/attempt ID는 보내지 않으며 STT 완료
   로그는 transcript 대신 길이 marker를 기록한다. 일반 발화는 `false`를 명시한다.

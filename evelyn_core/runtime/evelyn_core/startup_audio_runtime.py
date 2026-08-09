@@ -31,8 +31,10 @@ def ensure_opus_loaded_from_runtime(*, deps: OpusStartupRuntimeDeps) -> None:
     try:
         deps.load_default_opus()
     except Exception as exc:
-        deps.mark_startup_component("opus", "failed", repr(exc))
-        raise RuntimeError(f"Opus library load failed: {exc!r}") from exc
+        deps.mark_startup_component(
+            "opus", "failed", f"opus_load_failed:{type(exc).__name__}"
+        )
+        raise RuntimeError("Opus library load failed") from None
     if not deps.opus_is_loaded():
         deps.mark_startup_component("opus", "failed", "library did not report loaded")
         raise RuntimeError("Opus library did not report loaded after default load")
@@ -52,7 +54,9 @@ def warmup_stt_sync_from_runtime(*, deps: SttWarmupRuntimeDeps) -> None:
             stage="warmup",
         )
     except Exception as exc:
-        deps.mark_startup_component("stt", "failed", repr(exc))
-        raise RuntimeError(f"STT warmup failed: {exc!r}") from exc
+        deps.mark_startup_component(
+            "stt", "failed", f"stt_warmup_failed:{type(exc).__name__}"
+        )
+        raise RuntimeError("STT warmup failed") from None
     deps.mark_startup_component("stt", "done", "")
     deps.log("[STARTUP] stt_warmup_done")

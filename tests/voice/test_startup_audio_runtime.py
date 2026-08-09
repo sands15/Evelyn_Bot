@@ -51,6 +51,29 @@ class StartupAudioRuntimeTests(unittest.TestCase):
 
         self.assertEqual(marks[-1], ("opus", "failed", "library did not report loaded"))
 
+    def test_ensure_opus_loaded_redacts_load_error(self) -> None:
+        marks: list[tuple[str, str, str]] = []
+        private_error = "PRIVATE_OPUS_LOAD:/synthetic/audio-driver.json"
+
+        with self.assertRaisesRegex(RuntimeError, "^Opus library load failed$") as raised:
+            ensure_opus_loaded_from_runtime(
+                deps=OpusStartupRuntimeDeps(
+                    opus_is_loaded=lambda: False,
+                    load_default_opus=lambda: (_ for _ in ()).throw(
+                        RuntimeError(private_error)
+                    ),
+                    mark_startup_component=lambda key, status, detail="": marks.append(
+                        (key, status, detail)
+                    ),
+                )
+            )
+
+        self.assertEqual(marks[-1], ("opus", "failed", "opus_load_failed:RuntimeError"))
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+
     def test_warmup_stt_sync_transcribes_silence_and_marks_done(self) -> None:
         marks: list[tuple[str, str, str]] = []
         logs: list[str] = []
@@ -77,11 +100,12 @@ class StartupAudioRuntimeTests(unittest.TestCase):
 
     def test_warmup_stt_sync_marks_failed_on_transcribe_error(self) -> None:
         marks: list[tuple[str, str, str]] = []
+        private_error = "PRIVATE_STT_WARMUP:/synthetic/model-token.json"
 
         def fail_transcribe(*_args: Any, **_kwargs: Any) -> str:
-            raise ValueError("stt down")
+            raise ValueError(private_error)
 
-        with self.assertRaisesRegex(RuntimeError, "STT warmup failed"):
+        with self.assertRaisesRegex(RuntimeError, "^STT warmup failed$") as raised:
             warmup_stt_sync_from_runtime(
                 deps=SttWarmupRuntimeDeps(
                     mark_startup_component=lambda key, status, detail="": marks.append((key, status, detail)),
@@ -92,7 +116,11 @@ class StartupAudioRuntimeTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(marks[-1], ("stt", "failed", "ValueError('stt down')"))
+        self.assertEqual(marks[-1], ("stt", "failed", "stt_warmup_failed:ValueError"))
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
 
 
 if __name__ == "__main__":
