@@ -28,7 +28,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 2026-08-09 Mindcraft history는 bounded process-local·no-mount이며 Codex는 off다.
   Node LLM은 authenticated Bot API broker만 쓰고 서버가 fixed local/router를 선택한다. Minecraft lease 위임은 exact nonnegative JSON integer `guildId`만 받는다.
   broker는 core exposure를 frame consumer의 exact `delivered|discarded` ACK까지, generation fence는 final route/action sink까지 유지한다.
-  recovery step은 exact history snapshot의 process-local one-shot issuance만 소비하고, 손상 world-effect policy는 validation 예외나 false-ready 대신 fixed blocker로 닫힌다. Disconnect/kick reason과 bot error event도 분류에만 쓰고 output에는 고정 문구만 남긴다.
+  recovery step은 exact history snapshot의 process-local one-shot issuance만 소비하고, 손상 world-effect policy는 validation 예외나 false-ready 대신 fixed blocker로 닫힌다. Disconnect/kick reason과 bot error event도 분류에만 쓰고 output에는 고정 문구만 남긴다. Player chat/whisper는 empty `only_chat_with`에서 차단되고 exact configured name만 허용하며 self-prompt/system autonomous path는 독립적이다.
   Minecraft Autonomy plan은 current grant의 연속 prefix만 만들고, route·engine lifecycle과 world-action admission은 disconnect까지 직렬화되며 `자율정지`는 intent를 보존하고 exact current outcome fsync 뒤에만 cursor를 진행한다. durable bound-receipt history, legacy cleanup과 live 검증은 남아 있다.
 - 2026-08-08~09 memory 삭제는 Busy fallback과 2초 admission을 유지한다. 적용된
   direct·cascade source는 durable redaction 성공 뒤에만 unlink하고, applied-cleanup 503은 강제 재조회 뒤 자동 재시도하지 않으며 손상 full receipt는 `unattributed`로 강등한다.

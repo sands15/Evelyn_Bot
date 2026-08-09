@@ -85,6 +85,14 @@ index f5a8e3d..af937fb 100644
                  console.log(`${this.name} spawned.`);
                  this.clearBotLogs();
                
+@@ -157,6 +161,6 @@ export class Agent {
+         const respondFunc = async (username, message) => {
+             if (message === "") return;
+             if (username === this.name) return;
+-            if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
++            if (!settings.only_chat_with.includes(username)) return;
+             try {
+                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 @@ -194,7 +198,10 @@ export class Agent {
              if (init_message) {
                  this.history.add('system', init_message);

@@ -2169,6 +2169,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - Google translation 대신 local identity translator를 사용해 Minecraft chat을 제3자
   번역 서비스로 보내지 않는다. Python owner는 Node child stdout/stderr를 `DEVNULL`로
   연결한다. 이는 새 child 원문 log 생성을 막지만 기존 data/log를 삭제했다는 뜻은 아니다.
+- Mindcraft player chat/whisper ingress는 빈 `only_chat_with`를 deny-all로 해석하고 exact
+  configured player name만 받는다. 이 gate는 player ingress에만 적용되므로 self-prompt와
+  system autonomous `handleMessage` path는 독립적이다.
 - Python status owner와 Node writer는 legacy/free-text 상태를 재사용하지 않고 exact
   content-free projection만 공개·기록한다.
 - Node planner의 local/router/subgoal/recovery 요청은 caller가 URL·model을 고를 수 없는

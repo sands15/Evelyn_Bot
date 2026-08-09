@@ -67,6 +67,13 @@ test('Agent error output excludes raw Mineflayer errors', () => {
     assert.equal(source.includes("console.error('Error event!', err)"), false);
 });
 
+test('Agent player ingress is fail-closed without an allowlist', () => {
+    const source = fs.readFileSync('/app/mindcraft/src/agent/agent.js', 'utf8');
+
+    assert.match(source, /if \(!settings\.only_chat_with\.includes\(username\)\) return;/);
+    assert.equal(source.includes('settings.only_chat_with.length > 0 &&'), false);
+});
+
 const ACTION_SYSTEM = [
     'Available documented commands:',
     '!inventory !nearbyBlocks !stats !craftable !moveAway',

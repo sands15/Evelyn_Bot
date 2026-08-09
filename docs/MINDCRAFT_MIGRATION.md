@@ -33,6 +33,9 @@ patch and copies the custom runtime modules into the image.
 - account authentication: Microsoft
 - default mode: normal survival player, not operator
 - slash commands: blocked at the Mineflayer chat boundary
+- player chat/whisper ingress: an empty `only_chat_with` rejects every player;
+  a received name must exactly match one configured entry. Self-prompter and
+  system/autonomous `handleMessage` calls do not use this ingress gate.
 - disabled capabilities: cheats, player attacks, hunting, self-defense,
   arbitrary generated actions, generated mode changes, and blueprint commands
 - local microphone: unrelated to this runtime and remains controlled by the

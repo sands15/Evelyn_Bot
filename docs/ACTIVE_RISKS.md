@@ -1071,6 +1071,9 @@ Core sink는 canonical wrapper를 사용하고 inventory review를 거쳐야 한
 읽거나 현재 generation으로 rebase하거나 삭제하지 않는다. planner recovery도 디스크에
 저장하지 않는다. Google translation 경로는 local identity 변환으로 바뀌었고 Node child의
 stdout/stderr는 `DEVNULL`이지만, 이미 존재하는 legacy data와 log는 그대로 남아 있다.
+Player chat/whisper ingress는 빈 `only_chat_with`를 deny-all로 해석하고 exact configured
+name만 허용한다. self-prompt/system autonomous path는 이 ingress gate를 거치지 않는다.
+이는 source-level 경계이며 실제 Minecraft chat/whisper 세션에서는 검증하지 않았다.
 
 process-local generation exposure는 turn 첫 await 전부터 LLM 요청·결과와 실제 final
 route/action sink까지 clear를 busy로 막는다. inter-agent ingress/outbound pause·classifier와 예약 timer queue도
