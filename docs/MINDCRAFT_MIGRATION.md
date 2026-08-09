@@ -26,7 +26,8 @@ patch and copies the custom runtime modules into the image.
   `minecraft_world_lease.proof.v1`; `/stop` is always allowed
 - live-start idempotency: when a child is already running, `/start` does not
   rewrite its durable goal or immutable world-effect binding; live goal changes
-  use the separate `/goal` restart path
+  use the separate `/goal` restart path, which persists the new goal only after
+  the running child stops successfully
 - planner: local `Qwen3-14B-Q4_K_M.gguf`; planning, code-model requests, hash
   embedding, and recovery stay on the local planner by default
 - Codex escalation: disabled before token or network access; its separate

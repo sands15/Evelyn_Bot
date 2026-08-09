@@ -91,6 +91,27 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertEqual(runtime._world_effect_binding, {"grantId": "existing"})
         self.assertFalse(runtime._manual_stop)
 
+    def test_goal_restart_does_not_relabel_when_stop_fails(self) -> None:
+        goal_path = Path(self.temp_dir.name) / "goal.json"
+        runtime = mindcraft_service.MindcraftRuntime()
+        process = Mock()
+        process.poll.return_value = None
+        process.terminate.side_effect = OSError("synthetic stop failure")
+        runtime._process = process
+        runtime._manual_stop = False
+
+        with patch.object(mindcraft_service, "GOAL_STATE_PATH", goal_path):
+            runtime.persist_goal("collect oak logs")
+
+            with self.assertRaisesRegex(OSError, "synthetic stop failure"):
+                runtime.restart_for_goal("find a village")
+
+            self.assertEqual(runtime.get_goal(), "collect oak logs")
+
+        self.assertIs(runtime._process, process)
+        self.assertTrue(runtime.process_alive())
+        self.assertTrue(runtime._manual_stop)
+
     def test_cold_runtime_does_not_auto_start_without_lease(self) -> None:
         runtime = mindcraft_service.MindcraftRuntime()
         runtime._ensure_process_running = Mock()

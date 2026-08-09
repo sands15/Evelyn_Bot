@@ -1107,9 +1107,10 @@ class MindcraftRuntime:
     def restart_for_goal(self, goal: str) -> None:
         with self._lock:
             was_running = self.process_alive()
-            self.persist_goal(goal)
             if was_running:
                 self.stop()
+            self.persist_goal(goal)
+            if was_running:
                 self.start(goal)
 
     def restart_for_action(
