@@ -41,7 +41,10 @@ Discord의 다음 변경성 명령은 허용된 Discord ID 또는 서버 관리�
 
 `자율시작`은 해당 guild에 assistant action scope grant를 새로 발급한 뒤
 engine을 시작한다. 시작 실패 시 grant는 즉시 폐기한다. `자율정지`는 engine
-존재 여부와 관계없이 grant부터 철회한다.
+존재 여부와 관계없이 grant부터 철회하고 executor를 멈추되 process-local route
+intent는 유지한다. route 비활성화는 명시적 `마크종료`만 수행하며 intent를
+executor cleanup보다 먼저 지워 cleanup 오류가 권한 상태를 되살리지 못하게 한다.
+route enable·disable과 lifecycle connect·disconnect는 같은 guild router lock으로 직렬화한다.
 
 현재 Control Page의 Minecraft 변경은 CSRF 보호를 통과한 명시적 사용자 요청
 경계에서만 실행한다. Control Page에는 일반 assistant 자율 루프를 시작하는

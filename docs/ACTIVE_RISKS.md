@@ -41,6 +41,10 @@ executor builder를 production `RoutedAutonomyExecutor`에 전달한다. Discord
 `MINECRAFT_ROUTE_ACTIONS`를 grant에 추가한다. 현재 허용되는 Minecraft scope는
 `minecraft:find_food_source` 하나이며, route 검증 실패 시에는 기존처럼
 `assistant:*` scope만 발급한다.
+`자율정지`는 executor를 끊되 process-local route intent를 유지하고, 명시적
+`마크종료`만 route intent를 먼저 비활성화한다. 뒤의 cleanup이 실패해도 intent는
+꺼진 채 유지되며, 다음 `자율시작`은 route를 다시 연결·검증해야 한다. enable·disable과
+lifecycle connect·disconnect는 같은 router lock으로 직렬화돼 intent와 물리 연결이 어긋나지 않는다.
 
 trusted planner도 현재 grant의 연속 prefix까지만 계획한다. 정상 세계의
 `gather_logs`나 food 확보 뒤의 `consume_food`가 scope denial로 전체 loop를 끄던

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
@@ -222,6 +223,80 @@ class RoutedAutonomyExecutorFailureTests(
     def setUpClass(cls) -> None:
         if _SKIP_REASON:
             raise unittest.SkipTest(_SKIP_REASON)
+
+    async def test_lifecycle_disconnect_preserves_route_until_explicit_disable(
+        self,
+    ) -> None:
+        class Executor:
+            def __init__(self) -> None:
+                self.connect_calls = 0
+                self.disconnect_calls = 0
+                self.disconnect_error = False
+
+            async def connect(self) -> None:
+                self.connect_calls += 1
+
+            async def disconnect(self) -> None:
+                self.disconnect_calls += 1
+                if self.disconnect_error:
+                    raise RuntimeError("disconnect failed")
+
+        default_executor = Executor()
+        minecraft_executor = Executor()
+        executor = RoutedAutonomyExecutor(
+            default_executor=default_executor,
+            executors={"minecraft": minecraft_executor},
+        )
+
+        self.assertTrue(await executor.enable_domain("minecraft"))
+        await executor.disconnect()
+
+        self.assertTrue(executor.is_domain_enabled("minecraft"))
+        self.assertEqual(minecraft_executor.disconnect_calls, 1)
+        self.assertTrue(await executor.disable_domain("minecraft"))
+        self.assertFalse(executor.is_domain_enabled("minecraft"))
+        self.assertEqual(minecraft_executor.disconnect_calls, 2)
+
+        self.assertTrue(await executor.enable_domain("minecraft"))
+        minecraft_executor.disconnect_error = True
+        with self.assertRaisesRegex(RuntimeError, "disconnect failed"):
+            await executor.disable_domain("minecraft")
+        self.assertFalse(executor.is_domain_enabled("minecraft"))
+        self.assertEqual(minecraft_executor.disconnect_calls, 3)
+
+    async def test_domain_enable_waits_for_inflight_disable(self) -> None:
+        class Executor:
+            def __init__(self) -> None:
+                self.connected = False
+                self.disconnect_started = asyncio.Event()
+                self.disconnect_release = asyncio.Event()
+
+            async def connect(self) -> None:
+                self.connected = True
+
+            async def disconnect(self) -> None:
+                self.disconnect_started.set()
+                await self.disconnect_release.wait()
+                self.connected = False
+
+        minecraft_executor = Executor()
+        executor = RoutedAutonomyExecutor(
+            default_executor=Executor(),
+            executors={"minecraft": minecraft_executor},
+        )
+        self.assertTrue(await executor.enable_domain("minecraft"))
+
+        disable_task = asyncio.create_task(executor.disable_domain("minecraft"))
+        await minecraft_executor.disconnect_started.wait()
+        enable_task = asyncio.create_task(executor.enable_domain("minecraft"))
+        await asyncio.sleep(0)
+
+        self.assertFalse(enable_task.done())
+        minecraft_executor.disconnect_release.set()
+        self.assertTrue(await disable_task)
+        self.assertTrue(await enable_task)
+        self.assertTrue(executor.is_domain_enabled("minecraft"))
+        self.assertTrue(minecraft_executor.connected)
 
     async def test_observe_failure_never_exposes_exception_text(
         self,

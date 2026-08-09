@@ -1909,6 +1909,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `자율시작`이 route를 다시 검증한 경우에만 exact allowlist
     `minecraft:find_food_source`를 grant에 추가한다. route가 없거나 재검증에
     실패하면 assistant scope만 발급한다.
+    `자율정지`의 engine lifecycle disconnect는 물리 executor만 멈추고 process-local
+    route intent를 보존한다. 명시적 `마크종료`의 `disable_domain`만 route intent를
+    먼저 지우므로 뒤이은 executor cleanup이 실패해도 다시 활성화되지 않는다.
+    enable·disable과 lifecycle connect·disconnect는 같은 router lock에서 직렬화한다.
   - 실행 중 trusted planner는 현재 grant에 포함된 step의 연속 prefix만 만든다.
     첫 미허가 step에서 멈추므로 안전 선행조건을 건너뛰지 않고, prefix가 비면
     executor·authorization audit 호출 없이 다음 관찰을 기다린다. 음식이 생긴 뒤에는

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -169,6 +170,7 @@ class RoutedAutonomyExecutor:
         self.executors = executors
         self.active_environment = "assistant"
         self.enabled_domains: set[str] = set()
+        self._lifecycle_lock = asyncio.Lock()
 
     def list_enabled_domains(self) -> list[str]:
         return sorted(
@@ -188,8 +190,9 @@ class RoutedAutonomyExecutor:
             or executor is None
         ):
             return False
-        await executor.connect()
-        self.enabled_domains.add(normalized)
+        async with self._lifecycle_lock:
+            await executor.connect()
+            self.enabled_domains.add(normalized)
         return True
 
     async def disable_domain(self, domain: str) -> bool:
@@ -197,22 +200,23 @@ class RoutedAutonomyExecutor:
         executor = self.executors.get(normalized)
         if not normalized or executor is None:
             return False
-        await executor.disconnect()
-        self.enabled_domains.discard(normalized)
-        if self.active_environment == normalized:
-            self.active_environment = "assistant"
+        async with self._lifecycle_lock:
+            self.enabled_domains.discard(normalized)
+            if self.active_environment == normalized:
+                self.active_environment = "assistant"
+            await executor.disconnect()
         return True
 
     async def connect(self) -> None:
-        await self.default_executor.connect()
+        async with self._lifecycle_lock:
+            await self.default_executor.connect()
 
     async def disconnect(self) -> None:
-        for name, executor in self.executors.items():
-            if normalized := clean_text(name):
-                self.enabled_domains.discard(normalized)
-            await executor.disconnect()
-        self.active_environment = "assistant"
-        await self.default_executor.disconnect()
+        async with self._lifecycle_lock:
+            for executor in self.executors.values():
+                await executor.disconnect()
+            self.active_environment = "assistant"
+            await self.default_executor.disconnect()
 
     async def observe(self) -> dict[str, Any]:
         observed: dict[str, Any] = {}
