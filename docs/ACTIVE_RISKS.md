@@ -287,6 +287,10 @@ Main LLM warmup non-200 body는 읽지 않고 startup state와 외부 wrapper에
 fixed `llm_warmup_failed`, `LLM warmup failed`만 남긴다.
 OmniVoice startup health·generate warmup non-200 body도 읽지 않고 startup state에는
 fixed `tts_warmup_failed`, 외부 wrapper에는 phase별 고정 문구만 남긴다.
+Control Page server-start 실패는 startup detail에
+`control_page_start_failed:<exception-type>`만 남기고 operation log도 fixed code/type만
+기록한다. local-only outer wrapper는 원인 traceback을 억제한 fixed
+`Control Page start failed`다.
 Speaker verification probe embedding 실패 detail도 fixed
 `speaker_verification_failed:<type>`만 validation event·metrics에 전달하며, enrollment
 skip·success 로그도 exception type과 sample count만 남긴다.

@@ -56,7 +56,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
 - Local Voice는 단일 capture owner, durable claim·consent fence로 재시작 경쟁을 막고,
   Local Bridge 재생 실패는 user-only로 잇고 Discord partial checkpoint는 assistant/receipt/state만 복구해 TTL을 보존한다.
-- validation GET은 현재 consent를 반환하고 local mic capture·speaker verification probe/enrollment·Opus/STT startup·LLM warmup body·Bridge·TTS warmup/control·router, Discord playback trace·Minecraft snapshot, memory mirror·summary·proactive question promotion·vault maintenance·self-identity queue와 Main/Fast failed-tool·vision metrics/watch는 예외 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
+- validation GET은 현재 consent를 반환하고 local mic capture·speaker verification probe/enrollment·Opus/STT startup·LLM warmup body·Bridge·TTS warmup/control·Control Page server-start·router, Discord playback trace·Minecraft snapshot, memory mirror·summary·proactive question promotion·vault maintenance·self-identity queue와 Main/Fast failed-tool·vision metrics/watch는 예외 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
   Discord stale voice client는 강제 정리 뒤 표준 연결로 복구하고, 검색 복구·playback timeout·무재생 거부·late-turn fence가 stale 완료를 막는다.
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.

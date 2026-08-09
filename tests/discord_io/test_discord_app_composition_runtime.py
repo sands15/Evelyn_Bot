@@ -250,7 +250,8 @@ class DiscordAppCompositionTests(unittest.TestCase):
 
     def test_on_ready_records_fixed_error_code_in_runtime_status(self) -> None:
         runtime_status = Mock()
-        failure = RuntimeError("C:\\private\\token")
+        private_error = "PRIVATE_CONTROL_PAGE_START C:\\private\\token"
+        failure = RuntimeError(private_error)
         events = make_event_deps(
             runtime_status=runtime_status,
             start_control_page_server=AsyncMock(side_effect=failure),
@@ -262,6 +263,15 @@ class DiscordAppCompositionTests(unittest.TestCase):
             "control_page_start_failed",
             failure,
         )
+        events.mark_startup_component.assert_any_call(
+            "control_api", "failed", "control_page_start_failed:RuntimeError"
+        )
+        events.log.assert_any_call(
+            "[CONTROL PAGE] start_fail "
+            "errorCode=control_page_start_failed errorType=RuntimeError"
+        )
+        self.assertNotIn(private_error, repr(events.mark_startup_component.call_args_list))
+        self.assertNotIn(private_error, repr(events.log.call_args_list))
 
     def test_on_ready_recovers_promised_search_followups(self) -> None:
         recover = AsyncMock(

@@ -224,9 +224,15 @@ class DiscordAppComposition:
         try:
             await deps.start_control_page_server()
         except Exception as exc:
+            error_type = type(exc).__name__
             self._record_runtime_error("control_page_start_failed", exc)
-            deps.mark_startup_component("control_api", "failed", repr(exc))
-            deps.log(f"[CONTROL PAGE] start_fail err={exc!r}")
+            deps.mark_startup_component(
+                "control_api", "failed", f"control_page_start_failed:{error_type}"
+            )
+            deps.log(
+                "[CONTROL PAGE] start_fail "
+                f"errorCode=control_page_start_failed errorType={error_type}"
+            )
         try:
             await deps.ensure_startup_components_ready()
             await deps.ensure_local_mic_service_started()

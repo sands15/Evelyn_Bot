@@ -239,6 +239,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `llm_warmup_failed`, 외부 wrapper에는 고정 `LLM warmup failed`만 남긴다.
   - OmniVoice startup health·generate warmup의 non-200 body도 읽지 않고 startup
     detail에는 `tts_warmup_failed`, 외부 wrapper에는 phase별 고정 문구만 남긴다.
+  - Control Page server-start 실패는 startup detail에
+    `control_page_start_failed:<exception-type>`만 남기고 operation log도 fixed
+    code/type만 기록한다. local-only outer wrapper는 원인 traceback을 억제한 fixed
+    `Control Page start failed`다.
   - speaker verification probe embedding 실패 detail은
     `speaker_verification_failed:<exception-type>`으로 고정해 Local Bridge validation
     event와 TTS interrupt metrics에 예외 메시지·경로를 복제하지 않는다. enrollment

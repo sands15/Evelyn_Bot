@@ -275,16 +275,25 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         process.log.assert_any_call("[LOCAL MODE] ready url=http://127.0.0.1:8799")
 
     async def test_local_only_control_page_failure_is_marked_and_raised(self) -> None:
+        private_error = "PRIVATE_CONTROL_PAGE_START C:\\private\\token"
         process = self.build_process_deps(
-            start_control_page_server=AsyncMock(side_effect=RuntimeError("bind failed")),
+            start_control_page_server=AsyncMock(side_effect=RuntimeError(private_error)),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "bind failed"):
+        with self.assertRaisesRegex(RuntimeError, "^Control Page start failed$") as raised:
             await self.build_composition(process=process).run_local_only_mode()
 
         process.mark_startup_component.assert_any_call(
-            "control_api", "failed", "RuntimeError('bind failed')"
+            "control_api", "failed", "control_page_start_failed:RuntimeError"
         )
+        process.log.assert_any_call(
+            "[CONTROL PAGE] start_fail "
+            "errorCode=control_page_start_failed errorType=RuntimeError"
+        )
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertNotIn(private_error, repr(process.mark_startup_component.call_args_list))
+        self.assertNotIn(private_error, repr(process.log.call_args_list))
         process.wait_forever.assert_not_awaited()
 
     def test_shutdown_schedulers_preserve_project_root_and_delay(self) -> None:
