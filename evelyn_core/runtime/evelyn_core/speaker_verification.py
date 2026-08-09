@@ -103,12 +103,12 @@ class SpeakerVerifier:
         try:
             probe = self._normalize_embedding(self._embed(prepared, 16000))
         except Exception as exc:
-            self._last_error = repr(exc)
+            self._last_error = f"speaker_verification_failed:{type(exc).__name__}"
             return SpeakerVerificationResult(
                 "error",
                 threshold=self.config.threshold,
                 sample_count=self._enrollment_sample_count,
-                detail=repr(exc),
+                detail=self._last_error,
             )
 
         score = float(np.dot(enrollment, probe))

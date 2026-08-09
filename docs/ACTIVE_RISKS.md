@@ -285,6 +285,8 @@ Opus load·STT warmup 실패는 startup state와 Control Page boot progress에 f
 code/type만 남기고, 외부 wrapper의 원인 traceback도 억제한다.
 Main LLM warmup non-200 body는 읽지 않고 startup state와 외부 wrapper에 각각
 fixed `llm_warmup_failed`, `LLM warmup failed`만 남긴다.
+Speaker verification probe embedding 실패 detail도 fixed
+`speaker_verification_failed:<type>`만 validation event·metrics에 전달한다.
 Main/Fast의 failed tool evidence와 Main vision runtime metrics도 fixed code만
 직렬화해 다음 LLM prompt와 turn metrics에 예외 문장·경로를 복제하지 않는다.
 Background Vision Watch도 non-200 body를 읽지 않고 분석·capture 실패를 fixed

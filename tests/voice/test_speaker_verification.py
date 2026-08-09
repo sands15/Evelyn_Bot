@@ -100,6 +100,35 @@ class SpeakerVerificationTests(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(result.detail, "no_valid_enrollment_wav")
 
+    def test_probe_failure_detail_is_content_free(self) -> None:
+        private_error = "PRIVATE_SPEAKER_FAILURE C:/secret/voice-token"
+        calls = 0
+
+        def embed(_audio: np.ndarray, _sampling_rate: int) -> np.ndarray:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return np.array([1.0, 0.0], dtype=np.float32)
+            raise RuntimeError(private_error)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            enroll_dir = Path(tmp)
+            write_wav(enroll_dir / "sample.wav", np.ones(16000, dtype=np.float32) * 0.2)
+            verifier = SpeakerVerifier(
+                SpeakerVerificationConfig(enabled=True, enroll_dir=enroll_dir),
+                embedding_fn=embed,
+            )
+
+            result = verifier.verify(
+                np.ones(16000, dtype=np.float32) * 0.1,
+                sampling_rate=16000,
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertIsNone(result.matched)
+        self.assertEqual(result.detail, "speaker_verification_failed:RuntimeError")
+        self.assertNotIn(private_error, repr(result.to_dict()))
+
 
 if __name__ == "__main__":
     unittest.main()
