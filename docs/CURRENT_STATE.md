@@ -139,6 +139,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     완료로 확정하지 않는다. Local streaming은 전역 누계가 아니라 이 턴의 exact
     queued/played chunk 수를 우선 사용한다. 고정 전달 실패와 user-only continuity
     경로로 보내며 single·streaming 양쪽을 검사한다.
+  - Local Bridge의 `failed|partial|cancelled` playback ACK도 accepted user row만
+    ingress `turnId`로 checkpoint하고 assistant text·receipt는 버린다. checkpoint 뒤
+    journal 삭제가 실패하면 exact current turn과 마지막 user row로 재시작에서 한 번
+    정리하며, 다음 Fast prompt는 이를 미응답 문맥으로 소비한다.
   - Voice search follow-up의 최초 전달과 재시작 복구도 같은 playback metrics를
     소비한다. 무재생 최초 전달은 history/continuity를 commit하지 않고, 복구 중
     무재생은 `delivery_uncertain`으로 보존해 자동 재전송하지 않는다.
@@ -1838,9 +1842,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   Fast Control은 browser `requestId`와 Local Bridge의 canonical
   `[bridgeInstanceId, turnId]`, Discord text는 message ID를 사용하고 journal
   `turnId`를 continuity의 권위 있는 turn ID로 재사용한다. pending/in-flight/
-  ambiguous delivery는 재시작 뒤 자동 실행·재전송하지 않으며, 실제 HTTP EOF와
-  Discord 전송 성공 뒤에만 `delivery_succeeded -> terminal_committing -> completed`
-  순서로 진행한다. Fast partial stream 실패는 ambiguous로 남고, Discord는
+  ambiguous delivery는 재시작 뒤 자동 실행·재전송하지 않는다. Control Page HTTP EOF,
+  Discord 전송 성공과 Local Bridge의 exact software-playback ACK만 assistant 완료를
+  확정한다. Local Bridge 실패 ACK는 user-only checkpoint 뒤 journal을 정리하고,
+  Fast partial stream의 확인되지 않은 assistant는 재전송하지 않는다. Discord는
   session/reply-slot 선점으로 동시 claim을 직렬화하며 기존 turn P 뒤 전달된 turn
   Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
   text와 source/entry/turn ID를 내보내지 않는다. `delivery_succeeded` 복구의

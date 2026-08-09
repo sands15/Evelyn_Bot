@@ -737,7 +737,8 @@ attempt 없는 confirm은 최초 attempt에서만 호환하며, retry 뒤에는 
 revision을 명시하지 않거나 이전 revision을 보내면 상태를 바꾸지 않고 거부한다.
 
 소스 계약에서는 reply gate를 통과한 사용자 발화 뒤 Discord 연결 부재, 빈 답변,
-LLM/TTS 전달 실패가 나도 사용자 row만 즉시 continuity checkpoint에 한 번
+LLM/TTS 전달 실패와 Local Bridge의 failed·partial·cancelled playback ACK가 나도
+사용자 row만 즉시 continuity checkpoint에 한 번
 보존한다. 가짜 assistant row, memory write, search follow-up은 만들지 않고 공개
 voice 상태와 turn summary에는 고정 오류 코드·예외 타입만 남긴다. Main/Fast의
 다음 prompt는 restart restore와 cross-surface merge 뒤에도 history가 `user`로
@@ -745,6 +746,11 @@ voice 상태와 turn summary에는 고정 오류 코드·예외 타입만 남긴
 명시하고, 추적에는 boolean만 남긴다. 다만 실제 Discord 연결 단절과 스피커/TTS
 장애를 일으킨 뒤 재시작해 다음 응답이 이 미응답 발화를 이어가는 live
 failure-injection은 아직 수행하지 않았다.
+
+Local Bridge failure finalizer는 ingress의 exact `turnId`와 assistant hash를 먼저
+검사하고 user-only checkpoint를 durable commit한 뒤 journal을 지운다. 중간 crash는
+exact current turn과 마지막 user row가 함께 맞을 때만 journal을 정리하며 assistant
+원문·receipt·action을 복원하거나 재실행하지 않는다.
 
 다음 조치: 사용자가 Control Page의 “검증 세션 동안 마이크 허용”을 직접 확인한
 뒤 먼저 dormant 상태의 주변 발화·중간/유사 호출어·고영향 follow-up이 실제

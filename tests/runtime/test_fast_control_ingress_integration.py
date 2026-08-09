@@ -3881,6 +3881,13 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             recovered_owner.ingress_record(original_entry_id)
                         )
                         self.assertEqual(
+                            [
+                                (item["role"], item["text"])
+                                for item in recovered_owner.restored_chat_messages()
+                            ],
+                            [("user", turn.issued["forwardText"])],
+                        )
+                        self.assertEqual(
                             fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {}
                         )
                         unrelated = recovered_owner.claim_ingress(
@@ -3982,6 +3989,15 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seen_outcomes, [outcome])
                 self.assertIsNone(owner.ingress_record(entry_id))
                 self.assertEqual(fast_api.LOCAL_BRIDGE_PENDING_DELIVERIES, {})
+                restored = fast_api.FastControlContinuityOwner(
+                    artifacts_root=Path(temporary),
+                    enabled=True,
+                    log=lambda *_args, **_kwargs: None,
+                ).restored_chat_messages()
+                self.assertEqual(
+                    [(item["role"], item["text"]) for item in restored],
+                    [("user", "재생 전 실패 경계")],
+                )
 
     async def test_restart_ambiguous_ack_discards_and_unblocks_next_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

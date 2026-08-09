@@ -31,6 +31,7 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
 from evelyn_core.fast_control_continuity import (  # noqa: E402
     FAST_CONTROL_CONTINUITY_STATUS_SCHEMA,
     FAST_CONTROL_EPHEMERAL_VALIDATION_DELIVERY_REF,
+    FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
     FAST_CONTROL_SESSION_KEY,
     FastControlContinuityOwner,
 )
@@ -171,6 +172,103 @@ class FastControlContinuityTests(unittest.TestCase):
             "fast-control short-lived conversation continuity",
             checkpoint_text,
         )
+
+    def test_failed_ingress_restores_only_the_unanswered_user_turn(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            claim = owner.claim_ingress(
+                request_id="local-playback-failed",
+                accepted_text="실패해도 이 말은 이어가줘",
+            )
+            owner.bind_ingress_response(
+                claim["entryId"],
+                assistant_text="재생되지 않은 답변",
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            owner.mark_ingress_delivery_inflight(
+                claim["entryId"],
+                delivery_ref=FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+            )
+            owner.mark_ingress_delivery_ambiguous(
+                claim["entryId"],
+                error_code="conversation_ingress_delivery_failed",
+            )
+            with patch.object(
+                owner.ingress,
+                "discard_ambiguous",
+                side_effect=RuntimeError("simulated journal write failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated journal write failure",
+                ):
+                    owner.discard_failed_ingress(
+                        claim["entryId"],
+                        assistant_hash=final_text_sha256(
+                            "재생되지 않은 답변"
+                        ).upper(),
+                    )
+
+            restored_owner = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            restored = restored_owner.restored_chat_messages()
+            unrelated = restored_owner.claim_ingress(
+                request_id="local-playback-next",
+                accepted_text="다음 요청",
+            )
+
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in restored],
+            [("user", "실패해도 이 말은 이어가줘")],
+        )
+        self.assertIsNone(restored_owner.ingress_record(claim["entryId"]))
+        self.assertTrue(unrelated["shouldProcess"])
+
+    def test_failed_ingress_rejects_wrong_assistant_hash_before_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            owner = FastControlContinuityOwner(
+                artifacts_root=Path(temp_dir),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            claim = owner.claim_ingress(
+                request_id="local-playback-wrong-hash",
+                accepted_text="결합이 틀리면 저장하지 마",
+            )
+            owner.bind_ingress_response(
+                claim["entryId"],
+                assistant_text="결합된 답변",
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            owner.mark_ingress_delivery_inflight(
+                claim["entryId"],
+                delivery_ref=FAST_CONTROL_LOCAL_PLAYBACK_DELIVERY_REF,
+            )
+            owner.mark_ingress_delivery_ambiguous(
+                claim["entryId"],
+                error_code="conversation_ingress_delivery_failed",
+            )
+
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                owner.discard_failed_ingress(
+                    claim["entryId"],
+                    assistant_hash="0" * 64,
+                )
+
+            self.assertEqual(owner.restored_chat_messages(), [])
+            self.assertIsNotNone(owner.ingress_record(claim["entryId"]))
 
     def test_background_followup_preserves_exact_message_order(
         self,

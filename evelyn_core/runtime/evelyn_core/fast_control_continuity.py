@@ -431,20 +431,85 @@ class FastControlContinuityOwner:
     ) -> None:
         with self._lock:
             ingress = self._require_ingress()
+            checkpoint = self._require_checkpoint()
             record = ingress.record_for(entry_id)
             error_code = clean_text(
                 (record or {}).get("lastErrorCode")
             )
-            if error_code not in {
-                "conversation_ingress_delivery_ambiguous",
-                "conversation_ingress_delivery_ambiguous_after_restart",
-                "conversation_ingress_delivery_disconnected",
-                "conversation_ingress_delivery_failed",
-                "conversation_ingress_process_interrupted",
-            }:
+            if (
+                (record or {}).get("phase") != "delivery_ambiguous"
+                or error_code not in {
+                    "conversation_ingress_delivery_ambiguous",
+                    "conversation_ingress_delivery_ambiguous_after_restart",
+                    "conversation_ingress_delivery_disconnected",
+                    "conversation_ingress_delivery_failed",
+                    "conversation_ingress_process_interrupted",
+                }
+            ):
                 raise ConversationIngressBindingMismatch(
                     "conversation_ingress_error_binding_mismatch"
                 )
+            normalized_assistant_hash = normalize_final_conversation_text(
+                assistant_hash
+            ).lower()
+            if (
+                normalized_assistant_hash
+                and normalized_assistant_hash
+                != final_text_sha256((record or {}).get("assistantText"))
+            ):
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_delivery_binding_mismatch"
+                )
+            accepted_text = normalize_final_conversation_text(
+                (record or {}).get("acceptedText")
+            )
+            turn_id = clean_text((record or {}).get("turnId"))
+            if not accepted_text or not turn_id:
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_binding_mismatch"
+                )
+            user_turn_persisted = (
+                self._checkpoint_contains_unanswered_ingress_record(
+                    record
+                )
+            )
+            if (
+                self.store.current_turn_id(FAST_CONTROL_SESSION_KEY)
+                == turn_id
+                and not user_turn_persisted
+            ):
+                raise ConversationIngressBindingMismatch(
+                    "conversation_ingress_binding_mismatch"
+                )
+            if not user_turn_persisted:
+                self.store.start_new_turn(
+                    FAST_CONTROL_SESSION_KEY,
+                    turn_id=turn_id,
+                    now_monotonic=self.monotonic(),
+                )
+                self.store.append_history(
+                    FAST_CONTROL_SESSION_KEY,
+                    accepted_text,
+                    None,
+                    system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
+                    max_history_items=self.max_history_items,
+                )
+            self.store.mark_active(
+                FAST_CONTROL_SESSION_KEY,
+                ttl_sec=self.max_age_sec,
+                speaker="user",
+                awaiting_user_reply=False,
+                topic_id=build_topic_id(accepted_text),
+                user_text=accepted_text,
+                active_conversation_awaiting_reply_sec=(
+                    self.max_age_sec
+                ),
+                now_monotonic=self.monotonic(),
+            )
+            checkpoint.commit_completed_turn(
+                FAST_CONTROL_SESSION_KEY,
+                turn_id,
+            )
             ingress.discard_ambiguous(
                 entry_id,
                 assistant_hash=assistant_hash,
@@ -806,6 +871,30 @@ class FastControlContinuityOwner:
             record.get("memoryReceiptRef")
         )
 
+    def _checkpoint_contains_unanswered_ingress_record(
+        self,
+        record: dict[str, Any],
+    ) -> bool:
+        if self.store.current_turn_id(FAST_CONTROL_SESSION_KEY) != clean_text(
+            record.get("turnId")
+        ):
+            return False
+        history = self.store.histories.get(
+            FAST_CONTROL_SESSION_KEY,
+            [],
+        )
+        if not history or not isinstance(history[-1], dict):
+            return False
+        user = history[-1]
+        return bool(
+            user.get("role") == "user"
+            and "memoryReceiptRef" not in user
+            and normalize_final_conversation_text(user.get("content"))
+            == normalize_final_conversation_text(
+                record.get("acceptedText")
+            )
+        )
+
     def _reconcile_ingress_after_restore(
         self,
     ) -> dict[str, Any]:
@@ -836,6 +925,27 @@ class FastControlContinuityOwner:
         for record in records:
             phase = clean_text(record.get("phase"))
             try:
+                if (
+                    phase == "delivery_ambiguous"
+                    and self._checkpoint_contains_unanswered_ingress_record(
+                        record
+                    )
+                ):
+                    assistant_text = clean_text(
+                        record.get("assistantText")
+                    )
+                    ingress.discard_ambiguous(
+                        record["entryId"],
+                        assistant_hash=(
+                            final_text_sha256(assistant_text)
+                            if assistant_text
+                            else ""
+                        ),
+                        delivery_ref=record["deliveryRef"],
+                        error_code=record["lastErrorCode"],
+                    )
+                    projection["reconciledCount"] += 1
+                    continue
                 if (
                     phase in {"delivery_inflight", "delivery_ambiguous"}
                     and record.get("deliveryRef")

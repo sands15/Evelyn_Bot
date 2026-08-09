@@ -28,13 +28,16 @@ Last reviewed: 2026-07-31 KST
 ## Accepted voice turn delivery failure
 
 최종 STT와 reply gate를 통과한 음성 발화는 답변 전달이 실패해도 사라진 턴으로
-취급하지 않는다. Discord voice connection 부재, 빈 최종 답변, LLM/TTS 전달
-실패 시 다음 경계를 적용한다.
+취급하지 않는다. Discord voice connection 부재, 빈 최종 답변, LLM/TTS 전달 실패와
+Local Bridge의 `failed|partial|cancelled` software-playback ACK에 다음 경계를 적용한다.
 
 - 사용자 발화만 history에 한 번 추가하고 존재하지 않는 assistant 답변은 만들지
   않는다. 따라서 복구된 history는 `user` row로 끝날 수 있다.
 - 세션의 마지막 speaker를 `user`로 유지하고 room owner를 보존한 뒤 같은 durable
   continuity commit 계약으로 즉시 checkpoint한다.
+- Local Bridge는 ingress의 exact `turnId`와 assistant hash를 먼저 검증하고 accepted
+  user row만 Fast Control checkpoint에 commit한 뒤 실패 journal을 삭제한다. commit 뒤
+  삭제가 실패하면 exact turn과 마지막 user row를 재시작 증거로 사용해 중복 없이 끝낸다.
 - 같은 turn finalizer가 중복 호출돼도 process-local turn metrics의
   `unanswered_voice_turn_recorded` 표식으로 history mutation과 commit을 한 번만
   수행한다.
@@ -420,6 +423,9 @@ continuity history 결합에만 사용한다.
 - non-stream 응답은 body write 직전에 `delivery_inflight`, 성공한 EOF 뒤에만
   `delivery_succeeded`와 terminal commit을 기록한다. prepare/EOF 실패는
   `delivery_ambiguous`이고 background action을 시작하지 않는다.
+- TTS 재생이 필요한 Local Bridge 응답은 HTTP EOF를 완료로 쓰지 않는다. exact
+  software-playback ACK의 `played`만 assistant turn을 완료하고,
+  `failed|partial|cancelled`는 accepted user row만 durable commit한다.
 - stream은 첫 외부 event 전에 stream 전용 inflight를 기록한다. 한 event라도
   노출된 뒤 생성 오류가 나면 두 번째 고정 실패 payload나 continuity commit을
   만들지 않고 ambiguous/non-replayable로 남긴다.
@@ -547,6 +553,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   timeout·5xx·상태 없는 ambiguous failure의 무재전송
 - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
   경로의 전달·기록·commit 순서
+- Local Bridge playback 실패의 exact user-only checkpoint, journal 삭제 재시도와
+  fresh restart 뒤 미응답 user tail 복구
 - Discord 명령 19개와 권한 거부 응답의 단일 post-delivery owner,
   전송 실패 시 무기록, Minecraft 중복 commit 방지
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
