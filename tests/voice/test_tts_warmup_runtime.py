@@ -27,6 +27,7 @@ class FakeResponse:
     def __init__(self, status: int, text: str = "", chunks: list[bytes] | None = None) -> None:
         self.status = status
         self._text = text
+        self.text_calls = 0
         self.content = FakeContent(chunks or [])
 
     async def __aenter__(self):
@@ -36,6 +37,7 @@ class FakeResponse:
         return None
 
     async def text(self) -> str:
+        self.text_calls += 1
         return self._text
 
 
@@ -114,13 +116,36 @@ class TtsWarmupRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("OmniVoice TTS 워밍업 완료", logs)
 
     async def test_health_failure_marks_failed_and_raises(self) -> None:
+        private_error = "PRIVATE_TTS_HEALTH_BODY:/synthetic/server-token.json"
         marks: list[tuple[str, str, str]] = []
-        session = FakeSession(health=FakeResponse(503, text="not ready"))
+        response = FakeResponse(503, text=private_error)
+        session = FakeSession(health=response)
 
-        with self.assertRaisesRegex(RuntimeError, "OmniVoice health check"):
+        with self.assertRaises(RuntimeError) as raised:
             await warmup_tts_server_from_runtime(deps=self.build_deps(session, marks=marks))
 
-        self.assertEqual(marks[-1], ("tts_warmup", "failed", "health 503: not ready"))
+        self.assertEqual(str(raised.exception), "OmniVoice health check failed")
+        self.assertEqual(marks[-1], ("tts_warmup", "failed", "tts_warmup_failed"))
+        self.assertEqual(response.text_calls, 0)
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(raised.exception))
+
+    async def test_generation_failure_does_not_read_response_body(self) -> None:
+        private_error = "PRIVATE_TTS_GENERATE_BODY:/synthetic/voice-token.json"
+        marks: list[tuple[str, str, str]] = []
+        response = FakeResponse(500, text=private_error)
+        session = FakeSession(health=FakeResponse(200), post=response)
+
+        with self.assertRaises(RuntimeError) as raised:
+            await warmup_tts_server_from_runtime(
+                deps=self.build_deps(session, generate="true", marks=marks)
+            )
+
+        self.assertEqual(str(raised.exception), "OmniVoice warmup failed")
+        self.assertEqual(marks[-1], ("tts_warmup", "failed", "tts_warmup_failed"))
+        self.assertEqual(response.text_calls, 0)
+        self.assertNotIn(private_error, repr(marks))
+        self.assertNotIn(private_error, repr(raised.exception))
 
 
 if __name__ == "__main__":

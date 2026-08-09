@@ -24,9 +24,8 @@ async def warmup_tts_server_from_runtime(*, deps: TtsWarmupRuntimeDeps) -> None:
     session = await deps.get_http_session()
     async with session.get(f"{deps.omnivoice_server_url}/health", timeout=deps.client_timeout(total=10)) as resp:
         if resp.status != 200:
-            text = await resp.text()
-            deps.mark_startup_component("tts_warmup", "failed", f"health {resp.status}: {text[:160]}")
-            raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
+            deps.mark_startup_component("tts_warmup", "failed", "tts_warmup_failed")
+            raise RuntimeError("OmniVoice health check failed")
         deps.log("OmniVoice 서버 준비 확인 완료")
 
     if deps.getenv("TTS_WARMUP_GENERATE_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
@@ -49,9 +48,8 @@ async def warmup_tts_server_from_runtime(*, deps: TtsWarmupRuntimeDeps) -> None:
         timeout=deps.client_timeout(total=20),
     ) as resp:
         if resp.status != 200:
-            text = await resp.text()
-            deps.mark_startup_component("tts_warmup", "failed", f"warmup {resp.status}: {text[:160]}")
-            raise RuntimeError(f"OmniVoice warmup 실패: {resp.status} / {text[:200]}")
+            deps.mark_startup_component("tts_warmup", "failed", "tts_warmup_failed")
+            raise RuntimeError("OmniVoice warmup failed")
         async for chunk in resp.content.iter_chunked(4096):
             if chunk:
                 deps.mark_startup_component("tts_warmup", "done", "")
