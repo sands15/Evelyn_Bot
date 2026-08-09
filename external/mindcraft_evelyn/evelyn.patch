@@ -296,6 +296,25 @@ index 2dd2ea5..90b79b3 100644
  
      // Throttle position packets to avoid kicks on Paper/Spigot servers
      // Paper enforces stricter packet rate limits than vanilla, causing ECONNRESET
+@@ -100,18 +103 @@ export function initBot(username) {
+-    // Suppress PartialReadError for non-critical packets
+-    // Paper servers sometimes send packets that node-minecraft-protocol
+-    // can't fully parse (scoreboard, resource_pack, custom_payload, etc.)
+-    // These errors crash the bot but the packets aren't needed for gameplay
+-    const originalEmit = bot._client.emit.bind(bot._client);
+-    bot._client.emit = function(event, ...args) {
+-        if (event === 'error' && args[0]) {
+-            const err = args[0];
+-            const errStr = err instanceof Error ? err.message : String(err);
+-            if (errStr.includes('PartialReadError')) {
+-                console.warn('[mcdata] Suppressed PartialReadError:', errStr.substring(0, 120));
+-                return true; // Swallow the error
+-            }
+-        }
+-        return originalEmit(event, ...args);
+-    };
+-
+     bot.loadPlugin(pathfinder);
 diff --git a/src/mindcraft/mindserver.js b/src/mindcraft/mindserver.js
 index 3cfef91..7b4414e 100644
 --- a/src/mindcraft/mindserver.js

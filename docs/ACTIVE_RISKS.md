@@ -308,6 +308,9 @@ client·observer 예외는 `minecraft_status_failed:<type>`으로 Main LLM conte
 cache와 Control Page에 전달한다.
 Mindcraft disconnect/kick/error raw input은 classification에만 사용하며 console·MindServer
 `bot-output`과 handler/listener output에는 fixed classified message만 공개한다.
+Mindcraft `mcdata`의 전역 protocol `emit` override도 제거해 `PartialReadError`를 표준
+listener dispatch로 전달한다. 이 경계는 source·effective overlay offline 증거이며 실제
+Minecraft protocol parse failure나 Docker runtime에서는 검증하지 않았다.
 
 `2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
 간주하지 않는다. exact status schema, current/verified checkpoint head,

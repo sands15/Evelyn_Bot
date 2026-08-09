@@ -231,6 +231,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - Mindcraft connection handler와 bot error listener는 disconnect/kick/error input을
     내부 분류에만 사용한다. console·MindServer
     `bot-output`과 handler/listener output에는 fixed classified message만 남긴다.
+  - Mindcraft `mcdata`는 protocol client의 `emit`을 재정의하거나
+    `PartialReadError`를 선별해 삼키지 않고 표준 listener dispatch를 유지한다.
   - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다. Router
     fallback metadata는 `router_failed`, Local Bridge turn status는
     `turn_pipeline_failed`, control TTS status는 `control_tts_failed`만 보존한다. Voice

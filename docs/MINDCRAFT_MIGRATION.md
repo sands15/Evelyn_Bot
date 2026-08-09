@@ -36,6 +36,8 @@ patch and copies the custom runtime modules into the image.
 - player chat/whisper ingress: an empty `only_chat_with` rejects every player;
   a received name must exactly match one configured entry. Self-prompter and
   system/autonomous `handleMessage` calls do not use this ingress gate.
+- protocol error propagation: `mcdata` does not override the protocol client's
+  `emit` or swallow `PartialReadError`; standard listener dispatch remains intact.
 - disabled capabilities: cheats, player attacks, hunting, self-defense,
   arbitrary generated actions, generated mode changes, and blueprint commands
 - local microphone: unrelated to this runtime and remains controlled by the

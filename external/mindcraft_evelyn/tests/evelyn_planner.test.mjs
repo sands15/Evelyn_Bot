@@ -74,6 +74,13 @@ test('Agent player ingress is fail-closed without an allowlist', () => {
     assert.equal(source.includes('settings.only_chat_with.length > 0 &&'), false);
 });
 
+test('Mineflayer protocol errors are not globally swallowed', () => {
+    const source = fs.readFileSync('/app/mindcraft/src/utils/mcdata.js', 'utf8');
+
+    assert.equal(source.includes('bot._client.emit = function'), false);
+    assert.equal(source.includes("errStr.includes('PartialReadError')"), false);
+});
+
 const ACTION_SYSTEM = [
     'Available documented commands:',
     '!inventory !nearbyBlocks !stats !craftable !moveAway',
