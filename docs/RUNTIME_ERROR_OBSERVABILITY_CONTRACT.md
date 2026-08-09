@@ -107,7 +107,8 @@ startup component detail에는 fixed `tts_warmup_failed`, 외부 wrapper에는 p
 
 Speaker verification probe embedding 실패 detail은 fixed
 `speaker_verification_failed:<exception-type>`만 사용하며 validation event와 turn
-metrics에 원문 예외·모델 cache 경로를 복제하지 않는다.
+metrics에 원문 예외·모델 cache 경로를 복제하지 않는다. Enrollment skip·success 로그도
+exception type과 sample count만 남기며 WAV·enrollment directory 경로를 기록하지 않는다.
 
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 

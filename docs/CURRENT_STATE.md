@@ -241,7 +241,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     detail에는 `tts_warmup_failed`, 외부 wrapper에는 phase별 고정 문구만 남긴다.
   - speaker verification probe embedding 실패 detail은
     `speaker_verification_failed:<exception-type>`으로 고정해 Local Bridge validation
-    event와 TTS interrupt metrics에 예외 메시지·경로를 복제하지 않는다.
+    event와 TTS interrupt metrics에 예외 메시지·경로를 복제하지 않는다. enrollment
+    skip·success 운영 로그도 exception type과 sample count만 남긴다.
   - Control Page legacy runtime service probe의 Bot API TCP/HTTP, Voyager,
     Codex와 전체 refresh 오류도 exact allowlist 코드만 공개한다. 최종 payload
     builder가 알 수 없는 error/login 문자열을 generic 코드로 바꾸므로 내부

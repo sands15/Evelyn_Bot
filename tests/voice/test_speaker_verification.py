@@ -38,12 +38,14 @@ def sign_embedding(audio: np.ndarray, _sampling_rate: int) -> np.ndarray:
 
 class SpeakerVerificationTests(unittest.TestCase):
     def test_verifier_matches_enrolled_voiceprint(self) -> None:
+        logs = []
         with tempfile.TemporaryDirectory() as tmp:
             enroll_dir = Path(tmp)
             write_wav(enroll_dir / "sample.wav", np.ones(16000, dtype=np.float32) * 0.2)
             verifier = SpeakerVerifier(
                 SpeakerVerificationConfig(enabled=True, enroll_dir=enroll_dir, threshold=0.8),
                 embedding_fn=sign_embedding,
+                log=logs.append,
             )
 
             result = verifier.verify(np.ones(16000, dtype=np.float32) * 0.1, sampling_rate=16000)
@@ -51,6 +53,8 @@ class SpeakerVerificationTests(unittest.TestCase):
         self.assertEqual(result.status, "verified")
         self.assertTrue(result.matched)
         self.assertEqual(result.sample_count, 1)
+        self.assertEqual(logs, ["[SPEAKER VERIFY] enrolled samples=1"])
+        self.assertNotIn(str(enroll_dir), repr(logs))
 
     def test_verifier_rejects_different_voiceprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,11 +88,13 @@ class SpeakerVerificationTests(unittest.TestCase):
         self.assertTrue(speaker_verification_applies(source="discord_voice", apply_to="all"))
 
     def test_missing_optional_torch_degrades_verification_without_import_failure(self) -> None:
+        logs = []
         with tempfile.TemporaryDirectory() as tmp:
             enroll_dir = Path(tmp)
             write_wav(enroll_dir / "sample.wav", np.ones(16000, dtype=np.float32) * 0.2)
             verifier = SpeakerVerifier(
                 SpeakerVerificationConfig(enabled=True, enroll_dir=enroll_dir),
+                log=logs.append,
             )
 
             with patch.object(speaker_verification_module, "torch", None):
@@ -99,6 +105,8 @@ class SpeakerVerificationTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(result.detail, "no_valid_enrollment_wav")
+        self.assertEqual(logs, ["[SPEAKER VERIFY] enrollment_skip errorType=RuntimeError"])
+        self.assertNotIn(str(enroll_dir), repr(logs))
 
     def test_probe_failure_detail_is_content_free(self) -> None:
         private_error = "PRIVATE_SPEAKER_FAILURE C:/secret/voice-token"

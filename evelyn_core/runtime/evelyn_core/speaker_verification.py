@@ -148,7 +148,7 @@ class SpeakerVerifier:
                     continue
                 embeddings.append(self._normalize_embedding(self._embed(prepared, 16000)))
             except Exception as exc:
-                self._log(f"[SPEAKER VERIFY] enrollment_skip path={path} err={exc!r}")
+                self._log(f"[SPEAKER VERIFY] enrollment_skip errorType={type(exc).__name__}")
 
         self._enrollment_sample_count = len(embeddings)
         if not embeddings:
@@ -157,9 +157,7 @@ class SpeakerVerifier:
 
         average = np.mean(np.stack(embeddings, axis=0), axis=0)
         self._enrollment_embedding = self._normalize_embedding(average)
-        self._log(
-            f"[SPEAKER VERIFY] enrolled samples={self._enrollment_sample_count} dir={self.config.enroll_dir}"
-        )
+        self._log(f"[SPEAKER VERIFY] enrolled samples={self._enrollment_sample_count}")
         return self._enrollment_embedding
 
     def _embed(self, audio: np.ndarray, sampling_rate: int) -> np.ndarray:

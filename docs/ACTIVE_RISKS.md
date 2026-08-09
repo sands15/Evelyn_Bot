@@ -288,7 +288,8 @@ fixed `llm_warmup_failed`, `LLM warmup failed`만 남긴다.
 OmniVoice startup health·generate warmup non-200 body도 읽지 않고 startup state에는
 fixed `tts_warmup_failed`, 외부 wrapper에는 phase별 고정 문구만 남긴다.
 Speaker verification probe embedding 실패 detail도 fixed
-`speaker_verification_failed:<type>`만 validation event·metrics에 전달한다.
+`speaker_verification_failed:<type>`만 validation event·metrics에 전달하며, enrollment
+skip·success 로그도 exception type과 sample count만 남긴다.
 Main/Fast의 failed tool evidence와 Main vision runtime metrics도 fixed code만
 직렬화해 다음 LLM prompt와 turn metrics에 예외 문장·경로를 복제하지 않는다.
 Background Vision Watch도 non-200 body를 읽지 않고 분석·capture 실패를 fixed
