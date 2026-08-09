@@ -1939,7 +1939,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `find_food_source`를 반복하지 않는다. stale·직접 주입 plan의 강제 거부는 유지한다.
   - Mindcraft action gateway의 content-free world-effect projector와 validation
     observer는 같은 shared artifact의 exact grant·lease·actionRun·goalRun·contract
-    증거를 상관시킨다. source 배선은 연결됐지만 실제 Discord와 Minecraft world에서
+    증거를 상관시킨다. persisted policy의 `telemetryMaxAgeSec`가 유한한 0.1 이상
+    숫자가 아니면 예외나 ready로 올리지 않고 fixed postcondition blocker로 닫는다.
+    source 배선은 연결됐지만 실제 Discord와 Minecraft world에서
     단일 승인 E2E를 수행하지 않았으므로 자율행동 P0 운영 완료를 주장하지 않는다.
   - 최종 회귀는 runtime 583개(skip 4), Minecraft 160개(skip 7), UI 171개(skip 8),
     변경 집중 132개를 통과했다. core discovery 656개에는 기능 assertion 실패가

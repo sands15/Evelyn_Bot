@@ -62,7 +62,9 @@ content-free world-effect projector를 arm한다. projector의 durable
 `goal_verified`는 goal echo이고 readiness `ready`는 준비 상태일 뿐이므로 실제
 effect를 대신하지 않는다. observer도 grant/connect/goal/stop 또는 service/queue
 mutation을 실행하지 않으며, 필요한 live evidence가 없거나 stale이면 route와
-postcondition blocker를 계속 유지한다. 남은 P0는 배선 구현이 아니라 사용자가
+postcondition blocker를 계속 유지한다. world-effect status의 numeric policy가
+손상돼도 validation API를 중단하거나 false-ready로 올리지 않고 같은 fixed blocker로 닫는다.
+남은 P0는 배선 구현이 아니라 사용자가
 승인한 실제 Discord→Minecraft world-effect 세션의 성공·실패·복구 검증이다.
 
 assistant 실행 전 승인·사후 재검사·outcome에는 실행별 `actionRunId`를 추가했고,

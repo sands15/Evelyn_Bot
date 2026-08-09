@@ -396,6 +396,27 @@ class MindcraftWorldEffectTests(unittest.TestCase):
             )[1],
             "mindcraft_world_effect_status_invalid",
         )
+        for invalid_max_age in (
+            True,
+            0.0,
+            float("nan"),
+            float("inf"),
+            {"seconds": 5.0},
+            [5.0],
+            "not-a-number",
+            10**1_000,
+        ):
+            with self.subTest(telemetry_max_age_sec=invalid_max_age):
+                tampered = json.loads(json.dumps(status))
+                tampered["policy"]["telemetryMaxAgeSec"] = invalid_max_age
+                tampered = json.loads(json.dumps(tampered))
+                self.assertEqual(
+                    validate_mindcraft_world_effect_status(
+                        tampered,
+                        now=self.clock.value,
+                    ),
+                    (None, "mindcraft_world_effect_status_invalid"),
+                )
         self.assertEqual(
             validate_mindcraft_world_effect_status(
                 status,

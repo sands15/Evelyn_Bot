@@ -89,6 +89,8 @@ Mindcraft top-level의 `world_lease_authorized`, `running`,
 action gateway의 durable replay fence도 사용 가능해야 한다. observer event나
 status를 내구 기록하지 못하거나 gateway 상태가 손상되면 readiness는
 `effect_observer_unavailable`로 차단한다.
+persisted policy의 `telemetryMaxAgeSec`도 유한한 0.1 이상 숫자여야 한다. bool,
+비수치·복합 값, non-finite·overflow 값은 fixed unavailable blocker로 fail-closed한다.
 
 완료·취소·실패한 one-shot action 뒤에는 Mindcraft runner가 정지되어 일반
 readiness가 false일 수 있다. 이미 일반 readiness로 `connect()`를 마친 동일

@@ -187,7 +187,7 @@ def _timestamp(value: Any) -> float:
         raise ValueError("mindcraft_world_effect_timestamp_invalid")
     try:
         parsed = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             "mindcraft_world_effect_timestamp_invalid"
         ) from exc
@@ -425,8 +425,16 @@ def validate_mindcraft_world_effect_status(
     except ValueError:
         return None, "mindcraft_world_effect_status_invalid"
     policy = value["policy"]
+    try:
+        telemetry_max_age_sec = _timestamp(
+            policy.get("telemetryMaxAgeSec")
+        )
+    except ValueError:
+        return None, "mindcraft_world_effect_status_invalid"
+    if telemetry_max_age_sec < 0.1:
+        return None, "mindcraft_world_effect_status_invalid"
     expected_policy = _policy(
-        telemetry_max_age_sec=float(policy.get("telemetryMaxAgeSec") or 0.0)
+        telemetry_max_age_sec=telemetry_max_age_sec
     )
     if set(policy) != set(expected_policy) or policy != expected_policy:
         return None, "mindcraft_world_effect_status_invalid"
