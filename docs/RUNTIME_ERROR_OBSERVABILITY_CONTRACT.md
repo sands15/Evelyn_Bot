@@ -120,6 +120,9 @@ Control Page server-start 실패도 startup component detail에는 fixed
 `control_page_start_failed:<exception-type>`, operation log에는 fixed code/type만
 남긴다. local-only outer wrapper `Control Page start failed`는 원인 traceback을 억제한다.
 
+Control Page welcome LLM non-200 response body는 읽지 않는다. failure model-call turn
+trace와 operation log에는 exception type만 남기며 fallback welcome은 유지한다.
+
 Speaker verification probe embedding 실패 detail은 fixed
 `speaker_verification_failed:<exception-type>`만 사용하며 validation event와 turn
 metrics에 원문 예외·모델 cache 경로를 복제하지 않는다. Enrollment skip·success 로그도

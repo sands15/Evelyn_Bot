@@ -23,6 +23,7 @@ class FakeResponse:
         self.status = status
         self.data = data or {}
         self._text = text
+        self.text_calls = 0
 
     async def __aenter__(self):
         return self
@@ -34,6 +35,7 @@ class FakeResponse:
         return self.data
 
     async def text(self) -> str:
+        self.text_calls += 1
         return self._text
 
 
@@ -101,14 +103,21 @@ class ControlPageWelcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.traces[0]["guild_id"], 7)
 
     async def test_http_failure_records_trace_and_returns_fallback(self) -> None:
-        self.session = FakeSession(FakeResponse(status=503, text="not ready"))
+        marker = "PRIVATE_WELCOME_BODY_CANARY:/synthetic/model-token.json"
+        response = FakeResponse(status=503, text=marker)
+        self.session = FakeSession(response)
 
         result = await generate_control_page_welcome_text_from_runtime(None, deps=self.build_deps())
 
         self.assertEqual(result, "기본 환영")
+        self.assertEqual(response.text_calls, 0)
         self.assertFalse(self.traces[0]["success"])
-        self.assertIsInstance(self.traces[0]["error"], RuntimeError)
-        self.assertIn("welcome_generation_failed", self.logs[0])
+        self.assertEqual(self.traces[0]["error"], "RuntimeError")
+        self.assertEqual(
+            self.logs,
+            ["[CONTROL PAGE] welcome_generation_failed errorType=RuntimeError"],
+        )
+        self.assertNotIn(marker, repr(self.traces) + repr(self.logs))
 
     async def test_empty_choices_returns_fallback(self) -> None:
         self.session = FakeSession(FakeResponse(data={"choices": []}))
@@ -116,7 +125,7 @@ class ControlPageWelcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await generate_control_page_welcome_text_from_runtime(None, deps=self.build_deps())
 
         self.assertEqual(result, "기본 환영")
-        self.assertIn("empty choices", repr(self.traces[0]["error"]))
+        self.assertEqual(self.traces[0]["error"], "RuntimeError")
 
     def test_main_delegates_welcome_generation_to_ui_runtime(self) -> None:
         source = (

@@ -243,6 +243,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     fixed code/type만 artifact·Control Page·soft context에 투영해 원문을 복사하지 않는다.
   - Main LLM warmup non-200 body는 읽지 않고 startup detail에는
     `llm_warmup_failed`, 외부 wrapper에는 고정 `LLM warmup failed`만 남긴다.
+  - Control Page welcome LLM non-200 body는 읽지 않으며, failure model-call turn
+    trace와 operation log에는 exception type만 남기고 fallback welcome을 유지한다.
   - OmniVoice startup health·generate warmup의 non-200 body도 읽지 않고 startup
     detail에는 `tts_warmup_failed`, 외부 wrapper에는 phase별 고정 문구만 남긴다.
   - Control Page server-start 실패는 startup detail에

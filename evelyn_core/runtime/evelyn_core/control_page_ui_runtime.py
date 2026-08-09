@@ -82,8 +82,7 @@ async def generate_control_page_welcome_text_from_runtime(
         timeout = deps.client_timeout_factory(total=deps.welcome_llm_timeout_sec)
         async with session.post(deps.llm_server_url, json=payload, timeout=timeout) as resp:
             if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+                raise RuntimeError("control_page_welcome_failed")
             data = await resp.json()
         choices = data.get("choices", [])
         if not choices:
@@ -115,13 +114,13 @@ async def generate_control_page_welcome_text_from_runtime(
             hot_path=False,
             started_at=started_at,
             success=False,
-            error=exc,
+            error=type(exc).__name__,
             model_name=deps.model_name,
             endpoint=deps.llm_server_url,
             source="control_page",
             guild_id=deps.effective_guild_id(guild),
         )
-        deps.log(f"[CONTROL PAGE] welcome_generation_failed err={exc!r}")
+        deps.log(f"[CONTROL PAGE] welcome_generation_failed errorType={type(exc).__name__}")
         return deps.clean_text(deps.welcome_fallback)
 
 
