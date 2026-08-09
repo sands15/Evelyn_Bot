@@ -29,8 +29,11 @@ class FakeCheckpoint:
     def __init__(self, generation: int = 4) -> None:
         self.generation = generation
         self.commits: list[tuple[str, str]] = []
+        self.before_commit = None
 
     def commit_completed_turn(self, scope: str, turn_id: str):
+        if self.before_commit is not None:
+            self.before_commit(scope, turn_id)
         self.commits.append((scope, turn_id))
         self.generation += 1
         return durable_continuity_status(self.generation)
@@ -71,6 +74,8 @@ class ConversationIngressRestartRuntimeTests(unittest.TestCase):
         self,
     ) -> None:
         deps, store, checkpoint = self.deps()
+        scope = "guild:1:text:2:user:3"
+        store.active_until[scope] = 12.5
         generation = reconcile_recovered_delivery_succeeded(
             self.record(phase="delivery_succeeded"),
             deps=deps,
@@ -87,12 +92,19 @@ class ConversationIngressRestartRuntimeTests(unittest.TestCase):
             session_key="guild:1:text:2:user:3",
         )
         self.assertEqual([row["role"] for row in history[-2:]], ["user", "assistant"])
+        self.assertEqual(store.active_until[scope], 12.5)
 
+        store.last_speaker[scope] = "user"
+        store.awaiting_user_reply[scope] = True
+        store.active_until[scope] = 12.5
         reconcile_recovered_delivery_succeeded(
             self.record(phase="delivery_succeeded"),
             deps=deps,
         )
         self.assertEqual(len(history), 3)
+        self.assertEqual(store.last_speaker[scope], "assistant")
+        self.assertFalse(store.awaiting_user_reply[scope])
+        self.assertEqual(store.active_until[scope], 12.5)
 
     def test_prior_checkpoint_then_next_delivered_turn_reconciles(self) -> None:
         deps, store, checkpoint = self.deps()
@@ -177,6 +189,91 @@ class ConversationIngressRestartRuntimeTests(unittest.TestCase):
             ["prior user turn", "delivered answer"],
         )
 
+    def test_exact_current_user_only_tail_completes_delivered_turn(
+        self,
+    ) -> None:
+        deps, store, checkpoint = self.deps()
+        record = self.record(phase="delivery_succeeded")
+        scope = record["scope"]
+        store.start_new_turn(scope, turn_id=record["turnId"])
+        store.append_history(
+            scope,
+            "ｐｒｉｏｒ　ｕｓｅｒ　ｔｕｒｎ",
+            None,
+            system_prompt="system",
+            max_history_items=10,
+        )
+        store.active_until[scope] = 12.5
+
+        def assert_recovery_state(_scope: str, _turn_id: str) -> None:
+            history = store.get_conversation_history(
+                system_prompt="system",
+                session_key=scope,
+            )
+            self.assertEqual(
+                [row["role"] for row in history],
+                ["system", "user", "assistant"],
+            )
+            self.assertEqual(store.last_speaker[scope], "assistant")
+            self.assertFalse(store.awaiting_user_reply[scope])
+            self.assertEqual(store.active_until[scope], 12.5)
+
+        checkpoint.before_commit = assert_recovery_state
+
+        generation = reconcile_recovered_delivery_succeeded(
+            record,
+            deps=deps,
+        )
+
+        self.assertEqual(generation, 5)
+        self.assertEqual(checkpoint.commits, [(scope, record["turnId"])])
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key=scope,
+        )
+        self.assertEqual(
+            [row["role"] for row in history],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(
+            history[-1]["memoryReceiptRef"],
+            record["memoryReceiptRef"],
+        )
+        self.assertEqual(store.last_speaker[scope], "assistant")
+        self.assertEqual(store.active_until[scope], 12.5)
+
+    def test_different_current_turn_keeps_user_only_tail_blocked(
+        self,
+    ) -> None:
+        deps, store, checkpoint = self.deps()
+        record = self.record(phase="delivery_succeeded")
+        scope = record["scope"]
+        store.start_new_turn(scope, turn_id="different-turn")
+        store.append_history(
+            scope,
+            "ｐｒｉｏｒ　ｕｓｅｒ　ｔｕｒｎ",
+            None,
+            system_prompt="system",
+            max_history_items=10,
+        )
+
+        generation = reconcile_recovered_delivery_succeeded(
+            record,
+            deps=deps,
+        )
+
+        self.assertIsNone(generation)
+        self.assertEqual(checkpoint.commits, [])
+        self.assertEqual(store.current_turn_id(scope), "different-turn")
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key=scope,
+        )
+        self.assertEqual(
+            [row["role"] for row in history],
+            ["system", "user"],
+        )
+
     def test_terminal_commit_requires_exact_turn_history_and_generation(
         self,
     ) -> None:
@@ -188,8 +285,8 @@ class ConversationIngressRestartRuntimeTests(unittest.TestCase):
         )
         store.finish_assistant_text_turn(
             "guild:1:text:2:user:3",
-            "prior user turn",
-            "delivered answer",
+            "ｐｒｉｏｒ　ｕｓｅｒ　ｔｕｒｎ",
+            "ｄｅｌｉｖｅｒｅｄ　ａｎｓｗｅｒ",
             system_prompt="system",
             max_history_items=10,
             guild_id=1,

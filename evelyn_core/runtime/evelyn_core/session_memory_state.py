@@ -440,9 +440,9 @@ class SessionStateStore:
         memory_receipt: Any = None,
     ) -> None:
         history = self.get_conversation_history(system_prompt=system_prompt, session_key=session_key, guild_id=guild_id)
-        history.append({"role": "user", "content": clean_text(user_text)})
+        rows = [{"role": "user", "content": clean_text(user_text)}]
         if answer is not None:
-            history.append(
+            rows.append(
                 {
                     "role": "assistant",
                     "content": clean_text(answer),
@@ -455,6 +455,7 @@ class SessionStateStore:
                     ),
                 }
             )
+        history.extend(rows)
         self.trim_history(
             system_prompt=system_prompt,
             max_history_items=max_history_items,

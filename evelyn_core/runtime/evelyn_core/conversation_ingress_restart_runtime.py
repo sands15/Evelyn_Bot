@@ -7,6 +7,12 @@ from typing import Any, Callable
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
+from .conversation_memory_receipt import (
+    sanitize_memory_receipt_ref,
+)
+from .conversation_ingress_recovery import (
+    normalize_final_conversation_text,
+)
 from .session_memory_state import build_topic_id
 from .text import clean_text
 
@@ -50,11 +56,30 @@ def _exact_history_tail(
         and isinstance(assistant_row, dict)
         and user_row.get("role") == "user"
         and assistant_row.get("role") == "assistant"
-        and clean_text(str(user_row.get("content") or ""))
-        == clean_text(user_text)
-        and clean_text(str(assistant_row.get("content") or ""))
-        == clean_text(assistant_text)
+        and normalize_final_conversation_text(user_row.get("content"))
+        == normalize_final_conversation_text(user_text)
+        and normalize_final_conversation_text(
+            assistant_row.get("content")
+        )
+        == normalize_final_conversation_text(assistant_text)
         and assistant_row.get("memoryReceiptRef") == memory_receipt_ref
+    )
+
+
+def _exact_user_only_tail(
+    history: list[dict[str, Any]],
+    *,
+    user_text: str,
+) -> bool:
+    if not history:
+        return False
+    user_row = history[-1]
+    return bool(
+        isinstance(user_row, dict)
+        and set(user_row) == {"role", "content"}
+        and user_row.get("role") == "user"
+        and normalize_final_conversation_text(user_row.get("content"))
+        == normalize_final_conversation_text(user_text)
     )
 
 
@@ -100,8 +125,13 @@ def reconcile_recovered_delivery_succeeded(
     turn_id = str(record.get("turnId") or "")
     user_text = str(record.get("acceptedText") or "")
     assistant_text = str(record.get("assistantText") or "")
-    memory_ref = record.get("memoryReceiptRef")
-    if not all((scope, turn_id, user_text, assistant_text)):
+    memory_ref = sanitize_memory_receipt_ref(
+        record.get("memoryReceiptRef")
+    )
+    if (
+        not all((scope, turn_id, user_text, assistant_text))
+        or memory_ref is None
+    ):
         return None
     store = deps.session_state_store
     current_turn = str(store.current_turn_id(scope) or "")
@@ -115,30 +145,60 @@ def reconcile_recovered_delivery_succeeded(
         assistant_text=assistant_text,
         memory_receipt_ref=memory_ref,
     )
-    if not pair_persisted:
+    user_only_persisted = (
+        current_turn == turn_id
+        and _exact_user_only_tail(
+            history,
+            user_text=user_text,
+        )
+    )
+    if user_only_persisted:
+        history.append(
+            {
+                "role": "assistant",
+                "content": clean_text(assistant_text),
+                "memoryReceiptRef": memory_ref,
+            }
+        )
+        store.trim_history(
+            system_prompt=deps.system_prompt,
+            max_history_items=deps.max_history_items,
+            session_key=scope,
+        )
+    elif not pair_persisted:
         if (
             history
             and history[-1].get("role") == "user"
-            and clean_text(str(history[-1].get("content") or ""))
-            == clean_text(user_text)
+            and normalize_final_conversation_text(
+                history[-1].get("content")
+            )
+            == normalize_final_conversation_text(user_text)
         ):
             return None
         store.start_new_turn(scope, turn_id=turn_id)
-        guild_id, user_id = _scope_actor_ids(scope)
-        store.finish_assistant_text_turn(
+        guild_id, _ = _scope_actor_ids(scope)
+        store.append_history(
             scope,
             user_text,
             assistant_text,
             system_prompt=deps.system_prompt,
             max_history_items=deps.max_history_items,
             guild_id=guild_id,
-            user_id=user_id,
-            awaiting_user_reply=False,
-            normal_ttl_sec=deps.normal_ttl_sec,
-            question_ttl_sec=deps.question_ttl_sec,
-            topic_id=build_topic_id(user_text, assistant_text),
             memory_receipt=memory_ref,
         )
+    guild_id, user_id = _scope_actor_ids(scope)
+    store.update_session_state(
+        scope,
+        user_id=user_id,
+        speaker="assistant",
+        awaiting_user_reply=False,
+        topic_id=build_topic_id(user_text, assistant_text),
+        answer_text=assistant_text,
+        user_text=user_text,
+        active_conversation_awaiting_reply_sec=(
+            deps.question_ttl_sec
+        ),
+    )
     status = deps.session_continuity_checkpoint.commit_completed_turn(
         scope,
         turn_id,

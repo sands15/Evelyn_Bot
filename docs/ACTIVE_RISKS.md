@@ -623,8 +623,11 @@ claim receipt를 검증한 뒤에만 token/replay/follow-up/count를 확정하�
 receipt 불일치는 대화를 시작하지 않는다. recovered duplicate는 replay-only로
 폐기되고 자동 대화 재실행은 0이다. 따라서 이전의 `issue response -> Bot restart ->
 chat`과 `consume -> claim` crash-loss source 창은 닫혔다. Discord text의
-`delivery_succeeded` reconcile은 현재 journal `turnId`와 exact history tail을 함께
-요구하므로, 과거의 동일 문답이 새 turn의 durable commit을 대신하지 못한다.
+`delivery_succeeded` reconcile은 journal `turnId`와 exact pair를 함께 요구한다.
+exact current turn에 user-only tail만 durable한 crash 상태는 assistant/receipt/state를
+commit 전에 한 번 완성하고, 다른 turn이나 과거의 동일 문답은 계속 fail-closed다.
+복구는 기존 `active_until`을 보존해 expired admission을 다시 열지 않으며, history
+비교도 journal과 같은 NFKC 정규화를 써 호환문자 중복·fence 우회를 막는다.
 
 validation mutation과 local admission issue/consume은 attempt별 cross-process OS
 lease를 공유하며, lease는 성공·409·503 JSON/stream의 실제 HTTP terminal까지

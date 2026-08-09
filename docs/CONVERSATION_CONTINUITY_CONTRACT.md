@@ -424,6 +424,11 @@ continuity history 결합에만 사용한다.
 - non-stream 응답은 body write 직전에 `delivery_inflight`, 성공한 EOF 뒤에만
   `delivery_succeeded`와 terminal commit을 기록한다. prepare/EOF 실패는
   `delivery_ambiguous`이고 background action을 시작하지 않는다.
+- Discord `delivery_succeeded` 재시작은 exact current `turnId`와
+  user/assistant/receipt tail을 요구한다. 같은 turn의 strict user-only crash
+  checkpoint만 assistant/receipt/state를 commit 전에 한 번 완성하며, 다른 turn의
+  동일 문장은 fail-closed한다. 복구는 기존 `active_until`을 보존하고 새 TTL을
+  발급하지 않으며, 비교 정규화는 ingress journal의 NFKC 규칙과 같다.
 - TTS 재생이 필요한 Local Bridge 응답은 HTTP EOF를 완료로 쓰지 않는다. exact
   software-playback ACK의 `played`만 assistant turn을 완료하고,
   `failed|partial|cancelled`는 accepted user row만 durable commit한다.

@@ -1852,7 +1852,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
   text와 source/entry/turn ID를 내보내지 않는다. `delivery_succeeded` 복구의
   저장 증거는 현재 `turnId`와 history의 exact user/assistant/receipt tail이 함께
-  일치해야 하며, 과거의 동일 문답은 새 journal turn의 commit 증거로 쓰지 않는다.
+  일치해야 한다. 같은 current turn의 strict user-only crash checkpoint만 assistant,
+  compact receipt와 assistant state를 commit 전에 한 번 완성하며 journal과 같은 NFKC
+  정규화를 쓴다. fresh/pair/user-only 복구는 기존 `active_until`을 보존하고 새 TTL을
+  발급하지 않는다. 다른 turn의 동일 문장과 과거 동일 문답은 commit 증거로 쓰지 않는다.
 - Local Voice Fast Control 경로는 별도 `consume()` 뒤 claim을 호출하지 않는다.
   stream/non-stream이 같은 typed transaction을 사용하고, token 응답 전에 exact
   content-free ingress reservation을 durable 기록한다. Bot 재시작 뒤에는 Bridge가
