@@ -538,8 +538,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
     손상된 기존 파일은 성공으로 복구 추정하지 않고 content-free
     `memory_confirmation_write_unverified`로 fail-closed한다.
-  - 새 노트는 `memory.user-confirmation.note.v1` marker를 함께 기록한다. recall
-    index는 marker, `user-confirmed` tag 또는 고정 storage path로 이 계열을
+  - 새 노트는 `memory.user-confirmation.note.v2` marker와 private canonical
+    `owner_scope`를 함께 기록한다. recall index는 marker, `user-confirmed` tag 또는
+    고정 storage path로 이 계열을
     다시 식별하고, source/ref/evidence/confirmed timestamp를 매 동기화에서
     재검사한다. 무결성이 깨진 노트는 기존 retrieval cache·FTS·vector·hot
     context에서 제거되며 Control Page에는 `근거 손상`과 content-free blocker로
@@ -2127,7 +2128,7 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   쓰지 않고 unavailable로 닫는다. index sync, retrieval-cache migration/write와 실제
   cognitive·memory artifact commit은 writer로 유지했다.
 - 정상 recall은 기존 writer sync/cache를 유지하고 진입 전 exact busy만 shared no-cache
-  fallback으로 전환한다. fallback은 SQLite sidecar·symlink, `schema_version != 6`,
+  fallback으로 전환한다. fallback은 SQLite sidecar·symlink, `schema_version != 7`,
   비정규 `memory_version`과 필수 metadata/notes query 실패를 거부하고
   `mode=ro&immutable=1`에서 최대 500개 후보를 현재 Markdown hash·ID·path,
   tombstone·quarantine·confirmation에 다시 결합한다. cache/FTS/vector/graph/hot,
@@ -2420,3 +2421,21 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 정책·runtime gate 집중 20개, voice 전체 668개(skip 5), CI-equivalent 전체
   3,299개(skip 22)가 통과했다. 검증은 offline source/test이며 실제 Discord·마이크·
   스피커를 기동하지 않았다.
+
+## 2026-08-12 explicit memory principal isolation
+
+- 직접 사용자 확인 기억은 attribution과 별도로 opaque owner scope를 갖는다. Discord
+  text/voice와 Main recall은 trusted exact guild/person을 공유하고, Fast JSON·stream·
+  default recall은 startup의 cross-surface configured principal 또는 별도 local-only
+  principal 하나를 공유한다. 같은 owner/action 재시도만 멱등이고 다른 owner의 같은
+  action ID는 별도 노트다.
+- Markdown이 source of truth이며 SQLite index schema 7은 private `owner_scope`를 복제한다.
+  retrieval cache v3 key, FTS/scan, vector 추가, graph neighbor, read-only Markdown 재결합과
+  최종 render에서 exact owner를 검사한다. owner-scoped core/project는 global hot context에서
+  제외하며 token은 receipt/card/provenance/snapshot/graph에 투영하지 않는다.
+- owner가 없는 v1, marker-only, tag/path 계열 direct-confirm note는 관리 UI·편집·삭제에는
+  남지만 자동 Main/Fast prompt에서는 fail-closed한다. 기존 guild/session에서 owner를 자동
+  추정하거나 migration하지 않으며 현재 principal의 새 `/remember` 근거가 필요하다.
+- 변경 직결 집중 333개(skip 1), memory 전체 307개(skip 1), CI-equivalent 전체
+  3,306개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline temp-vault/source
+  tests이며 실제 Discord·Control Page·사용자 memory·Docker는 기동하거나 수정하지 않았다.

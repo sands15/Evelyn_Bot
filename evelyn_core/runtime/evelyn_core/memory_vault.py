@@ -48,6 +48,7 @@ from .memory_confirmation_contract import (
     MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
     MEMORY_USER_CONFIRMATION_TAG,
     is_user_confirmed_memory_integrity_valid,
+    memory_owner_scope_is_canonical,
 )
 from .memory_provenance_audit import (
     DIRECT_SOURCE_TYPES,
@@ -73,7 +74,8 @@ PROVENANCE_FORWARD_REJECTIONS_NAME = (
     "memory_provenance_forward_write_rejections.json"
 )
 RETRIEVAL_CACHE_TTL_SECONDS = 300
-MEMORY_RETRIEVAL_CACHE_SCHEMA = "memory.retrieval-cache.v2"
+MEMORY_RETRIEVAL_CACHE_SCHEMA = "memory.retrieval-cache.v3"
+MEMORY_INDEX_SCHEMA_VERSION = 7
 MEMORY_RECALL_MAX_RENDERED_NOTES = 12
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS = 120
@@ -553,6 +555,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             importance REAL NOT NULL DEFAULT 0.5,
             confidence TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
+            owner_scope TEXT NOT NULL DEFAULT '',
             source_refs TEXT NOT NULL DEFAULT '[]',
             derived_from TEXT NOT NULL DEFAULT '[]',
             origin_derived_from TEXT NOT NULL DEFAULT '[]',
@@ -600,6 +603,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "ALTER TABLE notes ADD COLUMN confidence TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE notes ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE notes ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE notes ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN derived_from TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN origin_derived_from TEXT NOT NULL DEFAULT '[]'",
@@ -842,10 +846,15 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
 
     with _open_index(index_path) as conn:
         _ensure_schema(conn)
-        force_reindex = _get_metadata_int(conn, "schema_version", 0) < 6
+        force_reindex = (
+            _get_metadata_int(conn, "schema_version", 0)
+            < MEMORY_INDEX_SCHEMA_VERSION
+        )
         existing = {
             row["rel_path"]: row
-            for row in conn.execute("SELECT rel_path, source_hash FROM notes").fetchall()
+            for row in conn.execute(
+                "SELECT rel_path, source_hash, owner_scope FROM notes"
+            ).fetchall()
         }
         seen: set[str] = set()
         changed = False
@@ -871,19 +880,27 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                 continue
             rel_path = path.relative_to(vault).as_posix()
             seen.add(rel_path)
-            if not force_reindex and existing.get(rel_path) and existing[rel_path]["source_hash"] == note.source_hash:
+            indexed = existing.get(rel_path)
+            if (
+                not force_reindex
+                and indexed
+                and indexed["source_hash"] == note.source_hash
+                and clean_text(indexed["owner_scope"])
+                == clean_text(note.metadata.get("owner_scope"))
+            ):
                 continue
             conn.execute(
                 """
                 INSERT INTO notes(
                     note_id, rel_path, note_type, title, body, tags, projects, links,
                     status, created_at, updated_at, importance, confidence, source,
+                    owner_scope,
                     source_refs, derived_from, origin_derived_from,
                     evidence_hashes, origin_source,
                     origin_source_refs, revision, revised_from_evidence_hashes,
                     mtime_ns, source_hash
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rel_path) DO UPDATE SET
                     note_id = excluded.note_id,
                     note_type = excluded.note_type,
@@ -898,6 +915,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     importance = excluded.importance,
                     confidence = excluded.confidence,
                     source = excluded.source,
+                    owner_scope = excluded.owner_scope,
                     source_refs = excluded.source_refs,
                     derived_from = excluded.derived_from,
                     origin_derived_from = excluded.origin_derived_from,
@@ -924,6 +942,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     _front_matter_float(note.metadata, "importance", 0.5),
                     clean_text(str(note.metadata.get("confidence") or "")),
                     clean_text(str(note.metadata.get("source") or "")),
+                    clean_text(str(note.metadata.get("owner_scope") or "")),
                     json.dumps(_as_list(note.metadata.get("source_refs") or note.metadata.get("source_ref")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("derived_from")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("origin_derived_from")), ensure_ascii=False),
@@ -964,7 +983,11 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
             version += 1
             _set_metadata(conn, "memory_version", version)
             _set_metadata(conn, "last_indexed_at", _utc_now_iso())
-            _set_metadata(conn, "schema_version", 6)
+            _set_metadata(
+                conn,
+                "schema_version",
+                MEMORY_INDEX_SCHEMA_VERSION,
+            )
             _set_metadata(conn, "vector_model", VECTOR_INDEX_MODEL)
             _set_metadata(conn, "vector_dimensions", VECTOR_INDEX_DIMENSIONS)
             conn.execute("DELETE FROM retrieval_cache")
@@ -1030,7 +1053,10 @@ def _is_user_confirmed_memory_note(
         if clean_text(tag)
     }
     return bool(
-        memory_contract == MEMORY_USER_CONFIRMATION_NOTE_SCHEMA
+        memory_contract in {
+            MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
+            "memory.user-confirmation.note.v1",
+        }
         or MEMORY_USER_CONFIRMATION_TAG in tags
         or note.path.name.lower().startswith("user-confirmed-")
     )
@@ -1072,6 +1098,7 @@ def _user_confirmed_memory_integrity_state(
                 note.metadata.get("evidence_hashes")
             ),
             confirmed_at=note.metadata.get("confirmed_at"),
+            owner_scope=note.metadata.get("owner_scope"),
         )
         else "invalid"
     )
@@ -1760,11 +1787,45 @@ def _fts_query(tokens: set[str]) -> str:
     return " OR ".join(terms)
 
 
+def _recall_owner_scope(value: object) -> str:
+    return value if memory_owner_scope_is_canonical(value) else ""
+
+
+def _is_user_confirmed_memory_row(
+    row: sqlite3.Row | dict[str, Any],
+) -> bool:
+    tags = {
+        clean_text(item).lower()
+        for item in _safe_json_list(clean_text(row["tags"]))
+    }
+    return bool(
+        MEMORY_USER_CONFIRMATION_TAG in tags
+        or Path(clean_text(row["rel_path"])).name.lower().startswith(
+            "user-confirmed-"
+        )
+    )
+
+
+def _memory_row_visible_to_owner(
+    row: sqlite3.Row | dict[str, Any],
+    owner_scope: str,
+) -> bool:
+    row_scope = clean_text(row["owner_scope"])
+    if row_scope:
+        return bool(
+            owner_scope
+            and memory_owner_scope_is_canonical(row_scope)
+            and secrets.compare_digest(row_scope, owner_scope)
+        )
+    return not _is_user_confirmed_memory_row(row)
+
+
 def _fetch_candidate_rows(
     conn: sqlite3.Connection,
     *,
     query_tokens: set[str],
     focus_tokens: set[str],
+    owner_scope: str,
     limit: int,
 ) -> tuple[list[sqlite3.Row], str]:
     fts = _fts_query(query_tokens | focus_tokens)
@@ -1775,11 +1836,13 @@ def _fetch_candidate_rows(
                 SELECT n.*, bm25(notes_fts) AS fts_rank
                 FROM notes_fts
                 JOIN notes n ON n.note_id = notes_fts.note_id
-                WHERE notes_fts MATCH ? AND n.status NOT IN ('archived', 'superseded')
+                WHERE notes_fts MATCH ?
+                  AND n.status NOT IN ('archived', 'superseded')
+                  AND (n.owner_scope = '' OR n.owner_scope = ?)
                 ORDER BY fts_rank
                 LIMIT ?
                 """,
-                (fts, max(limit, 80)),
+                (fts, owner_scope, max(limit, 80)),
             ).fetchall()
             if rows:
                 return rows, "fts"
@@ -1787,20 +1850,29 @@ def _fetch_candidate_rows(
             _set_metadata(conn, "fts_available", "0")
 
     rows = conn.execute(
-        "SELECT *, 0.0 AS fts_rank FROM notes WHERE status NOT IN ('archived', 'superseded') ORDER BY mtime_ns DESC LIMIT ?",
-        (max(limit, 500),),
+        """
+        SELECT *, 0.0 AS fts_rank FROM notes
+        WHERE status NOT IN ('archived', 'superseded')
+          AND (owner_scope = '' OR owner_scope = ?)
+        ORDER BY mtime_ns DESC
+        LIMIT ?
+        """,
+        (owner_scope, max(limit, 500)),
     ).fetchall()
     return rows, "scan"
 
 
 def _fetch_read_only_candidate_rows(
     conn: sqlite3.Connection,
+    *,
+    owner_scope: str,
 ) -> list[sqlite3.Row]:
     """Read the bounded note table without trusting derived rank artifacts."""
 
     try:
         return conn.execute(
-            "SELECT *, 0.0 AS fts_rank FROM notes ORDER BY note_id LIMIT 500"
+            "SELECT *, 0.0 AS fts_rank FROM notes WHERE owner_scope = '' OR owner_scope = ? ORDER BY note_id LIMIT 500",
+            (owner_scope,),
         ).fetchall()
     except sqlite3.Error:
         raise MemoryDeletionJournalIntegrityError() from None
@@ -1810,6 +1882,7 @@ def _fetch_vector_scores(
     conn: sqlite3.Connection,
     query_text: str,
     *,
+    owner_scope: str,
     limit: int,
 ) -> dict[str, float]:
     query_vector, query_norm = _hashing_vector(query_text)
@@ -1820,9 +1893,11 @@ def _fetch_vector_scores(
         SELECT v.note_id, v.vector_json
         FROM note_vectors v
         JOIN notes n ON n.note_id = v.note_id
-        WHERE v.model = ? AND n.status NOT IN ('archived', 'superseded')
+        WHERE v.model = ?
+          AND n.status NOT IN ('archived', 'superseded')
+          AND (n.owner_scope = '' OR n.owner_scope = ?)
         """,
-        (VECTOR_INDEX_MODEL,),
+        (VECTOR_INDEX_MODEL, owner_scope),
     ).fetchall()
     scored: list[tuple[float, str]] = []
     for row in rows:
@@ -1839,14 +1914,24 @@ def _fetch_vector_scores(
     return {note_id: score for score, note_id in scored[: max(1, limit)]}
 
 
-def _fetch_notes_by_ids(conn: sqlite3.Connection, note_ids: list[str]) -> list[sqlite3.Row]:
+def _fetch_notes_by_ids(
+    conn: sqlite3.Connection,
+    note_ids: list[str],
+    *,
+    owner_scope: str,
+) -> list[sqlite3.Row]:
     cleaned_ids = [clean_text(note_id) for note_id in note_ids if clean_text(note_id)]
     if not cleaned_ids:
         return []
     placeholders = ",".join("?" for _ in cleaned_ids)
     return conn.execute(
-        f"SELECT *, 0.0 AS fts_rank FROM notes WHERE note_id IN ({placeholders}) AND status NOT IN ('archived', 'superseded')",
-        cleaned_ids,
+        f"""
+        SELECT *, 0.0 AS fts_rank FROM notes
+        WHERE note_id IN ({placeholders})
+          AND status NOT IN ('archived', 'superseded')
+          AND (owner_scope = '' OR owner_scope = ?)
+        """,
+        [*cleaned_ids, owner_scope],
     ).fetchall()
 
 
@@ -1854,6 +1939,7 @@ def _expand_graph_neighbors(
     conn: sqlite3.Connection,
     selected: list[sqlite3.Row],
     *,
+    owner_scope: str,
     max_extra: int,
 ) -> list[sqlite3.Row]:
     if max_extra <= 0 or not selected:
@@ -1869,7 +1955,14 @@ def _expand_graph_neighbors(
     if not dst_keys:
         return []
 
-    rows = conn.execute("SELECT *, 0.0 AS fts_rank FROM notes WHERE status NOT IN ('archived', 'superseded')").fetchall()
+    rows = conn.execute(
+        """
+        SELECT *, 0.0 AS fts_rank FROM notes
+        WHERE status NOT IN ('archived', 'superseded')
+          AND (owner_scope = '' OR owner_scope = ?)
+        """,
+        (owner_scope,),
+    ).fetchall()
     extras: list[sqlite3.Row] = []
     wanted = set(dst_keys)
     for row in rows:
@@ -1905,6 +1998,7 @@ def _cache_key(request: MemoryRecallRequest, memory_version: int) -> str:
         "version": memory_version,
         "guild_id": request.guild_id,
         "session_key": request.session_key,
+        "owner_scope": _recall_owner_scope(request.owner_scope),
         "user_text": clean_text(request.user_text).lower(),
         "topic_id": request.topic_id,
         "source": request.source,
@@ -3601,6 +3695,7 @@ def _recall_memory_vault_impl(
         allow_internal_memory = _allows_internal_memory_recall(request, focus_items)
         query_tokens = _tokenize(request.user_text)
         focus_tokens = _tokenize(" ".join(clean_text(str(item)) for item in focus_items))
+        owner_scope = _recall_owner_scope(request.owner_scope)
         deleted_note_ids: set[str] = set()
         quarantined_note_ids: set[str] = set()
 
@@ -3619,7 +3714,7 @@ def _recall_memory_vault_impl(
                 if _get_read_only_metadata_int(
                     conn,
                     "schema_version",
-                ) != 6:
+                ) != MEMORY_INDEX_SCHEMA_VERSION:
                     raise MemoryDeletionJournalIntegrityError()
                 version = _get_read_only_metadata_int(
                     conn,
@@ -3672,7 +3767,10 @@ def _recall_memory_vault_impl(
                 request.max_items
             )
             if read_only_fallback:
-                rows = _fetch_read_only_candidate_rows(conn)
+                rows = _fetch_read_only_candidate_rows(
+                    conn,
+                    owner_scope=owner_scope,
+                )
                 rows = _trusted_read_only_recall_rows(
                     rows,
                     root=root,
@@ -3685,12 +3783,14 @@ def _recall_memory_vault_impl(
                     conn,
                     query_tokens=query_tokens,
                     focus_tokens=focus_tokens,
+                    owner_scope=owner_scope,
                     limit=max(80, requested_max_items * 20),
                 )
             rows = [
                 row
                 for row in rows
-                if not _memory_note_has_unreceipted_derived_source(row)
+                if _memory_row_visible_to_owner(row, owner_scope)
+                and not _memory_note_has_unreceipted_derived_source(row)
             ]
             if not allow_internal_memory:
                 rows = [row for row in rows if not _is_internal_memory_note(row)]
@@ -3700,6 +3800,7 @@ def _recall_memory_vault_impl(
                 else _fetch_vector_scores(
                     conn,
                     " ".join([request.user_text, " ".join(clean_text(str(item)) for item in focus_items)]),
+                    owner_scope=owner_scope,
                     limit=max(20, requested_max_items * 8),
                 )
             )
@@ -3710,12 +3811,14 @@ def _recall_memory_vault_impl(
                     missing_rows = _fetch_notes_by_ids(
                         conn,
                         missing_vector_ids,
+                        owner_scope=owner_scope,
                     )
                     rows.extend(missing_rows)
                 rows = [
                     row
                     for row in rows
-                    if not _memory_note_has_unreceipted_derived_source(row)
+                    if _memory_row_visible_to_owner(row, owner_scope)
+                    and not _memory_note_has_unreceipted_derived_source(row)
                 ]
                 if not allow_internal_memory:
                     rows = [row for row in rows if not _is_internal_memory_note(row)]
@@ -3746,13 +3849,15 @@ def _recall_memory_vault_impl(
                 else _expand_graph_neighbors(
                     conn,
                     selected,
+                    owner_scope=owner_scope,
                     max_extra=max(0, requested_max_items - len(selected)),
                 )
             )
             graph_neighbors = [
                 row
                 for row in graph_neighbors
-                if not _memory_note_has_unreceipted_derived_source(row)
+                if _memory_row_visible_to_owner(row, owner_scope)
+                and not _memory_note_has_unreceipted_derived_source(row)
             ]
             if not allow_internal_memory:
                 graph_neighbors = [row for row in graph_neighbors if not _is_internal_memory_note(row)]
@@ -4066,6 +4171,7 @@ def _build_memory_vault_context_impl(
     session_key: str | None = None,
     topic_id: str | None = None,
     source: str = "context",
+    owner_scope: str | None = None,
     context_focus: list[str] | None = None,
     max_items: int = 5,
     root: Path | None = None,
@@ -4078,6 +4184,7 @@ def _build_memory_vault_context_impl(
         user_text=user_text,
         topic_id=topic_id,
         source=source,
+        owner_scope=owner_scope,
         max_items=max_items,
         metadata={
             "active_project": DEFAULT_PROJECT,
@@ -4189,6 +4296,7 @@ def build_memory_vault_context(
     session_key: str | None = None,
     topic_id: str | None = None,
     source: str = "context",
+    owner_scope: str | None = None,
     context_focus: list[str] | None = None,
     max_items: int = 5,
     root: Path | None = None,
@@ -4207,6 +4315,7 @@ def build_memory_vault_context(
                 session_key=session_key,
                 topic_id=topic_id,
                 source=source,
+                owner_scope=owner_scope,
                 context_focus=context_focus,
                 max_items=max_items,
                 root=root,
@@ -4227,6 +4336,7 @@ def build_memory_vault_context(
                 session_key=session_key,
                 topic_id=topic_id,
                 source=source,
+                owner_scope=owner_scope,
                 context_focus=context_focus,
                 max_items=max_items,
                 root=root,
@@ -4245,6 +4355,7 @@ def write_memory_vault_note(
     projects: list[str] | None = None,
     links: list[str] | None = None,
     source: str = "runtime",
+    owner_scope: str | None = None,
     source_refs: list[str] | None = None,
     derived_from: list[str] | None = None,
     evidence_hashes: list[str] | None = None,
@@ -4311,6 +4422,13 @@ def write_memory_vault_note(
         "projects": projects or [DEFAULT_PROJECT],
         "links": links or [],
     }
+    normalized_owner_scope = clean_text(owner_scope)
+    if normalized_owner_scope:
+        if not memory_owner_scope_is_canonical(
+            normalized_owner_scope
+        ):
+            raise ValueError("memory_owner_scope_invalid")
+        metadata["owner_scope"] = normalized_owner_scope
     normalized_confirmed_at = clean_text(confirmed_at)
     if normalized_confirmed_at:
         metadata["confirmed_at"] = normalized_confirmed_at
@@ -4764,6 +4882,18 @@ def memory_vault_user_snapshot(
         "hiddenTypes": sorted(MEMORY_INTERNAL_NOTE_TYPES) if not include_internal else [],
         "checkedAt": _utc_now_iso(),
     }
+
+
+@_memory_deletion_linearized
+def _memory_vault_note_owner_scope(
+    note_id_or_rel_path: str,
+    *,
+    root: Path | None = None,
+) -> str:
+    target = _memory_vault_find_note(note_id_or_rel_path, root=root)
+    if target is None:
+        return ""
+    return clean_text(target[1].metadata.get("owner_scope"))
 
 
 @_memory_deletion_linearized
@@ -5724,6 +5854,9 @@ def _trusted_read_only_recall_row(
                 str(note.metadata.get("confidence") or "")
             ),
             "source": source,
+            "owner_scope": clean_text(
+                note.metadata.get("owner_scope")
+            ),
             "source_refs": json.dumps(
                 _as_list(
                     note.metadata.get("source_refs")
@@ -8693,6 +8826,7 @@ def refresh_memory_hot_context(
             FROM notes
             WHERE status NOT IN ('archived', 'superseded')
               AND note_type IN ('core', 'project')
+              AND owner_scope = ''
               AND rel_path NOT LIKE 'core/legacy-guild-%'
             ORDER BY importance DESC, updated_at DESC, title ASC
             LIMIT 24

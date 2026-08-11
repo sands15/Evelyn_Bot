@@ -84,6 +84,7 @@ from .conversation_ingress_recovery import (
 from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
 )
+from .memory_confirmation_contract import memory_owner_scope
 from .cross_surface_continuity import (
     CrossSurfaceContinuityBridge,
     CrossSurfaceContinuityConfig,
@@ -393,6 +394,19 @@ CROSS_SURFACE_CONTINUITY_BRIDGE = CrossSurfaceContinuityBridge(
     artifacts_root=CONTINUITY_ARTIFACTS_ROOT,
     config=CrossSurfaceContinuityConfig.from_env(),
     authenticity=CONTINUITY_AUTHENTICITY,
+)
+FAST_MEMORY_OWNER_SCOPE = memory_owner_scope(
+    guild_id=(
+        CROSS_SURFACE_CONTINUITY_BRIDGE.config.guild_id
+        if CROSS_SURFACE_CONTINUITY_BRIDGE.config.scope_ready
+        else None
+    ),
+    person_key=(
+        "user:"
+        f"{CROSS_SURFACE_CONTINUITY_BRIDGE.config.user_id}"
+        if CROSS_SURFACE_CONTINUITY_BRIDGE.config.scope_ready
+        else "control-page:local"
+    ),
 )
 CHAT_MESSAGES: list[dict[str, Any]] = (
     FAST_CONTROL_CONTINUITY_OWNER.restored_chat_messages()[
@@ -4912,6 +4926,7 @@ async def build_main_llm_request_payload(
         user_text=text,
         final_user_text=final_user_text,
         source=source,
+        memory_owner_scope=FAST_MEMORY_OWNER_SCOPE,
         tool_user_text=(
             tool_plan.query
             if tool_plan is not None
@@ -6636,6 +6651,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             ) = execute_explicit_memory_confirmation(
                 text,
                 action_id=action_id,
+                owner_scope=FAST_MEMORY_OWNER_SCOPE,
             )
         if memory_command_matched:
             reply = memory_command_reply
@@ -7336,6 +7352,7 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
             ) = execute_explicit_memory_confirmation(
                 text,
                 action_id=action_id,
+                owner_scope=FAST_MEMORY_OWNER_SCOPE,
             )
         if memory_command_matched:
             reply = enforce_action_reply_contract(

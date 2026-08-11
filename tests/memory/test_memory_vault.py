@@ -33,6 +33,7 @@ from evelyn_core.memory_prompt_policy import (  # noqa: E402
     reconcile_memory_receipt_for_prompt,
     validated_memory_grounding_state,
 )
+from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
     MEMORY_DELETE_TOMBSTONE_SCHEMA,
     MEMORY_PROVENANCE_SCHEMA,
@@ -896,6 +897,58 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("TTS Latency", result.context_text)
         self.assertNotIn("Test Evelyn TTS", result.context_text)
         self.assertIn(result.metadata["retrieval_mode"], {"fts", "scan", "fts+vector", "scan+vector"})
+
+    def test_graph_link_does_not_cross_memory_owner_scope(self) -> None:
+        owner_a = memory_owner_scope(
+            guild_id=7,
+            person_key="user:21",
+        )
+        owner_b = memory_owner_scope(
+            guild_id=7,
+            person_key="user:22",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbor_path = write_memory_vault_note(
+                note_type="concept",
+                title="Private Neighbor",
+                body="cross-owner-neighbor-canary",
+                storage_key="private-neighbor-b",
+                owner_scope=owner_b,
+                source="discord-user",
+                root=root,
+            )
+            neighbor_id = parse_memory_note(neighbor_path).note_id
+            write_memory_vault_note(
+                note_type="concept",
+                title="Owner Anchor",
+                body="owner-anchor-query",
+                storage_key="owner-anchor-a",
+                links=[neighbor_id],
+                owner_scope=owner_a,
+                source="discord-user",
+                root=root,
+            )
+            result = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-owner-graph",
+                    session_key="guild:7:user:21",
+                    guild_id=7,
+                    user_text="owner anchor query",
+                    topic_id=None,
+                    source="test",
+                    owner_scope=owner_a,
+                    max_items=2,
+                ),
+                root=root,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIn("Owner Anchor", result.context_text)
+        self.assertNotIn(
+            "cross-owner-neighbor-canary",
+            result.context_text,
+        )
 
     def test_memory_admin_query_can_recall_procedure_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1876,7 +1929,7 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("original atomic body", after)
         self.assertNotIn("must not partially replace", after)
 
-    def test_schema_v3_index_migrates_and_reindexes_provenance(self) -> None:
+    def test_schema_v7_index_migrates_and_reindexes_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             vault = memory_vault_root(root)
@@ -1945,7 +1998,8 @@ class MemoryVaultTests(unittest.TestCase):
                 }
                 row = connection.execute(
                     """
-                    SELECT source, source_refs, derived_from, evidence_hashes
+                    SELECT source, source_refs, derived_from, evidence_hashes,
+                           owner_scope
                     FROM notes
                     WHERE note_id = 'provenance-migration'
                     """
@@ -1965,17 +2019,19 @@ class MemoryVaultTests(unittest.TestCase):
                 "created_at",
                 "source",
                 "source_refs",
+                "owner_scope",
                 "derived_from",
                 "origin_derived_from",
                 "evidence_hashes",
             }
             <= columns
         )
-        self.assertEqual(schema_version, "6")
+        self.assertEqual(schema_version, "7")
         self.assertEqual(row[0], "control-page-user")
         self.assertIn("user-request", row[1])
         self.assertIn("daily-source", row[2])
         self.assertIn("evidence-hash", row[3])
+        self.assertEqual(row[4], "")
 
     def test_delete_projects_busy_without_private_details(self) -> None:
         private_detail = "private delete lock path"
@@ -2895,6 +2951,38 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(receipt["suppliedNoteCount"], len(receipt["suppliedNoteIds"]))
         self.assertTrue(receipt["contentFree"])
         self.assertNotIn("Memory Source Contract", str(receipt))
+
+    def test_scoped_core_note_stays_out_of_global_hot_context(
+        self,
+    ) -> None:
+        owner_scope = memory_owner_scope(
+            guild_id=44,
+            person_key="user:55",
+        )
+        canary = "scoped-core-hot-canary-4455"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="core",
+                title="Scoped Core",
+                body=canary,
+                owner_scope=owner_scope,
+                source="discord-user",
+                root=root,
+            )
+            refresh_memory_hot_context(root=root)
+            hot = read_memory_hot_context(root=root)
+            context = build_memory_vault_context(
+                44,
+                canary,
+                owner_scope=owner_scope,
+                root=root,
+            )
+            graph = export_memory_graph(root=root)
+
+        self.assertNotIn(canary, str(hot))
+        self.assertIn(canary, context)
+        self.assertNotIn(owner_scope, str(graph))
 
     def test_content_free_receipt_and_audit_project_natural_note_ids(
         self,

@@ -21,6 +21,7 @@ from .explicit_memory_confirmation import (
 )
 from .memory_confirmation_contract import (
     explicit_memory_writer_skip_decision,
+    memory_owner_scope,
 )
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_metrics,
@@ -558,6 +559,10 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         ),
                         evidence_turn_id=turn_id,
                         source="discord-user",
+                        owner_scope=memory_owner_scope(
+                            guild_id=message.guild.id,
+                            person_key=person_key,
+                        ),
                     )
                 else:
                     memory_command_reply = ""

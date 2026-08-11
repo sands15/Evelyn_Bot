@@ -79,6 +79,7 @@ class MemoryRecallRequest:
     user_text: str
     topic_id: str | None
     source: str
+    owner_scope: str | None = None
     max_items: int = 6
     timeout_ms: int = 1200
     metadata: dict[str, Any] = field(default_factory=dict)

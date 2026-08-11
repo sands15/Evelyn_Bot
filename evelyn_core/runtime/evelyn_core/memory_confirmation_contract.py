@@ -16,8 +16,9 @@ from .memory_deletion_journal import (
 
 MEMORY_USER_CONFIRMATION_SCHEMA = "memory.user-confirmation.v1"
 MEMORY_USER_CONFIRMATION_NOTE_SCHEMA = (
-    "memory.user-confirmation.note.v1"
+    "memory.user-confirmation.note.v2"
 )
+MEMORY_OWNER_SCOPE_SCHEMA = "memory.owner-scope.v1"
 MEMORY_USER_CONFIRMATION_SOURCES = frozenset(
     {"control-page-user", "discord-user"}
 )
@@ -29,6 +30,7 @@ _SOURCE_REF_RE = re.compile(
 )
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,80}$")
 _EVIDENCE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_OWNER_SCOPE_RE = re.compile(r"^memory-owner-[0-9a-f]{64}$")
 _SUCCESS_KEYS = frozenset(
     {
         "schema",
@@ -108,6 +110,50 @@ def _clean_values(value: object) -> list[str]:
     ]
 
 
+def memory_owner_scope(
+    *,
+    guild_id: object | None,
+    person_key: object,
+) -> str:
+    normalized_person_key = _clean(person_key)
+    if not normalized_person_key or len(normalized_person_key) > 256:
+        raise ValueError("memory_owner_scope_invalid")
+    if guild_id is None:
+        if normalized_person_key != "control-page:local":
+            raise ValueError("memory_owner_scope_invalid")
+        normalized_guild_id = None
+    else:
+        if isinstance(guild_id, bool):
+            raise ValueError("memory_owner_scope_invalid")
+        try:
+            normalized_guild_id = int(guild_id)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("memory_owner_scope_invalid") from None
+        if normalized_guild_id <= 0:
+            raise ValueError("memory_owner_scope_invalid")
+    payload = json.dumps(
+        {
+            "guildId": normalized_guild_id,
+            "personKey": normalized_person_key,
+            "schema": MEMORY_OWNER_SCOPE_SCHEMA,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "memory-owner-" + hashlib.sha256(
+        payload.encode("utf-8")
+    ).hexdigest()
+
+
+def memory_owner_scope_is_canonical(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and _clean(value) == value
+        and _OWNER_SCOPE_RE.fullmatch(value)
+    )
+
+
 def _user_edit_evidence_hash(*, title: str, body: str) -> str:
     payload = json.dumps(
         {"body": body, "title": title},
@@ -143,6 +189,7 @@ def is_user_confirmed_memory_integrity_valid(
     source_refs: object,
     evidence_hashes: object,
     confirmed_at: object,
+    owner_scope: object,
 ) -> bool:
     normalized_title = _clean(title)
     normalized_body = _clean(body)
@@ -164,6 +211,7 @@ def is_user_confirmed_memory_integrity_valid(
         )
         is None
         or not _valid_iso_datetime(confirmed_at)
+        or not memory_owner_scope_is_canonical(owner_scope)
     ):
         return False
     if normalized_source in MEMORY_USER_CONFIRMATION_SOURCES:
@@ -202,6 +250,7 @@ def explicit_memory_writer_skip_decision() -> dict[str, Any]:
 
 __all__ = [
     "MEMORY_USER_CONFIRMATION_NOTE_SCHEMA",
+    "MEMORY_OWNER_SCOPE_SCHEMA",
     "MEMORY_USER_CONFIRMATION_SCHEMA",
     "MEMORY_USER_CONFIRMATION_SOURCES",
     "MEMORY_USER_CONFIRMATION_TAG",
@@ -210,4 +259,6 @@ __all__ = [
     "explicit_memory_writer_skip_decision",
     "is_explicit_memory_confirmation_receipt",
     "is_user_confirmed_memory_integrity_valid",
+    "memory_owner_scope",
+    "memory_owner_scope_is_canonical",
 ]

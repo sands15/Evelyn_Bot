@@ -15,6 +15,9 @@ import evelyn_core.memory as memory  # noqa: E402
 from evelyn_core.explicit_memory_confirmation import (  # noqa: E402
     store_explicit_memory_confirmation,
 )
+from evelyn_core.memory_confirmation_contract import (  # noqa: E402
+    memory_owner_scope,
+)
 from evelyn_core.memory_vault import (  # noqa: E402
     delete_memory_vault_user_note,
     preview_memory_vault_user_note_deletion,
@@ -218,6 +221,10 @@ class ProactiveQuestionTests(unittest.TestCase):
             source = store_explicit_memory_confirmation(
                 f"private source {canary}",
                 action_id="proactive-delete-canary",
+                owner_scope=memory_owner_scope(
+                    guild_id=None,
+                    person_key="control-page:local",
+                ),
                 root=root,
             )
             question = derived_question(f"ask about {canary}")

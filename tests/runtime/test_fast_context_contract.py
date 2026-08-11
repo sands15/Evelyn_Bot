@@ -16,6 +16,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_context_contract as fast_contract  # noqa: E402
+from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.assistant_contracts import MemoryRecallResult  # noqa: E402
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     memory_receipt_ref_from_receipt,
@@ -43,6 +44,12 @@ from evelyn_core.memory_exposure import (  # noqa: E402
     MemoryExposurePosition,
     capture_memory_exposure_position,
     reset_memory_exposure_position,
+)
+from evelyn_core.explicit_memory_confirmation import (  # noqa: E402
+    store_explicit_memory_confirmation,
+)
+from evelyn_core.memory_confirmation_contract import (  # noqa: E402
+    memory_owner_scope,
 )
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
@@ -208,6 +215,66 @@ def fake_local_bridge_status() -> dict[str, object]:
 
 
 class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_memory_provider_enforces_owner_scope_in_prompt(
+        self,
+    ) -> None:
+        canary = "fast-owner-scope-canary-771"
+        owner_a = memory_owner_scope(
+            guild_id=77,
+            person_key="user:1",
+        )
+        owner_b = memory_owner_scope(
+            guild_id=77,
+            person_key="user:2",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store_explicit_memory_confirmation(
+                f"내 개인 표식은 {canary}",
+                action_id="fast-owner-scope-action-771",
+                owner_scope=owner_a,
+                root=root,
+            )
+            with patch.object(
+                fast_contract,
+                "MEMORY_ROOT",
+                root,
+            ), patch.object(
+                memory_vault_module,
+                "MEMORY_ROOT",
+                root,
+            ):
+                owner_context, owner_receipt = (
+                    await fast_contract._default_memory_provider_result(
+                        "내 개인 표식",
+                        owner_scope=owner_a,
+                    )
+                )
+                other_context, other_receipt = (
+                    await fast_contract._default_memory_provider_result(
+                        "내 개인 표식",
+                        owner_scope=owner_b,
+                    )
+                )
+                other_request = await build_fast_main_llm_request(
+                    base_system_prompt="system",
+                    recent_messages=[],
+                    user_text="내 개인 기억을 알려줘",
+                    final_user_text="내 개인 기억을 알려줘",
+                    source="control_page",
+                    memory_owner_scope=owner_b,
+                    runtime_health_provider=fake_runtime_health,
+                )
+
+        self.assertIn(canary, owner_context)
+        self.assertEqual(owner_receipt["groundingState"], "attributed")
+        self.assertNotIn(canary, other_context)
+        self.assertNotEqual(
+            other_receipt["groundingState"],
+            "attributed",
+        )
+        self.assertNotIn(canary, str(other_request.messages))
+
     def tearDown(self) -> None:
         reset_memory_deletion_outbound_position()
 

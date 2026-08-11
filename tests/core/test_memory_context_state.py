@@ -19,6 +19,7 @@ from evelyn_core.memory_context_state import (  # noqa: E402
 from evelyn_core.memory_content_free_ids import (  # noqa: E402
     memory_content_free_id,
 )
+from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalBusyError,
     MemoryDeletionPosition,
@@ -123,6 +124,7 @@ class MemoryContextStateTests(unittest.TestCase):
                     "작업 계속",
                     cognitive_state={"action": "answer", "user_intent": "작업 계속", "state_summary": "분리 중"},
                     session_key="session-1",
+                    person_key="user:9",
                     session_state={"topic_id": "topic-1", "last_speaker": "정훈"},
                 )
 
@@ -131,7 +133,13 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertIn("미확인 열린 질문/가설(확인 전용):\n- 다음 작업 후보 확인", context)
         self.assertIn("미확인 문서 보관함 과거 대화(확인 전용):\n- user (vault): 작업 기록", context)
         self.assertIn("- 현재 topic_id: topic-1", context)
-        vault.assert_called_once()
+        self.assertEqual(
+            vault.call_args.kwargs["owner_scope"],
+            memory_owner_scope(
+                guild_id=123,
+                person_key="user:9",
+            ),
+        )
 
     def test_build_memory_context_emits_content_free_grounding_receipt(self) -> None:
         layers = {

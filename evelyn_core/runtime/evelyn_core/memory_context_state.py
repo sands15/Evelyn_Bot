@@ -11,6 +11,7 @@ from .config import (
 )
 from .memory import merge_memory_rows, normalize_cognitive_state, select_relevant_memory_rows
 from .memory_content_free_ids import memory_content_free_id
+from .memory_confirmation_contract import memory_owner_scope
 from .memory_deletion_journal import (
     MemoryDeletionJournalBusyError,
     MemoryDeletionPosition,
@@ -341,12 +342,22 @@ def _build_memory_context_at_position(
         )
     active_session_state = dict(session_state or {})
     vault_receipt: dict[str, Any] = {}
+    vault_owner_scope = None
+    if person_key:
+        try:
+            vault_owner_scope = memory_owner_scope(
+                guild_id=guild_id,
+                person_key=person_key,
+            )
+        except ValueError:
+            pass
     vault_context = build_memory_vault_context(
         guild_id,
         user_text,
         session_key=session_key,
         topic_id=clean_text(str(active_session_state.get("topic_id", ""))) or None,
         source="context_pipeline",
+        owner_scope=vault_owner_scope,
         context_focus=[
             "relevant_memory",
             clean_text(str(state.get("user_intent", ""))),

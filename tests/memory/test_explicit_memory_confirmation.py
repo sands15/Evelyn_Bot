@@ -26,6 +26,7 @@ from evelyn_core.explicit_memory_confirmation import (  # noqa: E402
 from evelyn_core.memory_vault import memory_vault_user_note  # noqa: E402
 from evelyn_core.memory_confirmation_contract import (  # noqa: E402
     is_explicit_memory_confirmation_receipt,
+    memory_owner_scope,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalIntegrityError,
@@ -33,6 +34,11 @@ from evelyn_core.memory_deletion_journal import (  # noqa: E402
 
 
 class ExplicitMemoryConfirmationTests(unittest.TestCase):
+    owner_scope = memory_owner_scope(
+        guild_id=None,
+        person_key="control-page:local",
+    )
+
     def test_parser_accepts_only_explicit_commands(self) -> None:
         self.assertEqual(
             parse_explicit_memory_confirmation(
@@ -74,11 +80,13 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             first = store_explicit_memory_confirmation(
                 "나는 산책을 좋아해",
                 action_id="control-request-123",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             second = store_explicit_memory_confirmation(
                 "나는 산책을 좋아해",
                 action_id="control-request-123",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             note = memory_vault_user_note(
@@ -116,7 +124,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         )
         self.assertIn("confirmed_at:", raw)
         self.assertIn(
-            "memory_contract: memory.user-confirmation.note.v1",
+            "memory_contract: memory.user-confirmation.note.v2",
             raw,
         )
         self.assertIn("evidence_hashes:", raw)
@@ -127,6 +135,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             receipt = store_explicit_memory_confirmation(
                 "사용자 확인 사실",
                 action_id="../../private path",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             raw = next(
@@ -146,6 +155,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             store_explicit_memory_confirmation(
                 "첫 번째 사실",
                 action_id="same-action-123",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             with self.assertRaises(
@@ -154,6 +164,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 store_explicit_memory_confirmation(
                     "다른 사실",
                     action_id="same-action-123",
+                    owner_scope=self.owner_scope,
                     root=root,
                 )
 
@@ -161,6 +172,30 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             caught.exception.code,
             "memory_confirmation_hash_collision",
         )
+
+    def test_same_action_is_isolated_by_owner_scope(self) -> None:
+        other_owner_scope = memory_owner_scope(
+            guild_id=77,
+            person_key="user:88",
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = store_explicit_memory_confirmation(
+                "각자 저장한 같은 사실",
+                action_id="shared-action-123",
+                owner_scope=self.owner_scope,
+                root=root,
+            )
+            second = store_explicit_memory_confirmation(
+                "각자 저장한 같은 사실",
+                action_id="shared-action-123",
+                owner_scope=other_owner_scope,
+                root=root,
+            )
+
+        self.assertNotEqual(first["noteId"], second["noteId"])
+        self.assertEqual(first["state"], "stored")
+        self.assertEqual(second["state"], "stored")
 
     def test_action_identity_and_evidence_turn_are_separate(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -170,6 +205,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 action_id="discord-message:1:2:99",
                 evidence_turn_id="discord-turn-abc",
                 source="discord-user",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             raw = next(
@@ -208,6 +244,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 action_id="discord-message:1:2:100",
                 evidence_turn_id="discord-turn-original",
                 source="discord-user",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             duplicate = store_explicit_memory_confirmation(
@@ -215,6 +252,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 action_id="discord-message:1:2:100",
                 evidence_turn_id="discord-turn-retry",
                 source="discord-user",
+                owner_scope=self.owner_scope,
                 root=root,
             )
 
@@ -236,6 +274,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                     "출처가 명확해야 해",
                     action_id="unknown-source-123",
                     source="untrusted-surface",
+                    owner_scope=self.owner_scope,
                     root=Path(temp_dir),
                 )
 
@@ -250,6 +289,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             store_explicit_memory_confirmation(
                 "손상되면 성공으로 답하지 마",
                 action_id="damaged-provenance-123",
+                owner_scope=self.owner_scope,
                 root=root,
             )
             path = next(
@@ -273,6 +313,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 store_explicit_memory_confirmation(
                     "손상되면 성공으로 답하지 마",
                     action_id="damaged-provenance-123",
+                    owner_scope=self.owner_scope,
                     root=root,
                 )
 
@@ -283,7 +324,10 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
 
     def test_executor_rejects_empty_command_without_content(self) -> None:
         matched, reply, receipt, error = (
-            execute_explicit_memory_confirmation("/remember")
+            execute_explicit_memory_confirmation(
+                "/remember",
+                owner_scope=self.owner_scope,
+            )
         )
 
         self.assertTrue(matched)
@@ -304,6 +348,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 execute_explicit_memory_confirmation(
                     "/remember private-canary-must-not-leak",
                     action_id="failed-write-action-123",
+                    owner_scope=self.owner_scope,
                 )
             )
 
@@ -335,6 +380,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 execute_explicit_memory_confirmation(
                     "/remember private-canary-must-not-leak",
                     action_id="integrity-failure-action-123",
+                    owner_scope=self.owner_scope,
                 )
 
     def test_receipt_validator_rejects_extra_or_private_fields(self) -> None:

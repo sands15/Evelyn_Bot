@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_vault import (
+    _memory_vault_note_owner_scope,
     memory_vault_user_note,
     write_memory_vault_note,
 )
@@ -20,6 +22,7 @@ from .memory_confirmation_contract import (
     explicit_memory_writer_skip_decision,
     is_explicit_memory_confirmation_receipt,
     is_user_confirmed_memory_integrity_valid,
+    memory_owner_scope_is_canonical,
 )
 from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
@@ -131,6 +134,8 @@ def _verified_stored_card(
     expected_fact: str,
     expected_evidence_hash: str,
     expected_source: str,
+    expected_owner_scope: str,
+    actual_owner_scope: str,
     expected_source_ref: str | None = None,
 ) -> tuple[str, str, str]:
     provenance = dict(card.get("provenance") or {})
@@ -155,6 +160,7 @@ def _verified_stored_card(
             source_refs=source_refs,
             evidence_hashes=evidence_hashes,
             confirmed_at=confirmed_at,
+            owner_scope=actual_owner_scope,
         )
         and clean_text(card.get("body")) == expected_fact
         and card.get("confirmed") is True
@@ -165,6 +171,10 @@ def _verified_stored_card(
         == expected_source
         and clean_text(provenance.get("sourceType")).lower()
         == "user"
+        and secrets.compare_digest(
+            actual_owner_scope,
+            expected_owner_scope,
+        )
         and len(source_refs) == 1
         and evidence_hashes == [expected_evidence_hash]
         and (
@@ -183,6 +193,7 @@ def store_explicit_memory_confirmation(
     fact: str,
     *,
     action_id: object = "",
+    owner_scope: object,
     evidence_turn_id: object | None = None,
     source: str = "control-page-user",
     root: Path | None = None,
@@ -201,13 +212,22 @@ def store_explicit_memory_confirmation(
         raise ExplicitMemoryConfirmationError(
             "memory_confirmation_source_invalid"
         )
+    normalized_owner_scope = clean_text(owner_scope)
+    if not memory_owner_scope_is_canonical(normalized_owner_scope):
+        raise ExplicitMemoryConfirmationError(
+            "memory_confirmation_owner_scope_invalid"
+        )
 
     evidence_hash = hashlib.sha256(
         normalized_fact.encode("utf-8")
     ).hexdigest()
     normalized_action_id = _normalized_action_id(action_id)
     action_fingerprint = hashlib.sha256(
-        normalized_action_id.encode("utf-8")
+        (
+            normalized_owner_scope
+            + "\x00"
+            + normalized_action_id
+        ).encode("utf-8")
     ).hexdigest()[:24]
     storage_key = f"user-confirmed-{action_fingerprint}"
     rel_path = f"concepts/{storage_key}.md"
@@ -235,6 +255,13 @@ def store_explicit_memory_confirmation(
                 expected_fact=normalized_fact,
                 expected_evidence_hash=evidence_hash,
                 expected_source=normalized_source,
+                expected_owner_scope=normalized_owner_scope,
+                actual_owner_scope=(
+                    _memory_vault_note_owner_scope(
+                        rel_path,
+                        root=root,
+                    )
+                ),
             )
             return _verified_receipt(
                 state="duplicate",
@@ -252,6 +279,7 @@ def store_explicit_memory_confirmation(
             tags=[MEMORY_USER_CONFIRMATION_TAG],
             projects=["evelyn"],
             source=normalized_source,
+            owner_scope=normalized_owner_scope,
             source_refs=[source_ref],
             evidence_hashes=[evidence_hash],
             confirmed_at=confirmed_at,
@@ -277,6 +305,13 @@ def store_explicit_memory_confirmation(
             expected_fact=normalized_fact,
             expected_evidence_hash=evidence_hash,
             expected_source=normalized_source,
+            expected_owner_scope=normalized_owner_scope,
+            actual_owner_scope=(
+                _memory_vault_note_owner_scope(
+                    rel_path,
+                    root=root,
+                )
+            ),
             expected_source_ref=source_ref,
         )
         return _verified_receipt(
@@ -291,6 +326,7 @@ def execute_explicit_memory_confirmation(
     text: str,
     *,
     action_id: object = "",
+    owner_scope: object,
     evidence_turn_id: object | None = None,
     source: str = "control-page-user",
 ) -> tuple[bool, str, dict[str, Any] | None, str]:
@@ -314,6 +350,7 @@ def execute_explicit_memory_confirmation(
         receipt = store_explicit_memory_confirmation(
             fact,
             action_id=action_id,
+            owner_scope=owner_scope,
             evidence_turn_id=evidence_turn_id,
             source=source,
         )

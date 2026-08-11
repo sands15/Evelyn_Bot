@@ -20,6 +20,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.voice_orchestration import (  # noqa: E402
     deliver_voice_reply,
 )
+from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 
 
 class ExplicitMemoryVoiceDeliveryTests(
@@ -537,6 +538,10 @@ class ExplicitMemoryVoiceDeliveryTests(
             action_id="turn-voice-1",
             evidence_turn_id="turn-voice-1",
             source="discord-user",
+            owner_scope=memory_owner_scope(
+                guild_id=7,
+                person_key="person-key",
+            ),
         )
 
     async def test_explicit_memory_cancel_emits_one_terminal_summary_and_reraises(

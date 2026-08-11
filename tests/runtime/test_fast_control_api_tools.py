@@ -597,6 +597,12 @@ class FastControlApiToolTests(unittest.TestCase):
             ],
             expected,
         )
+        self.assertEqual(
+            build_request.await_args.kwargs[
+                "memory_owner_scope"
+            ],
+            fast_api.FAST_MEMORY_OWNER_SCOPE,
+        )
         self.assertEqual(bridge.calls, ["새 질문", "새 질문"])
 
     def test_bound_history_does_not_wrap_write_backed_context_build(self) -> None:
@@ -873,6 +879,7 @@ class FastControlApiToolTests(unittest.TestCase):
         execute.assert_called_once_with(
             "/remember 나는 산책을 좋아해",
             action_id="control-request-123",
+            owner_scope=fast_api.FAST_MEMORY_OWNER_SCOPE,
         )
         planner.assert_not_awaited()
 

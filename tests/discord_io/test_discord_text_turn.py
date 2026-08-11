@@ -28,6 +28,7 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     unattributed_memory_receipt_ref,
 )
 from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
+from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
@@ -389,6 +390,10 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             action_id="discord-message:1:2:99",
             evidence_turn_id="turn:guild:1:text:2:user:3",
             source="discord-user",
+            owner_scope=memory_owner_scope(
+                guild_id=1,
+                person_key="user:3",
+            ),
         )
 
     def test_delivered_text_turn_is_committed_when_optional_voice_fails(self) -> None:

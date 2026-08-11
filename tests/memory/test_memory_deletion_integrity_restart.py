@@ -34,6 +34,7 @@ from evelyn_core.memory_deletion_journal import (  # noqa: E402
 )
 from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
 from evelyn_core import memory_vault  # noqa: E402
+from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
     build_memory_recall_receipt,
     build_memory_vault_context,
@@ -488,6 +489,56 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
             after = recall_memory_vault(request, root=root)
             self.assertTrue(after.ok, after.error_text)
             self.assertNotIn(body, after.context_text)
+
+    def test_read_only_recall_trusts_markdown_owner_scope_over_index(
+        self,
+    ) -> None:
+        owner_a = memory_owner_scope(
+            guild_id=91,
+            person_key="user:1",
+        )
+        owner_b = memory_owner_scope(
+            guild_id=91,
+            person_key="user:2",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Scoped Read Only",
+                body="read-only-owner-canary",
+                owner_scope=owner_a,
+                source="discord-user",
+                root=root,
+            )
+            note = parse_memory_note(path)
+            with closing(
+                sqlite3.connect(memory_index_db_path(root))
+            ) as connection:
+                connection.execute(
+                    "UPDATE notes SET owner_scope = ? WHERE note_id = ?",
+                    (owner_b, note.note_id),
+                )
+                connection.commit()
+            result = memory_vault._recall_memory_vault_impl(
+                MemoryRecallRequest(
+                    turn_id="read-only-owner",
+                    session_key="guild:91:user:2",
+                    guild_id=91,
+                    user_text="Scoped Read Only",
+                    topic_id=None,
+                    source="test",
+                    owner_scope=owner_b,
+                ),
+                root=root,
+                read_only_fallback=True,
+            )
+
+        self.assertTrue(result.ok, result.error_text)
+        self.assertNotIn(
+            "read-only-owner-canary",
+            result.context_text,
+        )
 
     def test_busy_recall_uses_current_markdown_without_cache_or_rank_artifacts(
         self,

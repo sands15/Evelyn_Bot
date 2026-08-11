@@ -971,9 +971,10 @@ summary는 `state=withheld`, `promptMemoryWithheld`와 content-free 보류 count
 
 layer 원문을 복제한 legacy mirror, daily conversation note와 semantic derived note도
 별도 vault recall 우회가 되지 않도록 live recall/hot context에서 제외한다. cache
-schema v2와 hot-context policy marker가 이전 attributed cache를 무효화한다. 저장과
+schema v3와 hot-context policy marker가 이전 attributed cache를 무효화한다. 저장과
 감사는 유지되지만 자동 파생 기억의 live recall은 deletion-current lineage가 생길
-때까지 일시적으로 꺼져 있고, explicit user/system note recall은 유지된다.
+때까지 일시적으로 꺼져 있고, exact owner가 검증된 explicit user note와 system note
+recall만 유지된다.
 
 저장 legacy coverage는 이제 `memory.legacy-context-coverage.v1`로 측정한다.
 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로 재검사하고
@@ -989,6 +990,16 @@ Discord text/voice에 연결됐다. 성공은 저장 후 card의 직접 사용�
 모두 재검사하며, 손상 provenance는 content-free 실패로 닫힌다. 격리된
 저장→attributed prompt 회수→2단계 삭제→동일 query 비회상 lifecycle도
 통과했지만 실제 사용자 기억에는 쓰기·삭제를 수행하지 않았다.
+
+2026-08-12에는 attribution만 유효하면 A의 direct-confirm note가 다른 Discord
+guild/user와 Fast local prompt에도 들어가던 principal 격리 누락을 temp vault에서
+재현해 닫았다. 새 v2 note는 exact guild/person 또는 별도 Fast local owner를 opaque
+scope로 저장하고 cache·FTS/vector/graph/read-only/render 전 경계에서 재검사한다.
+scope token은 public card/receipt/graph에 나오지 않는다. owner 없는 v1·marker-only
+legacy note는 관리·삭제 surface에 남지만 자동 prompt에는 들어가지 않으며 기존
+session으로 owner를 자동 추정하지 않는다. 남은 위험은 실제 configured Discord↔Fast
+handoff와 재확인 UX를 live 검증하지 않았고, legacy note가 다시 필요하면 현재
+authenticated principal이 새 `/remember` 근거를 제공해야 한다는 가용성 비용이다.
 
 저장 뒤 손상도 recall 시점에 다시 닫는다. 새 note marker와 기존 tag/path를
 함께 사용해 user-confirmed 계열을 식별하고, 무결성이 깨지면 index·cache·hot

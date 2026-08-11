@@ -1,7 +1,7 @@
 # Memory Provenance And Deletion Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-02 KST
+Last reviewed: 2026-08-12 KST
 
 이 문서는 Evelyn Memory Vault가 기억의 근거를 공개하고 사용자 삭제를
 영구적으로 지키는 현재 런타임 계약을 정의한다.
@@ -55,6 +55,30 @@ recall receipt 생성 양쪽에서 같은 validator로 검사한다. 이 검사�
 recall 본문은 정상 pinned hot-context와 함께 있어도 그 note ID를 빌려 전체 문맥을
 `attributed`로 승격할 수 없다. 이 경우 결합 문맥의 supplied note ID를 비우고 최종
 Main/Fast prompt 경계에서 본문 전체를 보류한다.
+
+### Explicit-memory owner authorization
+
+유효한 provenance와 receipt는 기억의 근거를 증명하지만 그 기억을 현재 principal에게
+노출할 권한까지 증명하지 않는다. 새 직접 사용자 확인 기억은
+`memory.user-confirmation.note.v2`와 raw ID를 포함하지 않는 canonical
+`memory-owner-<sha256>` scope를 Markdown에 함께 기록한다. Discord의 owner는 trusted
+ingress의 exact `(guild_id, person_key)`이고, Fast Control은 cross-surface continuity의
+configured guild/user가 완전할 때 같은 owner를 사용하며 그렇지 않으면 고정
+`control-page:local` owner만 사용한다. room/session key나 action ID에서 owner를
+추론하지 않는다.
+
+owner scope는 cache lookup 전과 FTS/scan, vector 추가, graph neighbor, read-only
+Markdown 재결합, 최종 render에서 exact match로 다시 검사한다. retrieval cache key도
+owner를 포함하고, owner-scoped core/project note는 global hot context에 들어가지 않는다.
+token은 private Markdown/index metadata이며 public receipt, card, provenance, snapshot,
+graph, log/status에 투영하지 않는다.
+
+v1 marker, `user-confirmed` tag 또는 고정 path로 식별되는 과거 direct-confirm note에
+owner scope가 없거나 손상됐으면 어떤 principal에게도 자동 회상하지 않는다. 파일과
+Control Page 관리·편집·삭제 surface는 유지하지만 owner를 기존 guild/user나 최근
+session에서 자동 추정하지 않는다. 현재 authenticated principal이 다시 `/remember`한
+새 근거 또는 별도 명시적 owner-assignment 절차가 생기기 전까지 prompt에서는
+fail-closed한다.
 
 ## Legacy provenance backfill audit
 
@@ -231,9 +255,9 @@ guild/room/person/session의 stored summary, fact, question과 assistant raw는 
 exact user raw만 기존 evidence shape 검사를 거쳐 사용할 수 있다. 같은 원문이
 `legacy/*` mirror나 `daily/*` conversation note, semantic derived note로 우회하지
 못하도록 live vault recall과 hot context는 `conversation|derived|legacy` source type을
-제외한다. retrieval cache는 `memory.retrieval-cache.v2`, hot context는
+제외한다. retrieval cache는 `memory.retrieval-cache.v3`, hot context는
 `recall_policy=deletion-current-v1`일 때만 재사용한다. 저장·감사와 사용자 검토는
-유지하며 explicit user/system note recall은 유지한다.
+유지하며 exact owner가 검증된 explicit user note와 system note recall만 유지한다.
 
 memory-derived proactive question queue는 deletion-current receipt를 갖추기 전까지
 선택과 mark를 전역 fail-closed한다. `open_questions.jsonl`의 provenance-bearing 원본은
@@ -574,7 +598,7 @@ Control Page에서 기억을 수정할 때는 마지막으로 읽은 card의 `so
   `revisedFromEvidenceHashes`
 - `confidence=high`, `userEditedAt`
 
-SQLite/FTS/vector/retrieval cache는 schema version 6으로 다시 동기화한다.
+SQLite/FTS/vector/retrieval cache는 schema version 7로 다시 동기화한다.
 인덱스나 user-state 후처리가 실패하면 편집을 완전 성공으로 보고하지 않고
 HTTP 503, `memory_edit_cleanup_required`, `edited=true`를 반환한다.
 원자 파일 교체 자체가 실패하면 HTTP 500, `memory_edit_failed`,
@@ -700,7 +724,7 @@ lease를 새로 얻는다.
 기존대로 수행한다. writer 진입 전 exact lock busy인 경우에만 fresh shared reader
 lease로 전환하며, repair가 필요한 journal state는 쓰지 않고 fixed integrity failure로
 닫는다. 이 fallback은 SQLite를 `mode=ro&immutable=1`로 열고 WAL/SHM/journal sidecar,
-symlink/junction, `schema_version != 6`, 비정규 `memory_version`과 필수
+symlink/junction, `schema_version != 7`, 비정규 `memory_version`과 필수
 metadata/notes query 실패를 거부한다. retrieval cache,
 FTS/vector/graph rank, hot context, legacy/layered memory와 disk cognitive state는 읽지
 않는다. 최대 500개 index 후보를 현재 Markdown의 exact path·note ID·전체 hash,
@@ -948,6 +972,12 @@ prompt block과 user state가 의도적으로 남아 있다.
   렌더링되는 계약
 - schema 없는 legacy retrieval cache의 재사용 거부와 procedural note 삭제 뒤
   이전 receipt-bound assistant history 제거
+- 같은 query의 A cache warm과 B empty cache warm 양방향에서 exact owner만 회상하고,
+  Discord text/voice, Main context와 Fast JSON/stream/final prompt가 같은 owner를 전달
+- v1 marker-only·tag/path legacy direct-confirm note의 owner 누락 거부, 다른 owner의
+  vector/graph neighbor 제외와 owner-scoped core/project의 global hot-context 제외
+- read-only fallback에서 변조된 SQLite owner보다 현재 Markdown owner를 다시 신뢰해
+  mismatch를 거부하고 public receipt/card/snapshot/graph에는 owner token을 미투영
 - 전체 legacy+vault context position capture, content-free receipt projection,
   build와 Main/Voice/Fast HTTP admission 사이 삭제 시 POST 0회 fail-closed
 - durable source redaction 실패 시 direct/cascade Markdown을 unlink하지 않고

@@ -48,6 +48,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .memory_confirmation_contract import memory_owner_scope
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
     memory_deletion_boundary_from_position,
@@ -71,6 +72,10 @@ MemoryProvider = Callable[[str], Awaitable[str | tuple[str, dict[str, Any]]]]
 LogProvider = Callable[[str], Awaitable[str]]
 LocalBridgeStatusProvider = Callable[[], Any]
 VisionProvider = Callable[..., Awaitable[HostVisionResult]]
+FAST_LOCAL_MEMORY_OWNER_SCOPE = memory_owner_scope(
+    guild_id=None,
+    person_key="control-page:local",
+)
 
 
 @dataclass(slots=True)
@@ -334,6 +339,8 @@ def _fast_memory_context_receipt(
 
 async def _default_memory_provider_result(
     user_text: str,
+    *,
+    owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
 ) -> tuple[str, dict[str, Any]]:
     from .assistant_contracts import MemoryRecallRequest
     from .memory_vault import build_memory_recall_receipt, recall_memory_vault
@@ -345,6 +352,7 @@ async def _default_memory_provider_result(
         user_text=user_text,
         topic_id=None,
         source="fast_control_api",
+        owner_scope=owner_scope,
         max_items=5,
         metadata={"active_project": "evelyn", "context_focus": ["control_page", "local_runtime"]},
     )
@@ -588,6 +596,7 @@ async def build_fast_control_context(
     user_text: str,
     *,
     source: str,
+    memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
@@ -769,7 +778,12 @@ async def build_fast_control_context(
         elif decision.tool_name == "memory_recall":
             try:
                 if memory_provider is None:
-                    memory_context, memory_receipt = await _default_memory_provider_result(decision_text)
+                    memory_context, memory_receipt = (
+                        await _default_memory_provider_result(
+                            decision_text,
+                            owner_scope=memory_owner_scope,
+                        )
+                    )
                 else:
                     provider_result = await memory_provider(decision_text)
                     if (
@@ -946,6 +960,7 @@ async def build_fast_main_llm_request(
     user_text: str,
     final_user_text: str,
     source: str,
+    memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
@@ -957,6 +972,7 @@ async def build_fast_main_llm_request(
     context = await build_fast_control_context(
         user_text,
         source=source,
+        memory_owner_scope=memory_owner_scope,
         tool_user_text=tool_user_text,
         runtime_health_provider=runtime_health_provider,
         search_provider=search_provider,
@@ -1008,6 +1024,7 @@ async def build_fast_main_llm_messages(
     user_text: str,
     final_user_text: str,
     source: str,
+    memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
@@ -1022,6 +1039,7 @@ async def build_fast_main_llm_messages(
         user_text=user_text,
         final_user_text=final_user_text,
         source=source,
+        memory_owner_scope=memory_owner_scope,
         tool_user_text=tool_user_text,
         runtime_health_provider=runtime_health_provider,
         search_provider=search_provider,

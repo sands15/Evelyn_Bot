@@ -263,6 +263,14 @@ superseded_by: null
 ---
 ```
 
+Direct user-confirmed notes additionally carry a private canonical
+`owner_scope`. Discord derives it from the trusted guild/person principal;
+Fast Control uses the configured cross-surface principal or a distinct local-only
+principal. Raw guild/user IDs are never stored in that field, and the field is
+not part of public cards, receipts, provenance, or graph projections. Legacy
+confirmed notes without an owner remain editable and deletable but are not
+eligible for automatic recall.
+
 The body should stay readable:
 
 ```markdown
@@ -299,6 +307,7 @@ notes(
   updated_at text not null,
   importance real not null,
   confidence text not null,
+  owner_scope text not null default '',
   content_hash text not null,
   memory_version integer not null
 );
@@ -409,7 +418,7 @@ Purpose: avoid repeating expensive vector/graph search for the same query.
 Key shape:
 
 ```text
-query_hash + context_policy_hash + memory_version -> note_ids
+owner_scope + query_hash + context_policy_hash + memory_version -> note_ids
 ```
 
 Invalidation:
@@ -418,6 +427,10 @@ Invalidation:
 - note is archived/superseded,
 - embedding index version changes,
 - policy shape changes.
+
+Owner-scoped notes are selected only by an exact owner match at every candidate,
+vector, graph, cache, and render boundary. They do not enter the global core or
+hot prompt cache; owner-specific recall assembles them dynamically.
 
 ### 4. Prompt Assembly Cache
 

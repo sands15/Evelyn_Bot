@@ -3217,8 +3217,12 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
         owner = _IngressOwner()
         action_ids: list[str] = []
 
-        def memory_command(_text, *, action_id):
+        def memory_command(_text, *, action_id, owner_scope):
             action_ids.append(str(action_id))
+            self.assertEqual(
+                owner_scope,
+                fast_api.FAST_MEMORY_OWNER_SCOPE,
+            )
             return True, "확인", None, ""
 
         with (

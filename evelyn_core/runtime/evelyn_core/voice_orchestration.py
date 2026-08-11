@@ -19,6 +19,7 @@ from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
     is_explicit_memory_confirmation_command,
 )
+from .memory_confirmation_contract import memory_owner_scope
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_metrics,
     not_used_memory_receipt_ref,
@@ -1807,6 +1808,10 @@ async def deliver_voice_reply(
                 action_id=accepted_turn_id,
                 evidence_turn_id=accepted_turn_id,
                 source="discord-user",
+                owner_scope=memory_owner_scope(
+                    guild_id=guild_id,
+                    person_key=person_key,
+                ),
             )
         if memory_command_matched:
             answer = memory_command_reply

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -1180,7 +1180,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                 receipt,
                 "",
             ),
-        ), patch.object(
+        ) as execute, patch.object(
             fast_api,
             "plan_fast_tool_request_for_turn",
             new=AsyncMock(),
@@ -1197,6 +1197,11 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "조용한 밤",
             json.dumps(receipt, ensure_ascii=False),
+        )
+        execute.assert_called_once_with(
+            "기억해줘: 나는 조용한 밤을 좋아해",
+            action_id=ANY,
+            owner_scope=fast_api.FAST_MEMORY_OWNER_SCOPE,
         )
         planner.assert_not_awaited()
 
