@@ -119,6 +119,10 @@ Implemented slices:
 - Discord session-policy helpers for voice reply gate, local mic suppression,
   TTS interrupt qualification, wake/no-wake skip, short transcript ignore,
   short follow-up candidate, and room-owner/reply facade.
+- The reply gate treats the same or similar STT as a duplicate only while the
+  existing reply cooldown is active. After cooldown, it reevaluates the normal
+  owner, speaker, and wake gates, so an exact wake can enter `wake_entry` again.
+  TTS suppression and recent duplicate rejection are unchanged.
 - Voice STT flow helpers for wake interpretation, partial STT, full STT/rescore,
   final transcript assembly, and final wake-veto decision.
 - Discord voice channel changes stop the listener, advance its generation,

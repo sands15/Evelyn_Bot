@@ -2410,3 +2410,13 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   관련 82개, Discord I/O 133개, Runtime Errors/Health 인접 70개와
   CI-equivalent 전체 3,298개(skip 22)가 통과했다. 검증은 offline이며 실제 Discord·
   Minecraft·Docker를 시작하지 않았다.
+
+## 2026-08-12 Discord voice duplicate cooldown 경계
+
+- 동일하거나 유사한 STT는 기존 reply cooldown 동안에만 `duplicate`로 차단한다.
+  cooldown이 끝나면 owner·speaker·wake gate를 정상 재평가하므로, 다른 gate가 허용한
+  exact wake는 duplicate만으로 막히지 않고 `wake_entry`로 다시 수락될 수 있다. TTS
+  suppression과 cooldown 안의 recent echo 차단은 그대로 유지한다.
+- 정책·runtime gate 집중 20개, voice 전체 668개(skip 5), CI-equivalent 전체
+  3,299개(skip 22)가 통과했다. 검증은 offline source/test이며 실제 Discord·마이크·
+  스피커를 기동하지 않았다.

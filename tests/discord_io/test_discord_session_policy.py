@@ -106,11 +106,26 @@ class DiscordSessionPolicyTests(unittest.TestCase):
         self.assertEqual(decision.reason, "tts_post_playback")
 
     def test_duplicate_and_cooldown_reject(self) -> None:
-        duplicate = decide(text="evelyn hello", last_stt_text="evelyn hello")
+        duplicate = decide(
+            text="evelyn hello",
+            wake_detected=True,
+            wake_match_mode="exact",
+            last_stt_text="evelyn hello",
+            cooldown_active=True,
+        )
+        expired_duplicate = decide(
+            text="evelyn hello",
+            wake_detected=True,
+            wake_match_mode="exact",
+            last_stt_text="evelyn hello",
+            cooldown_active=False,
+        )
         cooldown = decide(text="evelyn hello", cooldown_active=True)
 
         self.assertFalse(duplicate.accepted)
         self.assertEqual(duplicate.reason, "duplicate")
+        self.assertTrue(expired_duplicate.accepted)
+        self.assertEqual(expired_duplicate.gate_mode, "wake_entry")
         self.assertFalse(cooldown.accepted)
         self.assertEqual(cooldown.reason, "cooldown")
 

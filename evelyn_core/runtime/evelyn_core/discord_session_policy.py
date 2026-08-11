@@ -167,7 +167,7 @@ def decide_voice_reply_gate(
         return VoiceReplyGateDecision(False, "reply_gate_noise_text", "reply_gate_noise_text")
 
     last_stt_text = normalize_voice_text(gate.last_stt_text)
-    if last_stt_text and is_similar(text_n, last_stt_text):
+    if gate.cooldown_active and last_stt_text and is_similar(text_n, last_stt_text):
         return VoiceReplyGateDecision(False, "duplicate", "duplicate")
 
     if followup_allowed:
