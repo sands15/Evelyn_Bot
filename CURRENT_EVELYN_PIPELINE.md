@@ -123,6 +123,12 @@ Implemented slices:
   final transcript assembly, and final wake-veto decision.
 - Local TTS barge-in path: strong user speech during active local TTS can stop
   the local speaker stream and keep the accepted utterance from being suppressed.
+- Local mic capture freezes the exact playback generation on the first threshold
+  candidate block. If that generation is released before segment flush and no
+  current owner or active validation remains, the released-owner tail bypasses
+  post-TTS suppression only after STT confirms an exact leading `이블린`, then
+  follows the normal Local Voice admission path. Current-owner qualified
+  cancellation and different-generation fail-closed behavior are unchanged.
 - Optional speaker verification for barge-in: enrolled local voiceprints can
   reject non-owner interruptions, with missing enrollment/dependency falling
   back to the existing barge-in behavior.

@@ -5,7 +5,9 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
+
+import numpy as np
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +17,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
 from evelyn_core import local_io_bridge  # noqa: E402
+from evelyn_core.local_mic import LocalMicCaptureService  # noqa: E402
 
 
 def install_admission_grant(bridge: LocalIoBridge) -> AsyncMock:
@@ -102,6 +105,99 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.transcript_count, 1)
         self.assertEqual(bridge.suppressed_mic_segment_count, 0)
         self.assertEqual(bridge.last_error, "")
+
+    async def test_capture_started_during_playback_survives_owner_release(self) -> None:
+        class OfflineMicCaptureService(LocalMicCaptureService):
+            def start(self, *, timeout_sec: float = 3.0) -> bool:
+                del timeout_sec
+                self._capture_ready = True
+                return True
+
+        bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
+        bridge.active_turn_id = "turn-a"
+        bridge.active_turn_task = asyncio.current_task()
+        bridge._emit_validation = Mock()  # type: ignore[method-assign]
+        bridge._speaker_verification_required_for_barge_in = Mock(  # type: ignore[method-assign]
+            return_value=False
+        )
+        bridge._verify_barge_in_speaker = AsyncMock(  # type: ignore[method-assign]
+            return_value=None
+        )
+
+        with patch.object(
+            local_io_bridge,
+            "LocalMicCaptureService",
+            OfflineMicCaptureService,
+        ):
+            await bridge._start_mic()
+
+        service = bridge.service
+        self.assertIsInstance(service, OfflineMicCaptureService)
+        assert service is not None
+        service.vad_filter_enabled = False
+        service.env_noise_filter_enabled = False
+        service.waveform_filter_enabled = False
+
+        playback_owner = bridge._claim_playback_owner()
+        voiced = np.full(service.block_samples, 0.05, dtype=np.float32)
+        service._consume_block(voiced, {})
+        self.assertFalse(service._capture_active)
+        self.assertTrue(bridge._release_playback_owner(playback_owner))
+        bridge.mic_input_suppressed_until = time.monotonic() + 0.7
+
+        voiced_blocks = max(
+            service.start_consecutive,
+            (service.min_voiced_ms + service.block_ms - 1) // service.block_ms,
+        ) + 1
+        for _ in range(voiced_blocks):
+            service._consume_block(voiced, {})
+        self.assertTrue(service._capture_active)
+
+        silence = np.zeros(service.block_samples, dtype=np.float32)
+        for _ in range(service._effective_trailing_silence_blocks()):
+            service._consume_block(silence, {})
+        await asyncio.sleep(0)
+
+        worker = asyncio.create_task(bridge._barge_in_worker())
+        await asyncio.wait_for(bridge.barge_in_queue.join(), timeout=1.0)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        self.assertEqual(bridge.suppressed_mic_segment_count, 0)
+        self.assertTrue(bridge.queue.empty())
+        self.assertEqual(bridge.priority_queue.qsize(), 1)
+        _pcm, queued_meta = bridge.priority_queue.get_nowait()
+        self.assertTrue(queued_meta["_requiresFreshWake"])
+        self.assertFalse(bridge.playback_cancelled_for_turn)
+
+    async def test_released_playback_tail_requires_fresh_wake(self) -> None:
+        bridge = LocalIoBridge()
+        bridge.mic_enabled = True
+        bridge.mic_capture_stopped = False
+        bridge._emit_validation = Mock()  # type: ignore[method-assign]
+        bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+        bridge._transcribe = AsyncMock(  # type: ignore[method-assign]
+            side_effect=["답변 echo", "이블린 /help"]
+        )
+        admission = AsyncMock(return_value=None)
+        bridge._request_voice_admission = admission  # type: ignore[method-assign]
+        meta = {
+            "source": "local_mic",
+            "_requiresFreshWake": True,
+            "_admissionEpoch": bridge.admission_epoch,
+        }
+
+        await bridge._handle_segment(b"echo", dict(meta))
+        admission.assert_not_awaited()
+        self.assertEqual(bridge.admission_last_reason, "fresh_wake_required")
+
+        await bridge._handle_segment(b"wake", dict(meta))
+        admission.assert_awaited_once()
+        self.assertEqual(admission.await_args.args[0], "이블린 /help")
+        for call in bridge._post_status.await_args_list:
+            self.assertNotIn("_requiresFreshWake", repr(call.kwargs.get("extra")))
 
     async def test_tts_cleanup_preserves_queue_and_clone_fallback_keeps_one_owner(self) -> None:
         class FakeResponse:

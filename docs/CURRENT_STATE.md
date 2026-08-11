@@ -81,8 +81,12 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.
   - STT 불일치, 중복 final/turn/playback/interrupt, 완료·취소 동시 관측,
     무음 구간의 모든 음성·재생 활동은 즉시 해당 시도를 실패시킨다.
-  - 재생 직전에 일반 큐에 들어온 발화는 TTS 종료·cooldown 때문에 폐기하지
-    않는다. 재생 중 발화는 기존 barge-in 큐와 VAD/RMS/화자 검증을 유지한다.
+  - 로컬 마이크는 첫 threshold 후보 블록에서 exact playback owner/token과
+    interrupt binding을 고정한다. callback 전에 그 generation이 해제되고 새
+    owner·active validation이 없으면 VAD/RMS/필수 화자 검증을 거친 뒤 cooldown으로
+    버리지 않되, STT가 정확한 선두 `이블린`을 확인할 때만 기존 Local Voice
+    admission으로 전달한다. 현재 owner의 qualified 취소와 다른 generation의
+    fail-closed 계약은 유지한다.
   - clone TTS 실패 시 같은 playback owner 안에서 `auto` voice로 한 번
     fallback하므로 재귀 claim 충돌과 이중 재생을 만들지 않는다.
   - 현재 소스에는 로컬 STT admission 경계가 추가됐다. 초기 발화는 정확한

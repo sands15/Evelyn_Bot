@@ -82,6 +82,7 @@ from .local_bridge_barge_in import (
     evaluate_local_barge_in,
     local_barge_source_binding_matches,
 )
+from .local_voice_admission import split_exact_leading_wake
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
@@ -395,6 +396,7 @@ class LocalIoBridge:
         self.playback_controller = SingleOwnerPlaybackController()
         self._barge_source_lock = threading.Lock()
         self._barge_source_snapshot: dict[str, Any] | None = None
+        self._last_released_barge_source: dict[str, Any] | None = None
         self._speaker_verifier: Any | None = None
         self._speaker_verifier_initialized = False
         self.bridge_instance_id = uuid.uuid4().hex
@@ -515,36 +517,47 @@ class LocalIoBridge:
         loop = asyncio.get_running_loop()
         capture_service_epoch = self.admission_epoch
 
-        def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-            # Bind every callback to the service generation that captured it.
-            # A final flush racing with OFF/restart must stay stale.
-            captured_admission_epoch = capture_service_epoch
+        def capture_context() -> dict[str, Any] | None:
             with self._barge_source_lock:
                 barge_source = (
                     dict(self._barge_source_snapshot)
                     if self._barge_source_snapshot is not None
                     else None
                 )
-            interrupt_validation = (
-                active_validation_context(
-                    surface="local",
-                    prefer_interrupt=True,
-                )
-                if barge_source is not None
+            if barge_source is None:
+                return None
+            interrupt_validation = active_validation_context(
+                surface="local",
+                prefer_interrupt=True,
+            )
+            source_session_id = str(
+                barge_source.get("validationSessionId") or ""
+            )
+            interrupt_session_id = str(
+                (interrupt_validation or {}).get("sessionId") or ""
+            )
+            barge_source["interruptPairingValid"] = not bool(
+                source_session_id
+                and interrupt_session_id
+                and source_session_id != interrupt_session_id
+            )
+            context: dict[str, Any] = {"_bargeSource": barge_source}
+            if interrupt_validation:
+                context["validationSessionId"] = interrupt_validation["sessionId"]
+                context["validationStepId"] = interrupt_validation["stepId"]
+                context["validationAttempt"] = interrupt_validation.get("attempt")
+                context["validationAttemptId"] = interrupt_validation.get("attemptId")
+            return context
+
+        def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
+            # Bind every callback to the service generation that captured it.
+            # A final flush racing with OFF/restart must stay stale.
+            captured_admission_epoch = capture_service_epoch
+            barge_source = (
+                dict(meta.get("_bargeSource") or {})
+                if isinstance(meta.get("_bargeSource"), dict)
                 else None
             )
-            if barge_source is not None:
-                source_session_id = str(
-                    barge_source.get("validationSessionId") or ""
-                )
-                interrupt_session_id = str(
-                    (interrupt_validation or {}).get("sessionId") or ""
-                )
-                barge_source["interruptPairingValid"] = not bool(
-                    source_session_id
-                    and interrupt_session_id
-                    and source_session_id != interrupt_session_id
-                )
 
             def enqueue() -> None:
                 if not self._voice_admission_lifecycle_is_current(
@@ -557,12 +570,6 @@ class LocalIoBridge:
                 segment_meta["_admissionEpoch"] = captured_admission_epoch
                 if barge_source is not None:
                     segment_meta["_bargeSource"] = dict(barge_source)
-                    validation = interrupt_validation
-                    if validation:
-                        segment_meta["validationSessionId"] = validation["sessionId"]
-                        segment_meta["validationStepId"] = validation["stepId"]
-                        segment_meta["validationAttempt"] = validation.get("attempt")
-                        segment_meta["validationAttemptId"] = validation.get("attemptId")
                     if self.barge_in_queue.full():
                         with contextlib.suppress(Exception):
                             self.barge_in_queue.get_nowait()
@@ -590,6 +597,7 @@ class LocalIoBridge:
 
         self.service = LocalMicCaptureService(
             on_segment=on_segment,
+            capture_context_provider=capture_context,
             sample_rate=LOCAL_MIC_SAMPLE_RATE,
             block_ms=LOCAL_MIC_BLOCK_MS,
             start_threshold=LOCAL_MIC_START_THRESHOLD,
@@ -1575,9 +1583,9 @@ class LocalIoBridge:
             cancel = current_task.cancel
             source_turn_id = owner_id
             source_validation = {}
-        if not self.playback_controller.claim(owner_id, cancel):
-            raise RuntimeError("active_playback_owner_conflict")
         with self._barge_source_lock:
+            if not self.playback_controller.claim(owner_id, cancel):
+                raise RuntimeError("active_playback_owner_conflict")
             self._barge_source_snapshot = {
                 "turnId": source_turn_id,
                 "ownerId": owner_id,
@@ -1590,17 +1598,18 @@ class LocalIoBridge:
         return owner_id
 
     def _release_playback_owner(self, owner_id: str) -> bool:
-        owner_token = self.playback_controller.owner_token
-        released = self.playback_controller.release(owner_id)
-        if not released:
-            return False
         with self._barge_source_lock:
+            owner_token = self.playback_controller.owner_token
+            released = self.playback_controller.release(owner_id)
+            if not released:
+                return False
             snapshot = self._barge_source_snapshot
             if (
                 snapshot is not None
                 and snapshot.get("ownerId") == owner_id
                 and snapshot.get("ownerToken") is owner_token
             ):
+                self._last_released_barge_source = dict(snapshot)
                 self._barge_source_snapshot = None
         return True
 
@@ -1734,13 +1743,43 @@ class LocalIoBridge:
                         **{**decision_payload, "reason": "validation_attempt_stale"},
                     )
                     continue
-                if not local_barge_source_binding_matches(
+                source_matches_current_owner = local_barge_source_binding_matches(
                     meta,
                     active_turn_id=self.active_turn_id,
                     active_validation=self.active_validation,
                     active_owner_id=self.playback_controller.owner_id,
                     active_owner_token=self.playback_controller.owner_token,
-                ):
+                )
+                if not source_matches_current_owner:
+                    with self._barge_source_lock:
+                        released_source = (
+                            dict(self._last_released_barge_source)
+                            if self._last_released_barge_source is not None
+                            else None
+                        )
+                    source_matches_released_owner = bool(
+                        not self.active_validation
+                        and not self.playback_controller.owner_id
+                        and self.playback_controller.owner_token is None
+                        and released_source
+                        and local_barge_source_binding_matches(
+                            meta,
+                            active_turn_id=self.active_turn_id,
+                            active_validation=None,
+                            active_owner_id=str(
+                                released_source.get("ownerId") or ""
+                            ),
+                            active_owner_token=released_source.get("ownerToken"),
+                        )
+                    )
+                    if source_matches_released_owner:
+                        meta["_requiresFreshWake"] = True
+                        if self.priority_queue.full():
+                            with contextlib.suppress(Exception):
+                                self.priority_queue.get_nowait()
+                                self.priority_queue.task_done()
+                        self.priority_queue.put_nowait((pcm_bytes, meta))
+                        continue
                     self._emit_validation(
                         "barge_in_rejected",
                         meta=meta,
@@ -1858,6 +1897,7 @@ class LocalIoBridge:
         public_segment_meta = dict(meta)
         public_segment_meta.pop("_bargeSource", None)
         public_segment_meta.pop("_admissionEpoch", None)
+        public_segment_meta.pop("_requiresFreshWake", None)
         public_segment_meta.pop("validationAttemptId", None)
         public_segment_meta.pop("validation_attempt_id", None)
         await self._post_status(extra={"lastSegmentMeta": public_segment_meta})
@@ -1887,6 +1927,15 @@ class LocalIoBridge:
             if len(text) < LOCAL_BRIDGE_MIN_TEXT_CHARS:
                 return
             transcript_text = text
+            if meta.get("_requiresFreshWake"):
+                fresh_wake, _ = split_exact_leading_wake(
+                    transcript_text
+                )
+                if not fresh_wake:
+                    self._record_local_voice_admission_rejection(
+                        "fresh_wake_required"
+                    )
+                    return
             context = self._validation_context_from_meta(meta)
             if context:
                 emit_transcript_validation_event(

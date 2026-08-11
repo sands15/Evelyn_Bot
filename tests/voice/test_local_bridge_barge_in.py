@@ -448,12 +448,19 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertIn("validation_attempt_stale", rejection_reasons)
         self.assertEqual(priority_size, 0)
 
-    def test_mic_callback_freezes_source_a_before_deferred_enqueue_runs(self):
+    def test_mic_capture_start_freezes_source_a_before_deferred_enqueue_runs(self):
         class FakeMicCaptureService:
             instance = None
 
-            def __init__(self, *, on_segment, **_kwargs) -> None:
+            def __init__(
+                self,
+                *,
+                on_segment,
+                capture_context_provider=None,
+                **_kwargs,
+            ) -> None:
                 self.on_segment = on_segment
+                self.capture_context_provider = capture_context_provider
                 self.capture_ready = True
                 self.capture_stopped = False
                 self.last_error = ""
@@ -461,6 +468,17 @@ class LocalBridgeBargeInTests(unittest.TestCase):
 
             def start(self) -> bool:
                 return True
+
+            def capture(self, pcm_bytes, meta) -> None:
+                context = (
+                    self.capture_context_provider()
+                    if self.capture_context_provider is not None
+                    else None
+                )
+                segment_meta = dict(meta)
+                if context:
+                    segment_meta.update(context)
+                self.on_segment(pcm_bytes, segment_meta)
 
         async def runner() -> dict:
             bridge = make_active_voice_bridge()
@@ -507,7 +525,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                         "validationAttemptId": "attempt-a",
                     }
                 assert FakeMicCaptureService.instance is not None
-                FakeMicCaptureService.instance.on_segment(b"pcm", self.strong_meta())
+                FakeMicCaptureService.instance.capture(b"pcm", self.strong_meta())
 
                 interrupt_context["current"] = {
                     "sessionId": "validation-b",
@@ -536,6 +554,99 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertEqual(queued_meta["validationSessionId"], "validation-a")
         self.assertEqual(queued_meta["validationStepId"], "08-interrupt-a")
         self.assertEqual(queued_meta["validationAttemptId"], "interrupt-attempt-a")
+
+    def test_playback_owner_and_capture_source_publish_atomically(self):
+        class FakeMicCaptureService:
+            instance = None
+
+            def __init__(
+                self,
+                *,
+                capture_context_provider=None,
+                **_kwargs,
+            ) -> None:
+                self.capture_context_provider = capture_context_provider
+                self.capture_ready = True
+                self.capture_stopped = False
+                self.last_error = ""
+                type(self).instance = self
+
+            def start(self) -> bool:
+                return True
+
+        async def runner() -> tuple[dict, dict | None, object]:
+            bridge = make_active_voice_bridge()
+            with patch.object(
+                local_io_bridge,
+                "LocalMicCaptureService",
+                FakeMicCaptureService,
+            ):
+                await bridge._start_mic()
+            service = FakeMicCaptureService.instance
+            assert service is not None
+            assert service.capture_context_provider is not None
+            bridge.active_turn_id = "turn-a"
+            bridge.active_turn_task = asyncio.current_task()
+
+            claim_contexts: list[dict | None] = []
+            claim_threads: list[threading.Thread] = []
+            original_claim = bridge.playback_controller.claim
+
+            def racing_claim(owner_id, cancel):
+                self.assertTrue(bridge._barge_source_lock.locked())
+                claimed = original_claim(owner_id, cancel)
+                started = threading.Event()
+
+                def capture() -> None:
+                    started.set()
+                    claim_contexts.append(service.capture_context_provider())
+
+                thread = threading.Thread(target=capture)
+                claim_threads.append(thread)
+                thread.start()
+                self.assertTrue(started.wait(timeout=1.0))
+                return claimed
+
+            bridge.playback_controller.claim = racing_claim  # type: ignore[method-assign]
+            owner_id = bridge._claim_playback_owner()
+            for thread in claim_threads:
+                thread.join(timeout=1.0)
+
+            owner_token = bridge.playback_controller.owner_token
+            release_contexts: list[dict | None] = []
+            release_threads: list[threading.Thread] = []
+            original_release = bridge.playback_controller.release
+
+            def racing_release(released_owner_id):
+                self.assertTrue(bridge._barge_source_lock.locked())
+                released = original_release(released_owner_id)
+                started = threading.Event()
+
+                def capture() -> None:
+                    started.set()
+                    release_contexts.append(service.capture_context_provider())
+
+                thread = threading.Thread(target=capture)
+                release_threads.append(thread)
+                thread.start()
+                self.assertTrue(started.wait(timeout=1.0))
+                return released
+
+            bridge.playback_controller.release = racing_release  # type: ignore[method-assign]
+            self.assertTrue(bridge._release_playback_owner(owner_id))
+            for thread in release_threads:
+                thread.join(timeout=1.0)
+
+            assert claim_contexts
+            assert release_contexts
+            return dict(claim_contexts[0] or {}), release_contexts[0], owner_token
+
+        claim_context, release_context, owner_token = asyncio.run(runner())
+        source = dict(claim_context["_bargeSource"])
+
+        self.assertEqual(source["ownerId"], "turn-a")
+        self.assertIs(source["ownerToken"], owner_token)
+        self.assertIsNone(release_context)
 
     def test_barge_worker_records_causal_interrupt_without_synthetic_final(self):
         source = (

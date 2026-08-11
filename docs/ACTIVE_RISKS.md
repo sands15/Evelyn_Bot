@@ -648,10 +648,12 @@ client disconnect가 in-flight generation과 concurrency slot을 확실히 취�
 identifier를 제거하고 profile API의 `ref_text`를 숨긴다. 새 image의 실제 profile 응답과
 합성 후 로그 검사도 통과했다. client fallback/final failure도 upstream HTTP 오류 본문과
 clone profile 대신 고정 `tts_request_failed`·`omnivoice_request_failed`만 남긴다.
-Local Bridge의 direct HTTP PCM write는 cancellation-safe
-worker와 단일 playback owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다.
-mock 회귀는 통과했지만 남은 공백은 사용자 스피커 청취, 실제 마이크 10-turn·무음,
-barge-in과 Discord 채널 E2E다.
+Local Bridge의 direct HTTP PCM write는 cancellation-safe worker와 단일 playback
+owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다. actual segmenter
+회귀는 첫 threshold 후보 블록 뒤 owner release→flush와 fresh-wake 거부·normal
+admission을 검증했다. 실제 장치의 TTS 종료 경계, echo false-accept, qualified
+interrupt, successor playback 교체와 사용자 스피커 청취, 마이크 10-turn·무음,
+Discord 채널 E2E는 아직 검증하지 않았다.
 
 2026-08-09 source는 validation GET이 terminal/expired session의 동의를 철회한 뒤
 철회 전 capability를 반환하던 경합을 닫았다. session snapshot은 consent lock 안에서
@@ -739,8 +741,10 @@ false reject를 측정하지 않았다.
 abort와 runtime event 기록에서도 먼저 적용하며, mutation 중 만료를 발견해도
 로컬 마이크 동의 임대를 즉시 해제한다. 따라서 사전 GET이 없어도 만료된 세션은
 새 증거나 동작을 받아들이지 않는다. 누락·비수치·비유한 만료값과 현재 세션/단계에
-맞지 않는 명시적 runtime event ID도 fail-closed한다. 로컬 브리지는 재생 직전
-일반 큐 발화를 TTS cleanup에서 잃지 않고, clone voice fallback도 단일 playback
+맞지 않는 명시적 runtime event ID도 fail-closed한다. 로컬 브리지는 첫 threshold
+후보에서 playback generation을 고정한다. flush 전에 같은 generation이 해제되고
+새 owner·active validation이 없으면 exact leading wake를 확인한 뒤 기존 admission으로
+보내며, 다른 generation은 fail-closed한다. clone voice fallback도 단일 playback
 owner 안에서 수행한다. Discord streaming뿐 아니라 canned wake와 명시적 기억
 응답도 terminal turn summary를 남기며, transcript match, accepted-turn contract,
 content-free reply-started/final과 playback failure·terminal outcome을 typed

@@ -147,6 +147,7 @@ class LocalMicCaptureService:
         self,
         *,
         on_segment: Callable[[bytes, dict[str, Any]], None],
+        capture_context_provider: Callable[[], dict[str, Any] | None] | None = None,
         sample_rate: int = 16000,
         block_ms: int = 30,
         start_threshold: float = 0.015,
@@ -164,6 +165,7 @@ class LocalMicCaptureService:
         waveform_filter_enabled: bool = True,
     ) -> None:
         self.on_segment = on_segment
+        self.capture_context_provider = capture_context_provider
         self.sample_rate = max(8000, int(sample_rate))
         self.block_ms = max(10, int(block_ms))
         self.start_threshold = max(0.001, float(start_threshold))
@@ -196,6 +198,8 @@ class LocalMicCaptureService:
 
         self._pre_roll: deque[tuple[np.ndarray, float]] = deque(maxlen=self._preroll_blocks)
         self._current_blocks: list[np.ndarray] = []
+        self._capture_context: dict[str, Any] = {}
+        self._candidate_capture_context: dict[str, Any] = {}
         self._capture_active = False
         self._capture_unstable = False
         self._consecutive_start_blocks = 0
@@ -310,6 +314,8 @@ class LocalMicCaptureService:
         finally:
             self._capture_ready = False
             self._flush_active_segment(force=True)
+            self._consecutive_start_blocks = 0
+            self._candidate_capture_context = {}
 
     def _input_callback(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if self._stop_event.is_set():
@@ -344,9 +350,12 @@ class LocalMicCaptureService:
         self._pre_roll.append((block, level))
         if not self._capture_active:
             if level >= self.start_threshold:
+                if self._consecutive_start_blocks == 0:
+                    self._candidate_capture_context = self._capture_context_snapshot()
                 self._consecutive_start_blocks += 1
             else:
                 self._consecutive_start_blocks = 0
+                self._candidate_capture_context = {}
             if self._consecutive_start_blocks >= self.start_consecutive:
                 self._begin_capture(meta=meta)
             return
@@ -381,8 +390,21 @@ class LocalMicCaptureService:
         self._consecutive_start_blocks = 0
         self._trailing_silence = 0
         self._current_blocks = [block.copy() for block, _ in self._pre_roll]
+        self._capture_context = self._candidate_capture_context
+        self._candidate_capture_context = {}
         self._total_samples = sum(int(block.size) for block in self._current_blocks)
         self._voiced_samples = sum(int(block.size) for block, level in self._pre_roll if level >= self.continue_threshold)
+
+    def _capture_context_snapshot(self) -> dict[str, Any]:
+        capture_context: dict[str, Any] = {}
+        if self.capture_context_provider is not None:
+            try:
+                provided = self.capture_context_provider()
+            except Exception:
+                provided = None
+            if isinstance(provided, dict):
+                capture_context = dict(provided)
+        return capture_context
 
     def _append_block(self, block: np.ndarray, *, level: float) -> None:
         self._current_blocks.append(block.copy())
@@ -443,9 +465,11 @@ class LocalMicCaptureService:
         voiced_samples = self._voiced_samples
         total_samples = self._total_samples
         unstable = self._capture_unstable
+        capture_context = self._capture_context
         self._capture_active = False
         self._capture_unstable = False
         self._current_blocks = []
+        self._capture_context = {}
         self._trailing_silence = 0
         self._voiced_samples = 0
         self._total_samples = 0
@@ -473,13 +497,12 @@ class LocalMicCaptureService:
         pcm_bytes = mono16k_float_to_discord_pcm(segment, sampling_rate=self.sample_rate)
         if not pcm_bytes:
             return
-        self.on_segment(
-            pcm_bytes,
-            {
-                "source": "local_mic",
-                "unstable": unstable,
-                "duration_sec": round(segment.size / float(self.sample_rate), 3),
-                "sampling_rate": self.sample_rate,
-                "voice_filter": filter_meta,
-            },
-        )
+        segment_meta = {
+            "source": "local_mic",
+            "unstable": unstable,
+            "duration_sec": round(segment.size / float(self.sample_rate), 3),
+            "sampling_rate": self.sample_rate,
+            "voice_filter": filter_meta,
+        }
+        segment_meta.update(capture_context)
+        self.on_segment(pcm_bytes, segment_meta)
