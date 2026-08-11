@@ -1822,11 +1822,11 @@ control_page_search_text_dependency_composition = ControlPageSearchTextDependenc
         schedule_local_control_tts=lambda *args, **kwargs: schedule_local_control_tts(
             *args, **kwargs
         ),
-        current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs),
         format_display_text=lambda *args, **kwargs: format_display_text(*args, **kwargs),
         fallback_answer_for=lambda *args, **kwargs: fallback_answer_for(*args, **kwargs),
         begin_user_text_turn=lambda *args, **kwargs: begin_user_text_turn(*args, **kwargs),
         replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
+        get_room_turn_scope=lambda *args, **kwargs: get_room_turn_scope(*args, **kwargs),
         attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
         resolve_pending_proactive_question_for_turn=lambda *args, **kwargs: resolve_pending_proactive_question_for_turn(
             *args, **kwargs

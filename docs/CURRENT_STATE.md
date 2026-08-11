@@ -2366,3 +2366,15 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 변경 직결 84개, 인접 156개, voice 전체 667개(skip 5), CI-equivalent 전체
   3,290개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline source/test와
   subprocess crash recovery이며 실제 Discord·마이크·스피커·LLM·TTS를 기동하지 않았다.
+
+## 2026-08-12 Control Page forced-search exact turn binding
+
+- 강제 검색은 이전 `current_turn_id`를 재사용하지 않는다. 첫 per-session critical section에서
+  `begin_user_text_turn`과 새 TurnScope를 결박하고, 검색·합성 await 동안 lock을 놓는다. 최종
+  critical section은 exact current scope를 다시 검사한 뒤 반환 turn ID로 history 완료,
+  durable continuity commit과 로컬 TTS를 수행한다. 그래서 검색은 이전 일반 턴을 취소하고,
+  검색 대기 중 들어온 후속 턴은 검색의 stale sink를 0회로 만든다. 일반·검색 TTS task도
+  완료까지 exact scope를 소유해 다음 턴이 stale 재생을 취소한다.
+- focused 34개, continuity 인접 68개, UI 전체 186개와 CI-equivalent 전체
+  3,294개(skip 22), Python 구문 검사가 통과했다. 검증은 offline source/test이며 실행 중
+  Control Page·LLM·TTS·Docker를 시작하거나 교체하지 않았다.

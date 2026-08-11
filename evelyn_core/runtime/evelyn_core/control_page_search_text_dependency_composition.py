@@ -27,11 +27,11 @@ class ControlPageSearchTextDependencyCompositionDeps:
     active_conversation_text_sec: float
     build_topic_id: Callable[..., str]
     schedule_local_control_tts: Callable[..., Any]
-    current_turn_id: Callable[..., Any]
     format_display_text: Callable[..., str]
     fallback_answer_for: Callable[..., str]
     begin_user_text_turn: Callable[..., Any]
     replace_room_turn_scope: Callable[..., Any]
+    get_room_turn_scope: Callable[..., Any]
     attach_current_task: Callable[..., Any]
     resolve_pending_proactive_question_for_turn: Callable[..., Any]
     ask_llm_streaming: Callable[..., Any]
@@ -67,15 +67,21 @@ class ControlPageSearchTextDependencyComposition:
             synthesize_tool_result_with_main_llm=deps.synthesize_tool_result_with_main_llm,
             clean_text=clean_text,
             get_session_lock=self._get_session_lock,
+            begin_user_text_turn=deps.begin_user_text_turn,
+            turn_scope_factory=TurnScope,
+            replace_room_turn_scope=deps.replace_room_turn_scope,
+            get_room_turn_scope=deps.get_room_turn_scope,
+            attach_current_task=deps.attach_current_task,
             append_history=deps.append_history,
             mark_session_active=deps.mark_session_active,
             commit_session_continuity=deps.commit_session_continuity,
             active_conversation_text_sec=deps.active_conversation_text_sec,
             build_topic_id=deps.build_topic_id,
             schedule_local_control_tts=deps.schedule_local_control_tts,
-            current_turn_id=deps.current_turn_id,
             format_display_text=deps.format_display_text,
             fallback_answer_for=deps.fallback_answer_for,
+            detach_task=deps.detach_task,
+            clear_room_turn_scope=deps.clear_room_turn_scope,
             log=deps.log,
         )
 

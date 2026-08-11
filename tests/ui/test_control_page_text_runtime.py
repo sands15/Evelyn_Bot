@@ -30,6 +30,7 @@ from evelyn_core.memory_exposure import (  # noqa: E402
     capture_memory_exposure_position,
     reset_memory_exposure_position,
 )
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -156,6 +157,68 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.detached[0][1], "attached-task")
         self.assertEqual(self.cleared[0][0], "control:7")
+
+    async def test_tts_owns_scope_until_done_and_cannot_clear_successor(self) -> None:
+        registry = TurnScopeRegistry()
+        playback_started = asyncio.Event()
+        release_playback = asyncio.Event()
+        tts_tasks: list[asyncio.Task] = []
+
+        async def play_tts() -> None:
+            playback_started.set()
+            await release_playback.wait()
+
+        def schedule_tts(*_args, **kwargs):
+            task = registry.create_scoped_task(
+                play_tts(),
+                turn_scope=kwargs["turn_scope"],
+            )
+            tts_tasks.append(task)
+            return task
+
+        deps = self.build_deps()
+        deps = ControlPageTextRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "turn_scope_factory": TurnScope,
+                "replace_room_turn_scope": registry.replace_room_scope,
+                "attach_current_task": registry.attach_current_task,
+                "schedule_local_control_tts": schedule_tts,
+                "detach_task": registry.detach_task,
+                "clear_room_turn_scope": registry.clear_room_scope,
+            }
+        )
+
+        await answer_control_page_text_from_runtime(
+            None,
+            "질문",
+            deps=deps,
+        )
+        await playback_started.wait()
+        tts_task = tts_tasks[0]
+
+        async def cleanup() -> None:
+            release_playback.set()
+            if not tts_task.done():
+                tts_task.cancel()
+            await asyncio.gather(tts_task, return_exceptions=True)
+
+        self.addAsyncCleanup(cleanup)
+        scope = registry.get_room_scope("control:0")
+        self.assertIsNotNone(scope)
+        self.assertIn(tts_task, scope.tasks)
+
+        successor = TurnScope("successor-turn")
+        registry.replace_room_scope("control:0", successor)
+        with self.assertRaises(asyncio.CancelledError):
+            await tts_task
+        await asyncio.sleep(0)
+
+        self.assertTrue(scope.cancelled)
+        self.assertIs(
+            registry.get_room_scope("control:0"),
+            successor,
+        )
 
     async def test_resolved_proactive_question_skips_append(self) -> None:
         self.proactive_resolved = True

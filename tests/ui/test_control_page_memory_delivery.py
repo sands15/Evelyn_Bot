@@ -334,6 +334,15 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
             synthesize_tool_result_with_main_llm=synthesize_without_receipt,
             clean_text=lambda value: value.strip(),
             get_session_lock=lambda _key: state_lock,
+            begin_user_text_turn=lambda *_args, **_kwargs: (
+                SimpleNamespace(turn_id="turn-1")
+            ),
+            turn_scope_factory=lambda turn_id: SimpleNamespace(
+                turn_id=turn_id
+            ),
+            replace_room_turn_scope=lambda *_args: None,
+            get_room_turn_scope=lambda _key: None,
+            attach_current_task=lambda _scope: "task",
             append_history=lambda *args, **kwargs: persisted.append(
                 (*args, kwargs)
             ),
@@ -346,9 +355,10 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
             schedule_local_control_tts=lambda *args, **kwargs: tts.append(
                 (*args, kwargs)
             ),
-            current_turn_id=lambda _key: "turn-1",
             format_display_text=lambda value, **_kwargs: value,
             fallback_answer_for=lambda _text: "fallback",
+            detach_task=lambda *_args: None,
+            clear_room_turn_scope=lambda *_args: None,
             log=lambda *_args, **_kwargs: None,
         )
 

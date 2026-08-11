@@ -392,8 +392,14 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   durable commit을 수행한다. fallback 전송이 실패하거나 성공 여부가
   모호하면 history/checkpoint를 변경하지 않으며, 기록·commit 실패 때문에
   fallback을 다시 보내지 않는다.
-- Control Page 일반·검색 답변은 세션 완료 상태를 반영하고 durable commit한
-  뒤 로컬 TTS를 예약한다.
+- Control Page 일반 답변은 세션 완료 상태를 반영하고 durable commit한 뒤
+  로컬 TTS를 예약한다. 일반·검색 TTS task 완료까지 exact TurnScope를 유지해
+  다음 턴이 stale 재생을 취소하게 한다. 강제 검색은 첫 per-session critical
+  section에서 새 user text turn과 scope를 만들고, 느린 검색·합성 await는 lock
+  밖에서 수행한다. 최종 critical section은 같은 scope가 아직 current인지 다시
+  확인한 뒤에만 세션 완료, durable commit과 로컬 TTS를 수행한다. 반환된 exact
+  turn ID는 metrics와 모든 최종 sink에 고정되며 이전·경쟁 turn ID는 새 검색
+  답변의 commit 증거가 아니다.
 - 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
   기록한다. 같은 답변의 선택적 voice가 실패해도 중복 기록하지 않는다.
 - 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.

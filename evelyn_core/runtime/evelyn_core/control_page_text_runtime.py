@@ -41,7 +41,7 @@ class ControlPageTextRuntimeDeps:
         Awaitable[dict[str, Any]],
     ]
     log_voice_bottleneck_summary: Callable[..., None]
-    schedule_local_control_tts: Callable[..., None]
+    schedule_local_control_tts: Callable[..., Any]
     format_display_text: Callable[..., str]
     fallback_answer_for: Callable[[str], str]
     detach_task: Callable[[Any, Any], None]
@@ -65,6 +65,7 @@ async def answer_control_page_text_from_runtime(
     turn_scope = deps.turn_scope_factory(turn_id)
     deps.replace_room_turn_scope(session_key, turn_scope)
     turn_task = deps.attach_current_task(turn_scope)
+    scope_handed_off = False
     text_metrics: dict[str, Any] = {
         "started_at": deps.monotonic(),
         "meta": {
@@ -203,12 +204,20 @@ async def answer_control_page_text_from_runtime(
             required=response_exposure is not None,
             index_dir=deps.memory_index_dir,
         ):
-            deps.schedule_local_control_tts(
+            tts_task = deps.schedule_local_control_tts(
                 plain_answer,
                 turn_id=turn_id,
                 session_key=session_key,
                 turn_scope=turn_scope,
             )
+            if tts_task is not None:
+                tts_task.add_done_callback(
+                    lambda _done, key=session_key, scope=turn_scope: deps.clear_room_turn_scope(
+                        key,
+                        scope,
+                    )
+                )
+                scope_handed_off = True
         return deps.format_display_text(plain_answer, session_key=session_key).strip() or deps.fallback_answer_for(
             user_text
         )
@@ -226,4 +235,5 @@ async def answer_control_page_text_from_runtime(
                 event_name="text_turn_summary",
             )
         deps.detach_task(turn_scope, turn_task)
-        deps.clear_room_turn_scope(session_key, turn_scope)
+        if not scope_handed_off:
+            deps.clear_room_turn_scope(session_key, turn_scope)

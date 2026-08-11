@@ -61,8 +61,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령과 `/remember` 등 명시적 기억 저장 결과 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 process handle만 사용하며 Control Page의 Discord 토글은 core를 유지한 채 `discord_bot`만 전환한다.
-- Main↔Fast continuity는 선택 session 활동시각으로 ordering·stale·revocation/reset을 판정해 무관한 session commit의 재정렬·부활을 막고 선택 대상의 누락 metadata는 fail-closed한다. CI-equivalent 전체 3,290개(skip 22),
-  accepted-voice 집중 84개·인접 156개, voice 667개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
+- Control Page 강제 검색은 새 text turn/TurnScope로 이전 일반 턴을 취소하고, 느린 await 밖의 final currentness 검사로 후속 턴이 stale sink를 막는다. 일반·검색 TTS도 task 완료까지 scope를 유지한다. CI-equivalent 전체 3,294개(skip 22),
+  검색 집중 34개·continuity 인접 68개·UI 186개와 accepted-voice 집중 84개·voice 667개(skip 5)가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙
 
