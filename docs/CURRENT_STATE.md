@@ -2048,7 +2048,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   `EVELYN_IMAGE_SOURCE_REVISION`을 clean Git revision과 exact 비교한다. 둘 중 하나가
   missing/stale이면 allowlist builder로 Bot API, Control Page와 Vision을 갱신하고,
   두 control service의 role·image/expected revision과 proxy identity를 `/health`에서
-  확인한 뒤에만 Host Supervisor를 시작하고 준비 완료를 보고한다.
+  확인한 뒤에만 Host Supervisor를 시작하고 준비 완료를 보고한다. 실행 소스가 아닌
+  user-owned `docs/99_PROJECT_INBOX.md`만 dirty-tree 검사에서 제외하며 다른
+  tracked/untracked 변경은 계속 fail-closed한다.
 - 실제 stale `7c4770e` image에서 자동 rebuild가 선택됐다. 첫 실행이 드러낸 optional
   `BuildContexts` StrictMode 결함을 공통 builder에서 수정한 뒤 정상
   `start_local.bat --background`가 exit 0으로 완료됐다. 공식 checker는 Control Page,

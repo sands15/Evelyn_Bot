@@ -47,7 +47,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 현재 저장소의 정상 launcher가 stale Bot API·Control Page image를 exact source
   revision으로 감지해 재빌드한다. 2026-08-08 실제 `start_local.bat --background`에서
   Control Page, Bot API, LLM 3개, OmniVoice, STT, Vision과 Local Bridge가 공식 checker를
-  통과했다. Bridge는 mic OFF, output ready, clone warmup 564.1 ms, error/play count 0이었다. 시작 실패는 고정 `EVL-START-NNNN` 코드·조치와 content-free latest log로 표시한다.
+  통과했다. Bridge는 mic OFF, output ready, clone warmup 564.1 ms, error/play count 0이었다. 시작 실패는 고정 `EVL-START-NNNN` 코드·조치와 content-free latest log로 표시하며 user-owned `docs/99_PROJECT_INBOX.md`는 source-dirty 검사에서 제외한다.
 - 오래된 `C:\Evelyn` Compose에는 `vision_runtime`이 없어 현재 Vision ingress와
   결합하면 DNS/502가 반복됐다. 현재 저장소 Compose로 재생성해 ingress와 runtime을
   함께 띄웠고 Vision health가 통과했다.

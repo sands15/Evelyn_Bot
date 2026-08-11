@@ -25,7 +25,7 @@ function Resolve-EvelynSourceRevision {
         throw 'Cannot prove the runtime source revision because git is unavailable. Set EVELYN_SOURCE_REVISION explicitly.'
     }
 
-    $statusOutput = @(& $gitCommand.Source -C $ProjectRoot status --porcelain --untracked-files=all 2>&1)
+    $statusOutput = @(& $gitCommand.Source -C $ProjectRoot status --porcelain --untracked-files=all -- . ':(exclude)docs/99_PROJECT_INBOX.md' 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw 'Cannot inspect the Evelyn source tree before runtime launch.'
     }

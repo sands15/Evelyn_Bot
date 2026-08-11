@@ -96,6 +96,9 @@ If startup fails, `start.bat` keeps the error visible and prints a stable
 [`docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md`](docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md#시작-실패-오류코드).
 The latest content-free failure record is written to
 `runtime_artifacts/logs/background_start/startup-error.log`.
+The user-owned `docs/99_PROJECT_INBOX.md` capture file is excluded from the
+source-cleanliness check; other tracked or untracked changes still produce
+`EVL-START-2001`.
 
 For non-interactive use, set `EVELYN_KEEP_CONSOLE_ON_EXIT=false` to skip the
 failure pause. This does not change the process exit code.

@@ -40,7 +40,7 @@ readiness·Windows bridge/UI 연동, `9xxx`는 미분류 오류다. 한 번 공�
 | `EVL-START-1001` | Docker CLI를 찾을 수 없음 | Docker Desktop을 설치하거나 복구한 뒤 다시 실행한다. |
 | `EVL-START-1002` | Docker Engine에 연결할 수 없음 | Docker Desktop을 열고 Engine running을 확인한 뒤 다시 실행한다. |
 | `EVL-START-1003` | Docker Compose를 사용할 수 없음 | Docker Desktop을 업데이트·복구하고 `docker compose version`을 확인한다. |
-| `EVL-START-2001` | clean Git revision을 증명할 수 없음 | `git status --short`로 변경을 검토한 뒤 의도한 변경을 commit 또는 stash한다. 명령 자체가 없으면 Git을 복구하고, 파일을 무작정 삭제하거나 reset하지 않는다. |
+| `EVL-START-2001` | runtime source의 clean Git revision을 증명할 수 없음 | `git status --short`로 변경을 검토한 뒤 의도한 변경을 commit 또는 stash한다. 명령 자체가 없으면 Git을 복구하고, 파일을 무작정 삭제하거나 reset하지 않는다. |
 | `EVL-START-2002` | OmniVoice profile 누락·손상 | `ref_audio.wav`, `meta.json`, non-empty `ref_text`를 확인한다. |
 | `EVL-START-3001` | Docker image build 또는 Compose 시작 실패 | 한 번 재시도하고 반복되면 코드와 발생 시각을 전달한다. |
 | `EVL-START-4001` | 필수 Docker service readiness 시간 초과 | `tools/check_docker_runtime.ps1`을 실행하고 코드와 발생 시각을 전달한다. |
@@ -55,6 +55,10 @@ launcher가 추가하는 실패 요약에는 고정 코드·설명·조치만 �
 
 최상위 `start.bat`은 실패 화면을 유지한다. 자동 실행에서 pause가 필요 없으면 호출
 전에 `EVELYN_KEEP_CONSOLE_ON_EXIT=false`를 설정한다.
+
+`docs/99_PROJECT_INBOX.md`는 실행 소스가 아닌 user-owned project capture이므로 이
+검사에서 정확히 한 경로만 제외한다. 그 외 tracked/untracked 코드·설정·문서 변경은
+계속 `EVL-START-2001`로 시작을 차단한다.
 
 기본 OmniVoice 이미지는 `EVELYN_OMNIVOICE_SERVER_DIR` 아래의
 `omnivoice_server/`만 build context로 읽는다. 환경변수가 없으면

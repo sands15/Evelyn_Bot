@@ -544,6 +544,11 @@ class ShutdownScriptContractTests(unittest.TestCase):
             self.assertIn("source_revision.ps1", script)
             self.assertIn("Initialize-EvelynSourceRevision", script)
         self.assertIn("status --porcelain --untracked-files=all", revision_helper)
+        self.assertIn(
+            "-- . ':(exclude)docs/99_PROJECT_INBOX.md'",
+            revision_helper,
+        )
+        self.assertEqual(revision_helper.count(":(exclude)"), 1)
         self.assertIn("rev-parse HEAD", revision_helper)
         self.assertIn("dirty source tree", revision_helper)
         self.assertIn("40- or 64-character hexadecimal revision", revision_helper)
