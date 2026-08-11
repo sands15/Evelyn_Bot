@@ -353,17 +353,24 @@ owner와 같은 파일을 동시에 쓰지 않으므로 multi-process overwrite�
 두 short-lived owner의 prompt-time cross-surface merge는 구현됐다. 각
 checkpoint의 single writer는 유지하고 상대 process는 current hash/head,
 TTL, privacy policy와 revocation ledger를 read-only로 검증한다. Main/Discord와
-Fast Control은 owner `savedAt` 순서로 bounded recent context를 양방향
-사용하며, 더 최신 empty/reset boundary보다 오래된 상대 문맥은 되살리지
-않는다. 중앙 mutation owner로 이관할 때 생기는 multi-process overwrite
-위험은 도입하지 않았다.
+Fast Control은 선택 session의 durable 상대 활동시각으로 bounded recent
+context를 양방향 사용한다. 무관한 session의 후속 commit은 대상 session을
+재정렬·갱신하거나 철회/reset 전 문맥을 되살리지 못한다. 선택 대상의
+누락·손상된 활동 metadata는 cross-surface에서 거부하고 owner restore에서는
+보수적인 만료 시각으로 복구한다. target scope가 없는 checkpoint의 owner `savedAt`은 삭제
+tombstone을 별도로 저장하지 않는 현재 schema에서 reset 부활을 막는
+fail-closed 경계라, 무관한 commit과 실제 reset을 구분하지 못하면 상대 문맥을
+보수적으로 생략할 수 있다. 중앙 mutation owner나 새 tombstone store는
+도입하지 않았다.
 
 남은 공백은 실제 인증된 Discord↔Control Page handoff다. 교차 연결은
 `CROSS_SURFACE_CONTINUITY_ENABLED`와 개인 guild/user ID를 명시해야 하며,
 기본값은 의도적으로 fail-closed다. 이번 작업에서는 실행 중인 Bot API와
 Control Page를 교체하지 않았고 Discord도 시작하지 않았으므로, 한 surface의
 완료 턴이 실제 다른 surface의 다음 응답 의미에 반영되는 live 증거와
-동시 write 중 반복 read의 Windows filesystem 지연 표본은 아직 없다.
+동시 write 중 반복 read의 Windows filesystem 지연 표본은 아직 없다. source
+회귀는 무관한 session ordering, restart 활동시각 복원, revocation/reset과 선택
+대상 metadata 거부를 고정하지만 이 live 공백을 대신하지 않는다.
 
 코드는 이제 매 prompt 시도의 결과를
 `cross_surface_continuity.merge.v1`으로 계측한다. Main 턴 metrics와 Fast

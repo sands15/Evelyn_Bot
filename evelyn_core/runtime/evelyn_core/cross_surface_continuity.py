@@ -457,6 +457,7 @@ class VerifiedContinuitySnapshot:
     source: str
     state: str
     saved_at: float | None = None
+    selected_activity_at: float | None = None
     generation: int = 0
     messages: tuple[dict[str, Any], ...] = ()
     session_count: int = 0
@@ -591,14 +592,8 @@ def _merge_ordering(
     local_snapshot: VerifiedContinuitySnapshot,
     cross_snapshot: VerifiedContinuitySnapshot,
 ) -> str:
-    local_saved_at = _finite_float(
-        local_snapshot.saved_at,
-        default=-1.0,
-    )
-    cross_saved_at = _finite_float(
-        cross_snapshot.saved_at,
-        default=-1.0,
-    )
+    local_saved_at = _snapshot_activity_at(local_snapshot)
+    cross_saved_at = _snapshot_activity_at(cross_snapshot)
     if (
         local_saved_at >= 0.0
         and cross_saved_at >= 0.0
@@ -606,6 +601,19 @@ def _merge_ordering(
     ):
         return "cross_before_local"
     return "cross_after_local"
+
+
+def _snapshot_activity_at(
+    snapshot: VerifiedContinuitySnapshot,
+) -> float:
+    return _finite_float(
+        (
+            snapshot.selected_activity_at
+            if snapshot.selected_activity_at is not None
+            else snapshot.saved_at
+        ),
+        default=-1.0,
+    )
 
 
 class CrossSurfaceContinuityBridge:
@@ -928,7 +936,7 @@ class CrossSurfaceContinuityBridge:
         merged = merge_verified_recent_context(
             source_messages,
             cross_snapshot,
-            local_saved_at=local_snapshot.saved_at,
+            local_saved_at=_snapshot_activity_at(local_snapshot),
             current_user_text=current_user_text,
             limit=self.config.max_messages,
         )
@@ -1058,7 +1066,7 @@ class CrossSurfaceContinuityBridge:
         merged = merge_verified_recent_context(
             source_messages,
             cross_snapshot,
-            local_saved_at=local_snapshot.saved_at,
+            local_saved_at=_snapshot_activity_at(local_snapshot),
             current_user_text=current_user_text,
             limit=self.config.max_messages,
         )
@@ -1308,7 +1316,10 @@ def read_verified_continuity_snapshot(
         sessions = checkpoint.get("sessions")
         if not isinstance(sessions, list):
             raise ValueError("continuity_sessions_rejected")
-        selected: list[tuple[str, list[dict[str, Any]]]] = []
+        selected: list[
+            tuple[str, list[dict[str, Any]], float]
+        ] = []
+        revocation_boundary_at: float | None = None
         selection_limit = max(1, int(max_sessions))
         for row in sessions[:DEFAULT_MAX_SESSIONS]:
             if not isinstance(row, dict):
@@ -1319,17 +1330,37 @@ def read_verified_continuity_snapshot(
             row_guild_id, row_user_id = _parse_session_scope(
                 session_key
             )
-            if (
-                row_guild_id is not None
-                and revocations.get(row_guild_id, -1.0)
-                >= saved_at
-            ):
-                continue
             if guild_id is not None or user_id is not None:
                 if (
                     row_guild_id != guild_id
                     or row_user_id != user_id
                 ):
+                    continue
+            state = row.get("state")
+            if not isinstance(state, dict):
+                raise ValueError("continuity_session_rejected")
+            raw_last_active_ago_sec = state.get(
+                "lastActiveAgoSec"
+            )
+            if isinstance(raw_last_active_ago_sec, bool):
+                raise ValueError("continuity_session_rejected")
+            last_active_ago_sec = _finite_float(
+                raw_last_active_ago_sec,
+                default=-1.0,
+            )
+            if last_active_ago_sec < 0.0:
+                raise ValueError("continuity_session_rejected")
+            selected_activity_at = max(
+                0.0,
+                saved_at - last_active_ago_sec,
+            )
+            if row_guild_id is not None:
+                revoked_at = revocations.get(row_guild_id, -1.0)
+                if revoked_at >= selected_activity_at:
+                    revocation_boundary_at = max(
+                        revoked_at,
+                        revocation_boundary_at or 0.0,
+                    )
                     continue
             selected.append(
                 (
@@ -1345,6 +1376,7 @@ def read_verified_continuity_snapshot(
                             int(max_content_chars),
                         ),
                     ),
+                    selected_activity_at,
                 )
             )
             if len(selected) >= selection_limit:
@@ -1352,15 +1384,38 @@ def read_verified_continuity_snapshot(
         messages: list[dict[str, Any]] = []
         # The writer stores newest sessions first. Reverse session order so
         # the newest selected session is closest to the current user turn.
-        for _session_key, history in reversed(selected):
+        for _session_key, history, _activity_at in reversed(selected):
             messages.extend(history)
         messages = _dedupe_adjacent(messages)[
             -max(2, int(max_messages)) :
         ]
+        selected_activity_at = (
+            max(row[2] for row in selected)
+            if selected
+            else revocation_boundary_at
+        )
+        selected_max_age = min(
+            bounded_max_age,
+            max(0.0, expires_at - saved_at),
+        )
+        if (
+            selected
+            and now - selected_activity_at > selected_max_age
+        ):
+            return VerifiedContinuitySnapshot(
+                source=source,
+                state="stale",
+                saved_at=saved_at,
+                selected_activity_at=selected_activity_at,
+                generation=generation,
+                session_count=len(selected),
+                error_code="cross_surface_continuity_stale",
+            )
         return VerifiedContinuitySnapshot(
             source=source,
             state="verified",
             saved_at=saved_at,
+            selected_activity_at=selected_activity_at,
             generation=generation,
             messages=tuple(messages),
             session_count=len(selected),
@@ -1447,14 +1502,8 @@ def _cross_snapshot_precedes_empty_local_boundary(
         return False
     if local_snapshot.messages:
         return False
-    local_saved_at = _finite_float(
-        local_snapshot.saved_at,
-        default=-1.0,
-    )
-    cross_saved_at = _finite_float(
-        cross_snapshot.saved_at,
-        default=-1.0,
-    )
+    local_saved_at = _snapshot_activity_at(local_snapshot)
+    cross_saved_at = _snapshot_activity_at(cross_snapshot)
     return (
         local_saved_at >= 0.0
         and cross_saved_at >= 0.0
@@ -1506,10 +1555,7 @@ def merge_verified_recent_context(
         local_saved_at,
         default=-1.0,
     )
-    cross_timestamp = _finite_float(
-        cross_snapshot.saved_at,
-        default=-1.0,
-    )
+    cross_timestamp = _snapshot_activity_at(cross_snapshot)
     if (
         local_timestamp >= 0.0
         and cross_timestamp >= 0.0

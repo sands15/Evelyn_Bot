@@ -65,6 +65,7 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         sessions: list[tuple[str, str, str]] | None = None,
         root: Path | None = None,
         memory_receipt: dict | None = None,
+        last_active_monotonic: dict[str, float] | None = None,
     ) -> None:
         target_root = root or self.root
         target_root.mkdir(parents=True, exist_ok=True)
@@ -97,6 +98,13 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                 active_conversation_awaiting_reply_sec=900.0,
                 now_monotonic=self.clock.mono,
             )
+            if (
+                last_active_monotonic is not None
+                and session_key in last_active_monotonic
+            ):
+                store.last_active_at[session_key] = (
+                    last_active_monotonic[session_key]
+                )
         manager = SessionContinuityCheckpoint(
             store=store,
             checkpoint_path=target_root / "active.json",
@@ -297,6 +305,21 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
     def test_rejects_tamper_head_mismatch_and_symlink(self) -> None:
         self.write_checkpoint()
         checkpoint_path = self.root / "active.json"
+        head_path = self.root / "checkpoint_head.json"
+        payload = json.loads(
+            checkpoint_path.read_text(encoding="utf-8")
+        )
+        payload["sessions"][0]["state"].pop("lastActiveAgoSec")
+        payload["checkpointHash"] = _checkpoint_hash(payload)
+        head = json.loads(head_path.read_text(encoding="utf-8"))
+        head["checkpointHash"] = payload["checkpointHash"]
+        checkpoint_path.write_text(json.dumps(payload), encoding="utf-8")
+        head_path.write_text(json.dumps(head), encoding="utf-8")
+        self.assertEqual(self.read().state, "rejected")
+
+        checkpoint_path.unlink()
+        head_path.unlink()
+        self.write_checkpoint()
         payload = json.loads(
             checkpoint_path.read_text(encoding="utf-8")
         )
@@ -312,7 +335,6 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         self.root.joinpath("active.json").unlink()
         self.root.joinpath("checkpoint_head.json").unlink()
         self.write_checkpoint()
-        head_path = self.root / "checkpoint_head.json"
         head = json.loads(head_path.read_text(encoding="utf-8"))
         head["generation"] += 1
         head_path.write_text(
@@ -348,11 +370,30 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         self.clock.wall += 901.0
         self.assertEqual(self.read().state, "stale")
 
-        self.clock.wall = 1000.0
+        self.clock.wall = 1300.0
+        self.clock.mono = 300.0
+        self.write_checkpoint(
+            sessions=[
+                (
+                    "guild:7:text:8:user:9",
+                    "철회 전 질문",
+                    "철회 전 답",
+                ),
+                (
+                    "guild:7:text:9:user:10",
+                    "무관한 최신 질문",
+                    "무관한 최신 답",
+                ),
+            ],
+            last_active_monotonic={
+                "guild:7:text:8:user:9": 100.0,
+                "guild:7:text:9:user:10": 300.0,
+            },
+        )
         revocations = {
             "schema": "conversation_continuity.guild_revocations.v1",
-            "updatedAt": 1001.0,
-            "guilds": {"7": 1001.0},
+            "updatedAt": 1150.0,
+            "guilds": {"7": 1150.0},
             "policy": {
                 "contentFree": True,
                 "maxGuilds": 256,
@@ -366,6 +407,7 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         self.assertTrue(revoked.verified)
         self.assertEqual(revoked.session_count, 0)
         self.assertEqual(revoked.messages, ())
+        self.assertEqual(revoked.selected_activity_at, 1150.0)
 
         (self.root / "guild_revocations.json").write_text(
             "{broken",
@@ -465,6 +507,7 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             **{
                 **newer_cross.__dict__,
                 "saved_at": 800.0,
+                "selected_activity_at": 800.0,
                 "messages": (
                     {
                         "role": "assistant",
@@ -483,6 +526,99 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             [row["content"] for row in merged[1:]],
             ["예전 답", "예전 질문", "예전 답"],
         )
+
+    def test_unrelated_session_commit_does_not_reorder_selected_context(
+        self,
+    ) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        main_root = artifacts / "conversation_continuity"
+        fast_root = artifacts / "fast_control_continuity"
+        self.clock.wall = 1200.0
+        self.clock.mono = 200.0
+        self.write_checkpoint(
+            root=fast_root,
+            sessions=[(
+                "fast-control:control-page:owner",
+                "Fast 새 질문",
+                "Fast 새 답",
+            )],
+        )
+        self.clock.wall = 1300.0
+        self.clock.mono = 300.0
+        self.write_checkpoint(
+            root=main_root,
+            sessions=[
+                ("guild:7:text:8:user:9", "Main 예전 질문", "Main 예전 답"),
+                ("guild:7:text:9:user:10", "다른 질문", "다른 답"),
+            ],
+            last_active_monotonic={
+                "guild:7:text:8:user:9": 100.0,
+                "guild:7:text:9:user:10": 300.0,
+            },
+        )
+        bridge = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+                max_messages=2,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        main_snapshot = read_verified_continuity_snapshot(
+            main_root,
+            source="main",
+            wall_time=self.clock.wall_time,
+            guild_id=7,
+            user_id=9,
+        )
+        for_fast = bridge.merge_for_fast_observed(
+            [
+                {"role": "user", "content": "Fast 새 질문"},
+                {"role": "assistant", "content": "Fast 새 답"},
+            ],
+            current_user_text="후속 질문",
+        )
+        for_main = bridge.merge_for_main_observed(
+            [
+                {"role": "user", "content": "Main 예전 질문"},
+                {"role": "assistant", "content": "Main 예전 답"},
+            ],
+            session_key="guild:7:text:8:user:9",
+            current_user_text="후속 질문",
+        )
+        self.assertEqual(main_snapshot.saved_at, 1300.0)
+        self.assertEqual(main_snapshot.selected_activity_at, 1100.0)
+        self.assertEqual(
+            read_verified_continuity_snapshot(
+                main_root,
+                source="main",
+                wall_time=lambda: 2050.0,
+                guild_id=7,
+                user_id=9,
+            ).state,
+            "stale",
+        )
+        self.assertEqual(
+            [row["content"] for row in for_fast.messages],
+            [
+                "Fast 새 질문",
+                "Fast 새 답",
+            ],
+        )
+        self.assertEqual(
+            for_fast.evidence["ordering"],
+            "cross_before_local",
+        )
+        self.assertEqual(
+            [row["content"] for row in for_main.messages],
+            [
+                "Fast 새 질문",
+                "Fast 새 답",
+            ],
+        )
+        self.assertEqual(for_main.evidence["ordering"], "cross_after_local")
 
     def test_unavailable_cross_snapshot_preserves_local_context_exactly(
         self,
@@ -700,6 +836,11 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         artifacts = self.root / "runtime_artifacts"
         main_root = artifacts / "conversation_continuity"
         fast_root = artifacts / "fast_control_continuity"
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
+        self.write_empty_boundary(root=fast_root)
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
         self.write_checkpoint(
             root=main_root,
             sessions=[
@@ -707,11 +848,18 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                     "guild:7:text:8:user:9",
                     "삭제 전 질문",
                     "삭제 전 답",
-                )
+                ),
+                (
+                    "guild:7:text:9:user:10",
+                    "무관한 최신 질문",
+                    "무관한 최신 답",
+                ),
             ],
+            last_active_monotonic={
+                "guild:7:text:8:user:9": 100.0,
+                "guild:7:text:9:user:10": 102.0,
+            },
         )
-        self.clock.wall += 1.0
-        self.write_empty_boundary(root=fast_root)
         bridge = CrossSurfaceContinuityBridge(
             artifacts_root=artifacts,
             config=CrossSurfaceContinuityConfig(

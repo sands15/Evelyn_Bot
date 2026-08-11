@@ -235,9 +235,22 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
 - 현재 owner의 더 최신 empty boundary 또는 대상 scope가 없는 더 최신
   checkpoint는 reset 경계다. 그보다 오래된 다른 owner의 문맥을 다시 넣지
   않아 삭제 전 대화가 surface 전환으로 되살아나는 것을 막는다.
-- 양 owner의 `savedAt`으로 owner chunk 순서를 정하고, 현재 user input과 인접
+- checkpoint v2의 각 session row는 checkpoint 시점 기준의 유한한 비음수
+  `state.lastActiveAgoSec`를 저장한다. verifier는 `savedAt - lastActiveAgoSec`로
+  선택 session의 활동시각을 복원하고, 이 시각으로 owner chunk 순서와 선택
+  session stale·guild revocation·reset 경계를 판정한다. revoked target은
+  revocation 시각을 경계로 보존하고, target이 전혀 없거나 owner가 empty이면
+  owner `savedAt`을 reset 경계로 유지한다.
+- cross-surface reader는 선택 대상 row의 `lastActiveAgoSec`가 누락되거나
+  bool·음수·비유한이면 해당 snapshot을 거부한다. owner restore는 이전
+  checkpoint history를 보수적인 만료 활동시각으로만 복구하고 다음 실제
+  durable rewrite에서 새 필드를 쓴다.
+  따라서 무관한 user/session의 후속 commit이 대상 session을 최신으로 만들거나
+  철회·reset 전 문맥을 되살리지 않는다.
+- 선택 session 활동시각으로 owner chunk 순서를 정하고 현재 user input과 인접
   중복을 제거한 뒤 Main의 최신 eligible session 한 개에서 기본 최근 8개만
-  prompt에 넣는다. 원문은 새 artifact나 status에 복사하지 않는다.
+  prompt에 넣는다. 상대 활동시각과 session ID는 새 artifact·public status에
+  복사하지 않는다.
 - Fast Control의 tool planner와 Main LLM payload가 같은 merged context를
   사용한다. Main/Discord는 공통 `prepare_llm_messages` 진입점에서 합치므로
   text와 voice 응답이 같은 경계를 지난다.
@@ -585,10 +598,10 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
 - Discord guild/user exact scope, 다른 member/server 제외와 content-free
   status
-- owner `savedAt` 순서, 현재 input 제거, bounded merge와 양방향 Main/Fast
-  prompt 주입
-- 더 최신 empty/reset boundary가 다른 owner의 오래된 대화를 되살리지 않는지
-  검증
+- session `lastActiveAgoSec` 검증·restart 복원, 선택 session 활동시각 순서,
+  현재 input 제거, bounded merge와 양방향 Main/Fast prompt 주입
+- 무관한 session commit 뒤에도 선택 session stale·guild revocation과 더 최신
+  empty/reset boundary가 다른 owner의 오래된 대화를 되살리지 않는지 검증
 - 현재 owner가 거부된 경우 정상인 상대 문맥도 주입하지 않는 fail-closed
   경계
 - Main 턴 metrics와 Fast `lastMerge`의 exact-field, content-free,

@@ -176,6 +176,13 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   - 더 최신 empty owner 또는 target scope가 비어 있는 더 최신 checkpoint를
     reset boundary로 취급해 다른 owner의 오래된 대화가 삭제 뒤 되살아나지
     않는다. 공개 상태는 count/generation/고정 code만 포함한다.
+  - v2 session row는 checkpoint 시점 기준 `lastActiveAgoSec`를 저장하고,
+    restart에서는 checkpoint age와 합쳐 process-local 활동시각을 복원한다.
+    verifier는 설정된 scope의 선택 session 활동시각으로 Main/Fast ordering,
+    stale, guild revocation과 reset을 판정한다. 다른 Main session의 후속 commit은
+    오래된 대상 session을 최신으로 만들지 못하며, 선택 대상의 누락·손상된 활동
+    metadata는 cross-surface에서 fail-closed한다. 이 내부 시각은 public status에
+    노출하지 않는다.
   - 각 prompt merge는 `cross_surface_continuity.merge.v1`의 process-local
     증거를 남긴다. Main/Discord는 턴 metrics, Fast Control은 마지막 merge
     status에서 state, owner generation/count, ordering, latency만 공개한다.

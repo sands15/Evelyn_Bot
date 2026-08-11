@@ -175,6 +175,10 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertNotIn("persist하면 안 되는 부분", serialized)
         self.assertFalse(payload["policy"]["rawAudio"])
         self.assertFalse(payload["policy"]["partialTranscript"])
+        self.assertEqual(
+            payload["sessions"][0]["state"]["lastActiveAgoSec"],
+            0.0,
+        )
 
         restored_store = SessionStateStore.create_empty()
         restored_clock = FakeClock(wall=1006.0, monotonic=500.0)
@@ -199,6 +203,10 @@ class SessionContinuityTests(unittest.TestCase):
         )
         self.assertTrue(restored_store.awaiting_user_reply[session_key])
         self.assertEqual(restored_store.active_user_ids[session_key], 3)
+        self.assertAlmostEqual(
+            restored_store.last_active_at[session_key],
+            494.0,
+        )
         self.assertAlmostEqual(
             restored_store.active_until[session_key],
             794.0,
@@ -759,6 +767,7 @@ class SessionContinuityTests(unittest.TestCase):
         legacy.pop("generation")
         legacy.pop("previousHash")
         legacy.pop("checkpointHash")
+        legacy["sessions"][0]["state"].pop("lastActiveAgoSec")
         self.checkpoint_path.write_text(
             json.dumps(
                 legacy,
@@ -791,6 +800,12 @@ class SessionContinuityTests(unittest.TestCase):
         )
         self.assertEqual(legacy_head["generation"], 0)
         self.assertTrue(restored["rollbackProtected"])
+        self.assertEqual(
+            restored_store.last_active_at[
+                "guild:1:text:2:user:3"
+            ],
+            -402.0,
+        )
 
         restored_store.histories[
             "guild:1:text:2:user:3"
@@ -812,6 +827,10 @@ class SessionContinuityTests(unittest.TestCase):
             SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
         )
         self.assertEqual(current["generation"], 1)
+        self.assertGreater(
+            current["sessions"][0]["state"]["lastActiveAgoSec"],
+            900.0,
+        )
         self.assertEqual(
             current["previousHash"],
             legacy_head["checkpointHash"],
@@ -1017,6 +1036,37 @@ class SessionContinuityTests(unittest.TestCase):
         )
         self.assertEqual(restored_store.histories, {})
         self.assertFalse(self.checkpoint_path.exists())
+
+    def test_restore_applies_revocation_to_selected_session_activity(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1300.0, monotonic=300.0)
+        store = self.populated_store()
+        other_session = self.add_other_guild(store)
+        target_session = "guild:1:text:2:user:3"
+        store.last_active_at[target_session] = 100.0
+        store.last_active_at[other_session] = 300.0
+        self.manager(store, clock).flush()
+        (self.root / "guild_revocations.json").write_text(
+            json.dumps(
+                {
+                    "schema": "conversation_continuity.guild_revocations.v1",
+                    "updatedAt": 1150.0,
+                    "guilds": {"1": 1150.0},
+                    "policy": {"contentFree": True, "maxGuilds": 256},
+                }
+            ),
+            encoding="utf-8",
+        )
+        restored_store = SessionStateStore.create_empty()
+
+        self.manager(
+            restored_store,
+            FakeClock(wall=1301.0, monotonic=500.0),
+        ).restore()
+
+        self.assertNotIn(target_session, restored_store.histories)
+        self.assertIn(other_session, restored_store.histories)
 
     def test_expired_followup_restores_history_but_not_active_state(self) -> None:
         source = self.populated_store()

@@ -439,7 +439,8 @@ class SessionContinuityCheckpoint:
                         self.store.active_until.get(session_key)
                     ),
                     "lastActiveMonotonic": _finite_float(
-                        self.store.last_active_at.get(session_key)
+                        self.store.last_active_at.get(session_key),
+                        default=-1.0,
                     ),
                     "awaitingUserReply": bool(
                         self.store.awaiting_user_reply.get(session_key)
@@ -480,6 +481,15 @@ class SessionContinuityCheckpoint:
     ) -> dict[str, Any]:
         sessions: list[dict[str, Any]] = []
         for source in material["sessions"]:
+            last_active_monotonic = _finite_float(
+                source.get("lastActiveMonotonic"),
+                default=-1.0,
+            )
+            last_active_ago_sec = (
+                max(0.0, now_monotonic - last_active_monotonic)
+                if last_active_monotonic >= 0.0
+                else self.max_age_sec + 1.0
+            )
             remaining_sec = max(
                 0.0,
                 min(
@@ -494,6 +504,7 @@ class SessionContinuityCheckpoint:
                     "history": source["history"],
                     "state": {
                         "activeRemainingSec": round(remaining_sec, 3),
+                        "lastActiveAgoSec": last_active_ago_sec,
                         "awaitingUserReply": bool(
                             source.get("awaitingUserReply")
                             and remaining_sec > 0.0
@@ -1617,23 +1628,44 @@ class SessionContinuityCheckpoint:
                 session_key = _valid_session_key(row.get("sessionKey"))
                 if not session_key:
                     continue
+                state = row.get("state")
+                state = state if isinstance(state, dict) else {}
+                raw_last_active_ago_sec = state.get(
+                    "lastActiveAgoSec"
+                )
+                parsed_last_active_ago_sec = _finite_float(
+                    raw_last_active_ago_sec,
+                    default=-1.0,
+                )
+                activity_known = (
+                    not isinstance(raw_last_active_ago_sec, bool)
+                    and parsed_last_active_ago_sec >= 0.0
+                )
+                last_active_ago_sec = (
+                    parsed_last_active_ago_sec
+                    if activity_known
+                    else self.max_age_sec + 1.0
+                )
+                selected_activity_at = max(
+                    0.0,
+                    saved_at - last_active_ago_sec,
+                )
                 guild_id = _session_guild_id(session_key)
-                if (
-                    guild_id is not None
-                    and _finite_float(
+                if guild_id is not None:
+                    revoked_at = _finite_float(
                         guild_revocations.get(guild_id),
                         default=-1.0,
                     )
-                    >= saved_at
-                ):
-                    continue
+                    if revoked_at >= 0.0 and (
+                        not activity_known
+                        or revoked_at >= selected_activity_at
+                    ):
+                        continue
                 history = _safe_history(
                     row.get("history"),
                     max_items=self.max_history_items,
                     max_chars=self.max_content_chars,
                 )
-                state = row.get("state")
-                state = state if isinstance(state, dict) else {}
                 remaining_sec = max(
                     0.0,
                     min(
@@ -1646,11 +1678,13 @@ class SessionContinuityCheckpoint:
                     {"role": "system", "content": self.system_prompt},
                     *history,
                 ]
+                self.store.last_active_at[session_key] = (
+                    now_mono - age_sec - last_active_ago_sec
+                )
                 if remaining_sec > 0.0:
                     self.store.active_until[session_key] = (
                         now_mono + remaining_sec
                     )
-                    self.store.last_active_at[session_key] = now_mono
                     user_id = _safe_int(state.get("userId"))
                     if user_id is not None:
                         self.store.active_user_ids[session_key] = user_id
