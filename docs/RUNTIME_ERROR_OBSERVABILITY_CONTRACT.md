@@ -1,7 +1,7 @@
 # Runtime Error Observability Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-11 KST
 
 ## Purpose
 
@@ -90,6 +90,15 @@ additive 필드로 기록한다.
 
 기존 서비스 heartbeat의 `lastError` 호환 필드는 유지하지만 새 합성기는 해당 값을
 공개 응답으로 복사하지 않고 현재 오류 존재 여부 판정에만 사용한다.
+
+### Launcher startup boundary
+
+Windows launcher가 추가하는 시작 실패 요약은 사용자용
+`EVL-START-NNNN` fixed code·설명·조치만 사용한다. 이는 HTTP/heartbeat의 소문자
+runtime error code와 별도 namespace이며 프로세스 종료 코드도 대체하지 않는다.
+최신 startup failure 파일에는 timestamp, fixed code, exception type과 fixed stage만
+기록하고 예외 메시지, stack trace, token, 절대경로는 기록하지 않는다. 사용자 조치 표의 정본은
+[`EVELYN_DOCKER_RUNTIME_QUICKSTART.md`](EVELYN_DOCKER_RUNTIME_QUICKSTART.md#시작-실패-오류코드)다.
 
 Minecraft live status fallback은 upstream error를 fixed `minecraft_status_failed`, local
 client·observer 예외를 `minecraft_status_failed:<exception-type>`으로 Main LLM context,

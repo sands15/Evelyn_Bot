@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -348,9 +349,10 @@ class ShutdownScriptContractTests(unittest.TestCase):
             script.index("function Start-HostSupervisor") :
             script.index("function Open-ControlPage")
         ]
+        browser_start = script.index("function Open-ControlPage")
         browser = script[
-            script.index("function Open-ControlPage") :
-            script.index("try {", script.index("function Open-ControlPage"))
+            browser_start :
+            script.index("\ntry {\n    # Keep channel credentials", browser_start)
         ]
         main = script[script.rindex("try {") :]
 
@@ -550,6 +552,63 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "'--build-arg', \"EVELYN_SOURCE_REVISION=$sourceRevision\"",
             builder,
         )
+
+    def test_local_launcher_reports_documented_fixed_startup_error_codes(self) -> None:
+        launcher = self.read_script("start_local_background.ps1")
+        root_start = (REPO_ROOT / "start.bat").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        quickstart = (
+            REPO_ROOT / "docs" / "EVELYN_DOCKER_RUNTIME_QUICKSTART.md"
+        ).read_text(encoding="utf-8")
+        expected = {
+            "EVL-START-1001",
+            "EVL-START-1002",
+            "EVL-START-1003",
+            "EVL-START-2001",
+            "EVL-START-2002",
+            "EVL-START-3001",
+            "EVL-START-4001",
+            "EVL-START-4002",
+            "EVL-START-4003",
+            "EVL-START-9000",
+        }
+
+        self.assertEqual(set(re.findall(r"EVL-START-\d{4}", launcher)), expected)
+        self.assertEqual(set(re.findall(r"EVL-START-\d{4}", quickstart)), expected)
+        self.assertIn("function Assert-DockerReady", launcher)
+        source_revision = launcher.index(
+            "$sourceRevision = Initialize-EvelynSourceRevision"
+        )
+        unknown_stage = launcher.index("$startupStage = 'unknown'")
+        self.assertLess(source_revision, unknown_stage)
+        self.assertLess(
+            unknown_stage,
+            launcher.rindex("Assert-DockerReady"),
+        )
+        self.assertLess(
+            launcher.rindex("Assert-DockerReady"),
+            launcher.rindex("Start-DockerCore"),
+        )
+        self.assertIn("errorCode=$($failure.Code)", launcher)
+        self.assertIn("evelyn.startup_error.v1", launcher)
+        self.assertNotIn("$ErrorRecord.Exception.Message", launcher)
+        self.assertNotIn("ScriptStackTrace", launcher)
+        self.assertIn("$startupExitCode = 1", launcher)
+        self.assertIn("exit $startupExitCode", launcher)
+        self.assertIn("startup-error.log", launcher)
+        self.assertIn("Remove-Item -LiteralPath", launcher)
+        self.assertIn(
+            "$startupStage = 'control_page_open'\n    Open-ControlPage",
+            launcher,
+        )
+        self.assertIn("EVELYN_KEEP_CONSOLE_ON_EXIT", root_start)
+        failure_branch = root_start[root_start.index('if not "%EXITCODE%"=="0"') :]
+        self.assertIn("pause", failure_branch)
+        self.assertIn('if /I "%LOCAL_BACKGROUND%"=="true" goto :background', (
+            REPO_ROOT / "evelyn_core" / "start_local.bat"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("Startup error codes", readme)
+        self.assertIn("docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md", readme)
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")

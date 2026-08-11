@@ -89,6 +89,17 @@ The usual launcher is:
 start.bat
 ```
 
+### Startup error codes
+
+If startup fails, `start.bat` keeps the error visible and prints a stable
+`EVL-START-NNNN` code. The Korean cause/action table is in
+[`docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md`](docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md#시작-실패-오류코드).
+The latest content-free failure record is written to
+`runtime_artifacts/logs/background_start/startup-error.log`.
+
+For non-interactive use, set `EVELYN_KEEP_CONSOLE_ON_EXIT=false` to skip the
+failure pause. This does not change the process exit code.
+
 To rebuild the local app images before starting:
 
 ```powershell

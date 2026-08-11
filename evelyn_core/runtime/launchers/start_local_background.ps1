@@ -1,4 +1,78 @@
 $ErrorActionPreference = 'Stop'
+$startupStage = 'source_revision'
+$startupExitCode = 0
+$projectRoot = ''
+
+$startupFailures = @{
+    docker_cli = @('EVL-START-1001', 'Docker CLI was not found.', 'Install or repair Docker Desktop, then run start.bat again.')
+    docker_engine = @('EVL-START-1002', 'Docker Engine is not available.', 'Start Docker Desktop, wait for Engine running, then retry.')
+    docker_compose = @('EVL-START-1003', 'Docker Compose is not available.', 'Repair or update Docker Desktop and verify: docker compose version')
+    source_revision = @('EVL-START-2001', 'The Evelyn source revision could not be verified.', 'Run: git status --short. Review and commit or stash changes; repair Git if unavailable.')
+    tts_profile = @('EVL-START-2002', 'The OmniVoice profile is missing or invalid.', 'Check ref_audio.wav, meta.json, and meta.json ref_text in the README.')
+    docker_start = @('EVL-START-3001', 'A Docker image build or Compose start failed.', 'Retry once. If it repeats, report this code and the failure time.')
+    service_readiness = @('EVL-START-4001', 'A required Docker service did not become ready in time.', 'Run tools\check_docker_runtime.ps1, then report this code and time.')
+    host_supervisor = @('EVL-START-4002', 'The Windows Host Supervisor or Local I/O Bridge failed.', 'Check Host-Supervisor.log. Run bootstrap_host_runtime.ps1 only if the host runtime is missing.')
+    control_page_open = @('EVL-START-4003', 'Evelyn started, but the Control Page could not be opened.', 'Open the Control Page URL printed above in a browser.')
+    unknown = @('EVL-START-9000', 'An unclassified startup failure occurred.', 'Retry once. If it repeats, report this code and the failure time.')
+}
+
+function Get-EvelynStartupFailure {
+    param([string]$Stage)
+
+    $definition = if ($startupFailures.ContainsKey($Stage)) {
+        $startupFailures[$Stage]
+    } else {
+        $startupFailures.unknown
+    }
+    return [pscustomobject]@{
+        Code = $definition[0]
+        Message = $definition[1]
+        Action = $definition[2]
+    }
+}
+
+function Write-EvelynStartupFailure {
+    param(
+        [string]$Stage,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$ProjectRoot
+    )
+
+    $failure = Get-EvelynStartupFailure -Stage $Stage
+    $errorType = if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $ErrorRecord.Exception.GetType().Name
+    } else {
+        'Error'
+    }
+    $relativeLog = 'runtime_artifacts\logs\background_start\startup-error.log'
+
+    Write-Host ''
+    Write-Host "[Evelyn] Startup failed. errorCode=$($failure.Code)"
+    Write-Host "[Evelyn] $($failure.Message)"
+    Write-Host "[Evelyn] Action: $($failure.Action)"
+    Write-Host '[Evelyn] Help: README.md#startup-error-codes'
+
+    try {
+        $root = if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+            [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+        } else {
+            $ProjectRoot
+        }
+        $logPath = Join-Path $root $relativeLog
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath) |
+            Out-Null
+        @(
+            'schema=evelyn.startup_error.v1'
+            'timestamp=' + [DateTimeOffset]::Now.ToString('o')
+            'errorCode=' + $failure.Code
+            'errorType=' + $errorType
+            'stage=' + $Stage
+        ) | Set-Content -LiteralPath $logPath -Encoding UTF8
+        Write-Host "[Evelyn] Log: $relativeLog"
+    } catch {
+        Write-Host '[Evelyn] Log: unavailable'
+    }
+}
 
 $previousLocalBridgeStatusAuthToken = [Environment]::GetEnvironmentVariable(
     'LOCAL_BRIDGE_STATUS_AUTH_TOKEN',
@@ -40,6 +114,7 @@ if (-not (Test-Path -LiteralPath $sourceRevisionHelper -PathType Leaf)) {
 }
 . $sourceRevisionHelper
 $sourceRevision = Initialize-EvelynSourceRevision -ProjectRoot $projectRoot
+$startupStage = 'unknown'
 Write-Host "[Evelyn] Runtime source revision: $sourceRevision"
 $coreRuntime = Join-Path $projectRoot 'evelyn_core\runtime'
 $composeFile = Join-Path $projectRoot 'docker-compose.fast-control.yml'
@@ -401,6 +476,29 @@ function Assert-TtsProfileReady {
     }
     if ([string]::IsNullOrWhiteSpace([string]$metadata.ref_text)) {
         throw "Evelyn TTS profile ref_text is missing. $remediation"
+    }
+}
+
+function Assert-DockerReady {
+    $script:startupStage = 'docker_cli'
+    $dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if (-not $dockerCommand) {
+        $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+    }
+    if (-not $dockerCommand) {
+        throw 'Docker CLI is unavailable.'
+    }
+
+    $script:startupStage = 'docker_engine'
+    & $dockerCommand.Source info --format '{{.ServerVersion}}' *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Engine is unavailable.'
+    }
+
+    $script:startupStage = 'docker_compose'
+    & $dockerCommand.Source compose version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose is unavailable.'
     }
 }
 
@@ -790,10 +888,15 @@ try {
         -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
         -Value $null
 
+    Assert-DockerReady
+    $startupStage = 'tts_profile'
     Assert-TtsProfileReady
+    $startupStage = 'host_supervisor'
     Stop-PreviousHostSupervisorGeneration
+    $startupStage = 'docker_start'
     Start-DockerCore
 
+    $startupStage = 'service_readiness'
     Wait-Port -HostName '127.0.0.1' -Port 9820 -Label 'Main-LLM'
     Wait-Port -HostName '127.0.0.1' -Port 9822 -Label 'Router-LLM'
     Wait-Port -HostName '127.0.0.1' -Port 9821 -Label 'Sub-LLM'
@@ -806,11 +909,17 @@ try {
     Wait-HttpReady -Url "http://127.0.0.1:$botApiPort/health" -Label 'Docker Bot API' -Contract 'bot_api'
     Wait-HttpReady -Url "http://127.0.0.1:$controlPagePublicPort/health" -Label 'Docker Control Page' -Contract 'control_page'
 
+    $startupStage = 'host_supervisor'
     Start-HostSupervisor
 
     Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"
     Write-Host "[Evelyn] Windows Host Supervisor log: $supervisorLog"
+    $startupStage = 'control_page_open'
     Open-ControlPage
+    $startupStage = 'complete'
+    Remove-Item -LiteralPath (
+        Join-Path $projectRoot 'runtime_artifacts\logs\background_start\startup-error.log'
+    ) -Force -ErrorAction SilentlyContinue
 } finally {
     Set-ProcessEnvironmentVariable `
         -Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN' `
@@ -822,6 +931,12 @@ try {
         -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
         -Value $previousVoiceCaptureHostAuthToken
 }
+} catch {
+    $startupExitCode = 1
+    Write-EvelynStartupFailure `
+        -Stage $startupStage `
+        -ErrorRecord $_ `
+        -ProjectRoot $projectRoot
 } finally {
     # This outer boundary also covers failures before helper functions or the
     # main launch block have been defined (for example a dirty-source error).
@@ -840,4 +955,8 @@ try {
         $previousVoiceCaptureHostAuthToken,
         [EnvironmentVariableTarget]::Process
     )
+}
+
+if ($startupExitCode -ne 0) {
+    exit $startupExitCode
 }

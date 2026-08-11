@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-11
 ---
 
 # Evelyn — Now
@@ -47,7 +47,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 현재 저장소의 정상 launcher가 stale Bot API·Control Page image를 exact source
   revision으로 감지해 재빌드한다. 2026-08-08 실제 `start_local.bat --background`에서
   Control Page, Bot API, LLM 3개, OmniVoice, STT, Vision과 Local Bridge가 공식 checker를
-  통과했다. Bridge는 mic OFF, output ready, clone warmup 564.1 ms, error/play count 0이었다.
+  통과했다. Bridge는 mic OFF, output ready, clone warmup 564.1 ms, error/play count 0이었다. 시작 실패는 고정 `EVL-START-NNNN` 코드·조치와 content-free latest log로 표시한다.
 - 오래된 `C:\Evelyn` Compose에는 `vision_runtime`이 없어 현재 Vision ingress와
   결합하면 DNS/502가 반복됐다. 현재 저장소 Compose로 재생성해 ingress와 runtime을
   함께 띄웠고 Vision health가 통과했다.
@@ -61,7 +61,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 process handle만 사용하며 Control Page의 Discord 토글은 core를 유지한 채 `discord_bot`만 전환한다.
-- CI-equivalent 전체 3,238개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
+- CI-equivalent 전체 3,246개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 644개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

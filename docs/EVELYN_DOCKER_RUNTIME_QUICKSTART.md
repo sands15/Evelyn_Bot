@@ -27,6 +27,35 @@ Discord bot loop는 `discord` profile의 `discord_bot` 서비스로 분리한다
 Windows 로컬 기본 경로는 launcher를 사용한다. Host Supervisor와 화면 bridge,
 TTS profile 검증, 모델 readiness까지 같은 계약으로 확인한다.
 
+### 시작 실패 오류코드
+
+사용자용 시작 오류코드는 `EVL-START-NNNN` 형식이다. 숫자는 프로세스 종료 코드와
+별개이며 시작 실패의 프로세스 종료 코드는 계속 `1`이다. `1xxx`는 Windows/Docker
+전제조건, `2xxx`는 소스·설정, `3xxx`는 Docker build/Compose 시작, `4xxx`는
+readiness·Windows bridge/UI 연동, `9xxx`는 미분류 오류다. 한 번 공개한 코드의 의미는
+바꾸거나 다른 원인에 재사용하지 않는다.
+
+| 코드 | 뜻 | 사용자 조치 |
+| --- | --- | --- |
+| `EVL-START-1001` | Docker CLI를 찾을 수 없음 | Docker Desktop을 설치하거나 복구한 뒤 다시 실행한다. |
+| `EVL-START-1002` | Docker Engine에 연결할 수 없음 | Docker Desktop을 열고 Engine running을 확인한 뒤 다시 실행한다. |
+| `EVL-START-1003` | Docker Compose를 사용할 수 없음 | Docker Desktop을 업데이트·복구하고 `docker compose version`을 확인한다. |
+| `EVL-START-2001` | clean Git revision을 증명할 수 없음 | `git status --short`로 변경을 검토한 뒤 의도한 변경을 commit 또는 stash한다. 명령 자체가 없으면 Git을 복구하고, 파일을 무작정 삭제하거나 reset하지 않는다. |
+| `EVL-START-2002` | OmniVoice profile 누락·손상 | `ref_audio.wav`, `meta.json`, non-empty `ref_text`를 확인한다. |
+| `EVL-START-3001` | Docker image build 또는 Compose 시작 실패 | 한 번 재시도하고 반복되면 코드와 발생 시각을 전달한다. |
+| `EVL-START-4001` | 필수 Docker service readiness 시간 초과 | `tools/check_docker_runtime.ps1`을 실행하고 코드와 발생 시각을 전달한다. |
+| `EVL-START-4002` | Host Supervisor 또는 Local I/O Bridge 준비 실패 | `runtime_artifacts/logs/background_start/Host-Supervisor.log`를 확인한다. host runtime이 없거나 의존성이 손상된 경우에만 README의 `bootstrap_host_runtime.ps1`을 실행한다. |
+| `EVL-START-4003` | runtime service는 준비됐지만 Control Page 자동 열기 실패 | 화면에 출력된 Control Page URL을 브라우저에서 직접 연다. service는 유지되지만 launcher는 코드 표시를 위해 exit 1을 반환한다. |
+| `EVL-START-9000` | 분류되지 않은 시작 실패 | 한 번 재시도하고 반복되면 코드와 발생 시각을 전달한다. |
+
+launcher가 추가하는 실패 요약에는 고정 코드·설명·조치만 표시하고, 최신 실패 파일
+`runtime_artifacts/logs/background_start/startup-error.log`에는 시각·코드·예외
+종류·고정 단계만 기록한다. 예외 메시지, stack trace, token, 절대경로는 기록하지
+않는다. 오류 제보 시 이 파일 전체보다 코드와 발생 시각만 먼저 전달한다.
+
+최상위 `start.bat`은 실패 화면을 유지한다. 자동 실행에서 pause가 필요 없으면 호출
+전에 `EVELYN_KEEP_CONSOLE_ON_EXIT=false`를 설정한다.
+
 기본 OmniVoice 이미지는 `EVELYN_OMNIVOICE_SERVER_DIR` 아래의
 `omnivoice_server/`만 build context로 읽는다. 환경변수가 없으면
 `${USERPROFILE}/omnivoice-server`를 사용한다. 검토된 Python 파일 20개가

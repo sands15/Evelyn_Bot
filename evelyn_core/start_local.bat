@@ -46,11 +46,7 @@ if /I "%LOCAL_FOREGROUND_REQUESTED%"=="true" echo [Evelyn] --foreground no longe
 if /I "%LOCAL_PROFILE%"=="lightweight" echo [Evelyn] Lightweight profile: Vision OCR is not loaded at startup.
 echo [Evelyn] Control page: http://127.0.0.1:%CONTROL_PAGE_PORT%/
 
-if /I "%LOCAL_BACKGROUND%"=="true" (
-  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_local_background.ps1"
-  set "EXIT_CODE=%ERRORLEVEL%"
-  endlocal & exit /b %EXIT_CODE%
-)
+if /I "%LOCAL_BACKGROUND%"=="true" goto :background
 
 if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
   echo [Evelyn] Legacy host foreground launch is blocked by default.
@@ -93,6 +89,11 @@ if exist .venv\Scripts\python.exe (
 
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
+endlocal & exit /b %EXIT_CODE%
+
+:background
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_local_background.ps1"
+set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%
 
 :fail
