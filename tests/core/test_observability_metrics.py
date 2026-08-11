@@ -220,7 +220,7 @@ class ObservabilityMetricsTests(unittest.TestCase):
             log_turn_event=lambda event, **payload: events.append((event, payload)),
             metrics=metrics,
             first_token_ms=12.345,
-            error=ValueError("bad"),
+            error=ValueError("PRIVATE_MODEL_ERROR C:/secret/model.txt"),
             model_name=" model ",
             endpoint=" http://llm ",
         )
@@ -240,7 +240,7 @@ class ObservabilityMetricsTests(unittest.TestCase):
         self.assertEqual(payload["session_key"], "session-meta")
         self.assertEqual(payload["source"], "voice")
         self.assertEqual(payload["guild_id"], 7)
-        self.assertIn("ValueError", payload["error"])
+        self.assertEqual(payload["error"], "ValueError")
 
     def test_record_context_pipeline_benchmark_writes_jsonl_when_context_meta_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

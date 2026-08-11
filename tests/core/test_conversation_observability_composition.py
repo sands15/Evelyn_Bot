@@ -114,6 +114,24 @@ class ConversationObservabilityCompositionTests(unittest.TestCase):
         self.assertNotIn(private_error, repr(deps.original_print.call_args_list))
         deps.write_turn_trace_event.assert_called_once()
 
+    def test_turn_trace_sink_failure_cannot_fail_the_turn(self) -> None:
+        private_error = "PRIVATE_TRACE_SINK C:/secret/turn.jsonl"
+        writer = Mock(side_effect=RuntimeError(private_error))
+        composition, deps, *_ = self.build_composition(
+            write_turn_trace_event=writer
+        )
+
+        composition.log_turn_event("turn_ingress", turn_id="turn-1")
+
+        writer.assert_called_once()
+        deps.original_print.assert_called_once_with(
+            "[TURN TRACE SINK ERROR] errorType=RuntimeError"
+        )
+        self.assertNotIn(
+            private_error,
+            repr(deps.original_print.call_args_list),
+        )
+
     def test_validation_attempt_token_is_only_visible_to_internal_observer(self) -> None:
         observer = Mock()
         composition, deps, *_ = self.build_composition(

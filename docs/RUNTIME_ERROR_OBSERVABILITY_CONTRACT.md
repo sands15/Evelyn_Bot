@@ -179,9 +179,17 @@ Discord last voice-channel state 저장 실패 운영 로그도
   type만 남긴다.
   retries를 소진한 final wrapper는 upstream 예외 메시지·경로를 caller나 운영 로그에
   전달하지 않는다.
-- Voice validation observer 자체 실패 로그는
-  `[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남기며, 이후 public
-  turn-trace projection은 계속한다.
+- Voice validation observer 자체 실패와 그 오류 출력 실패는 원래 turn control flow 또는
+  이어지는 public turn-trace projection으로 전파하지 않는다. 관측 가능한 경우
+  `[VOICE VALIDATION OBSERVER ERROR] errorType=<exception-type>`만 남긴다.
+- Turn-trace writer·file·console sink의 일반 예외(`Exception`) 실패도 원래 turn control
+  flow로 전파하지 않는다.
+  관측 가능한 fallback은 `[TURN TRACE FILE ERROR] errorType=<exception-type>`,
+  `[TURN TRACE SINK ERROR] errorType=<exception-type>` 또는 JSON
+  `"trace_error_type": "<exception-type>"`만 남기며 예외 메시지·경로를 복제하지 않는다.
+  fallback 출력까지 실패하면 해당 관측 시도만 무음으로 끝낸다. Model-call의
+  `BaseException`도 turn trace에 넣기 전에 exception type으로 축약한다. 취소와
+  `SystemExit`·`KeyboardInterrupt` 같은 control signal 자체는 기존대로 전파한다.
 - Opus load·STT warmup의 startup component detail에는 고정 code와 exception
   class만 넣는다. Control Page `bootProgress.steps[].detail`과 외부 wrapper traceback에
   upstream 예외 메시지·경로를 복제하지 않는다.

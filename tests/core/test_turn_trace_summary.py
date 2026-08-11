@@ -488,6 +488,76 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertIn("playback_completed", record)
         self.assertIsNone(record["playback_completed"])
 
+    def test_writer_failures_are_nonfatal_and_type_only(self) -> None:
+        private_error = "PRIVATE_TRACE_BODY C:/secret/turn.jsonl"
+        fallback_output: list[str] = []
+
+        class FailOnce:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self, text: str) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError(private_error)
+                fallback_output.append(text)
+
+        def fail_always(_text: str) -> None:
+            raise OSError(private_error)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_errors: list[str] = []
+            record = write_turn_trace_event(
+                "model_call",
+                {"turn_id": "turn-1", "error": private_error},
+                turn_trace_json_log=True,
+                bottleneck_events={"model_call"},
+                console_only_stt_and_reply=False,
+                voice_bottleneck_logs=False,
+                voice_trace_all_events=True,
+                log_dir=Path(tmpdir),
+                file_lock=threading.Lock(),
+                original_print=lambda _text: None,
+                trace_print=FailOnce(),
+            )
+            write_turn_trace_event(
+                "model_call",
+                {"turn_id": "turn-2"},
+                turn_trace_json_log=True,
+                bottleneck_events={"model_call"},
+                console_only_stt_and_reply=False,
+                voice_bottleneck_logs=False,
+                voice_trace_all_events=True,
+                log_dir=Path(tmpdir),
+                file_lock=threading.Lock(),
+                original_print=lambda _text: None,
+                trace_print=fail_always,
+            )
+            blocked_log_dir = Path(tmpdir) / "not-a-directory"
+            blocked_log_dir.write_text("blocked", encoding="utf-8")
+            write_turn_trace_event(
+                "model_call",
+                {"turn_id": "turn-3"},
+                turn_trace_json_log=True,
+                bottleneck_events={"model_call"},
+                console_only_stt_and_reply=False,
+                voice_bottleneck_logs=False,
+                voice_trace_all_events=True,
+                log_dir=blocked_log_dir,
+                file_lock=threading.Lock(),
+                original_print=file_errors.append,
+                trace_print=lambda _text: None,
+            )
+
+        self.assertEqual(record["turn_id"], "turn-1")
+        self.assertEqual(len(fallback_output), 1)
+        self.assertIn('"trace_error_type": "RuntimeError"', fallback_output[0])
+        self.assertNotIn(private_error, fallback_output[0])
+        self.assertEqual(
+            file_errors,
+            ["[TURN TRACE FILE ERROR] errorType=FileExistsError"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

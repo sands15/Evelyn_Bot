@@ -258,7 +258,11 @@ def record_model_call_trace_from_runtime(
     if not isinstance(meta, dict):
         meta = {}
     elapsed_ms = max(0.0, (monotonic() - float(started_at)) * 1000.0)
-    error_text = repr(error) if isinstance(error, BaseException) else clean_text(str(error or ""))
+    error_text = (
+        type(error).__name__
+        if isinstance(error, BaseException)
+        else clean_text(str(error or ""))
+    )
     record_model_call_metric(
         model_role=model_role,
         purpose=purpose,

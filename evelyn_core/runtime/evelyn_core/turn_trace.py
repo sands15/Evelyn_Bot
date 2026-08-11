@@ -196,17 +196,38 @@ def write_turn_trace_event(
             with trace_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception as exc:
-        original_print(f"[TURN TRACE FILE ERROR] {exc!r}")
+        try:
+            original_print(
+                "[TURN TRACE FILE ERROR] "
+                f"errorType={type(exc).__name__}"
+            )
+        except Exception:
+            pass
 
     try:
         trace_print("[TURN TRACE]\n" + json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
     except Exception as exc:
-        safe_record = {"event": event, "ts": record.get("ts"), "trace_error": repr(exc)}
-        for key in ("turn_id", "chunk_index", "session_key", "source_type", "stage", "error"):
+        safe_record = {
+            "event": event,
+            "ts": record.get("ts"),
+            "trace_error_type": type(exc).__name__,
+        }
+        for key in ("turn_id", "chunk_index", "session_key", "source_type", "stage"):
             value = record.get(key)
             if value is not None:
                 safe_record[key] = value
-        trace_print("[TURN TRACE]\n" + json.dumps(safe_record, ensure_ascii=False, sort_keys=True, indent=2))
+        try:
+            trace_print(
+                "[TURN TRACE]\n"
+                + json.dumps(
+                    safe_record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
+        except Exception:
+            pass
     return record
 
 

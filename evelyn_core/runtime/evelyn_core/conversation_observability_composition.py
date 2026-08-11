@@ -44,6 +44,13 @@ def _redact_validation_attempt_token(value: Any) -> Any:
     return value
 
 
+def _safe_observability_print(output: Callable[..., Any], message: str) -> None:
+    try:
+        output(message)
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True)
 class ConversationObservabilityCompositionDeps:
     question_policy: Callable[[], Any]
@@ -87,24 +94,32 @@ class ConversationObservabilityComposition:
             try:
                 deps.voice_validation_observer(event, dict(payload))
             except Exception as exc:
-                deps.original_print(
+                _safe_observability_print(
+                    deps.original_print,
                     "[VOICE VALIDATION OBSERVER ERROR] "
-                    f"errorType={type(exc).__name__}"
+                    f"errorType={type(exc).__name__}",
                 )
-        deps.write_turn_trace_event(
-            event,
-            public_payload,
-            turn_trace_json_log=deps.turn_trace_json_log,
-            bottleneck_events=deps.bottleneck_events,
-            summary_events=deps.summary_events,
-            console_only_stt_and_reply=deps.console_only_stt_and_reply,
-            voice_bottleneck_logs=deps.voice_bottleneck_logs,
-            voice_trace_all_events=deps.voice_trace_all_events,
-            log_dir=deps.turn_trace_log_dir,
-            file_lock=deps.turn_trace_file_lock,
-            original_print=deps.original_print,
-            trace_print=deps.trace_print,
-        )
+        try:
+            deps.write_turn_trace_event(
+                event,
+                public_payload,
+                turn_trace_json_log=deps.turn_trace_json_log,
+                bottleneck_events=deps.bottleneck_events,
+                summary_events=deps.summary_events,
+                console_only_stt_and_reply=deps.console_only_stt_and_reply,
+                voice_bottleneck_logs=deps.voice_bottleneck_logs,
+                voice_trace_all_events=deps.voice_trace_all_events,
+                log_dir=deps.turn_trace_log_dir,
+                file_lock=deps.turn_trace_file_lock,
+                original_print=deps.original_print,
+                trace_print=deps.trace_print,
+            )
+        except Exception as exc:
+            _safe_observability_print(
+                deps.original_print,
+                "[TURN TRACE SINK ERROR] "
+                f"errorType={type(exc).__name__}",
+            )
 
     def record_model_call_trace(
         self,
