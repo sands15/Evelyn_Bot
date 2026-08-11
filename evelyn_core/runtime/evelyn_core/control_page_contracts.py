@@ -12,6 +12,7 @@ CONTROL_PAGE_UI_PANELS: dict[str, str] = {
     "avatar": "Avatar",
     "chat": "Chat",
     "memory": "Memory",
+    "voice_validation": "Voice validation",
 }
 
 CONTROL_PAGE_UI_PANEL_ALIASES: dict[str, str] = {
@@ -105,7 +106,7 @@ def build_fast_control_default_commands() -> list[dict[str, str]]:
         {"command": "/obsidian", "template": "/obsidian", "summary": "Obsidian 메모리 저장소 열기", "visibility": "always", "group": "페이지"},
         {"command": "/voice status", "template": "/voice status", "summary": "Windows 음성 브리지 상태 보기", "visibility": "always", "group": "음성"},
         {"command": "/mic status", "template": "/mic status", "summary": "로컬 마이크 상태 보기", "visibility": "always", "group": "음성"},
-        {"command": "/mic on", "template": "/mic on", "summary": "로컬 마이크 입력 켜기", "visibility": "always", "group": "음성"},
+        {"command": "/mic on", "template": "/mic on", "summary": "음성 검증 청취 동의 화면 열기", "visibility": "always", "group": "음성"},
         {"command": "/mic off", "template": "/mic off", "summary": "로컬 마이크 입력 끄기", "visibility": "always", "group": "음성"},
         {"command": "/minecraft connect", "template": "/minecraft connect", "summary": "Minecraft 서비스 지연 기동 및 접속", "visibility": "always", "group": "Minecraft"},
         {"command": "/minecraft status", "template": "/minecraft status", "summary": "Minecraft 서비스와 접속 상태 보기", "visibility": "always", "group": "Minecraft"},

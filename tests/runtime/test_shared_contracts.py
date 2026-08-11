@@ -42,6 +42,10 @@ class SharedContractTests(unittest.TestCase):
 
     def test_control_page_memory_panel_contract_is_shared(self) -> None:
         self.assertEqual(CONTROL_PAGE_UI_PANELS["memory"], "Memory")
+        self.assertEqual(
+            CONTROL_PAGE_UI_PANELS["voice_validation"],
+            "Voice validation",
+        )
         self.assertEqual(detect_memory_panel_action("/memory"), "toggle")
         self.assertEqual(detect_memory_panel_action("메모리 패널 열어줘"), "open")
 

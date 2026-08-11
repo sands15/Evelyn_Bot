@@ -404,6 +404,7 @@ BACKGROUND_ACTION_HANDLERS: list[dict[str, Any]] = []
 BACKGROUND_ACTION_TASKS: set[asyncio.Task[Any]] = set()
 CONTROL_PAGE_UI_COMMANDS: list[dict[str, Any]] = []
 CONTROL_PAGE_UI_COMMAND_SEQ = 0
+CONTROL_PAGE_UI_COMMAND_GENERATION = secrets.token_hex(16)
 LOCAL_BRIDGE_STATUS: dict[str, Any] = {
     "enabled": False,
     "ready": False,
@@ -2305,6 +2306,7 @@ def local_voice_capture_fence_digest_if_current(
     bridge_instance_id: Any,
     *,
     now: float | None = None,
+    require_capture_active: bool = True,
 ) -> str:
     """Return the private, current consent generation digest or ``""``."""
 
@@ -2363,7 +2365,10 @@ def local_voice_capture_fence_digest_if_current(
         and isinstance(mic, dict)
         and mic.get("enabled") is True
         and mic.get("captureReady") is True
-        and mic.get("captureActive") is True
+        and (
+            require_capture_active is False
+            or mic.get("captureActive") is True
+        )
         and mic.get("captureStopped") is False
         and RESTART_REQUEST.get("requested") is not True
         and SHUTDOWN_REQUEST.get("requested") is not True
@@ -3538,9 +3543,25 @@ async def wait_for_local_bridge_mic_control(
 
 async def execute_local_bridge_mic_control(enabled: bool, *, source: str) -> str:
     if enabled:
+        snapshot = local_bridge_status_snapshot()
+        mic = dict(snapshot.get("mic") or {})
+        if (
+            snapshot.get("ready") is True
+            and snapshot.get("micEnabled") is True
+            and mic.get("captureReady") is True
+            and local_voice_capture_fence_digest_if_current(
+                LOCAL_BRIDGE_STATUS.get("bridgeInstanceId"),
+                require_capture_active=False,
+            )
+        ):
+            return "마이크 입력은 이미 켜져 있어."
+        enqueue_control_page_ui_command(
+            "open",
+            panel_id="voice_validation",
+        )
         return (
-            "마이크 입력은 음성 검증 화면에서 청취 동의를 확인한 뒤에만 "
-            "켤 수 있어."
+            "음성 검증 영역을 열었어. 검증 시작을 누른 뒤 Local voice의 "
+            "청취 동의를 확인하면 검증 동안 마이크가 켜져."
         )
     try:
         request = request_local_bridge_mic_control(False, source=source)
@@ -4475,10 +4496,12 @@ def enqueue_control_page_ui_command(action: str, *, panel_id: str) -> dict[str, 
 
 
 def build_control_page_panel_state() -> dict[str, Any]:
-    return build_control_page_panel_state_payload(
+    state = build_control_page_panel_state_payload(
         CONTROL_PAGE_UI_COMMANDS,
         revision=CONTROL_PAGE_UI_COMMAND_SEQ,
     )
+    state["generation"] = CONTROL_PAGE_UI_COMMAND_GENERATION
+    return state
 
 
 def execute_memory_panel_action(action: str) -> str:

@@ -573,6 +573,10 @@ ambient 환경값이나 일반 `/mic on`은 더 이상 캡처 ON 권한이 아�
 validation confirm/retry/abort도 같은 app lock에서 terminal 전환과 exact OFF를
 직렬화한다. 최신 preview만 정확한 validation 세대에서 apply할 수 있고, unbound
 동의는 canonical idle만 허용하므로 idle ON 뒤 Discord-only 시작도 OFF로 돌아간다.
+일반 `/mic on`은 이 권한 경계를 유지하면서 Control Page의 검증 시작·청취 동의
+영역을 열고 포커스한다. capture-ready와 authenticated watchdog, durable consent/
+host-lease fence가 모두 current일 때만 이미 ON으로 인정한다. panel command에는
+process generation을 붙여 Bot API 재시작 뒤 ID 재사용도 구분한다.
 mutation I/O 예외는 고정 503과 즉시 recovery/OFF로 닫힌다. Supervisor의 개별
 Docker 복구는 `--no-deps`이고, Bridge와 그 자식은 목적 밖 credential을 상속하지
 않는다. 전체 재시작 credential 연속성은 Supervisor-owned exit-code handoff가 맡는다.
@@ -1124,6 +1128,10 @@ metrics 누락·null·non-mapping·모순 필드와 손상 compact state는 예�
 `unattributed`로 강등해 기억 의존 assistant row를 보존하지 않는다.
 Discord 명령의 전달 완료 답변도 `not_used`로 기록해 필터가 assistant 행을
 제거하고 직전 명령을 미응답으로 되살리던 경로를 닫았다.
+저장 기억을 요청하지 않은 Fast Control prompt도 빈 context 조정 뒤
+`state=not_requested`, `groundingState=not_requested`를 함께 유지해 compact
+`not_used`가 된다. 정상 응답을 `unattributed`로 잘못 강등해 음성만 재생하고 공개
+텍스트 행을 숨기던 경로를 닫되, 손상 receipt의 fail-closed 제거는 유지한다.
 Main/Fast/Voice/Search/tool과 production autonomy가 history를 재사용하기 전에 누락·손상·
 `unattributed`·stale version·tombstoned-note assistant row를 fail-closed로
 제거하고, persona/cognitive/router의 history-derived 상태도 strict receipt가

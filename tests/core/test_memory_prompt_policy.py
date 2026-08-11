@@ -30,6 +30,9 @@ from evelyn_core.memory_deletion_outbound import (  # noqa: E402
     current_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    memory_receipt_ref_from_receipt,
+)
 
 
 class MemoryPromptPolicyTests(unittest.TestCase):
@@ -236,6 +239,47 @@ class MemoryPromptPolicyTests(unittest.TestCase):
             receipt["deletionBoundary"]["state"],
             "not_required",
         )
+
+    def test_empty_prompt_does_not_repair_malformed_no_memory_receipts(self) -> None:
+        boundary = prepare_memory_context_for_prompt(
+            "",
+            grounding_state="empty",
+        )
+        malformed_receipts = (
+            {
+                "schema": "memory.context-receipt.v1",
+                "contentFree": True,
+                "state": "not_requested",
+                "groundingState": "unattributed",
+                "suppliedNoteIds": [],
+                "suppliedNoteCount": 0,
+            },
+            {
+                "schema": "memory.context-receipt.v1",
+                "contentFree": True,
+                "state": "not_requested",
+                "groundingState": "not_requested",
+                "suppliedNoteIds": ["unexpected-note"],
+                "suppliedNoteCount": 1,
+            },
+            {
+                "contentFree": True,
+                "state": "not_requested",
+                "groundingState": "not_requested",
+                "suppliedNoteIds": [],
+                "suppliedNoteCount": 0,
+            },
+        )
+
+        for receipt in malformed_receipts:
+            with self.subTest(receipt=receipt):
+                reconcile_memory_receipt_for_prompt(receipt, boundary)
+
+                self.assertEqual(receipt["groundingState"], "empty")
+                self.assertEqual(
+                    memory_receipt_ref_from_receipt(receipt)["state"],
+                    "unattributed",
+                )
 
     def test_oversized_memory_fails_closed_and_discards_attribution_claims(self) -> None:
         boundary = prepare_memory_context_for_prompt(

@@ -391,11 +391,16 @@ class FastControlApiToolTests(unittest.TestCase):
 
         self.assertIn("메모리 패널", reply)
         self.assertEqual(state["revision"], 1)
+        self.assertEqual(
+            state["generation"],
+            fast_api.CONTROL_PAGE_UI_COMMAND_GENERATION,
+        )
         self.assertEqual(state["commands"][0]["panel"], "memory")
         self.assertEqual(state["commands"][0]["action"], "open")
 
     def test_default_commands_expose_memory_panel_command(self) -> None:
-        commands = {item["command"] for item in fast_api.build_default_commands()}
+        catalog = fast_api.build_default_commands()
+        commands = {item["command"] for item in catalog}
         self.assertEqual(
             commands,
             {
@@ -420,6 +425,14 @@ class FastControlApiToolTests(unittest.TestCase):
                 "/restart",
                 "/shutdown",
             },
+        )
+        mic_on = next(
+            item for item in catalog
+            if item["command"] == "/mic on"
+        )
+        self.assertEqual(
+            mic_on["summary"],
+            "음성 검증 청취 동의 화면 열기",
         )
 
     def test_visible_text_strips_internal_answer_tag(self) -> None:
@@ -1885,7 +1898,7 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertNotIn("ack", result)
         sleep.assert_not_awaited()
 
-    def test_mic_on_command_runs_before_main_llm_and_requires_validation_consent(self) -> None:
+    def test_mic_on_command_opens_validation_consent(self) -> None:
         request_payload = self.admitted_local_payload("/mic on")
 
         class _Request:
@@ -1916,13 +1929,71 @@ class FastControlApiToolTests(unittest.TestCase):
         payload = fast_api.json.loads(response.text or "{}")
 
         expected = (
-            "마이크 입력은 음성 검증 화면에서 청취 동의를 확인한 뒤에만 "
-            "켤 수 있어."
+            "음성 검증 영역을 열었어. 검증 시작을 누른 뒤 Local voice의 "
+            "청취 동의를 확인하면 검증 동안 마이크가 켜져."
         )
         self.assertEqual(payload["reply"], expected)
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["text"], expected)
+        panel_state = fast_api.build_control_page_panel_state()
+        self.assertEqual(
+            panel_state["commands"][-1],
+            {
+                "id": 1,
+                "action": "open",
+                "panel": "voice_validation",
+                "at": panel_state["commands"][-1]["at"],
+            },
+        )
         self.assertIsNone(
             fast_api.LOCAL_BRIDGE_MIC_CONTROL_REQUEST["enabled"]
+        )
+
+    def test_mic_on_reports_already_active_capture(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+
+        with patch.object(
+            fast_api,
+            "local_voice_capture_fence_digest_if_current",
+            return_value="d" * 64,
+        ) as current_fence:
+            reply = asyncio.run(
+                fast_api.execute_local_bridge_mic_control(
+                    True,
+                    source="unit",
+                )
+            )
+
+        self.assertEqual(reply, "마이크 입력은 이미 켜져 있어.")
+        current_fence.assert_called_once_with(
+            "a" * 32,
+            require_capture_active=False,
+        )
+        self.assertEqual(
+            fast_api.build_control_page_panel_state()["commands"],
+            [],
+        )
+
+    def test_mic_on_reopens_consent_when_capture_fence_is_not_current(self) -> None:
+        self.prepare_mic_bridge(mic_enabled=True)
+
+        with patch.object(
+            fast_api,
+            "local_voice_capture_fence_digest_if_current",
+            return_value="",
+        ):
+            reply = asyncio.run(
+                fast_api.execute_local_bridge_mic_control(
+                    True,
+                    source="unit",
+                )
+            )
+
+        self.assertIn("청취 동의", reply)
+        self.assertEqual(
+            fast_api.build_control_page_panel_state()["commands"][-1][
+                "panel"
+            ],
+            "voice_validation",
         )
 
     def test_chat_handler_blocks_future_claim_without_task_id(self) -> None:

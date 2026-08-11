@@ -2,8 +2,11 @@
 
 로컬 음성 검증 마법사는 시스템의 일반 마이크 설정과 별도로 시간 제한 동의를
 요구한다. 이 계약은 Control Page에서 시작한 `voice-p0.v1` 로컬 검증에만
-적용된다. 일반 채팅의 `/mic on`은 더 이상 캡처를 활성화하지 않으며 동의
-마법사로 안내한다. `/mic off`는 복구·철회 경로로 계속 허용한다.
+적용된다. 일반 채팅의 `/mic on`은 캡처를 직접 활성화하지 않고 Control Page의
+음성 검증 시작·청취 동의 영역을 열고 포커스한다. 검증 캡처와 authenticated watchdog,
+durable consent/host-lease fence가 모두 current일 때만 다시 동의를 요구하지 않고 현재
+ON 상태를 알린다. Bot API 재시작 뒤에도 panel command generation을 바꿔 열린 브라우저가
+새 명령을 놓치지 않는다. `/mic off`는 복구·철회 경로로 계속 허용한다.
 
 ## 안전 기본값
 

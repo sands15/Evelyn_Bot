@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from .context_pipeline import clean_block_text
+from .conversation_memory_receipt import memory_receipt_ref_from_receipt
 from .memory_deletion_journal import (
     MEMORY_DELETION_POSITION_SCHEMA,
     MemoryDeletionJournalIntegrityError,
@@ -392,6 +393,12 @@ def reconcile_memory_receipt_for_prompt(
     receipt: dict[str, Any],
     boundary: MemoryPromptBoundary,
 ) -> None:
+    preserve_not_requested = bool(
+        receipt.get("state") == "not_requested"
+        and receipt.get("groundingState") == "not_requested"
+        and memory_receipt_ref_from_receipt(receipt).get("state")
+        == "not_used"
+    )
     preboundary_legacy_item_count = _nonnegative_int(
         receipt.get("legacyItemCount")
     )
@@ -434,7 +441,11 @@ def reconcile_memory_receipt_for_prompt(
     if not boundary.context:
         if receipt.get("state") == "provided":
             receipt["state"] = "empty"
-        receipt["groundingState"] = "empty"
+        receipt["groundingState"] = (
+            "not_requested"
+            if preserve_not_requested
+            else "empty"
+        )
         receipt["confirmOnlyItemCount"] = 0
         receipt["suppliedNoteIds"] = []
         receipt["suppliedNoteCount"] = 0

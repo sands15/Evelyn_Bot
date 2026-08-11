@@ -192,7 +192,13 @@ class ControlPageChatTests(unittest.TestCase):
 
     def test_control_panel_commands_drive_memory_window(self) -> None:
         self.assertIn("let lastControlPanelCommandId = 0;", self.html)
+        self.assertIn('let controlPanelCommandGeneration = "";', self.html)
         self.assertIn("function applyControlPanelCommands(state, options = {})", self.html)
+        self.assertIn(
+            "generation !== controlPanelCommandGeneration",
+            self.html,
+        )
+        self.assertIn("lastControlPanelCommandId = 0;", self.html)
         self.assertIn("runInitialPanelCommands", self.html)
         self.assertIn("applyState(payload.state, { runInitialPanelCommands: true });", self.html)
         self.assertIn('String(command.panel || "") !== "memory"', self.html)
@@ -200,6 +206,44 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("toggleMemoryWindow(true, options);", self.html)
         self.assertIn('action === "close"', self.html)
         self.assertIn("toggleMemoryWindow(false, options);", self.html)
+
+    def test_panel_command_generation_resets_restart_cursor(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        command_start = self.html.index("    function applyControlPanelCommand")
+        command_end = self.html.index("\n    function apiCandidates", command_start)
+        function_source = self.html[command_start:command_end]
+        script = "\n".join(
+            (
+                "let scrolls = 0;",
+                "let focuses = 0;",
+                "let lastControlPanelCommandId = 5;",
+                "let controlPanelCommandCursorReady = true;",
+                'let controlPanelCommandGeneration = "old";',
+                "const document = {getElementById(id) {",
+                "  if (id !== 'voiceValidationStartButton') return null;",
+                "  return {scrollIntoView() { scrolls += 1; }, focus() { focuses += 1; }};",
+                "}};",
+                "function toggleMemoryWindow() { process.exit(2); }",
+                function_source,
+                "const restarted = {controlPagePanels: {generation: 'new', commands: [",
+                "  {id: 1, panel: 'voice_validation', action: 'open'}",
+                "]}};",
+                "applyControlPanelCommands(restarted);",
+                "applyControlPanelCommands(restarted);",
+                "if (scrolls !== 1 || focuses !== 1) process.exit(1);",
+            )
+        )
+        result = subprocess.run(
+            [node, "-e", script],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_boot_splash_markup_is_present(self) -> None:
         self.assertIn('class="is-boot-splash-active"', self.html)

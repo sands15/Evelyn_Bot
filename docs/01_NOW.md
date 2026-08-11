@@ -36,7 +36,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
-  ready latch·채팅 보존·single-flight/generation fence로 막았다(UI 176·집중 60 통과, live GET 일치). 빈 Fast Control 채팅은 상태 안내 대신 `Evelyn`의 한국어 환영 인사로 시작한다.
+  ready latch·채팅 보존·single-flight/generation fence로 막았다(UI 176·집중 60 통과, live GET 일치). 빈 Fast Control 채팅은 `Evelyn`의 한국어 환영 인사로 시작하고, 저장 기억 미요청 응답은 exact `not_used` receipt로 음성·텍스트를 함께 보존한다.
 - 2026-08-08 기본 `tts:8880`을 실제 `k2-fsa/OmniVoice` container로 교체했다.
   recipe `7cfc51e96088`, source revision `485c81d`, 서버 Python 20개와 model snapshot
   13개 SHA-256, read-only profile/cache, exact model ID/revision health가 모두 통과했다.
@@ -54,14 +54,14 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Windows venv launcher PID와 실제 Bridge PID가 달라 Supervisor readiness가
   실패하던 문제를 실제 base Python 직접 소유 방식으로 수정했다. Supervisor가
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
-- Local Voice는 단일 capture owner, durable claim·consent fence로 재시작 경쟁을 막고,
+- Local Voice는 단일 capture owner, durable claim·consent fence로 재시작 경쟁을 막고, `/mic on`은 검증·청취 동의 영역을 열며 current watchdog/fence가 증명된 캡처에만 재동의를 요구하지 않는다.
   Local Bridge 재생 실패는 user-only로 잇고 Discord partial checkpoint는 assistant/receipt/state만 복구해 TTL을 보존한다.
 - validation GET은 현재 consent를 반환하고 local mic capture·speaker verification probe/enrollment·Opus/STT startup·LLM warmup body·Control Page welcome LLM non-200 body·Bridge·TTS warmup/control·Control Page server-start·router/tool-router, Discord playback trace·voice connect retry·voice validation observer·voice last-channel state save·Minecraft snapshot, cognitive refresh·memory mirror·summary·proactive question promotion·vault maintenance·self-identity queue와 Main/Fast failed-tool·vision metrics/watch는 예외 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
   Discord stale voice client는 강제 정리 뒤 표준 연결로 복구하고, 검색 복구·playback timeout·무재생 거부·late-turn fence가 stale 완료를 막는다.
 - validation LLM은 memory/history/tool 없이 격리되고 원문은 일반 history에 남지 않는다. awaiting 세션은 `active_until` 뒤 만료되고 Discord 명령 답변은 `not_used` receipt로 완료 문맥을 유지한다.
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 process handle만 사용하며 Control Page의 Discord 토글은 core를 유지한 채 `discord_bot`만 전환한다.
-- CI-equivalent 전체 3,246개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
+- CI-equivalent 전체 3,253개(skip 22), Local Bridge continuity 74개, Mindcraft 56개,
   voice 644개(skip 5)와 구문 검사가 통과했다. 마이크·Discord·Minecraft·Docker는 기동하지 않았다.
 
 ## 작업 원칙

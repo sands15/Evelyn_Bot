@@ -17,6 +17,9 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core import fast_context_contract as fast_contract  # noqa: E402
 from evelyn_core.assistant_contracts import MemoryRecallResult  # noqa: E402
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    memory_receipt_ref_from_receipt,
+)
 from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_log_context,
     build_fast_control_context,
@@ -212,6 +215,24 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         requirements = (REPO_ROOT / "docker" / "requirements.bot-api.txt").read_text(encoding="utf-8")
 
         self.assertIn("numpy", requirements)
+
+    async def test_plain_turn_keeps_not_used_memory_receipt(self) -> None:
+        context = await build_fast_control_context(
+            "안녕",
+            source="control_page",
+        )
+
+        self.assertEqual(context.memory_receipt["state"], "not_requested")
+        self.assertEqual(
+            context.memory_receipt["groundingState"],
+            "not_requested",
+        )
+        self.assertEqual(
+            memory_receipt_ref_from_receipt(
+                context.memory_receipt
+            )["state"],
+            "not_used",
+        )
 
     async def test_runtime_status_tool_is_executed_in_fast_context(self) -> None:
         context = await build_fast_control_context(

@@ -187,6 +187,13 @@ Full receipt에서 `not_used`를 만들 때도 exact `memory.context-receipt.v1`
 version·ID/count와 손상 compact state는 예외를 내거나 비사용으로 낮추지 않고
 `unattributed`로 fail-closed한다.
 
+저장 기억을 요청하지 않은 prompt는 빈 context를 조정한 뒤에도 full receipt의
+`state=not_requested`, `groundingState=not_requested`를 함께 보존한다.
+`state=not_requested` receipt에서는 이 exact 조합만 compact `not_used`가 될 수 있으며,
+정상 assistant row가
+`unattributed`로 잘못 강등되어 공개 채팅에서 사라지지 않는다. 실제로 기억을
+요청했지만 근거를 증명하지 못한 receipt의 fail-closed 필터는 그대로 유지한다.
+
 사용자 row는 receipt가 필요 없다. assistant row의 compact receipt는
 process-local history에만 남지 않고 durable continuity checkpoint, restart restore,
 session merge와 Control Page·Discord text·Discord voice의 cross-surface merge까지

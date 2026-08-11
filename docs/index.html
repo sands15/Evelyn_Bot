@@ -2582,6 +2582,7 @@
     let renderedChatMessageCount = 0;
     let lastControlPanelCommandId = 0;
     let controlPanelCommandCursorReady = false;
+    let controlPanelCommandGeneration = "";
     let runtimeRepairAction = null;
     let runtimeRepairPreviewPlan = null;
     let runtimeRepairPreviewBusy = false;
@@ -3851,8 +3852,18 @@
     }
 
     function applyControlPanelCommand(command, options = {}) {
-      if (!command || String(command.panel || "") !== "memory") return;
+      if (!command) return;
+      const panel = String(command.panel || "");
       const action = String(command.action || "").toLowerCase();
+      if (panel === "voice_validation" && action === "open") {
+        const target = document.getElementById("voiceValidationStartButton");
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (String(command.panel || "") !== "memory") return;
       if (action === "open") {
         toggleMemoryWindow(true, options);
       } else if (action === "close") {
@@ -3865,6 +3876,16 @@
     function applyControlPanelCommands(state, options = {}) {
       const panelState = state && state.controlPagePanels;
       const commands = panelState && Array.isArray(panelState.commands) ? panelState.commands : [];
+      const generation = String(panelState && panelState.generation || "");
+      if (
+        generation &&
+        controlPanelCommandGeneration &&
+        generation !== controlPanelCommandGeneration
+      ) {
+        lastControlPanelCommandId = 0;
+        controlPanelCommandCursorReady = true;
+      }
+      if (generation) controlPanelCommandGeneration = generation;
       const ids = commands.map((command) => Number(command && command.id) || 0);
       const maxId = ids.length ? Math.max(...ids) : lastControlPanelCommandId;
       if (!controlPanelCommandCursorReady) {

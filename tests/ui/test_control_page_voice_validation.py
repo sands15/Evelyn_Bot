@@ -57,6 +57,14 @@ class ControlPageVoiceValidationTests(unittest.TestCase):
         self.assertIn("최대 ${maxMinutes}분 뒤 자동으로 꺼집니다.", source)
         self.assertIn("원문 음성이나 transcript를 저장하지 않습니다.", source)
 
+    def test_mic_on_panel_command_focuses_validation_controls(self):
+        source = HTML.read_text(encoding="utf-8")
+
+        self.assertIn('panel === "voice_validation"', source)
+        self.assertIn('getElementById("voiceValidationStartButton")', source)
+        self.assertIn("target.scrollIntoView", source)
+        self.assertIn("controlPanelCommandGeneration", source)
+
     def test_javascript_parses(self):
         node = shutil.which("node")
         if not node:

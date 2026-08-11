@@ -2275,3 +2275,20 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   `memory_delete_cleanup_required`, `tombstoned=true`를 보존한다. ledger 자체가
   손상됐으면 기존 exact/content-free integrity 503으로 fail-closed한다.
 - UI 전체 178개와 diff check가 통과했다. 실행 중 Control Page image는 교체하지 않았다.
+
+## 2026-08-11 Local mic 안내와 Fast Control 텍스트 projection
+
+- 일반 `/mic on`은 validation 전용 청취 동의를 우회하지 않는다. 대신 Control Page의
+  음성 검증 시작·청취 동의 영역을 열고 포커스한다. capture-ready와 authenticated
+  watchdog, durable consent/host-lease fence가 모두 current인 경우에만 현재 ON 상태를
+  알린다. Bot API process generation이 바뀌면 브라우저 panel-command cursor를 초기화해
+  재시작 뒤 작은 command ID도 적용한다.
+- 저장 기억을 요청하지 않은 Fast Control turn은 빈 prompt context에서도 full receipt의
+  `state=not_requested`, `groundingState=not_requested`를 보존해 compact `not_used`로
+  완료한다. 따라서 생성·TTS·continuity가 성공한 assistant 텍스트가 모순된 receipt로
+  `unattributed`가 되어 공개 채팅에서 빠지지 않는다. 손상되거나 기억 의존성을 증명하지
+  못한 receipt를 가리는 기존 fail-closed 필터는 완화하지 않았다.
+- 실행 중 artifact를 content-free field로 확인했을 때 최근 turn은 assistant text와
+  playback/continuity 완료 증거가 있었지만 일부 receipt만 `unattributed`였고, Local Bridge는
+  장치 오류 없이 mic OFF였다. 서비스·마이크·스피커는 재기동하지 않았으므로 수정 후
+  화면·청취 동작은 다음 사용자 실사용에서 확인한다.

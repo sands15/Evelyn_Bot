@@ -319,6 +319,27 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
             expected_digest="d" * 64,
             now=matcher.call_args.kwargs["now"],
         )
+        fast_api.LOCAL_BRIDGE_STATUS["mic"]["captureActive"] = False
+        with patch.object(
+            fast_api,
+            "voice_capture_consent_fence_matches",
+            return_value=True,
+        ):
+            self.assertFalse(
+                fast_api.local_voice_capture_fence_is_current(
+                    "a" * 32,
+                    now=now,
+                )
+            )
+            self.assertEqual(
+                fast_api.local_voice_capture_fence_digest_if_current(
+                    "a" * 32,
+                    now=now,
+                    require_capture_active=False,
+                ),
+                "d" * 64,
+            )
+        fast_api.LOCAL_BRIDGE_STATUS["mic"]["captureActive"] = True
         with patch.object(
             fast_api,
             "voice_capture_consent_fence_matches",
@@ -329,6 +350,14 @@ class LocalVoiceAdmissionApiTests(unittest.IsolatedAsyncioTestCase):
                     "a" * 32,
                     now=now,
                 )
+            )
+            self.assertEqual(
+                fast_api.local_voice_capture_fence_digest_if_current(
+                    "a" * 32,
+                    now=now,
+                    require_capture_active=False,
+                ),
+                "",
             )
         self.assertFalse(
             fast_api.local_voice_capture_fence_is_current(
