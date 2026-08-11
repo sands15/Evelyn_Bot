@@ -15,6 +15,7 @@ class VoiceTurnDependencyCompositionDeps:
     command_status: Callable[..., str]
     session_speculative_policies: MutableMapping[str, Any]
     append_history: Callable[..., Any]
+    begin_user_only_turn: Callable[..., Any]
     compute_runtime_mode: Callable[..., str]
     record_context_pipeline_benchmark: Callable[..., Any]
     schedule_memory_update: Callable[..., Any]
@@ -89,6 +90,7 @@ class VoiceTurnDependencyComposition:
         return VoiceReplySideEffectDeps(
             session_speculative_policies=deps.session_speculative_policies,
             append_history=deps.append_history,
+            begin_user_only_turn=deps.begin_user_only_turn,
             compute_runtime_mode=deps.compute_runtime_mode,
             record_context_pipeline_benchmark=deps.record_context_pipeline_benchmark,
             schedule_memory_update=deps.schedule_memory_update,

@@ -29,7 +29,10 @@ from .voice_ingress_runtime import (
 )
 from .voice_member_audio_pipeline_runtime import process_member_audio_pipeline_from_runtime
 from .voice_reply_gate_runtime import should_reply_to_voice_from_runtime
-from .voice_reply_side_effects import finalize_voice_reply_side_effects_from_runtime
+from .voice_reply_side_effects import (
+    checkpoint_accepted_voice_turn_from_runtime,
+    finalize_voice_reply_side_effects_from_runtime,
+)
 from .voice_response_runtime import (
     build_first_response_from_runtime,
     build_followup_response_from_runtime,
@@ -72,6 +75,28 @@ class VoiceIoComposition:
 
     def __init__(self, deps: VoiceIoCompositionDeps) -> None:
         self.deps = deps
+
+    def checkpoint_accepted_voice_turn(
+        self,
+        *,
+        session_key: str,
+        user_id: int,
+        user_text: str,
+        accepted_turn_id: str,
+        ttl_sec: float,
+        topic_id: str,
+        metrics: dict,
+    ) -> None:
+        checkpoint_accepted_voice_turn_from_runtime(
+            session_key=session_key,
+            user_id=user_id,
+            user_text=user_text,
+            accepted_turn_id=accepted_turn_id,
+            ttl_sec=ttl_sec,
+            topic_id=topic_id,
+            metrics=metrics,
+            deps=self.deps.reply_side_effects(),
+        )
 
     def finalize_voice_reply_side_effects(
         self,

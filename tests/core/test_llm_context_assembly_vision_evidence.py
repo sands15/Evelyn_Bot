@@ -149,6 +149,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         memory_context_callback=None,
         conversation_history=None,
         conversation_context_callback=None,
+        session_snapshot=None,
     ) -> LlmContextAssemblyDeps:
         async def unused_async(*_args, **_kwargs):
             return None
@@ -165,7 +166,9 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             read_cached_cognitive_state=lambda *_args, **_kwargs: None,
             get_matching_speculative_policy=lambda *_args, **_kwargs: None,
             fast_path_policy=lambda *_args, **_kwargs: None,
-            session_state_snapshot=lambda *_args, **_kwargs: {},
+            session_state_snapshot=lambda *_args, **_kwargs: dict(
+                session_snapshot or {}
+            ),
             context_policy_for_fast_path_policy=lambda *_args, **_kwargs: {},
             extract_question_policy_from_route_meta=lambda _meta: {},
             build_fast_cognitive_state=lambda *_args, **_kwargs: {},
@@ -335,6 +338,141 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                 for message in messages
             )
         )
+
+    async def test_precommitted_voice_user_is_sent_once_to_main_llm(self) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        current_text = "현재 음성 질문"
+        deps = self.build_deps(
+            no_vision,
+            conversation_history=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_text},
+            ],
+            session_snapshot={"turn_id": "turn-1"},
+        )
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {
+                "turn_id": "turn-1",
+                "accepted_voice_turn_precommitted": True,
+            },
+            "marks": {},
+        }
+
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                current_text,
+                deps=deps,
+                session_key="session-1",
+                source="voice",
+                metrics=metrics,
+            )
+        )
+        payload = build_main_llm_payload(
+            model_name="test-model",
+            messages=messages,
+            final_user_text=current_text,
+            source="voice",
+            stream=True,
+        )
+
+        self.assertEqual(
+            sum(
+                row.get("role") == "user"
+                and row.get("content") == current_text
+                for row in payload["messages"]
+            ),
+            1,
+        )
+
+        unbound_messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                current_text,
+                deps=deps,
+                session_key="session-1",
+                source="voice",
+                metrics={
+                    "started_at": time.monotonic(),
+                    "meta": {"turn_id": "turn-1"},
+                    "marks": {},
+                },
+            )
+        )
+        self.assertTrue(
+            any(
+                row.get("role") == "user"
+                and row.get("content") == current_text
+                for row in unbound_messages
+            )
+        )
+
+    async def test_precommitted_voice_tail_mismatch_fails_closed(self) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        deps = self.build_deps(
+            no_vision,
+            conversation_history=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "다른 질문"},
+            ],
+            session_snapshot={"turn_id": "turn-1"},
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "accepted_voice_turn_history_mismatch",
+        ):
+            await prepare_llm_messages_from_runtime(
+                "현재 음성 질문",
+                deps=deps,
+                session_key="session-1",
+                source="voice",
+                metrics={
+                    "started_at": time.monotonic(),
+                    "meta": {
+                        "turn_id": "turn-1",
+                        "accepted_voice_turn_precommitted": True,
+                    },
+                    "marks": {},
+                },
+            )
+
+        stale_turn_deps = self.build_deps(
+            no_vision,
+            conversation_history=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "현재 음성 질문"},
+            ],
+            session_snapshot={"turn_id": "turn-2"},
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "accepted_voice_turn_history_mismatch",
+        ):
+            await prepare_llm_messages_from_runtime(
+                "현재 음성 질문",
+                deps=stale_turn_deps,
+                session_key="session-1",
+                source="voice",
+                metrics={
+                    "started_at": time.monotonic(),
+                    "meta": {
+                        "turn_id": "turn-1",
+                        "accepted_voice_turn_precommitted": True,
+                    },
+                    "marks": {},
+                },
+            )
 
     async def test_receipt_fields_never_enter_context_or_voice_payload(
         self,

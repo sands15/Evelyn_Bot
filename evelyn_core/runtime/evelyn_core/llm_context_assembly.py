@@ -163,6 +163,26 @@ async def prepare_llm_messages_from_runtime(
             }
         )
     messages = list(deps.get_conversation_history(session_key=session_key, guild_id=guild_id))
+    meta = metrics.get("meta") if metrics is not None else {}
+    if source == "voice" and (meta or {}).get(
+        "accepted_voice_turn_precommitted"
+    ) is True:
+        accepted_turn_id = str((meta or {}).get("turn_id") or "").strip()
+        current_turn_id = str(
+            deps.session_state_snapshot(session_key).get("turn_id") or ""
+        ).strip()
+        tail = messages[-1] if messages else None
+        if (
+            not accepted_turn_id
+            or current_turn_id != accepted_turn_id
+            or not isinstance(tail, dict)
+            or set(tail) != {"role", "content"}
+            or tail.get("role") != "user"
+            or deps.clean_text(str(tail.get("content") or ""))
+            != deps.clean_text(user_text)
+        ):
+            raise RuntimeError("accepted_voice_turn_history_mismatch")
+        messages.pop()
     if deps.merge_cross_surface_context is not None:
         merge_outcome = deps.merge_cross_surface_context(
             messages,

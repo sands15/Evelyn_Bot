@@ -1,7 +1,9 @@
 ﻿import sys
 import asyncio
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -16,10 +18,19 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestrator,
     VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
+    accept_voice_reply_execution,
+    prepare_and_execute_accepted_voice_reply,
     prepare_voice_reply_for_delivery,
     run_locked_voice_reply_delivery,
 )
 from evelyn_core.tts_playback import play_audio_source  # noqa: E402
+from evelyn_core.session_continuity import (  # noqa: E402
+    SessionContinuityCheckpoint,
+)
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
+from evelyn_core.voice_reply_side_effects import (  # noqa: E402
+    checkpoint_accepted_voice_turn_from_runtime,
+)
 from evelyn_core.voice_pipeline import (  # noqa: E402
     DeliveryPlan,
     TranscriptResult,
@@ -36,6 +47,325 @@ def split_test_tts_chunks(text: str, *, force: bool = False) -> tuple[list[str],
 
 
 class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def accepted_voice_fixture() -> tuple[
+        VoiceReplyRequest,
+        VoiceSegment,
+        TranscriptResult,
+    ]:
+        segment = VoiceSegment(
+            guild_id=7,
+            room_session_key="room-1",
+            session_key="session-1",
+            speaker_user_id=42,
+            speaker_name="tester",
+            audio16k=np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            duration_sec=0.1,
+            segment_id=1,
+            owner_user_id=42,
+        )
+        transcript = TranscriptResult(
+            wake_detected=True,
+            wake_match_mode="exact",
+            wake_alias="이블린",
+            probe_text="계속해 줘",
+            confirm_text="계속해 줘",
+            reject_reason=None,
+            partial_text="",
+            committed_text="계속해 줘",
+            final_text="계속해 줘",
+            speaker_user_id=42,
+            duration_sec=0.1,
+        )
+        reply = VoiceReplyRequest(
+            transcript=transcript,
+            segment=segment,
+            gate_mode="wake_entry",
+            raw_user_text="계속해 줘",
+            prompt_user_text="계속해 줘",
+            history_user_text="계속해 줘",
+            wake_only_turn=False,
+            turn_type="voice_request",
+            selected_path="main_llm",
+            reply_source="main_llm",
+            topic_id="topic-1",
+        )
+        return reply, segment, transcript
+
+    def test_accepted_voice_checkpoint_precedes_owner_and_scope(self) -> None:
+        reply, segment, transcript = self.accepted_voice_fixture()
+        events: list[str] = []
+        metrics: dict[str, Any] = {"meta": {}}
+
+        accepted = accept_voice_reply_execution(
+            session_key="session-1",
+            room_session_key="room-1",
+            user_id=42,
+            source_turn_id="turn-1",
+            segment_id=1,
+            gate_mode="wake_entry",
+            reply_in_progress=False,
+            voice_reply=reply,
+            voice_segment=segment,
+            transcript=transcript,
+            ingress_source="discord_voice",
+            queue_wait_ms=0.0,
+            active_conversation_awaiting_reply_sec=120.0,
+            active_conversation_voice_sec=30.0,
+            metrics=metrics,
+            start_new_turn=lambda *_args, **_kwargs: self.fail(
+                "Discord voice precommit owns the new turn"
+            ),
+            update_session_state=lambda *_args, **_kwargs: self.fail(
+                "Discord voice precommit owns the user state"
+            ),
+            checkpoint_accepted_voice_turn=lambda **_kwargs: events.append(
+                "checkpoint"
+            ),
+            set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
+            session_partial_stt_text={},
+            session_committed_stt_text={},
+            partial_stt_cache={},
+            owner_user_id=42,
+            make_turn_scope=lambda _turn_id: (
+                events.append("scope") or "scope"
+            ),
+            replace_room_turn_scope=lambda *_args, **_kwargs: None,
+            attach_current_task=lambda _scope: "task",
+            set_room_reply_in_progress=lambda *_args, **_kwargs: None,
+        )
+
+        self.assertEqual(events, ["checkpoint", "owner", "scope"])
+        self.assertEqual(accepted.accepted_turn_id, "turn-1")
+
+    def test_accepted_voice_checkpoint_failure_starts_no_reply_state(self) -> None:
+        reply, segment, transcript = self.accepted_voice_fixture()
+        events: list[str] = []
+
+        def fail_checkpoint(**_kwargs: Any) -> None:
+            raise RuntimeError("conversation_continuity_commit_failed")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_continuity_commit_failed",
+        ):
+            accept_voice_reply_execution(
+                session_key="session-1",
+                room_session_key="room-1",
+                user_id=42,
+                source_turn_id="turn-1",
+                segment_id=1,
+                gate_mode="wake_entry",
+                reply_in_progress=False,
+                voice_reply=reply,
+                voice_segment=segment,
+                transcript=transcript,
+                ingress_source="discord_voice",
+                queue_wait_ms=0.0,
+                active_conversation_awaiting_reply_sec=120.0,
+                active_conversation_voice_sec=30.0,
+                metrics={"meta": {}},
+                start_new_turn=lambda *_args, **_kwargs: None,
+                update_session_state=lambda *_args, **_kwargs: None,
+                checkpoint_accepted_voice_turn=fail_checkpoint,
+                set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
+                session_partial_stt_text={},
+                session_committed_stt_text={},
+                partial_stt_cache={},
+                owner_user_id=42,
+                make_turn_scope=lambda _turn_id: events.append("scope"),
+                replace_room_turn_scope=lambda *_args, **_kwargs: None,
+                attach_current_task=lambda _scope: events.append("task"),
+                set_room_reply_in_progress=lambda *_args, **_kwargs: events.append(
+                    "reply"
+                ),
+            )
+
+        self.assertEqual(events, [])
+
+    def test_local_mic_keeps_existing_noncheckpointed_turn_path(self) -> None:
+        reply, segment, transcript = self.accepted_voice_fixture()
+        events: list[str] = []
+
+        accepted = accept_voice_reply_execution(
+            session_key="session-1",
+            room_session_key="room-1",
+            user_id=42,
+            source_turn_id="turn-local",
+            segment_id=1,
+            gate_mode="wake_entry",
+            reply_in_progress=False,
+            voice_reply=reply,
+            voice_segment=segment,
+            transcript=transcript,
+            ingress_source="local_mic",
+            queue_wait_ms=0.0,
+            active_conversation_awaiting_reply_sec=120.0,
+            active_conversation_voice_sec=30.0,
+            metrics={"meta": {}},
+            start_new_turn=lambda *_args, **_kwargs: (
+                events.append("start") or "turn-local"
+            ),
+            update_session_state=lambda *_args, **_kwargs: events.append(
+                "update"
+            ),
+            checkpoint_accepted_voice_turn=lambda **_kwargs: self.fail(
+                "local mic uses Fast ingress continuity"
+            ),
+            set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
+            session_partial_stt_text={},
+            session_committed_stt_text={},
+            partial_stt_cache={},
+            owner_user_id=42,
+            make_turn_scope=lambda _turn_id: (
+                events.append("scope") or "scope"
+            ),
+            replace_room_turn_scope=lambda *_args, **_kwargs: None,
+            attach_current_task=lambda _scope: "task",
+            set_room_reply_in_progress=lambda *_args, **_kwargs: None,
+        )
+
+        self.assertEqual(events, ["start", "update", "owner", "scope"])
+        self.assertEqual(accepted.accepted_turn_id, "turn-local")
+
+    async def test_cancel_after_precommit_preserves_control_flow_and_cleans_scope(
+        self,
+    ) -> None:
+        reply, segment, transcript = self.accepted_voice_fixture()
+        events: list[str] = []
+        scopes: list[object] = []
+        reply_states: list[bool] = []
+        metrics: dict[str, Any] = {"meta": {}}
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        store = SessionStateStore.create_empty()
+        manager = SessionContinuityCheckpoint(
+            store=store,
+            checkpoint_path=root / "active.json",
+            status_path=root / "status.json",
+            system_prompt="system",
+        )
+
+        def begin_user_only_turn(key: str, text: str, **kwargs: Any) -> str:
+            return store.begin_user_only_turn(
+                key,
+                text,
+                system_prompt="system",
+                max_history_items=12,
+                active_conversation_awaiting_reply_sec=120.0,
+                **kwargs,
+            )
+
+        checkpoint_deps = SimpleNamespace(
+            begin_user_only_turn=begin_user_only_turn,
+            commit_session_continuity=manager.commit_completed_turn,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        def checkpoint(**kwargs: Any) -> None:
+            events.append("checkpoint")
+            checkpoint_accepted_voice_turn_from_runtime(
+                **kwargs,
+                deps=checkpoint_deps,
+            )
+
+        def make_scope(_turn_id: str) -> object:
+            scope = object()
+            scopes.append(scope)
+            return scope
+
+        async def cancel_during_llm(*_args: Any, **_kwargs: Any) -> str:
+            events.append("llm")
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await prepare_and_execute_accepted_voice_reply(
+                session_key="session-1",
+                room_session_key="room-1",
+                user_id=42,
+                source_turn_id="turn-1",
+                segment_id=1,
+                gate_mode="wake_entry",
+                reply_in_progress=False,
+                voice_reply=reply,
+                voice_segment=segment,
+                transcript=transcript,
+                ingress_source="discord_voice",
+                queue_wait_ms=0.0,
+                metrics=metrics,
+                active_conversation_awaiting_reply_sec=120.0,
+                active_conversation_voice_sec=30.0,
+                start_new_turn=lambda *_args, **_kwargs: self.fail(
+                    "Discord voice precommit owns the new turn"
+                ),
+                update_session_state=lambda *_args, **_kwargs: self.fail(
+                    "Discord voice precommit owns the user state"
+                ),
+                checkpoint_accepted_voice_turn=checkpoint,
+                set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
+                session_partial_stt_text={},
+                session_committed_stt_text={},
+                partial_stt_cache={},
+                owner_user_id=42,
+                make_turn_scope=make_scope,
+                replace_room_turn_scope=lambda *_args, **_kwargs: None,
+                attach_current_task=lambda _scope: asyncio.current_task(),
+                set_room_reply_in_progress=(
+                    lambda _room, active, **_kwargs: reply_states.append(active)
+                ),
+                session_locks={},
+                speaker_display_name="tester",
+                visible_text=str,
+                print_fn=lambda *_args, **_kwargs: None,
+                get_voice_client=object,
+                member=type(
+                    "Member",
+                    (),
+                    {"id": 42, "display_name": "tester"},
+                )(),
+                canned_wake_reply="응",
+                guild_id=7,
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                speak_answer=lambda *_args, **_kwargs: self.fail(
+                    "single reply TTS must not run"
+                ),
+                ask_llm_and_speak_streaming=cancel_during_llm,
+                record_voice_pipeline_failure=lambda *_args, **_kwargs: self.fail(
+                    "cancellation must stay control flow"
+                ),
+                finalize_voice_reply_side_effects=lambda **_kwargs: self.fail(
+                    "cancellation must not synthesize a reply"
+                ),
+                log_voice_stage=lambda *_args, **_kwargs: None,
+                strip_omnivoice_tags=str,
+                get_room_turn_scope=lambda _room: scopes[0],
+                detach_task=lambda *_args, **_kwargs: events.append("detach"),
+                clear_room_turn_scope=lambda *_args, **_kwargs: events.append(
+                    "clear"
+                ),
+            )
+
+        self.assertEqual(events[:3], ["checkpoint", "owner", "llm"])
+        self.assertEqual(events[-2:], ["detach", "clear"])
+        self.assertEqual(reply_states, [True, False])
+        restored_store = SessionStateStore.create_empty()
+        restore_status = SessionContinuityCheckpoint(
+            store=restored_store,
+            checkpoint_path=root / "active.json",
+            status_path=root / "restored-status.json",
+            system_prompt="system",
+        ).restore()
+        self.assertEqual(restore_status["state"], "restored")
+        self.assertEqual(
+            [row["role"] for row in restored_store.histories["session-1"]],
+            ["system", "user"],
+        )
+        self.assertEqual(restored_store.turn_ids["session-1"], "turn-1")
+
     async def test_lost_playback_callback_releases_room_lock_and_finalizes_failure(
         self,
     ) -> None:

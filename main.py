@@ -695,7 +695,7 @@ voice_turn_dependency_composition = VoiceTurnDependencyComposition(
     VoiceTurnDependencyCompositionDeps(
         barge_in_tracker=voice_barge_in_continuity_tracker, command_status=command_status,
         session_speculative_policies=session_speculative_policies, append_history=append_history,
-        compute_runtime_mode=lambda *args, **kwargs: compute_runtime_mode(*args, **kwargs),
+        begin_user_only_turn=conversation_session_composition.begin_user_only_turn, compute_runtime_mode=compute_runtime_mode,
         record_context_pipeline_benchmark=record_context_pipeline_benchmark,
         schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), read_cached_cognitive_state=read_cached_cognitive_state,
         apply_ask_gating=apply_ask_gating,
@@ -2262,6 +2262,7 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         pick_active_speaker=lambda *args, **kwargs: pick_active_speaker(*args, **kwargs),
         start_new_turn=lambda *args, **kwargs: start_new_turn(*args, **kwargs),
         update_session_state=lambda *args, **kwargs: update_session_state(*args, **kwargs),
+        checkpoint_accepted_voice_turn=lambda *args, **kwargs: voice_io_composition.checkpoint_accepted_voice_turn(*args, **kwargs),
         set_room_owner=lambda *args, **kwargs: set_room_owner(*args, **kwargs), session_partial_stt_text=session_state_store.partial_stt_text,
         session_committed_stt_text=session_state_store.committed_stt_text, partial_stt_cache=partial_stt_cache,
         replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
@@ -2312,7 +2313,6 @@ voice_io_composition = VoiceIoComposition(
         member_audio_pipeline=lambda: build_voice_member_audio_pipeline_deps(),
     )
 )
-
 finalize_voice_reply_side_effects = voice_io_composition.finalize_voice_reply_side_effects
 should_reply_to_voice = voice_io_composition.should_reply_to_voice
 voice_ingress_worker = voice_io_composition.voice_ingress_worker

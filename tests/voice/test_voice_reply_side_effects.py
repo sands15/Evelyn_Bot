@@ -28,6 +28,7 @@ if "numpy" not in sys.modules:
 
 from evelyn_core.voice_reply_side_effects import (  # noqa: E402
     VoiceReplySideEffectDeps,
+    checkpoint_accepted_voice_turn_from_runtime,
     current_voice_reply_memory_boundary,
     finalize_voice_reply_side_effects_from_runtime,
 )
@@ -56,6 +57,7 @@ from tests.continuity_test_support import (  # noqa: E402
 from evelyn_core.voice_orchestration import (  # noqa: E402
     finalize_delivered_voice_reply,
 )
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,232 @@ class FakeVoiceReply:
 class VoiceReplySideEffectsTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_memory_exposure_position()
+
+    def test_accepted_voice_checkpoint_marks_and_skips_same_execution_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            calls: list[str] = []
+            deps = self._boundary_deps(
+                index_dir=Path(temp_dir),
+                calls=calls,
+            )
+            deps = replace(
+                deps,
+                begin_user_only_turn=lambda *_args, **_kwargs: calls.append(
+                    "begin"
+                ),
+                commit_session_continuity=lambda *_args, **_kwargs: (
+                    calls.append("commit")
+                    or durable_continuity_status(7)
+                ),
+            )
+            metrics: dict[str, Any] = {"meta": {}}
+
+            for _ in range(2):
+                checkpoint_accepted_voice_turn_from_runtime(
+                    session_key="session-1",
+                    user_id=42,
+                    user_text="계속해 줘",
+                    accepted_turn_id="turn-1",
+                    ttl_sec=30.0,
+                    topic_id="topic-1",
+                    metrics=metrics,
+                    deps=deps,
+                )
+
+        self.assertEqual(calls, ["begin", "commit"])
+        self.assertEqual(
+            metrics["meta"]["continuity_turn_state"],
+            "unanswered_user",
+        )
+        self.assertEqual(metrics["meta"]["continuity_generation"], 7)
+        self.assertTrue(metrics["meta"]["accepted_voice_turn_precommitted"])
+
+    def test_accepted_voice_turn_commit_failure_is_fixed_and_content_free(
+        self,
+    ) -> None:
+        private_user_canary = "PRIVATE_ACCEPTED_VOICE_TEXT"
+        private_error_canary = "PRIVATE_ACCEPTED_VOICE_PATH"
+        logs: list[str] = []
+
+        def fail_commit(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError(private_error_canary)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deps = self._boundary_deps(
+                index_dir=Path(temp_dir),
+                calls=[],
+            )
+            deps = replace(
+                deps,
+                commit_session_continuity=fail_commit,
+                log=lambda *parts: logs.append("".join(map(str, parts))),
+            )
+            metrics: dict[str, Any] = {"meta": {}}
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "conversation_continuity_commit_failed",
+            ):
+                checkpoint_accepted_voice_turn_from_runtime(
+                    session_key="session-1",
+                    user_id=42,
+                    user_text=private_user_canary,
+                    accepted_turn_id="turn-1",
+                    ttl_sec=30.0,
+                    topic_id="topic-1",
+                    metrics=metrics,
+                    deps=deps,
+                )
+
+        self.assertEqual(
+            metrics["meta"]["continuity_error"],
+            "conversation_continuity_commit_failed",
+        )
+        for private_canary in (private_user_canary, private_error_canary):
+            self.assertNotIn(private_canary, str(metrics))
+            self.assertNotIn(private_canary, "".join(logs))
+
+    def test_precommitted_success_adds_only_the_assistant_tail(self) -> None:
+        store = SessionStateStore.create_empty()
+        store.begin_user_only_turn(
+            "session-1",
+            "계속해 줘",
+            turn_id="turn-1",
+            system_prompt="system",
+            max_history_items=12,
+            user_id=42,
+            ttl_sec=30.0,
+            topic_id="topic-1",
+            active_conversation_awaiting_reply_sec=120.0,
+        )
+
+        def append_history(
+            session_key: str,
+            user_text: str,
+            answer: str | None,
+            *,
+            memory_receipt: Any = None,
+            complete_turn_id: str | None = None,
+            **_kwargs: Any,
+        ) -> None:
+            store.append_history(
+                session_key,
+                user_text,
+                answer,
+                system_prompt="system",
+                max_history_items=12,
+                memory_receipt=memory_receipt,
+                complete_turn_id=complete_turn_id,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deps = self._boundary_deps(
+                index_dir=Path(temp_dir),
+                calls=[],
+            )
+            deps = replace(
+                deps,
+                append_history=append_history,
+                session_state_snapshot=lambda *_args, **_kwargs: {
+                    "awaiting_user_reply": False
+                },
+            )
+            metrics: dict[str, Any] = {
+                "meta": {
+                    "accepted_voice_turn_precommitted": True,
+                    "unanswered_voice_turn_recorded": True,
+                }
+            }
+            for _ in range(2):
+                finalize_voice_reply_side_effects_from_runtime(
+                    guild_id=7,
+                    member=FakeMember(),
+                    session_key="session-1",
+                    room_session_key="room-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    voice_reply=FakeVoiceReply(
+                        history_user_text="계속해 줘"
+                    ),
+                    plain_answer="완료했어",
+                    metrics=metrics,
+                    turn_scope="scope",
+                    accepted_turn_id="turn-1",
+                    segment_id=1,
+                    memory_exposure_position=None,
+                    memory_receipt=not_used_memory_receipt_ref(),
+                    deps=deps,
+                )
+
+        self.assertEqual(
+            [row["role"] for row in store.histories["session-1"]],
+            ["system", "user", "assistant"],
+        )
+        self.assertFalse(metrics["meta"]["unanswered_voice_turn_recorded"])
+
+    def test_precommitted_failure_keeps_the_existing_user_tail(self) -> None:
+        store = SessionStateStore.create_empty()
+        store.begin_user_only_turn(
+            "session-1",
+            "계속해 줘",
+            turn_id="turn-1",
+            system_prompt="system",
+            max_history_items=12,
+            user_id=42,
+            ttl_sec=30.0,
+            topic_id="topic-1",
+            active_conversation_awaiting_reply_sec=120.0,
+        )
+
+        def unexpected(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("precommitted failure must not write again")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deps = self._boundary_deps(
+                index_dir=Path(temp_dir),
+                calls=[],
+            )
+            deps = replace(
+                deps,
+                append_history=unexpected,
+                commit_session_continuity=unexpected,
+                mark_session_active=unexpected,
+                set_room_owner=unexpected,
+            )
+            metrics: dict[str, Any] = {
+                "meta": {
+                    "accepted_voice_turn_precommitted": True,
+                    "unanswered_voice_turn_recorded": True,
+                }
+            }
+            finalize_voice_reply_side_effects_from_runtime(
+                guild_id=7,
+                member=FakeMember(),
+                session_key="session-1",
+                room_session_key="room-1",
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                voice_reply=FakeVoiceReply(
+                    history_user_text="계속해 줘"
+                ),
+                plain_answer="",
+                metrics=metrics,
+                turn_scope="scope",
+                accepted_turn_id="turn-1",
+                segment_id=1,
+                delivery_succeeded=False,
+                failure_code="voice_delivery_failed",
+                deps=deps,
+            )
+
+        self.assertEqual(
+            [row["role"] for row in store.histories["session-1"]],
+            ["system", "user"],
+        )
 
     @staticmethod
     def _bound_receipt(
@@ -141,6 +369,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         deps = VoiceReplySideEffectDeps(
             session_speculative_policies={"session-1": {}},
             append_history=record("append_history"),
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=unexpected,
             record_context_pipeline_benchmark=unexpected,
             schedule_memory_update=unexpected,
@@ -254,6 +483,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         deps = VoiceReplySideEffectDeps(
             session_speculative_policies={},
             append_history=lambda *_args, **_kwargs: None,
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=unexpected,
             record_context_pipeline_benchmark=unexpected,
             schedule_memory_update=unexpected,
@@ -326,6 +556,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         deps = VoiceReplySideEffectDeps(
             session_speculative_policies=speculative,
             append_history=record("append_history"),
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=record("compute_runtime_mode"),
             record_context_pipeline_benchmark=record("record_context_pipeline_benchmark"),
             schedule_memory_update=record("schedule_memory_update"),
@@ -433,6 +664,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             append_history=lambda *_args, **_kwargs: calls.append(
                 "append"
             ),
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=lambda _metrics: "normal",
             record_context_pipeline_benchmark=noop,
             schedule_memory_update=lambda *_args, **_kwargs: {},
@@ -500,6 +732,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         deps = VoiceReplySideEffectDeps(
             session_speculative_policies={},
             append_history=noop,
+            begin_user_only_turn=noop,
             compute_runtime_mode=lambda _metrics: "normal",
             record_context_pipeline_benchmark=noop,
             schedule_memory_update=lambda *_args, **_kwargs: {},
@@ -577,6 +810,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             append_history=(
                 lambda *_args, **_kwargs: calls.append("append")
             ),
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=unexpected,
             record_context_pipeline_benchmark=unexpected,
             schedule_memory_update=unexpected,
@@ -791,6 +1025,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                 speculative if speculative is not None else {}
             ),
             append_history=record("append_history"),
+            begin_user_only_turn=lambda *_args, **_kwargs: None,
             compute_runtime_mode=record(
                 "compute_runtime_mode", "normal"
             ),

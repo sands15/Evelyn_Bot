@@ -45,6 +45,7 @@ class VoiceMemberPipelineDependencyCompositionDeps:
     pick_active_speaker: Callable[..., Any]
     start_new_turn: Callable[..., Any]
     update_session_state: Callable[..., Any]
+    checkpoint_accepted_voice_turn: Callable[..., Any]
     set_room_owner: Callable[..., Any]
     session_partial_stt_text: MutableMapping[str, str]
     session_committed_stt_text: MutableMapping[str, str]
@@ -117,6 +118,9 @@ class VoiceMemberPipelineDependencyComposition:
             pick_active_speaker=deps.pick_active_speaker,
             start_new_turn=deps.start_new_turn,
             update_session_state=deps.update_session_state,
+            checkpoint_accepted_voice_turn=(
+                deps.checkpoint_accepted_voice_turn
+            ),
             set_room_owner=deps.set_room_owner,
             session_partial_stt_text=deps.session_partial_stt_text,
             session_committed_stt_text=deps.session_committed_stt_text,

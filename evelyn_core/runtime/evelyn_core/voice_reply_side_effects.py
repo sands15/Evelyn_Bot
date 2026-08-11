@@ -77,6 +77,7 @@ def current_voice_reply_memory_boundary(
 class VoiceReplySideEffectDeps:
     session_speculative_policies: MutableMapping[str, Any]
     append_history: Callable[..., Any]
+    begin_user_only_turn: Callable[..., Any]
     compute_runtime_mode: Callable[[dict[str, Any]], str]
     record_context_pipeline_benchmark: Callable[..., Any]
     schedule_memory_update: Callable[..., Any]
@@ -128,6 +129,66 @@ def _record_memory_boundary_failure(
     deps.log(
         "[VOICE TURN] reply_side_effects_rejected error=",
         MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
+    )
+
+
+def checkpoint_accepted_voice_turn_from_runtime(
+    *,
+    session_key: str,
+    user_id: int,
+    user_text: str,
+    accepted_turn_id: str,
+    ttl_sec: float,
+    topic_id: str,
+    metrics: dict[str, Any],
+    deps: VoiceReplySideEffectDeps,
+) -> None:
+    """Durably preserve the accepted user turn before reply delivery starts."""
+
+    meta = metrics.setdefault("meta", {})
+    if meta.get("accepted_voice_turn_precommitted") is True:
+        return
+    try:
+        deps.begin_user_only_turn(
+            session_key,
+            user_text,
+            turn_id=accepted_turn_id,
+            user_id=user_id,
+            ttl_sec=ttl_sec,
+            topic_id=topic_id,
+        )
+        meta["unanswered_voice_turn_recorded"] = True
+        continuity_receipt = require_durable_continuity_receipt(
+            deps.commit_session_continuity(
+                session_key,
+                accepted_turn_id,
+            )
+        )
+    except Exception as exc:
+        meta.update(
+            {
+                "continuity_commit": "failed",
+                "continuity_error": (
+                    "conversation_continuity_commit_failed"
+                ),
+            }
+        )
+        deps.log(
+            "[VOICE TURN] accepted_turn_commit_failed errorType=",
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            "conversation_continuity_commit_failed"
+        ) from None
+    meta.update(
+        {
+            "accepted_voice_turn_precommitted": True,
+            "continuity_turn_state": "unanswered_user",
+            "continuity_commit": "durable",
+            "continuity_generation": int(
+                continuity_receipt["generation"]
+            ),
+        }
     )
 
 
@@ -261,6 +322,20 @@ def finalize_voice_reply_side_effects_from_runtime(
                 plain_answer,
                 guild_id=guild_id,
                 memory_receipt=reply_receipt,
+                complete_turn_id=(
+                    accepted_turn_id
+                    if metrics.setdefault("meta", {}).get(
+                        "accepted_voice_turn_precommitted"
+                    )
+                    is True
+                    else None
+                ),
+            )
+            metrics.setdefault("meta", {}).update(
+                {
+                    "continuity_turn_state": "completed",
+                    "unanswered_voice_turn_recorded": False,
+                }
             )
             runtime_mode = (
                 ((metrics.get("meta") or {}).get("runtime_mode"))

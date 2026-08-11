@@ -64,6 +64,31 @@ def start_new_turn_from_runtime(
     return deps.session_state_store.start_new_turn(session_key, turn_id=turn_id)
 
 
+def begin_user_only_turn_from_runtime(
+    session_key: str,
+    user_text: str,
+    *,
+    turn_id: str,
+    user_id: int | None,
+    ttl_sec: float,
+    topic_id: str,
+    deps: SessionTurnRuntimeDeps,
+) -> str:
+    return deps.session_state_store.begin_user_only_turn(
+        session_key,
+        user_text,
+        turn_id=turn_id,
+        system_prompt=deps.system_prompt,
+        max_history_items=deps.max_history_items,
+        user_id=user_id,
+        ttl_sec=ttl_sec,
+        topic_id=topic_id,
+        active_conversation_awaiting_reply_sec=(
+            deps.active_conversation_awaiting_reply_sec
+        ),
+    )
+
+
 def begin_user_text_turn_from_runtime(
     session_key: str,
     user_text: str,
@@ -216,6 +241,7 @@ def append_history_from_runtime(
     *,
     guild_id: int | None = None,
     memory_receipt: Any = None,
+    complete_turn_id: str | None = None,
     deps: SessionTurnRuntimeDeps,
 ) -> None:
     receipt_kwargs = (
@@ -230,6 +256,7 @@ def append_history_from_runtime(
         system_prompt=deps.system_prompt,
         max_history_items=deps.max_history_items,
         guild_id=guild_id,
+        complete_turn_id=complete_turn_id,
         **receipt_kwargs,
     )
 
@@ -277,6 +304,7 @@ def reset_session_bad_audio_from_runtime(session_key: str | None, deps: SessionT
 __all__ = [
     "SessionTurnRuntimeDeps",
     "append_history_from_runtime",
+    "begin_user_only_turn_from_runtime",
     "begin_user_text_turn_from_runtime",
     "build_topic_id_from_runtime",
     "current_turn_id_from_runtime",

@@ -177,6 +177,7 @@ class VoiceTranscriptReplyDeps:
     pick_active_speaker: Callable[[str | None], int | None]
     start_new_turn: Callable[..., str]
     update_session_state: Callable[..., Any]
+    checkpoint_accepted_voice_turn: Callable[..., Any]
     set_room_owner: Callable[..., Any]
     session_partial_stt_text: MutableMapping[str, str]
     session_committed_stt_text: MutableMapping[str, str]
@@ -443,9 +444,7 @@ def activate_accepted_voice_turn(
     *,
     session_key: str | None,
     room_session_key: str,
-    user_id: int,
     source_turn_id: str,
-    segment_id: int,
     gate_mode: str,
     reply_in_progress: bool,
     voice_reply: VoiceReplyRequest,
@@ -456,30 +455,12 @@ def activate_accepted_voice_turn(
     active_conversation_awaiting_reply_sec: float,
     active_conversation_voice_sec: float,
     start_new_turn: Callable[..., str],
-    update_session_state: Callable[..., Any],
-    set_room_owner: Callable[..., Any],
-    session_partial_stt_text: MutableMapping[str, str],
-    session_committed_stt_text: MutableMapping[str, str],
-    partial_stt_cache: MutableMapping[str, Any],
-    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceAcceptedTurnActivation:
-    accepted_turn_id = start_new_turn(session_key, turn_id=source_turn_id)
-    if (
-        room_last_voice_utterance_for_merge is not None
-        and session_key is not None
-        and room_session_key is not None
-        and user_id is not None
-    ):
-        remember_voice_utterance_for_merge(
-            room_last_voice_utterance_for_merge,
-            room_session_key=room_session_key,
-            session_key=session_key,
-            user_id=user_id,
-            text=transcript.final_text,
-            accepted_at=time.monotonic(),
-            turn_id=accepted_turn_id,
-            segment_id=segment_id,
-            clean_text=clean_text,
+    accepted_turn_id = source_turn_id
+    if ingress_source != "discord_voice":
+        accepted_turn_id = start_new_turn(
+            session_key,
+            turn_id=source_turn_id,
         )
     lifecycle = build_voice_reply_lifecycle(
         accepted_turn_id=accepted_turn_id,
@@ -489,28 +470,6 @@ def activate_accepted_voice_turn(
         active_conversation_voice_sec=active_conversation_voice_sec,
         topic_id=voice_reply.topic_id,
         history_user_text=voice_reply.history_user_text,
-    )
-    if session_key:
-        session_partial_stt_text[session_key] = ""
-        session_committed_stt_text[session_key] = ""
-        partial_stt_cache.pop(session_key, None)
-    set_room_owner(
-        room_session_key,
-        user_id,
-        ttl_sec=lifecycle.owner_ttl_sec,
-        reason=gate_mode,
-        session_key=session_key,
-        turn_id=accepted_turn_id,
-        segment_id=segment_id,
-    )
-    update_session_state(
-        session_key,
-        user_id=user_id,
-        speaker="user",
-        ttl_sec=lifecycle.owner_ttl_sec,
-        awaiting_user_reply=False,
-        topic_id=lifecycle.topic_id,
-        user_text=lifecycle.history_user_text,
     )
     accepted_turn = build_accepted_voice_turn(
         accepted_turn_id=accepted_turn_id,
@@ -575,6 +534,7 @@ def accept_voice_reply_execution(
     metrics: MutableMapping[str, Any],
     start_new_turn: Callable[..., str],
     update_session_state: Callable[..., Any],
+    checkpoint_accepted_voice_turn: Callable[..., Any],
     set_room_owner: Callable[..., Any],
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
@@ -589,9 +549,7 @@ def accept_voice_reply_execution(
     activation = activate_accepted_voice_turn(
         session_key=session_key,
         room_session_key=room_session_key,
-        user_id=user_id,
         source_turn_id=source_turn_id,
-        segment_id=segment_id,
         gate_mode=gate_mode,
         reply_in_progress=reply_in_progress,
         voice_reply=voice_reply,
@@ -602,12 +560,6 @@ def accept_voice_reply_execution(
         active_conversation_awaiting_reply_sec=active_conversation_awaiting_reply_sec,
         active_conversation_voice_sec=active_conversation_voice_sec,
         start_new_turn=start_new_turn,
-        update_session_state=update_session_state,
-        set_room_owner=set_room_owner,
-        session_partial_stt_text=session_partial_stt_text,
-        session_committed_stt_text=session_committed_stt_text,
-        partial_stt_cache=partial_stt_cache,
-        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
     )
     metrics.setdefault("meta", {})["accepted_turn_contract"] = activation.accepted_turn
     metrics.setdefault("meta", {}).update(
@@ -616,6 +568,54 @@ def accept_voice_reply_execution(
             "turn_id": activation.accepted_turn_id,
             "owner_user_id": user_id,
         }
+    )
+    if ingress_source == "discord_voice":
+        checkpoint_accepted_voice_turn(
+            session_key=session_key,
+            user_id=user_id,
+            user_text=activation.history_user_text,
+            accepted_turn_id=activation.accepted_turn_id,
+            ttl_sec=activation.owner_ttl_sec,
+            topic_id=activation.topic_id,
+            metrics=metrics,
+        )
+    elif session_key:
+        update_session_state(
+            session_key,
+            user_id=user_id,
+            speaker="user",
+            ttl_sec=activation.owner_ttl_sec,
+            awaiting_user_reply=False,
+            topic_id=activation.topic_id,
+            user_text=activation.history_user_text,
+        )
+    if (
+        room_last_voice_utterance_for_merge is not None
+        and session_key is not None
+    ):
+        remember_voice_utterance_for_merge(
+            room_last_voice_utterance_for_merge,
+            room_session_key=room_session_key,
+            session_key=session_key,
+            user_id=user_id,
+            text=transcript.final_text,
+            accepted_at=time.monotonic(),
+            turn_id=activation.accepted_turn_id,
+            segment_id=segment_id,
+            clean_text=clean_text,
+        )
+    if session_key:
+        session_partial_stt_text[session_key] = ""
+        session_committed_stt_text[session_key] = ""
+        partial_stt_cache.pop(session_key, None)
+    set_room_owner(
+        room_session_key,
+        user_id,
+        ttl_sec=activation.owner_ttl_sec,
+        reason=gate_mode,
+        session_key=session_key,
+        turn_id=activation.accepted_turn_id,
+        segment_id=segment_id,
     )
     execution_state = begin_voice_reply_execution(
         room_session_key=room_session_key,
@@ -931,6 +931,7 @@ def prepare_accepted_voice_reply_delivery_runtime(
     active_conversation_voice_sec: float,
     start_new_turn: Callable[..., str],
     update_session_state: Callable[..., Any],
+    checkpoint_accepted_voice_turn: Callable[..., Any],
     set_room_owner: Callable[..., Any],
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
@@ -964,6 +965,7 @@ def prepare_accepted_voice_reply_delivery_runtime(
         metrics=metrics,
         start_new_turn=start_new_turn,
         update_session_state=update_session_state,
+        checkpoint_accepted_voice_turn=checkpoint_accepted_voice_turn,
         set_room_owner=set_room_owner,
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
@@ -1241,6 +1243,7 @@ async def prepare_and_execute_accepted_voice_reply(
     active_conversation_voice_sec: float,
     start_new_turn: Callable[..., str],
     update_session_state: Callable[..., Any],
+    checkpoint_accepted_voice_turn: Callable[..., Any],
     set_room_owner: Callable[..., Any],
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
@@ -1291,6 +1294,7 @@ async def prepare_and_execute_accepted_voice_reply(
         active_conversation_voice_sec=active_conversation_voice_sec,
         start_new_turn=start_new_turn,
         update_session_state=update_session_state,
+        checkpoint_accepted_voice_turn=checkpoint_accepted_voice_turn,
         set_room_owner=set_room_owner,
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
@@ -1354,6 +1358,7 @@ async def handle_prepared_voice_reply(
     active_conversation_voice_sec: float,
     start_new_turn: Callable[..., str],
     update_session_state: Callable[..., Any],
+    checkpoint_accepted_voice_turn: Callable[..., Any],
     set_room_owner: Callable[..., Any],
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
@@ -1412,6 +1417,7 @@ async def handle_prepared_voice_reply(
         active_conversation_voice_sec=active_conversation_voice_sec,
         start_new_turn=start_new_turn,
         update_session_state=update_session_state,
+        checkpoint_accepted_voice_turn=checkpoint_accepted_voice_turn,
         set_room_owner=set_room_owner,
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
@@ -1484,6 +1490,7 @@ async def process_voice_reply_from_transcript(
     active_conversation_voice_sec: float,
     start_new_turn: Callable[..., str],
     update_session_state: Callable[..., Any],
+    checkpoint_accepted_voice_turn: Callable[..., Any],
     set_room_owner: Callable[..., Any],
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
@@ -1561,6 +1568,7 @@ async def process_voice_reply_from_transcript(
         active_conversation_voice_sec=active_conversation_voice_sec,
         start_new_turn=start_new_turn,
         update_session_state=update_session_state,
+        checkpoint_accepted_voice_turn=checkpoint_accepted_voice_turn,
         set_room_owner=set_room_owner,
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
@@ -1637,6 +1645,9 @@ async def process_voice_reply_from_transcript_context(
         active_conversation_voice_sec=context.active_conversation_voice_sec,
         start_new_turn=deps.start_new_turn,
         update_session_state=deps.update_session_state,
+        checkpoint_accepted_voice_turn=(
+            deps.checkpoint_accepted_voice_turn
+        ),
         set_room_owner=deps.set_room_owner,
         session_partial_stt_text=deps.session_partial_stt_text,
         session_committed_stt_text=deps.session_committed_stt_text,

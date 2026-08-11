@@ -2344,3 +2344,25 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   다른 guild의 queue를 계속 처리한다. Discord `before→after` channel change는 내부·외부
   모두 관측한 exact client/channel에만 같은 idempotent cleanup을 재적용한다.
 - 실제 Discord 두 채널 live E2E와 gateway/audio 장치 전이는 실행하지 않았다.
+
+## 2026-08-12 Discord voice 수락 턴의 pre-delivery continuity
+
+- final STT와 reply gate가 수락한 Discord voice turn은 exact current turn ID와 정규화된
+  user tail을 user-only history로 만든 뒤 durable continuity receipt를 요구한다. receipt가
+  반환되기 전에는 room owner·TurnScope·LLM·TTS·playback을 시작하지 않는다. commit 실패는
+  고정 `conversation_continuity_commit_failed`와 예외 type만 남기고 downstream 실행 없이
+  닫는다. Local mic은 이 Main checkpoint를 중복 사용하지 않고 기존 Fast ingress owner를
+  유지한다.
+- Main prompt projection은 durable precommit 표식, current turn ID, exact trailing user
+  content가 모두 일치할 때만 저장된 현재 user row 한 개를 복사본에서 제거한다. 따라서
+  durable history는 보존하면서 같은 현재 질문을 LLM payload에는 한 번만 넣고, stale turn이나
+  손상 tail은 고정 mismatch로 거부한다.
+- 정상 완료는 같은 current turn의 exact user-only tail에 assistant와 receipt만 붙이고 exact
+  completed pair의 재호출은 history를 바꾸지 않는다. 실패·취소는 선행 user-only checkpoint를
+  유지하며 취소 신호를 다시 전파한다. durable receipt 직후의 subprocess hard-exit 복구는
+  exact user-only tail 한 개와 assistant 없음, reply side effect 미실행을 확인했다. 이 보장은
+  history mutation 경계이며 continuity generation이나 후속 memory/search side effect의
+  exactly-once를 뜻하지 않는다.
+- 변경 직결 84개, 인접 156개, voice 전체 667개(skip 5), CI-equivalent 전체
+  3,290개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline source/test와
+  subprocess crash recovery이며 실제 Discord·마이크·스피커·LLM·TTS를 기동하지 않았다.

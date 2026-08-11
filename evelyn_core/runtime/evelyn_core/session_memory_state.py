@@ -236,6 +236,62 @@ class SessionStateStore:
             now_monotonic=now_monotonic,
         )
 
+    def begin_user_only_turn(
+        self,
+        session_key: str,
+        user_text: str,
+        *,
+        turn_id: str,
+        system_prompt: str,
+        max_history_items: int,
+        user_id: int | None,
+        ttl_sec: float,
+        topic_id: str,
+        active_conversation_awaiting_reply_sec: float,
+        now_monotonic: float | None = None,
+    ) -> str:
+        history = self.get_conversation_history(
+            system_prompt=system_prompt,
+            session_key=session_key,
+        )
+        if self.current_turn_id(session_key) == turn_id:
+            user_row = history[-1] if history else None
+            if (
+                isinstance(user_row, dict)
+                and set(user_row) == {"role", "content"}
+                and user_row.get("role") == "user"
+                and clean_text(str(user_row.get("content") or ""))
+                == clean_text(user_text)
+            ):
+                return turn_id
+            raise ValueError("conversation_history_turn_mismatch")
+        self.start_new_turn(
+            session_key,
+            turn_id=turn_id,
+            now_monotonic=now_monotonic,
+        )
+        self.update_session_state(
+            session_key,
+            user_id=user_id,
+            speaker="user",
+            ttl_sec=ttl_sec,
+            awaiting_user_reply=False,
+            topic_id=topic_id,
+            user_text=user_text,
+            active_conversation_awaiting_reply_sec=(
+                active_conversation_awaiting_reply_sec
+            ),
+            now_monotonic=now_monotonic,
+        )
+        self.append_history(
+            session_key,
+            user_text,
+            None,
+            system_prompt=system_prompt,
+            max_history_items=max_history_items,
+        )
+        return turn_id
+
     def begin_user_text_turn(
         self,
         session_key: str,
@@ -438,9 +494,57 @@ class SessionStateStore:
         max_history_items: int,
         guild_id: int | None = None,
         memory_receipt: Any = None,
+        complete_turn_id: str | None = None,
     ) -> None:
-        history = self.get_conversation_history(system_prompt=system_prompt, session_key=session_key, guild_id=guild_id)
-        rows = [{"role": "user", "content": clean_text(user_text)}]
+        resolved = runtime_session_key(
+            session_key=session_key,
+            guild_id=guild_id,
+        )
+        history = self.get_conversation_history(
+            system_prompt=system_prompt,
+            session_key=session_key,
+            guild_id=guild_id,
+        )
+        rows: list[dict[str, Any]] = []
+        if complete_turn_id is not None:
+            user_row = history[-1] if history else None
+            if answer is None or resolved is None:
+                raise ValueError("conversation_history_turn_mismatch")
+            reply_receipt = (
+                unattributed_memory_receipt_ref()
+                if memory_receipt is None
+                else memory_receipt_ref_from_receipt(memory_receipt)
+            )
+            exact_user_tail = bool(
+                isinstance(user_row, dict)
+                and set(user_row) == {"role", "content"}
+                and user_row.get("role") == "user"
+                and clean_text(str(user_row.get("content") or ""))
+                == clean_text(user_text)
+            )
+            exact_pair_tail = bool(
+                len(history) >= 2
+                and isinstance(history[-2], dict)
+                and isinstance(history[-1], dict)
+                and set(history[-2]) == {"role", "content"}
+                and set(history[-1])
+                == {"role", "content", "memoryReceiptRef"}
+                and history[-2].get("role") == "user"
+                and clean_text(str(history[-2].get("content") or ""))
+                == clean_text(user_text)
+                and history[-1].get("role") == "assistant"
+                and clean_text(str(history[-1].get("content") or ""))
+                == clean_text(answer)
+                and history[-1].get("memoryReceiptRef") == reply_receipt
+            )
+            if self.turn_ids.get(resolved) != complete_turn_id:
+                raise ValueError("conversation_history_turn_mismatch")
+            if exact_pair_tail:
+                return
+            if not exact_user_tail:
+                raise ValueError("conversation_history_turn_mismatch")
+        else:
+            rows.append({"role": "user", "content": clean_text(user_text)})
         if answer is not None:
             rows.append(
                 {

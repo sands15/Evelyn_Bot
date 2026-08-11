@@ -1,7 +1,7 @@
 # Conversation Continuity Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-12 KST
 
 ## Purpose
 
@@ -31,16 +31,26 @@ Last reviewed: 2026-07-31 KST
 취급하지 않는다. Discord voice connection 부재, 빈 최종 답변, LLM/TTS 전달 실패와
 Local Bridge의 `failed|partial|cancelled` software-playback ACK에 다음 경계를 적용한다.
 
-- 사용자 발화만 history에 한 번 추가하고 존재하지 않는 assistant 답변은 만들지
-  않는다. 따라서 복구된 history는 `user` row로 끝날 수 있다.
-- 세션의 마지막 speaker를 `user`로 유지하고 room owner를 보존한 뒤 같은 durable
-  continuity commit 계약으로 즉시 checkpoint한다.
+- Discord voice는 final STT와 reply gate가 수락한 exact current turn을 먼저
+  user-only history로 만들고 durable continuity receipt를 요구한다. receipt가
+  반환되기 전에는 room owner·TurnScope·LLM·TTS·playback을 시작하지 않으며,
+  commit 실패는 고정 `conversation_continuity_commit_failed`로 닫는다.
+- 같은 current turn ID와 정규화된 exact user-only tail을 다시 시작하면 history를
+  바꾸지 않는다. 다른 turn ID는 같은 문장이어도 별도 user row를 시작하고,
+  user-only 시작 단계에서 같은 current turn ID의 다른 tail 또는 assistant로 이미
+  완료된 tail은
+  `conversation_history_turn_mismatch`로 거부한다. 이 중복 방지는 history mutation에만
+  적용하며 continuity generation이나 외부 side effect의 exactly-once를 뜻하지 않는다.
+- 정상 완료는 같은 current turn의 exact user-only tail에 assistant와 receipt만 붙인다.
+  exact completed pair의 재호출은 history를 다시 쓰지 않고, 전달 실패나 취소는
+  존재하지 않는 assistant를 만들지 않은 채 user-only tail을 유지한다. 취소 신호는
+  일반 오류로 삼키지 않고 그대로 전파한다.
+- durable receipt 반환 직후 process가 종료돼도 새 process는 exact user-only 문맥만
+  복구한다. 복구 자체가 LLM·TTS·playback을 자동 재실행하거나 assistant를 합성하지
+  않는다. receipt 이전 입력에 대한 hard-exit 보장은 하지 않는다.
 - Local Bridge는 ingress의 exact `turnId`와 assistant hash를 먼저 검증하고 accepted
   user row만 Fast Control checkpoint에 commit한 뒤 실패 journal을 삭제한다. commit 뒤
   삭제가 실패하면 exact turn과 마지막 user row를 재시작 증거로 사용해 중복 없이 끝낸다.
-- 같은 turn finalizer가 중복 호출돼도 process-local turn metrics의
-  `unanswered_voice_turn_recorded` 표식으로 history mutation과 commit을 한 번만
-  수행한다.
 - 전달되지 않은 답변을 기억으로 쓰거나 cognitive/search follow-up을 시작하지
   않는다. 다음 정상 턴은 보존된 사용자 발화를 문맥으로 받아 관계를 이어간다.
 - Main과 Fast Control의 최종 prompt 경계는 최근 non-empty conversational row가
@@ -579,6 +589,9 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   경로의 전달·기록·commit 순서
 - Local Bridge playback 실패의 exact user-only checkpoint, journal 삭제 재시도와
   fresh restart 뒤 미응답 user tail 복구
+- Discord voice 수락 turn의 pre-delivery user-only commit, commit 실패 시 downstream
+  0회, current turn/tail completion과 history 중복 방지, 취소 보존, receipt 직후
+  `os._exit` fresh restore 및 Main prompt 단일 user 투영
 - Discord 명령 19개와 권한 거부 응답의 단일 post-delivery owner,
   전송 실패 시 무기록, Minecraft 중복 commit 방지
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록

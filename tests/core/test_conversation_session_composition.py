@@ -274,25 +274,28 @@ class ConversationSessionCompositionTests(unittest.TestCase):
 
         mismatches = []
         additive_keyword_defaults = {
-            "begin_user_text_turn": ("turn_id", "None"),
+            "begin_user_text_turn": (("turn_id", "None"),),
             "finish_assistant_text_turn": (
-                "memory_receipt",
-                "None",
+                ("memory_receipt", "None"),
             ),
-            "append_history": ("memory_receipt", "None"),
+            "append_history": (
+                ("memory_receipt", "None"),
+                ("complete_turn_id", "None"),
+            ),
         }
         for old_name, new_name in mapping.items():
             old_signature = signature(old_functions[old_name])
             new_signature = signature(new_methods[new_name], method=True)
             comparable_signature = new_signature
             if old_name in additive_keyword_defaults:
+                additions = additive_keyword_defaults[old_name]
                 self.assertEqual(
-                    new_signature[4][-1],
-                    additive_keyword_defaults[old_name],
+                    tuple(new_signature[4][-len(additions):]),
+                    additions,
                 )
                 comparable_signature = (
                     *new_signature[:4],
-                    new_signature[4][:-1],
+                    new_signature[4][:-len(additions)],
                     new_signature[5],
                 )
             if old_signature != comparable_signature:

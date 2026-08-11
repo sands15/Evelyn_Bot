@@ -6,6 +6,7 @@ from typing import Any, Callable, MutableMapping
 from .discord_session_policy import DiscordRoomSessionPolicy
 from .session_turn_runtime import (
     append_history_from_runtime,
+    begin_user_only_turn_from_runtime,
     begin_user_text_turn_from_runtime,
     build_topic_id_from_runtime,
     current_turn_id_from_runtime,
@@ -96,6 +97,26 @@ class ConversationSessionComposition:
             guild_id=guild_id,
             user_id=user_id,
             turn_id=turn_id,
+            deps=self.deps.session(),
+        )
+
+    def begin_user_only_turn(
+        self,
+        session_key: str,
+        user_text: str,
+        *,
+        turn_id: str,
+        user_id: int | None,
+        ttl_sec: float,
+        topic_id: str,
+    ) -> str:
+        return begin_user_only_turn_from_runtime(
+            session_key,
+            user_text,
+            turn_id=turn_id,
+            user_id=user_id,
+            ttl_sec=ttl_sec,
+            topic_id=topic_id,
             deps=self.deps.session(),
         )
 
@@ -316,10 +337,16 @@ class ConversationSessionComposition:
         *,
         guild_id: int | None = None,
         memory_receipt: Any = None,
+        complete_turn_id: str | None = None,
     ) -> None:
         receipt_kwargs = (
             {"memory_receipt": memory_receipt}
             if memory_receipt is not None
+            else {}
+        )
+        completion_kwargs = (
+            {"complete_turn_id": complete_turn_id}
+            if complete_turn_id is not None
             else {}
         )
         append_history_from_runtime(
@@ -328,6 +355,7 @@ class ConversationSessionComposition:
             answer,
             guild_id=guild_id,
             **receipt_kwargs,
+            **completion_kwargs,
             deps=self.deps.session(),
         )
 

@@ -216,6 +216,140 @@ class SessionMemoryStateTests(unittest.TestCase):
             ],
         )
 
+    def test_user_only_turn_start_and_completion_are_idempotent(self) -> None:
+        store = make_store()
+        session_key = "guild:1:voice:2:user:3"
+        receipt = not_used_memory_receipt_ref()
+
+        for _ in range(2):
+            store.begin_user_only_turn(
+                session_key,
+                "같은 부탁",
+                turn_id="turn-1",
+                system_prompt="system",
+                max_history_items=10,
+                user_id=3,
+                ttl_sec=30.0,
+                topic_id="topic-1",
+                active_conversation_awaiting_reply_sec=120.0,
+                now_monotonic=10.0,
+            )
+        self.assertEqual(
+            [row["role"] for row in store.histories[session_key]],
+            ["system", "user"],
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "conversation_history_turn_mismatch",
+        ):
+            store.begin_user_only_turn(
+                session_key,
+                "다른 부탁",
+                turn_id="turn-1",
+                system_prompt="system",
+                max_history_items=10,
+                user_id=3,
+                ttl_sec=30.0,
+                topic_id="topic-1",
+                active_conversation_awaiting_reply_sec=120.0,
+            )
+
+        for _ in range(2):
+            store.append_history(
+                session_key,
+                "같은 부탁",
+                "완료했어",
+                system_prompt="system",
+                max_history_items=10,
+                memory_receipt=receipt,
+                complete_turn_id="turn-1",
+            )
+        self.assertEqual(
+            [row["role"] for row in store.histories[session_key]],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(
+            store.histories[session_key][-1]["memoryReceiptRef"],
+            receipt,
+        )
+        completed = list(store.histories[session_key])
+        for answer, completion_receipt in (
+            ("다른 응답", receipt),
+            ("완료했어", unattributed_memory_receipt_ref()),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "conversation_history_turn_mismatch",
+            ):
+                store.append_history(
+                    session_key,
+                    "같은 부탁",
+                    answer,
+                    system_prompt="system",
+                    max_history_items=10,
+                    memory_receipt=completion_receipt,
+                    complete_turn_id="turn-1",
+                )
+        self.assertEqual(store.histories[session_key], completed)
+
+        for row_index in (-2, -1):
+            with self.subTest(malformed_row=row_index):
+                row = store.histories[session_key][row_index]
+                row["unexpectedField"] = "malformed"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "conversation_history_turn_mismatch",
+                ):
+                    store.append_history(
+                        session_key,
+                        "같은 부탁",
+                        "완료했어",
+                        system_prompt="system",
+                        max_history_items=10,
+                        memory_receipt=receipt,
+                        complete_turn_id="turn-1",
+                    )
+                self.assertEqual(row["unexpectedField"], "malformed")
+                del row["unexpectedField"]
+
+    def test_user_only_turn_uses_turn_id_not_text_for_deduplication(self) -> None:
+        store = make_store()
+        session_key = "guild:1:voice:2:user:3"
+
+        for turn_id, now_monotonic in (("turn-1", 10.0), ("turn-2", 20.0)):
+            store.begin_user_only_turn(
+                session_key,
+                "같은 부탁",
+                turn_id=turn_id,
+                system_prompt="system",
+                max_history_items=10,
+                user_id=3,
+                ttl_sec=30.0,
+                topic_id=turn_id,
+                active_conversation_awaiting_reply_sec=120.0,
+                now_monotonic=now_monotonic,
+            )
+        self.assertEqual(
+            [row["role"] for row in store.histories[session_key]],
+            ["system", "user", "user"],
+        )
+
+        before = list(store.histories[session_key])
+        with self.assertRaisesRegex(
+            ValueError,
+            "conversation_history_turn_mismatch",
+        ):
+            store.append_history(
+                session_key,
+                "같은 부탁",
+                "오래된 응답",
+                system_prompt="system",
+                max_history_items=10,
+                memory_receipt=not_used_memory_receipt_ref(),
+                complete_turn_id="turn-1",
+            )
+        self.assertEqual(store.histories[session_key], before)
+
     def test_session_state_lifecycle_mutates_backing_maps(self) -> None:
         store = make_store()
 
