@@ -216,14 +216,17 @@ class ControlPageChatTests(unittest.TestCase):
         function_source = self.html[command_start:command_end]
         script = "\n".join(
             (
-                "let scrolls = 0;",
-                "let focuses = 0;",
+                "const events = [];",
                 "let lastControlPanelCommandId = 5;",
                 "let controlPanelCommandCursorReady = true;",
                 'let controlPanelCommandGeneration = "old";',
+                "const drawer = {classList: {add(name) { events.push(name); }}};",
                 "const document = {getElementById(id) {",
                 "  if (id !== 'voiceValidationStartButton') return null;",
-                "  return {scrollIntoView() { scrolls += 1; }, focus() { focuses += 1; }};",
+                "  return {",
+                "    scrollIntoView() { events.push('scroll'); },",
+                "    focus() { events.push('focus'); },",
+                "  };",
                 "}};",
                 "function toggleMemoryWindow() { process.exit(2); }",
                 function_source,
@@ -232,7 +235,9 @@ class ControlPageChatTests(unittest.TestCase):
                 "]}};",
                 "applyControlPanelCommands(restarted);",
                 "applyControlPanelCommands(restarted);",
-                "if (scrolls !== 1 || focuses !== 1) process.exit(1);",
+                "if (JSON.stringify(events) !== JSON.stringify(['open', 'scroll', 'focus'])) {",
+                "  process.exit(1);",
+                "}",
             )
         )
         result = subprocess.run(

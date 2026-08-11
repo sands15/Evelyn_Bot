@@ -61,6 +61,7 @@ class ControlPageVoiceValidationTests(unittest.TestCase):
         source = HTML.read_text(encoding="utf-8")
 
         self.assertIn('panel === "voice_validation"', source)
+        self.assertIn('drawer.classList.add("open")', source)
         self.assertIn('getElementById("voiceValidationStartButton")', source)
         self.assertIn("target.scrollIntoView", source)
         self.assertIn("controlPanelCommandGeneration", source)

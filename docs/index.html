@@ -3856,6 +3856,7 @@
       const panel = String(command.panel || "");
       const action = String(command.action || "").toLowerCase();
       if (panel === "voice_validation" && action === "open") {
+        drawer.classList.add("open");
         const target = document.getElementById("voiceValidationStartButton");
         if (target) {
           target.scrollIntoView({ behavior: "smooth", block: "center" });

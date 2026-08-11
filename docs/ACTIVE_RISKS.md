@@ -574,7 +574,8 @@ validation confirm/retry/abort도 같은 app lock에서 terminal 전환과 exact
 직렬화한다. 최신 preview만 정확한 validation 세대에서 apply할 수 있고, unbound
 동의는 canonical idle만 허용하므로 idle ON 뒤 Discord-only 시작도 OFF로 돌아간다.
 일반 `/mic on`은 이 권한 경계를 유지하면서 Control Page의 검증 시작·청취 동의
-영역을 열고 포커스한다. capture-ready와 authenticated watchdog, durable consent/
+영역이 들어 있는 오른쪽 상태 drawer를 먼저 열고 버튼을 화면에 표시·포커스한다.
+capture-ready와 authenticated watchdog, durable consent/
 host-lease fence가 모두 current일 때만 이미 ON으로 인정한다. panel command에는
 process generation을 붙여 Bot API 재시작 뒤 ID 재사용도 구분한다.
 mutation I/O 예외는 고정 503과 즉시 recovery/OFF로 닫힌다. Supervisor의 개별

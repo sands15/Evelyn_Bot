@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 ---
 
 # Evelyn — Now
@@ -54,7 +54,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - Windows venv launcher PID와 실제 Bridge PID가 달라 Supervisor readiness가
   실패하던 문제를 실제 base Python 직접 소유 방식으로 수정했다. Supervisor가
   소유한 PID와 서명 상태의 Bridge PID가 일치하고 TTS warmup도 완료됐다.
-- Local Voice는 단일 capture owner, durable claim·consent fence로 재시작 경쟁을 막고, `/mic on`은 검증·청취 동의 영역을 열며 current watchdog/fence가 증명된 캡처에만 재동의를 요구하지 않는다.
+- Local Voice는 단일 capture owner, durable claim·consent fence로 재시작 경쟁을 막고, `/mic on`은 오른쪽 상태 drawer를 먼저 열어 검증·청취 동의 버튼을 표시·포커스하며 current watchdog/fence가 증명된 캡처에만 재동의를 요구하지 않는다. 실행 중 Control Page에서도 drawer·버튼 표시를 확인했다.
   Local Bridge 재생 실패는 user-only로 잇고 Discord partial checkpoint는 assistant/receipt/state만 복구해 TTL을 보존한다.
 - validation GET은 현재 consent를 반환하고 local mic capture·speaker verification probe/enrollment·Opus/STT startup·LLM warmup body·Control Page welcome LLM non-200 body·Bridge·TTS warmup/control·Control Page server-start·router/tool-router, Discord playback trace·voice connect retry·voice validation observer·voice last-channel state save·Minecraft snapshot, cognitive refresh·memory mirror·summary·proactive question promotion·vault maintenance·self-identity queue와 Main/Fast failed-tool·vision metrics/watch는 예외 원문을 가린다. Runtime Health probe도 timeout을 지킨다.
   Discord stale voice client는 강제 정리 뒤 표준 연결로 복구하고, 검색 복구·playback timeout·무재생 거부·late-turn fence가 stale 완료를 막는다.
@@ -77,4 +77,4 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - [[ACTIVE_RISKS]] — 남은 위험과 검증 공백
 - [[DOCUMENTATION_INDEX]] — 문서 권위와 탐색 경로
 - [[02_DECISIONS]] — 지속할 결정과 근거
-- [[worklog/2026-08-09]] — 당일 구현·검증 근거
+- [[worklog/2026-08-12]] — 당일 구현·검증 근거

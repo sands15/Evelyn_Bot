@@ -2279,7 +2279,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 ## 2026-08-11 Local mic 안내와 Fast Control 텍스트 projection
 
 - 일반 `/mic on`은 validation 전용 청취 동의를 우회하지 않는다. 대신 Control Page의
-  음성 검증 시작·청취 동의 영역을 열고 포커스한다. capture-ready와 authenticated
+  오른쪽 상태 drawer를 먼저 열고 음성 검증 시작·청취 동의 영역을 화면에 표시한 뒤
+  포커스한다. capture-ready와 authenticated
   watchdog, durable consent/host-lease fence가 모두 current인 경우에만 현재 ON 상태를
   알린다. Bot API process generation이 바뀌면 브라우저 panel-command cursor를 초기화해
   재시작 뒤 작은 command ID도 적용한다.
@@ -2290,5 +2291,6 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   못한 receipt를 가리는 기존 fail-closed 필터는 완화하지 않았다.
 - 실행 중 artifact를 content-free field로 확인했을 때 최근 turn은 assistant text와
   playback/continuity 완료 증거가 있었지만 일부 receipt만 `unattributed`였고, Local Bridge는
-  장치 오류 없이 mic OFF였다. 서비스·마이크·스피커는 재기동하지 않았으므로 수정 후
-  화면·청취 동작은 다음 사용자 실사용에서 확인한다.
+  장치 오류 없이 mic OFF였다. 실행 중 Control Page를 새로고침해 drawer가 열리고 검증 시작
+  버튼이 보이며 포커스되는 것까지 확인했다. 서비스·마이크·스피커는 재기동하지 않았고
+  실제 동의·청취 동작은 다음 사용자 실사용에서 확인한다.
