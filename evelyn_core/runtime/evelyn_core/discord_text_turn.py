@@ -24,6 +24,7 @@ from .memory_confirmation_contract import (
 )
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_metrics,
+    not_used_memory_receipt_ref,
 )
 from .turn_lifecycle import TurnScope
 
@@ -384,6 +385,7 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         answer_text: str,
         final_text: str,
         metrics: dict[str, Any],
+        response_memory_ref: Any = None,
     ) -> None:
         nonlocal text_metrics
         nonlocal ingress_response_bound
@@ -396,7 +398,11 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             or deps.strip_omnivoice_tags(str(answer_text or "")).strip()
             or str(answer_text or "").strip()
         )
-        memory_ref = memory_receipt_ref_from_metrics(metrics)
+        memory_ref = (
+            response_memory_ref
+            if response_memory_ref is not None
+            else memory_receipt_ref_from_metrics(metrics)
+        )
         await asyncio.to_thread(
             deps.mark_ingress_response_ready,
             ingress_entry_id,
@@ -576,6 +582,9 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         answer_text=memory_command_reply,
                         final_text=memory_command_reply,
                         metrics=text_metrics,
+                        response_memory_ref=(
+                            not_used_memory_receipt_ref()
+                        ),
                     )
                     try:
                         await message.channel.send(memory_command_reply)

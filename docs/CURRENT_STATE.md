@@ -161,6 +161,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     Minecraft의 이전 수동 기록도 제거해 이중 commit을 막는다.
     이 응답은 저장 기억을 사용하지 않은 `not_used` receipt로 기록되어 공용
     history filter 뒤에도 assistant 완료 행이 남고 미응답 user tail로 오인되지 않는다.
+  - Discord text ingress가 직접 처리하는 명시적 기억 저장 결과 답변도 memory-write
+    receipt와 응답 의존 receipt를 분리한다. exact `not_used` receipt가 response-ready,
+    assistant history, terminal commit과 ingress completion에 동일하게 전달되므로 공용
+    history filter가 저장 결과 답변을 미귀속 행으로 제거하지 않는다.
   - 실제 Control Page가 호출하는 standalone Bot API도 더 이상
     process-local `CHAT_MESSAGES`만 사용하지 않는다. 별도 single-writer
     `fast_control_continuity` v2 chain에 일반·stream·background의 정상·고정

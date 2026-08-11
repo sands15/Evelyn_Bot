@@ -24,6 +24,7 @@ from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
     ConversationIngressRecoveryJournal,
 )
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
     unattributed_memory_receipt_ref,
 )
 from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
@@ -275,6 +276,7 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
     def test_explicit_memory_confirmation_bypasses_llm_and_keeps_continuity(self) -> None:
         calls: list[tuple[str, object]] = []
         summaries: list[dict] = []
+        response_receipts: list[tuple[str, object]] = []
         receipt = {
             "schema": "memory.user-confirmation.v1",
             "state": "stored",
@@ -301,6 +303,26 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             log_voice_bottleneck_summary=(
                 lambda metrics, **_kwargs: summaries.append(
                     metrics
+                )
+            ),
+            mark_ingress_response_ready=(
+                lambda *_args, **kwargs: response_receipts.append(
+                    ("ready", kwargs["memory_receipt_ref"])
+                )
+            ),
+            finish_assistant_text_turn=(
+                lambda *_args, **kwargs: response_receipts.append(
+                    ("history", kwargs["memory_receipt"])
+                )
+            ),
+            begin_ingress_terminal_commit=(
+                lambda *_args, **kwargs: response_receipts.append(
+                    ("terminal", kwargs["memory_receipt_ref"])
+                )
+            ),
+            complete_ingress=(
+                lambda *_args, **kwargs: response_receipts.append(
+                    ("complete", kwargs["memory_receipt_ref"])
                 )
             ),
         )
@@ -351,6 +373,16 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
                 "reason"
             ],
             "explicit_user_confirmation",
+        )
+        expected_memory_ref = not_used_memory_receipt_ref()
+        self.assertEqual(
+            response_receipts,
+            [
+                ("ready", expected_memory_ref),
+                ("history", expected_memory_ref),
+                ("terminal", expected_memory_ref),
+                ("complete", expected_memory_ref),
+            ],
         )
         execute.assert_called_once_with(
             "/remember 나는 비 오는 날 산책을 좋아해",
