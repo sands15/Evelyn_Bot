@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
+from .discord_delivery import send_discord_text
 from .room_session_state import (
     clear_room_owner,
     is_room_owner_active,
@@ -13,7 +14,7 @@ from .room_session_state import (
     set_room_owner,
     set_room_reply_in_progress,
 )
-from .text import clean_text, is_user_echo_answer
+from .text import clean_text, is_user_echo_answer, visible_text as render_visible_text
 from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
     is_explicit_memory_confirmation_command,
@@ -25,6 +26,7 @@ from .conversation_memory_receipt import (
 from .memory_exposure import (
     MemoryExposurePosition,
     current_memory_exposure_position,
+    memory_exposure_guard,
 )
 from .voice_reply_side_effects import bind_voice_reply_memory_boundary
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
@@ -199,6 +201,7 @@ class VoiceTranscriptReplyDeps:
     detach_task: Callable[[Any, Any], None]
     clear_room_turn_scope: Callable[[str | None, Any], None]
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None
+    record_runtime_error: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -806,7 +809,7 @@ def finalize_delivered_voice_reply(
     log_voice_stage: Callable[..., Any],
     delivery_succeeded: bool = True,
     failure_code: str = "",
-) -> None:
+) -> MemoryExposurePosition | None:
     memory_exposure_position: MemoryExposurePosition | None = None
     memory_receipt: dict[str, Any] | None = None
     if delivery_succeeded:
@@ -859,6 +862,7 @@ def finalize_delivered_voice_reply(
             else f"failure_code={failure_code or 'voice_delivery_failed'}"
         ),
     )
+    return memory_exposure_position
 
 
 def get_room_reply_lock(
@@ -881,10 +885,7 @@ def prepare_voice_reply_delivery_runtime(
 ) -> VoiceReplyDeliveryRuntime:
     async def on_final_answer(answer_text: str) -> None:
         visible_answer = visible_text(answer_text)
-        print_fn(
-            f"💬 [Evelyn] "
-            f"{_observability_text(visible_answer, metrics)}"
-        )
+        print_fn(f"💬 [Evelyn] chars={len(visible_answer)}")
 
     def report_waiting_on_lock(reply: VoiceReplyRequest) -> None:
         print_fn(
@@ -1016,6 +1017,7 @@ async def run_locked_voice_reply_delivery(
     report_waiting_on_lock: Callable[[VoiceReplyRequest], None] | None,
     report_delivery_error: Callable[[Exception], None],
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
+    record_runtime_error: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     if lock.locked():
         if report_waiting_on_lock is not None:
@@ -1066,6 +1068,7 @@ async def run_locked_voice_reply_delivery(
                 failure_code="voice_connection_unavailable",
             )
             return None
+        playback_channel = getattr(vc, "channel", None)
 
         delivery_result = await deliver_voice_reply(
             voice_reply=voice_reply,
@@ -1132,7 +1135,7 @@ async def run_locked_voice_reply_delivery(
             )
             return None
 
-        finalize_delivered_voice_reply(
+        delivery_exposure_position = finalize_delivered_voice_reply(
             guild_id=guild_id,
             member=member,
             session_key=session_key,
@@ -1150,6 +1153,52 @@ async def run_locked_voice_reply_delivery(
             finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
             log_voice_stage=log_voice_stage,
         )
+        if not _validation_bound(metrics):
+            projected_text = render_visible_text(
+                delivery_result.plain_answer_text
+            )
+            raise_if_cancelled = getattr(
+                turn_scope,
+                "raise_if_cancelled",
+                None,
+            )
+            if callable(raise_if_cancelled):
+                raise_if_cancelled()
+            try:
+                current_vc = get_voice_client()
+                if (
+                    projected_text
+                    and playback_channel is not None
+                    and current_vc is vc
+                    and getattr(current_vc, "channel", None)
+                    is playback_channel
+                ):
+                    with memory_exposure_guard(
+                        expected_position=delivery_exposure_position,
+                        required=(delivery_exposure_position is not None),
+                    ):
+                        await send_discord_text(
+                            playback_channel,
+                            projected_text,
+                        )
+            except Exception as exc:
+                if record_runtime_error is not None:
+                    try:
+                        record_runtime_error(
+                            "discord_voice_text_delivery_failed",
+                            exc,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    record_voice_pipeline_failure(
+                        "discord_voice_text_delivery_failed",
+                        _observability_error(exc, metrics),
+                        metrics,
+                        stage="discord_voice_text_delivery",
+                    )
+                except Exception:
+                    pass
         return delivery_result
 
 
@@ -1181,6 +1230,7 @@ async def execute_accepted_voice_reply(
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
+    record_runtime_error: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     try:
         return await run_locked_voice_reply_delivery(
@@ -1210,6 +1260,7 @@ async def execute_accepted_voice_reply(
             report_waiting_on_lock=delivery_runtime.report_waiting_on_lock,
             report_delivery_error=delivery_runtime.report_delivery_error,
             log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+            record_runtime_error=record_runtime_error,
         )
     finally:
         finish_voice_reply_execution(
@@ -1275,6 +1326,7 @@ async def prepare_and_execute_accepted_voice_reply(
     clear_room_turn_scope: Callable[[str | None, Any], None],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
+    record_runtime_error: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     delivery_runtime = prepare_accepted_voice_reply_delivery_runtime(
         session_key=session_key,
@@ -1336,6 +1388,7 @@ async def prepare_and_execute_accepted_voice_reply(
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        record_runtime_error=record_runtime_error,
     )
 
 
@@ -1389,6 +1442,7 @@ async def handle_prepared_voice_reply(
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
+    record_runtime_error: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     gate_mode = reply_prep.gate_mode
     if not reply_prep.accepted or gate_mode is None or reply_prep.voice_reply is None:
@@ -1449,6 +1503,7 @@ async def handle_prepared_voice_reply(
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        record_runtime_error=record_runtime_error,
     )
 
 
@@ -1517,6 +1572,7 @@ async def process_voice_reply_from_transcript(
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
+    record_runtime_error: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     active_speaker_user_id = update_active_speaker_for_voice_reply(
         room_session_key=room_session_key,
@@ -1600,6 +1656,7 @@ async def process_voice_reply_from_transcript(
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        record_runtime_error=record_runtime_error,
     )
 
 
@@ -1674,6 +1731,7 @@ async def process_voice_reply_from_transcript_context(
         get_room_turn_scope=deps.get_room_turn_scope,
         detach_task=deps.detach_task,
         clear_room_turn_scope=deps.clear_room_turn_scope,
+        record_runtime_error=deps.record_runtime_error,
     )
 
 

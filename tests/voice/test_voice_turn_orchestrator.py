@@ -2,9 +2,11 @@
 import asyncio
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 
@@ -20,10 +22,12 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnRequest,
     accept_voice_reply_execution,
     prepare_and_execute_accepted_voice_reply,
+    prepare_voice_reply_delivery_runtime,
     prepare_voice_reply_for_delivery,
     run_locked_voice_reply_delivery,
 )
 from evelyn_core.tts_playback import play_audio_source  # noqa: E402
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
 from evelyn_core.session_continuity import (  # noqa: E402
     SessionContinuityCheckpoint,
 )
@@ -365,6 +369,280 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ["system", "user"],
         )
         self.assertEqual(restored_store.turn_ids["session-1"], "turn-1")
+
+    async def test_discord_voice_projects_text_once_after_audio_and_commit(
+        self,
+    ) -> None:
+        answer = "[답변] 보이는 답변"
+        private_error = "PRIVATE_DISCORD_TEXT_ERROR_C:/secret"
+
+        async def run_case(
+            *,
+            ingress_source: str = "discord_voice",
+            validation_bound: bool = False,
+            move_channel: bool = False,
+            replace_client: bool = False,
+            send_fails: bool = False,
+            send_cancelled: bool = False,
+            local_output: bool = False,
+            cancel_scope: bool = False,
+            runtime_observer_fails: bool = False,
+            exposure_guard_fails: bool = False,
+        ) -> tuple[Any, list[Any], list[str], list[Any], dict[str, Any]]:
+            events: list[Any] = []
+            logs: list[str] = []
+            failures: list[Any] = []
+
+            class FakeChannel:
+                async def send(self, text: str) -> object:
+                    events.append(("text", text))
+                    if send_cancelled:
+                        raise asyncio.CancelledError()
+                    if send_fails:
+                        raise RuntimeError(private_error)
+                    return object()
+
+            original_channel = FakeChannel()
+            replacement_channel = FakeChannel()
+            vc = SimpleNamespace(
+                channel=None if local_output else original_channel
+            )
+            current_voice_client = {"value": vc}
+            meta: dict[str, Any] = {
+                "accepted_turn_contract": SimpleNamespace(
+                    ingress_source=ingress_source,
+                )
+            }
+            if validation_bound:
+                meta["validation_session_id"] = "validation-1"
+            metrics: dict[str, Any] = {"meta": meta}
+            delivery_runtime = prepare_voice_reply_delivery_runtime(
+                accepted_execution=SimpleNamespace(
+                    accepted_turn_id="turn-1",
+                    turn_scope="scope",
+                    turn_task=asyncio.current_task(),
+                ),
+                room_session_key="room-1",
+                session_locks={},
+                speaker_display_name="tester",
+                visible_text=lambda text: text.removeprefix("[답변] "),
+                print_fn=lambda message: logs.append(str(message)),
+                metrics=metrics,
+            )
+            reply = VoiceReplyRequest(
+                transcript=None,
+                segment=None,
+                gate_mode="wake_entry",
+                raw_user_text="이블린",
+                prompt_user_text="이블린",
+                history_user_text="이블린",
+                wake_only_turn=True,
+                turn_type="wake_only",
+                selected_path="canned_wake_reply",
+                reply_source="canned_wake_reply",
+                topic_id="topic-1",
+            )
+
+            async def speak_answer(
+                _voice_client: Any,
+                _answer: str,
+                **_kwargs: Any,
+            ) -> None:
+                events.append("audio")
+                metrics["meta"]["playback_completed"] = True
+                if move_channel:
+                    vc.channel = replacement_channel
+                if replace_client:
+                    current_voice_client["value"] = SimpleNamespace(
+                        channel=original_channel
+                    )
+
+            def raise_if_cancelled() -> None:
+                if cancel_scope:
+                    raise asyncio.CancelledError()
+
+            turn_scope = SimpleNamespace(
+                raise_if_cancelled=raise_if_cancelled
+            )
+            runtime_status = DiscordRuntimeStatus(
+                gateway_ready=lambda: True,
+                bot_guilds=list,
+                voice_client_type=object,
+                now=lambda: 1000.0,
+            )
+
+            def record_runtime_error(kind: str, error: BaseException) -> None:
+                if runtime_observer_fails:
+                    raise OSError("PRIVATE_RUNTIME_OBSERVER_ERROR")
+                runtime_status.record_error(kind, error)
+
+            exposure_position = object()
+
+            def reject_memory_exposure_guard(**kwargs: Any) -> Any:
+                events.append(
+                    (
+                        "guard",
+                        kwargs.get("expected_position") is exposure_position,
+                        kwargs.get("required") is True,
+                    )
+                )
+                raise RuntimeError(
+                    "PRIVATE_MEMORY_EXPOSURE_ERROR_C:/secret"
+                )
+
+            guard_patch = (
+                patch(
+                    "evelyn_core.voice_orchestration.memory_exposure_guard",
+                    side_effect=reject_memory_exposure_guard,
+                )
+                if exposure_guard_fails
+                else nullcontext()
+            )
+            finalizer_patch = (
+                patch(
+                    "evelyn_core.voice_orchestration."
+                    "finalize_delivered_voice_reply",
+                    side_effect=(
+                        lambda **_kwargs: (
+                            events.append("commit") or exposure_position
+                        )
+                    ),
+                )
+                if exposure_guard_fails
+                else nullcontext()
+            )
+            try:
+                with finalizer_patch, guard_patch:
+                    result = await run_locked_voice_reply_delivery(
+                        room_session_key="room-1",
+                        lock=delivery_runtime.lock,
+                        get_voice_client=(
+                            lambda: current_voice_client["value"]
+                        ),
+                        member=SimpleNamespace(id=42, display_name="tester"),
+                        voice_reply=reply,
+                        canned_wake_reply=answer,
+                        accepted_turn_id="turn-1",
+                        session_key="session-1",
+                        guild_id=7,
+                        room_key=None,
+                        person_key=None,
+                        session_memory_key=None,
+                        metrics=metrics,
+                        turn_scope=turn_scope,
+                        segment_id=1,
+                        gate_mode="wake_entry",
+                        on_final_answer=delivery_runtime.on_final_answer,
+                        speak_answer=speak_answer,
+                        ask_llm_and_speak_streaming=(
+                            lambda *_args, **_kwargs: None
+                        ),
+                        record_voice_pipeline_failure=(
+                            lambda kind, error, _metrics, **payload: failures.append(
+                                (kind, type(error).__name__, payload)
+                            )
+                        ),
+                        finalize_voice_reply_side_effects=(
+                            lambda **_kwargs: events.append("commit")
+                        ),
+                        log_voice_stage=lambda *_args, **_kwargs: None,
+                        strip_omnivoice_tags=lambda text: text,
+                        report_waiting_on_lock=None,
+                        report_delivery_error=lambda _exc: None,
+                        record_runtime_error=record_runtime_error,
+                    )
+            except asyncio.CancelledError:
+                result = "cancelled"
+            runtime_errors = runtime_status.snapshot()
+            return result, events, logs, failures, runtime_errors
+
+        result, events, logs, failures, runtime_errors = await run_case()
+        self.assertIsNotNone(result)
+        self.assertEqual(events, ["audio", "commit", ("text", "보이는 답변")])
+        self.assertEqual(failures, [])
+        self.assertEqual(runtime_errors["errorCount"], 0)
+        self.assertTrue(any("chars=6" in log for log in logs))
+        self.assertNotIn(answer, "\n".join(logs))
+
+        result, events, logs, failures, runtime_errors = await run_case(
+            send_fails=True
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(events, ["audio", "commit", ("text", "보이는 답변")])
+        self.assertEqual(
+            failures,
+            [
+                (
+                    "discord_voice_text_delivery_failed",
+                    "RuntimeError",
+                    {"stage": "discord_voice_text_delivery"},
+                )
+            ],
+        )
+        self.assertEqual(
+            runtime_errors["lastErrorCode"],
+            "discord_voice_text_delivery_failed",
+        )
+        self.assertEqual(runtime_errors["lastErrorType"], "RuntimeError")
+        self.assertNotIn(private_error, str(runtime_errors))
+        self.assertNotIn(private_error, "\n".join(logs))
+
+        result, events, logs, failures, runtime_errors = await run_case(
+            exposure_guard_fails=True
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(events, ["audio", "commit", ("guard", True, True)])
+        self.assertEqual(failures[0][0], "discord_voice_text_delivery_failed")
+        self.assertEqual(
+            runtime_errors["lastErrorCode"],
+            "discord_voice_text_delivery_failed",
+        )
+        self.assertNotIn("PRIVATE_MEMORY_EXPOSURE_ERROR", "\n".join(logs))
+        self.assertNotIn("PRIVATE_MEMORY_EXPOSURE_ERROR", str(runtime_errors))
+
+        for kwargs in (
+            {"ingress_source": "local_mic", "local_output": True},
+            {"validation_bound": True},
+            {"move_channel": True},
+            {"replace_client": True},
+            {"cancel_scope": True},
+        ):
+            with self.subTest(**kwargs):
+                result, events, _logs, failures, runtime_errors = (
+                    await run_case(**kwargs)
+                )
+                if kwargs.get("cancel_scope"):
+                    self.assertEqual(result, "cancelled")
+                else:
+                    self.assertIsNotNone(result)
+                self.assertEqual(events, ["audio", "commit"])
+                self.assertEqual(failures, [])
+                self.assertEqual(runtime_errors["errorCount"], 0)
+
+        result, events, _logs, failures, runtime_errors = await run_case(
+            send_cancelled=True
+        )
+        self.assertEqual(result, "cancelled")
+        self.assertEqual(events, ["audio", "commit", ("text", "보이는 답변")])
+        self.assertEqual(failures, [])
+        self.assertEqual(runtime_errors["errorCount"], 0)
+
+        result, events, _logs, failures, runtime_errors = await run_case(
+            ingress_source="local_mic"
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(events, ["audio", "commit", ("text", "보이는 답변")])
+        self.assertEqual(failures, [])
+        self.assertEqual(runtime_errors["errorCount"], 0)
+
+        result, events, _logs, failures, runtime_errors = await run_case(
+            send_fails=True,
+            runtime_observer_fails=True,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(events, ["audio", "commit", ("text", "보이는 답변")])
+        self.assertEqual(failures[0][0], "discord_voice_text_delivery_failed")
+        self.assertEqual(runtime_errors["errorCount"], 0)
 
     async def test_lost_playback_callback_releases_room_lock_and_finalizes_failure(
         self,

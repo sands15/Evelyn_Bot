@@ -2367,6 +2367,27 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   3,290개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline source/test와
   subprocess crash recovery이며 실제 Discord·마이크·스피커·LLM·TTS를 기동하지 않았다.
 
+## 2026-08-12 Discord voice의 post-playback text projection
+
+- non-validation Main voice turn의 실제 playback client가 Discord channel을 가질 때,
+  audio playback과 기존 assistant/history/continuity finalization 경로가 끝난 뒤 캡처한
+  TurnScope가 취소되지 않았는지와 같은 client/channel binding을 다시 확인하고 canonical
+  visible text를 그 channel에 application-level 한 번 전송 시도한다. local-mic ingress가 실제 Discord
+  voice client로 route된 경우는 포함하고, 별도 Windows LocalIoBridge/Control Page 경로와
+  `LocalControlVoiceClient(channel=None)`는 포함하지 않는다. validation·empty·pre-send scope
+  cancellation·moved/replaced target은 전송하지 않는다. channel send 자체의 취소는 관측·
+  재시도 없이 전파하며 실제 전달 여부는 모호하다. finalizer가 반환한 canonical memory
+  exposure position이 non-null이면 send용 deletion read lease를 required로 다시 획득해
+  await 전체에 유지하고 stale exposure는 send 전에 고정 projection 실패로 닫는다.
+- text send의 일반 예외는 audio와 finalization 결과를 뒤집거나 재전송하지 않는다. shared
+  `DiscordRuntimeStatus`와 별도 voice pipeline observer에 고정
+  `discord_voice_text_delivery_failed`와 exception type만 각각 기록을 시도하며, observer
+  자체의 일반 예외도 완료된 turn을 바꾸지 않는다. 이 projection은 exactly-once, durable
+  receipt 또는 restart replay가 아니다.
+- 변경 직결 55개, voice 전체 668개(skip 5), CI-equivalent 전체 3,299개(skip 22)가
+  offline에서 통과했다. 실제 Discord channel permission·표시·지연, timeout ambiguity,
+  live memory 삭제 경합, 마이크·스피커·Docker는 검증하지 않았다.
+
 ## 2026-08-12 Control Page forced-search exact turn binding
 
 - 강제 검색은 이전 `current_turn_id`를 재사용하지 않는다. 첫 per-session critical section에서

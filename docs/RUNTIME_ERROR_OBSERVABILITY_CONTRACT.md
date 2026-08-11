@@ -170,6 +170,14 @@ exception type과 sample count만 남기며 WAV·enrollment directory 경로를 
 
 Discord 음성 pipeline snapshot도 같은 경계를 따른다.
 
+Discord-channel audio가 성공한 뒤의 text projection 또는 memory-exposure guard 예외는 shared
+`DiscordRuntimeStatus`에 고정 `discord_voice_text_delivery_failed`, exception type과
+process-lifetime count 기록을 시도한다. 같은 fixed code/type의 content-free
+`voicePipeline.lastFailure`와 turn event도 별도로 기록을 시도한다. shared status는 다음
+status projection/heartbeat에서 기존 Discord Runtime Errors source로 보일 수 있다.
+어느 observer의 일반 예외도 완료된 turn을 바꾸거나 text send를 재시도하지 않으며,
+취소 신호는 일반 오류로 기록하지 않고 그대로 전파한다.
+
 Discord last voice-channel state 저장 실패 운영 로그도
 `[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남기며 예외 메시지·경로를
 복제하지 않는다.

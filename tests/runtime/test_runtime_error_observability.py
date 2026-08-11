@@ -60,6 +60,7 @@ class RuntimeErrorCounterTests(unittest.TestCase):
             "voice_connection_unavailable",
             "voice_delivery_empty",
             "voice_delivery_failed",
+            "discord_voice_text_delivery_failed",
         ):
             snapshot = counter.record(code, RuntimeError("private"))
             self.assertEqual(snapshot["lastErrorCode"], code)

@@ -74,8 +74,16 @@ class VoiceMemberPipelineDependencyCompositionTests(unittest.TestCase):
             "finalize_transcript=finalize_voice_transcript_from_runtime",
             "run_session_gate=run_voice_session_gate_from_runtime",
             "dispatch_voice_reply=dispatch_voice_reply_from_runtime",
+            "record_runtime_error=deps.record_runtime_error",
         ):
             self.assertIn(binding, source)
+
+        main_source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "record_runtime_error=discord_runtime_status.record_error",
+            main_source,
+        )
+        self.assertIn("runtime_status=discord_runtime_status", main_source)
 
 
 if __name__ == "__main__":

@@ -418,7 +418,16 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   Minecraft handler의 이전 수동 기록은 제거해 응답당 기록·commit을 한 번으로
   제한한다.
 - 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
-  즉시 commit한다.
+  즉시 commit을 시도한다. 실제 Discord-channel playback의 text projection은 기존
+  finalization 경로가 반환된 뒤 캡처한 TurnScope가 취소되지 않았는지와 같은 playback
+  client/channel을 재검증해 canonical visible text를 한 번 보내는 별도 best-effort
+  경계다. finalizer가 판정한 memory exposure position을 재사용해 non-null이면 send용
+  deletion read lease를 required로 다시 획득하고 await 전체에 유지한다. stale exposure는
+  전송 전에 거부한다. text send 실패는 선행 audio/finalization을
+  되돌리거나 재시도하지 않는다.
+  이는 continuity receipt나
+  playback 완료 증거가 아니며 timeout의 실제 전달 여부는 모호할 수 있으므로 exactly-once,
+  delivery receipt 또는 restart replay를 보장하지 않는다.
 - Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속과
   음성 완료는 모두 같은 receipt validator를 사용한다. 자율 후속의 generation
   역시 owner의 `checkpointGeneration`에서만 가져온다.
@@ -598,6 +607,9 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - Discord voice 수락 turn의 pre-delivery user-only commit, commit 실패 시 downstream
   0회, current turn/tail completion과 history 중복 방지, 취소 보존, receipt 직후
   `os._exit` fresh restore 및 Main prompt 단일 user 투영
+- Discord-channel playback의 audio→finalization→text 순서, local-mic→Discord target 포함,
+  channel 없음·validation·pre-send scope 취소·이동·client 교체 시 무전송, send 자체 취소의
+  무관측·무재시도·ambiguity, stale memory exposure의 send 전 거부와 일반 text-send 실패 비간섭
 - Discord 명령 19개와 권한 거부 응답의 단일 post-delivery owner,
   전송 실패 시 무기록, Minecraft 중복 commit 방지
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록

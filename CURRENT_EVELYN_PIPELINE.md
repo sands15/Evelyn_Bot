@@ -351,6 +351,22 @@ answer payload
 helpers respect it, so a route can answer without voice playback when policy
 requires that.
 
+For non-validation Main voice turns whose actual playback client has a Discord
+channel, the runtime captures that exact client/channel before audio playback.
+After playback succeeds and the existing assistant/history/continuity finalizer
+returns, it checks that the captured TurnScope was not cancelled and rechecks
+the same client/channel binding, then makes one application-level `visible_text`
+send to that channel. This also covers local-mic ingress routed to a Discord
+voice client, but not the Windows Local I/O Bridge Control Page path or
+`LocalControlVoiceClient(channel=None)`.
+The finalizer's canonical memory-exposure position is reused to reacquire a
+required deletion read lease for non-null exposures across the whole text send;
+a stale exposure fails before the send starts.
+Empty, pre-send scope-cancelled, moved, replaced, and validation-bound targets
+are not sent. Cancellation raised by the channel send itself propagates without
+observer recording or retry, and its delivery remains ambiguous. An ordinary
+text-send failure does not roll back audio/finalization or trigger a retry.
+
 TTS is still a sensitive hot path. Do not change TTS internals unless a concrete
 live failure or an approved refactor phase requires it.
 

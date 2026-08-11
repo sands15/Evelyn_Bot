@@ -2234,7 +2234,10 @@ build_voice_stt_execution_deps = (
 build_voice_transcript_finalize_deps = (
     voice_transcription_dependency_composition.build_voice_transcript_finalize_deps
 )
-
+discord_runtime_status = DiscordRuntimeStatus(
+    gateway_ready=lambda: discord_gateway_connected(bot), bot_guilds=lambda: list(bot.guilds),
+    voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
+    conversation_ingress_recovery_status=conversation_ingress_composition.public_status)
 voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition(
     VoiceMemberPipelineDependencyCompositionDeps(
         is_short_followup_candidate=lambda *args, **kwargs: is_short_followup_candidate(
@@ -2277,6 +2280,7 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         record_voice_pipeline_failure=lambda *args, **kwargs: record_voice_pipeline_failure(
             *args, **kwargs
         ),
+        record_runtime_error=discord_runtime_status.record_error,
         finalize_voice_reply_side_effects=lambda *args, **kwargs: finalize_voice_reply_side_effects(
             *args, **kwargs
         ),
@@ -2399,11 +2403,7 @@ discord_app_composition = DiscordAppComposition(
             restore_last_voice_channel=restore_last_voice_channel, autonomy_enabled=AUTONOMY_ENABLED,
             text_message_handler=build_discord_text_message_handler_deps,
             log=print, recover_search_followups=partial(recover_search_followups_from_runtime, deps=build_search_followup_runtime_deps()),
-            runtime_status=DiscordRuntimeStatus(
-                gateway_ready=lambda: discord_gateway_connected(bot), bot_guilds=lambda: list(bot.guilds),
-                voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
-                conversation_ingress_recovery_status=conversation_ingress_composition.public_status,
-            ),
+            runtime_status=discord_runtime_status,
         ),
         commands=DiscordCommandCompositionDeps(
             ensure_listening_voice_client=ensure_listening_voice_client, mark_voice_manual_disconnect=mark_voice_manual_disconnect,

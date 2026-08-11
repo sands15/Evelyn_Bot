@@ -20,7 +20,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 - 실사용 로그 기반 오류 수정, Control Page Discord 모드 OFF/ON과 OmniVoice 실제 청취 검증
 - 로컬 마이크 동의 후 실제 장치 barge-in 연속성 검증
-- Discord 음성의 실제 채널 E2E 검증
+- local_mic→Discord를 포함한 Discord-channel playback 뒤 text projection 실제 채널 E2E 검증
 - Conversation Continuity와 local/Discord 음성의 장애·재시작 실환경 검증
 
 ## 최근 확인
@@ -62,7 +62,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 손상 consent/heartbeat와 Control Page crash는 exact ACK·watchdog physical OFF로 닫힌다.
 - Supervisor 복구는 목적별 최소 credential과 소유한 process handle만 사용하며 Control Page의 Discord 토글은 core를 유지한 채 `discord_bot`만 전환한다.
 - Control Page 강제 검색은 새 text turn/TurnScope와 두 짧은 critical section으로 이전 일반 턴과 stale sink를 막고, 일반·검색 TTS는 task 완료까지 scope를 유지한다.
-  Discord 자율시작의 실제 생성·cleanup·start 실패는 type-only Runtime Error로 남고 관측기·성공 응답 실패는 명령 상태를 바꾸지 않으며 cleanup/route/start 취소는 grant를 회수한다. 관련 82개·Discord I/O 133개·Runtime Errors/Health 인접 70개와 CI-equivalent 전체 3,298개(skip 22)가 통과했다. live 서비스는 기동하지 않았다.
+  Discord 자율시작의 실제 생성·cleanup·start 실패는 type-only Runtime Error로 남고 관측기·성공 응답 실패는 명령 상태를 바꾸지 않으며 cleanup/route/start 취소는 grant를 회수한다. 실제 Discord-channel playback은 audio/finalization 뒤 exact target에 visible text를 한 번 시도하고 non-null memory exposure의 send용 deletion lease를 다시 획득한다. Windows Local I/O Bridge/Control Page `/mic on`은 기존 Fast 경로로 유지하고 `LocalControlVoiceClient(channel=None)`는 이 projection 대상에서 제외한다. send 실패는 shared Discord Runtime Errors와 voice pipeline에 fixed code/type 기록을 각각 시도하며 rollback·retry하지 않는다. voice 668개(skip 5)와 CI-equivalent 전체 3,299개(skip 22)가 통과했고 live 서비스는 기동하지 않았다.
 
 ## 작업 원칙
 

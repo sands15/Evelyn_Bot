@@ -676,7 +676,11 @@ owner를 사용하고, 빈 clone stream만 재생 전 `auto`로 넘긴다. actua
 회귀는 첫 threshold 후보 블록 뒤 owner release→flush와 fresh-wake 거부·normal
 admission을 검증했다. 실제 장치의 TTS 종료 경계, echo false-accept, qualified
 interrupt, successor playback 교체와 사용자 스피커 청취, 마이크 10-turn·무음,
-Discord 채널 E2E는 아직 검증하지 않았다.
+Discord 채널 E2E는 아직 검증하지 않았다. source는 Main voice local-mic→Discord를 포함한 실제
+channel playback 뒤 exact target에 visible text를 한 번 시도하지만, 실제 channel text
+권한·표시·지연, move/reconnect, timeout delivery ambiguity와 shared Discord status heartbeat
+투영, memory 삭제 경합은 live 미검증이다. source는 non-null memory exposure position으로
+send용 deletion read lease를 다시 획득하지만 exactly-once나 restart replay를 보장하지 않는다.
 
 2026-08-09 source는 validation GET이 terminal/expired session의 동의를 철회한 뒤
 철회 전 capability를 반환하던 경합을 닫았다. session snapshot은 consent lock 안에서

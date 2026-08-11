@@ -917,7 +917,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                     "memory_receipt_ref_from_metrics",
                     return_value=receipt,
                 ):
-                    finalize_delivered_voice_reply(
+                    returned_position = finalize_delivered_voice_reply(
                         guild_id=7,
                         member=FakeMember(),
                         session_key="session-1",
@@ -944,6 +944,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             captured["memory_exposure_position"],
             position,
         )
+        self.assertIs(returned_position, position)
         self.assertEqual(captured["memory_receipt"], receipt)
 
     def test_canned_reply_cannot_inherit_prior_memory_exposure(

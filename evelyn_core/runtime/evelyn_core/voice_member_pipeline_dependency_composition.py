@@ -57,6 +57,7 @@ class VoiceMemberPipelineDependencyCompositionDeps:
     speak_answer: Callable[..., Any]
     ask_llm_and_speak_streaming: Callable[..., Any]
     record_voice_pipeline_failure: Callable[..., Any]
+    record_runtime_error: Callable[..., Any]
     finalize_voice_reply_side_effects: Callable[..., Any]
     get_room_turn_scope: Callable[..., Any]
     detach_task: Callable[..., Any]
@@ -136,6 +137,7 @@ class VoiceMemberPipelineDependencyComposition:
             speak_answer=deps.speak_answer,
             ask_llm_and_speak_streaming=deps.ask_llm_and_speak_streaming,
             record_voice_pipeline_failure=deps.record_voice_pipeline_failure,
+            record_runtime_error=deps.record_runtime_error,
             finalize_voice_reply_side_effects=deps.finalize_voice_reply_side_effects,
             strip_omnivoice_tags=strip_omnivoice_tags,
             get_room_turn_scope=deps.get_room_turn_scope,
