@@ -271,6 +271,13 @@ Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 �
 commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
 
+음성 재생 완료 경로는 exact assistant history, active follow-up과 process-local room owner
+반영, completion continuity commit 시도를 같은 memory-exposure guard 안에서 먼저 처리한 뒤
+benchmark, memory write, cognitive gating과 search follow-up을 실행한다. commit이 durable하면
+후속 선택 작업 실패가 이미 들은 assistant pair와 active follow-up checkpoint를 되돌리지
+않는다. commit 자체의 실패는 기존 고정 오류 경계를 따르며, room owner 자체의 restart 복구,
+선택적 예외 전파와 실제 장치 검증은 이 변경의 보장이 아니다.
+
 음성의 source-level 성공 판정은 playback pipeline이 명시한
 `playback_completed=false`를 거부한다. Local speaker는 single의 실제 반환값과
 streaming의 이 턴별 queued/played chunk 수를 투영하므로 부분 재생, stale validation,

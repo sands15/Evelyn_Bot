@@ -2439,3 +2439,20 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 변경 직결 집중 333개(skip 1), memory 전체 307개(skip 1), CI-equivalent 전체
   3,306개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline temp-vault/source
   tests이며 실제 Discord·Control Page·사용자 memory·Docker는 기동하거나 수정하지 않았다.
+
+## 2026-08-12 Discord voice completion commit ordering
+
+- audio playback 뒤 assistant history를 붙이고도 선택적 `schedule_memory_update`의 동기
+  raw transcript write가 실패하면 active follow-up, room owner와 completion checkpoint 전에
+  빠져나가던 순서를 actual `OSError`로 재현했다. 사용자는 답변을 들었지만 즉시 restart하면
+  선행 precommit의 user-only tail만 복구될 수 있었다.
+- 같은 memory-exposure guard 안에서 exact assistant append, session snapshot과 active TTL,
+  process-local room owner 반영, completion commit 시도를 먼저 실행한다. 기존 benchmark,
+  memory update, cognitive gating과 search follow-up은 그 뒤에 실행한다. commit이 durable하면
+  선택적 예외가 계속 전파되더라도 persisted completion pair와 active follow-up state를
+  되돌리지 않는다. commit 자체의 실패는 기존 고정 오류 경계를 유지한다.
+- 실제 `SessionStateStore`와 `SessionContinuityCheckpoint` 회귀는 memory update `OSError` 뒤
+  fresh restore에서 exact `[system, user, assistant]`와 assistant 답변을 확인했다. 변경 직결
+  17개, voice/continuity 인접 67개, voice 전체 669개(skip 5), CI-equivalent 전체
+  3,307개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제 Discord,
+  마이크, 스피커, LLM, TTS, Docker를 기동하지 않았다.

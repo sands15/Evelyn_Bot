@@ -58,6 +58,9 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     finalize_delivered_voice_reply,
 )
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
+from evelyn_core.session_continuity import (  # noqa: E402
+    SessionContinuityCheckpoint,
+)
 
 
 @dataclass(frozen=True)
@@ -240,6 +243,126 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             ["system", "user", "assistant"],
         )
         self.assertFalse(metrics["meta"]["unanswered_voice_turn_recorded"])
+
+    def test_optional_memory_failure_keeps_delivered_turn_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = SessionStateStore.create_empty()
+            store.begin_user_only_turn(
+                "session-1",
+                "계속해 줘",
+                turn_id="turn-1",
+                system_prompt="system",
+                max_history_items=12,
+                user_id=42,
+                ttl_sec=30.0,
+                topic_id="topic-1",
+                active_conversation_awaiting_reply_sec=120.0,
+            )
+            manager = SessionContinuityCheckpoint(
+                store=store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "status.json",
+                system_prompt="system",
+            )
+            manager.commit_completed_turn("session-1", "turn-1")
+            calls: list[str] = []
+
+            def append_history(*args: Any, **kwargs: Any) -> None:
+                calls.append("append_history")
+                store.append_history(
+                    *args,
+                    system_prompt="system",
+                    max_history_items=12,
+                    **kwargs,
+                )
+
+            def commit(*args: Any) -> dict[str, Any]:
+                calls.append("continuity")
+                return manager.commit_completed_turn(*args)
+
+            def fail_memory_update(*_args: Any, **_kwargs: Any) -> None:
+                calls.append("memory_update")
+                raise OSError("optional_memory_write_failed")
+
+            def mark_active(session_key: str, **kwargs: Any) -> None:
+                calls.append("active")
+                store.mark_active(
+                    session_key,
+                    active_conversation_awaiting_reply_sec=120.0,
+                    **kwargs,
+                )
+
+            deps = replace(
+                self._boundary_deps(index_dir=root, calls=calls),
+                append_history=append_history,
+                commit_session_continuity=commit,
+                schedule_memory_update=fail_memory_update,
+                mark_session_active=mark_active,
+                session_state_snapshot=lambda *_args, **_kwargs: {
+                    "awaiting_user_reply": False
+                },
+            )
+            metrics: dict[str, Any] = {
+                "meta": {
+                    "accepted_voice_turn_precommitted": True,
+                    "unanswered_voice_turn_recorded": True,
+                }
+            }
+
+            with self.assertRaisesRegex(
+                OSError,
+                "optional_memory_write_failed",
+            ):
+                finalize_voice_reply_side_effects_from_runtime(
+                    guild_id=7,
+                    member=FakeMember(),
+                    session_key="session-1",
+                    room_session_key="room-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    voice_reply=FakeVoiceReply(
+                        history_user_text="계속해 줘"
+                    ),
+                    plain_answer="완료했어",
+                    metrics=metrics,
+                    turn_scope="scope",
+                    accepted_turn_id="turn-1",
+                    segment_id=1,
+                    memory_exposure_position=None,
+                    memory_receipt=not_used_memory_receipt_ref(),
+                    deps=deps,
+                )
+
+            self.assertEqual(
+                [
+                    name
+                    for name in calls
+                    if name
+                    in {"active", "owner", "continuity", "memory_update"}
+                ],
+                ["active", "owner", "continuity", "memory_update"],
+            )
+            restored = SessionStateStore.create_empty()
+            restore_status = SessionContinuityCheckpoint(
+                store=restored,
+                checkpoint_path=root / "active.json",
+                status_path=root / "restored-status.json",
+                system_prompt="system",
+            ).restore()
+
+        self.assertEqual(restore_status["state"], "restored")
+        self.assertEqual(
+            [row["role"] for row in restored.histories["session-1"]],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(
+            restored.histories["session-1"][-1]["content"],
+            "완료했어",
+        )
+        self.assertEqual(restored.last_speaker["session-1"], "assistant")
+        self.assertEqual(restored.active_user_ids["session-1"], 42)
 
     def test_precommitted_failure_keeps_the_existing_user_tail(self) -> None:
         store = SessionStateStore.create_empty()

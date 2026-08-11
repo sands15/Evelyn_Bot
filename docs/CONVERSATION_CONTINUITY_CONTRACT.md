@@ -417,8 +417,12 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   command 실패로 바꾸지 않고 고정 event와 exception type만 기록한다.
   Minecraft handler의 이전 수동 기록은 제거해 응답당 기록·commit을 한 번으로
   제한한다.
-- 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
-  즉시 commit을 시도한다. 실제 Discord-channel playback의 text projection은 기존
+- 음성 답변은 재생 완료 뒤 같은 memory-exposure guard 안에서 exact assistant history와
+  active session, process-local room owner를 먼저 반영하고 completion continuity commit을
+  선택 작업보다 먼저 시도한다. commit이 durable receipt를 반환했다면 이후 benchmark,
+  memory update, cognitive gating이나 search follow-up 실패가 이미 들은 답변을 user-only
+  restart 문맥으로 되돌리지 않는다. commit 자체의 실패는 기존 고정 오류 경계를 따르며
+  선택 작업 실행을 막는 durable gate는 아니다. 실제 Discord-channel playback의 text projection은 기존
   finalization 경로가 반환된 뒤 캡처한 TurnScope가 취소되지 않았는지와 같은 playback
   client/channel을 재검증해 canonical visible text를 한 번 보내는 별도 best-effort
   경계다. finalizer가 판정한 memory exposure position을 재사용해 non-null이면 send용

@@ -337,62 +337,6 @@ def finalize_voice_reply_side_effects_from_runtime(
                     "unanswered_voice_turn_recorded": False,
                 }
             )
-            runtime_mode = (
-                ((metrics.get("meta") or {}).get("runtime_mode"))
-                or deps.compute_runtime_mode(metrics)
-            )
-            memory_write_receipt = (metrics.get("meta") or {}).get(
-                "memory_write_receipt"
-            )
-            explicit_memory_write = (
-                is_explicit_memory_confirmation_receipt(
-                    memory_write_receipt
-                )
-            )
-            if explicit_memory_write:
-                memory_writer_decision = (
-                    explicit_memory_writer_skip_decision()
-                )
-            else:
-                deps.record_context_pipeline_benchmark(
-                    metrics=metrics,
-                    user_text=voice_reply.history_user_text,
-                    answer=plain_answer,
-                    source="voice",
-                    guild_id=guild_id,
-                    session_key=session_key,
-                )
-                memory_writer_decision = deps.schedule_memory_update(
-                    guild_id,
-                    voice_reply.history_user_text,
-                    plain_answer,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source="voice",
-                    user_speaker=getattr(member, "display_name", ""),
-                    assistant_speaker="Evelyn",
-                    session_key=session_key,
-                    turn_scope=turn_scope,
-                    runtime_mode=runtime_mode,
-                )
-            metrics.setdefault("meta", {})[
-                "memory_writer_decision"
-            ] = memory_writer_decision
-            search_requested = False
-            if not explicit_memory_write:
-                search_requested = bool(
-                    deps.apply_ask_gating(
-                        deps.read_cached_cognitive_state(
-                            guild_id,
-                            room_key=room_key,
-                            person_key=person_key,
-                            session_memory_key=session_memory_key,
-                        ),
-                        source="voice",
-                    ).get("action")
-                    == "search_then_answer"
-                )
             awaiting_reply = bool(
                 deps.session_state_snapshot(session_key).get(
                     "awaiting_user_reply"
@@ -456,6 +400,62 @@ def finalize_voice_reply_side_effects_from_runtime(
                 deps.log(
                     "[VOICE TURN] continuity_commit_failed errorType=",
                     type(exc).__name__,
+                )
+            runtime_mode = (
+                ((metrics.get("meta") or {}).get("runtime_mode"))
+                or deps.compute_runtime_mode(metrics)
+            )
+            memory_write_receipt = (metrics.get("meta") or {}).get(
+                "memory_write_receipt"
+            )
+            explicit_memory_write = (
+                is_explicit_memory_confirmation_receipt(
+                    memory_write_receipt
+                )
+            )
+            if explicit_memory_write:
+                memory_writer_decision = (
+                    explicit_memory_writer_skip_decision()
+                )
+            else:
+                deps.record_context_pipeline_benchmark(
+                    metrics=metrics,
+                    user_text=voice_reply.history_user_text,
+                    answer=plain_answer,
+                    source="voice",
+                    guild_id=guild_id,
+                    session_key=session_key,
+                )
+                memory_writer_decision = deps.schedule_memory_update(
+                    guild_id,
+                    voice_reply.history_user_text,
+                    plain_answer,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    source="voice",
+                    user_speaker=getattr(member, "display_name", ""),
+                    assistant_speaker="Evelyn",
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                    runtime_mode=runtime_mode,
+                )
+            metrics.setdefault("meta", {})[
+                "memory_writer_decision"
+            ] = memory_writer_decision
+            search_requested = False
+            if not explicit_memory_write:
+                search_requested = bool(
+                    deps.apply_ask_gating(
+                        deps.read_cached_cognitive_state(
+                            guild_id,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                        ),
+                        source="voice",
+                    ).get("action")
+                    == "search_then_answer"
                 )
             if not explicit_memory_write:
                 deps.schedule_search_followup(
