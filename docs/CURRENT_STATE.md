@@ -247,6 +247,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     `llm_warmup_failed`, 외부 wrapper에는 고정 `LLM warmup failed`만 남긴다.
   - Control Page welcome LLM non-200 body는 읽지 않으며, failure model-call turn
     trace와 operation log에는 exception type만 남기고 fallback welcome을 유지한다.
+  - Fast Control의 빈 채팅도 상태 안내 대신 author `Evelyn`의 한국어 fallback
+    welcome 한 문장으로 시작한다. readiness detail은 기존 boot/runtime state에 남긴다.
   - Control Page tool-router failure operation log도 exception type만 남기며, 실패
     결정의 기존 `None` 반환과 text/search fallback을 유지한다.
   - OmniVoice startup health·generate warmup의 non-200 body도 읽지 않고 startup

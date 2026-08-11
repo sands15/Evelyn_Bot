@@ -4682,8 +4682,8 @@ def default_chat_messages(
     return [
         {
             "role": "assistant",
-            "author": "Control",
-            "text": "Docker core is ready. Windows local I/O bridge can attach microphone and speaker output.",
+            "author": "Evelyn",
+            "text": "왔어? 오늘도 이상한 건 내가 정리하고, 재밌는 건 같이 키워볼게.",
             "at": time.time(),
         }
     ]

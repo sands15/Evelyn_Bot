@@ -36,7 +36,7 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - 2026-08-08 필수 provenance가 손상된 recall이 정상 pinned note ID를 빌려
   `attributed`가 되던 경로를 cache·receipt 공용 검사와 전체 prompt 보류로 닫았다.
 - 2026-08-08 Control Page의 transient degraded 화면 덮기와 stale poll 경쟁을
-  ready latch·채팅 보존·single-flight/generation fence로 막았다(UI 176·집중 60 통과, live GET 일치).
+  ready latch·채팅 보존·single-flight/generation fence로 막았다(UI 176·집중 60 통과, live GET 일치). 빈 Fast Control 채팅은 상태 안내 대신 `Evelyn`의 한국어 환영 인사로 시작한다.
 - 2026-08-08 기본 `tts:8880`을 실제 `k2-fsa/OmniVoice` container로 교체했다.
   recipe `7cfc51e96088`, source revision `485c81d`, 서버 Python 20개와 model snapshot
   13개 SHA-256, read-only profile/cache, exact model ID/revision health가 모두 통과했다.

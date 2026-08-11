@@ -132,6 +132,17 @@ class FastControlPublicMemoryProjectionTests(unittest.TestCase):
             },
         )
 
+    def test_empty_chat_uses_evelyn_welcome(self) -> None:
+        messages = fast_api.default_chat_messages()
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "assistant")
+        self.assertEqual(messages[0]["author"], "Evelyn")
+        self.assertEqual(
+            messages[0]["text"],
+            "왔어? 오늘도 이상한 건 내가 정리하고, 재밌는 건 같이 키워볼게.",
+        )
+
     def test_chat_projection_drops_stale_bound_reply_and_hides_receipt(
         self,
     ) -> None:
