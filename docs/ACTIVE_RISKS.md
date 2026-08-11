@@ -1266,10 +1266,16 @@ STT, Vision, Codex Gateway, Mindcraft는 공통 typed 설정 스키마로 이동
 전체의 환경변수 조회, 특히 대형 호환 계층인 `config.py`와
 `main_runtime_config.py`는 아직 분산돼 있다.
 
-Host Supervisor, Local I/O Bridge, Discord, Conversation Continuity, STT,
+Host Supervisor, Local I/O Bridge, Discord, Conversation Continuity, Fast Control Continuity, STT,
 Vision, Codex Gateway, Mindcraft의 오류 카운터를 Runtime Health와 Control
 Page가 합성한다. 예외 메시지·스택·경로는 새 공개 응답에서 제외한다. 아직
 owner 경계가 없는 보조 모듈의 광범위한 예외 처리는 남아 있다.
+
+Control Page·Bot API·세 LLM·TTS·STT가 counter payload를 내기 전에 probe 실패한 경우도
+현재 장애로 표시한다. 선택 서비스는 실행 의도와 장애를 구분할 durable desired-state가
+없어 payload 없는 실패를 합성하지 않는다. 의도된 OFF 오탐을 피하는 대신 예상하지 못한
+optional 장애도 Runtime Health에만 남을 수 있다. 오류 카운터는 여전히 process lifetime이며
+재시작 전 이력 보존은 별도다.
 
 `0f0201f`는 Control Page의 legacy runtime service probe도 같은 공개 오류
 경계로 옮겼다. Voyager, Bot API TCP/HTTP, Codex Gateway와 전체 refresh

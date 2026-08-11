@@ -2294,3 +2294,14 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   장치 오류 없이 mic OFF였다. 실행 중 Control Page를 새로고침해 drawer가 열리고 검증 시작
   버튼이 보이며 포커스되는 것까지 확인했다. 서비스·마이크·스피커는 재기동하지 않았고
   실제 동의·청취 동작은 다음 사용자 실사용에서 확인한다.
+
+## 2026-08-12 Runtime error observability coverage
+
+- Fast Control continuity의 실제 `fast_control_continuity/status.json`을 별도 오류 source로
+  합성한다. Discord/Main continuity artifact와 경로가 달라도 commit·restore 실패 카운터와
+  최근 고정 오류 코드를 Control Page에서 놓치지 않는다.
+- 필수 runtime service probe가 counter payload 전에 실패하면 현재 장애로
+  표시하되 기록된 예외 횟수는 올리지 않는다. Control Page·Bot API·세 LLM·TTS·STT를
+  포함하며 UI는 `기록된 예외`와 `현재 장애`를 구분한다. Optional payload-less 실패는
+  desired-state 부재로 Runtime Health에만 남는다. Python backend는 다음 재시작부터 적용되며
+  현재 실행 중 backend는 아직 이전 source 목록을 제공한다.

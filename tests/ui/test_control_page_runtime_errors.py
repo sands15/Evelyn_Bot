@@ -26,6 +26,20 @@ class ControlPageRuntimeErrorsTests(unittest.TestCase):
         self.assertIn("/api/control-page/runtime-errors", source)
         self.assertIn("메시지·스택·파일 경로는 수집하지 않습니다.", source)
         self.assertIn("conversation_continuity.commit-metrics.v1", source)
+        self.assertIn(
+            "`기록된 예외 ${Number(summaryData.totalCount) || 0}회`",
+            source,
+        )
+        self.assertIn(
+            "`최근 1시간 ${Number(summaryData.recentErrorCount) || 0}개 소스 · "
+            "현재 장애 ${Number(summaryData.currentErrorCount) || 0}개`",
+            source,
+        )
+        self.assertIn(
+            'if (source.hasCurrentError && !source.lastErrorCode) '
+            'return "현재 서비스 확인 실패";',
+            source,
+        )
         self.assertIn("p50", source)
         self.assertIn("p95", source)
         self.assertNotIn('method: "POST"', source)

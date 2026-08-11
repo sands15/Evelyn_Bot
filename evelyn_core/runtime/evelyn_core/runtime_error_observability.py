@@ -120,6 +120,13 @@ _SOURCE_SPECS: tuple[dict[str, Any], ...] = (
         "schema": "conversation_continuity.status.v1",
         "staleAfterSec": 5.0,
     },
+    {
+        "id": "fastControlContinuity",
+        "label": "Fast Control Continuity",
+        "path": Path("fast_control_continuity") / "status.json",
+        "schema": "conversation_continuity.status.v1",
+        "staleAfterSec": DEFAULT_RECENT_AFTER_SEC,
+    },
 )
 _HTTP_SOURCE_SPECS: tuple[dict[str, str], ...] = (
     {
@@ -142,6 +149,14 @@ _HTTP_SOURCE_SPECS: tuple[dict[str, str], ...] = (
         "label": "Codex Gateway",
         "serviceId": "codex_gateway",
     },
+)
+_REQUIRED_HEALTH_SOURCE_SPECS: tuple[dict[str, str], ...] = (
+    {"id": "controlPage", "label": "Control Page", "serviceId": "control_page"},
+    {"id": "botApi", "label": "Bot API", "serviceId": "bot_api"},
+    {"id": "mainLlm", "label": "Main LLM", "serviceId": "main_llm"},
+    {"id": "subLlm", "label": "Sub LLM", "serviceId": "sub_llm"},
+    {"id": "routerLlm", "label": "Router LLM", "serviceId": "router_llm"},
+    {"id": "tts", "label": "TTS", "serviceId": "tts"},
 )
 
 
@@ -340,7 +355,10 @@ def _read_source(
             _safe_continuity_commit_metrics(
                 payload.get("completedTurnCommit")
             )
-            if spec["id"] == "conversationContinuity"
+            if spec["id"] in {
+                "conversationContinuity",
+                "fastControlContinuity",
+            }
             else None
         )
         commit_warning = bool(
@@ -410,6 +428,7 @@ def _service_error_source(
     service = service_rows.get(spec["serviceId"])
     if not isinstance(service, Mapping):
         return _unavailable_source(base_spec, state="missing")
+    state = str(service.get("state") or "unknown").strip().lower()
     payload: Mapping[str, Any] | None = None
     for check in service.get("checks") or []:
         if not isinstance(check, Mapping):
@@ -423,6 +442,9 @@ def _service_error_source(
             payload = candidate
             break
     if payload is None:
+        required_failure = _required_service_failure_source(service, spec)
+        if required_failure is not None:
+            return required_failure
         return _unavailable_source(base_spec, state="unavailable")
 
     last_error_at = _safe_number(payload.get("lastErrorAt"))
@@ -430,7 +452,6 @@ def _service_error_source(
         payload.get("lastErrorCode"),
         fallback="",
     )
-    state = str(service.get("state") or "unknown")
     current_failure = (
         payload.get("ok") is False
         or payload.get("ready") is False
@@ -452,6 +473,25 @@ def _service_error_source(
         ),
         "errorCounters": _safe_counters(payload.get("errorCounters")),
         "hasCurrentError": bool(last_error_code and current_failure),
+    }
+
+
+def _required_service_failure_source(
+    service: Any,
+    spec: dict[str, str],
+) -> dict[str, Any] | None:
+    if not isinstance(service, Mapping) or not bool(service.get("required")):
+        return None
+    state = str(service.get("state") or "unknown").strip().lower()
+    if state == "up":
+        return None
+    if state not in {"down", "partial", "degraded", "unknown"}:
+        state = "unknown"
+    return {
+        **_unavailable_source(spec, state=state),
+        "available": True,
+        "heartbeatAt": _safe_number(service.get("checkedAt")),
+        "hasCurrentError": True,
     }
 
 
@@ -481,6 +521,13 @@ def collect_runtime_error_observability(
     for spec in _HTTP_SOURCE_SPECS:
         source = _service_error_source(service_rows, spec)
         sources[source["id"]] = source
+    for spec in _REQUIRED_HEALTH_SOURCE_SPECS:
+        source = _required_service_failure_source(
+            service_rows.get(spec["serviceId"]),
+            spec,
+        )
+        if source is not None:
+            sources[source["id"]] = source
 
     available_count = sum(1 for source in sources.values() if source["available"])
     stale_count = sum(1 for source in sources.values() if source["stale"])

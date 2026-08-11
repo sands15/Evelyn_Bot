@@ -340,7 +340,16 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
                             "privatePayload": {
                                 "path": "C:\\private\\errors.json",
                             },
-                        }
+                        },
+                        "fastControlContinuity": {
+                            "id": "fastControlContinuity",
+                            "label": "private",
+                            "state": "ready",
+                            "available": True,
+                            "stale": False,
+                            "errorCount": 0,
+                            "hasCurrentError": False,
+                        },
                     },
                     "recentErrors": [
                         {
@@ -389,6 +398,25 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         }
+
+        health_only_sources = {
+            "controlPage": "Control Page",
+            "botApi": "Bot API",
+            "mainLlm": "Main LLM",
+            "subLlm": "Sub LLM",
+            "routerLlm": "Router LLM",
+            "tts": "TTS",
+        }
+        for source_id in health_only_sources:
+            raw["observability"]["exceptions"]["sources"][source_id] = {
+                "id": source_id,
+                "label": "private",
+                "state": "down",
+                "available": True,
+                "stale": False,
+                "errorCount": 0,
+                "hasCurrentError": True,
+            }
 
         public = public_runtime_health_snapshot(raw)
         service = public["services"][0]
@@ -444,6 +472,20 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
                 "localBridge"
             ]["label"],
             "Local I/O Bridge",
+        )
+        self.assertEqual(
+            public["observability"]["exceptions"]["sources"][
+                "fastControlContinuity"
+            ]["label"],
+            "Fast Control Continuity",
+        )
+        projected_sources = public["observability"]["exceptions"]["sources"]
+        self.assertEqual(
+            {
+                source_id: projected_sources[source_id]["label"]
+                for source_id in health_only_sources
+            },
+            health_only_sources,
         )
         self.assertFalse(public["privacy"]["rawProbePayloads"])
         self.assertFalse(public["privacy"]["filesystemPaths"])

@@ -69,6 +69,7 @@
   function sourceDetail(source) {
     if (!source.available) return source.state === "invalid" ? "상태 파일 손상" : "상태 파일 없음";
     if (source.stale) return "heartbeat 오래됨";
+    if (source.hasCurrentError && !source.lastErrorCode) return "현재 서비스 확인 실패";
     if (source.lastErrorCode) {
       const errorType = source.lastErrorType ? ` · ${source.lastErrorType}` : "";
       return `${source.lastErrorCode}${errorType} · ${formatTime(source.lastErrorAt)}`;
@@ -102,11 +103,11 @@
     const summary = element("div", "runtime-errors-summary");
     const copy = element("div");
     copy.append(
-      element("div", "runtime-errors-total", `${Number(summaryData.totalCount) || 0}회`),
+      element("div", "runtime-errors-total", `기록된 예외 ${Number(summaryData.totalCount) || 0}회`),
       element(
         "span",
         "runtime-errors-meta",
-        `최근 1시간 ${Number(summaryData.recentErrorCount) || 0}개 소스 · 현재 오류 ${Number(summaryData.currentErrorCount) || 0}개`
+        `최근 1시간 ${Number(summaryData.recentErrorCount) || 0}개 소스 · 현재 장애 ${Number(summaryData.currentErrorCount) || 0}개`
       )
     );
     summary.append(copy, pill(errors.state));

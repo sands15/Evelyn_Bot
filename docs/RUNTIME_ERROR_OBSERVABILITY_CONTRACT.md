@@ -1,13 +1,13 @@
 # Runtime Error Observability Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-11 KST
+Last reviewed: 2026-08-12 KST
 
 ## Purpose
 
 핵심 음성 런타임의 광범위한 예외 경계가 실패를 삼킨 뒤 운영자에게 보이지 않는
 문제를 줄인다. Host Supervisor, Local I/O Bridge, Discord, Conversation
-Continuity는 heartbeat에, STT, Vision, Codex Gateway, Mindcraft는 HTTP
+Continuity와 Fast Control Continuity는 상태 artifact에, STT, Vision, Codex Gateway, Mindcraft는 HTTP
 health/status 응답에 프로세스 수명 기준 오류 카운터와 최근 오류 코드를
 additive 필드로 기록한다.
 
@@ -43,6 +43,10 @@ additive 필드로 기록한다.
 - `runtime_artifacts/local_bridge/status.json`
 - `runtime_artifacts/discord/status.json`
 - `runtime_artifacts/conversation_continuity/status.json`
+- `runtime_artifacts/fast_control_continuity/status.json`
+
+Fast Control continuity status는 주기 heartbeat가 아니라 restore·commit·오류 시 갱신되는
+event snapshot이므로 최근 오류 창과 같은 1시간 freshness를 사용한다.
 
 대상 HTTP owner:
 
@@ -50,6 +54,16 @@ additive 필드로 기록한다.
 - Vision
 - Codex Gateway
 - Mindcraft
+
+Counter payload가 없어도 현재 장애로 합성하는 필수 health source:
+
+- Control Page
+- Bot API
+- Main LLM
+- Sub LLM
+- Router LLM
+- TTS
+- STT
 
 ## Runtime Health
 
@@ -69,9 +83,16 @@ additive 필드로 기록한다.
 }
 ```
 
-현재 heartbeat에 `lastError`와 `lastErrorCode`가 함께 있으면 `error`, 최근 1시간에
-오류가 있었으면 `attention`, 관측 가능한 오류가 없으면 `clear`다. heartbeat가
-오래됐으면 현재 오류로 판정하지 않는다.
+현재 상태 artifact에 owner 오류가 있으면 `error`, 최근 1시간에 오류가 있었으면
+`attention`, 관측 가능한 오류가 없으면 `clear`다. 상태가 오래됐으면 현재 owner 오류로
+판정하지 않는다. 위 필수 health source의 probe가 payload 없이
+실패한 경우에도 현재 장애로 표시하지만, 프로세스가 기록한 예외가 아니므로 `errorCount`와
+`totalCount`는 올리지 않는다. 선택 서비스의 payload 없는 probe 실패는 durable desired-state를
+알 수 없어 합성하지 않는다. 이는 의도된 OFF 오탐을 피하지만 예상하지 못한 optional 장애도
+Runtime Health에만 남을 수 있는 현재 한계다.
+
+Control Page의 큰 합계는 `기록된 예외` 횟수이고 `currentErrorCount`는 owner 오류와 필수
+서비스의 현재 probe 장애를 함께 센다.
 
 ## Control Page API
 

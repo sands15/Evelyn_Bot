@@ -138,7 +138,7 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
 
         self.assertEqual(summary["schema"], RUNTIME_ERROR_SUMMARY_SCHEMA)
         self.assertEqual(summary["state"], "error")
-        self.assertEqual(summary["summary"]["sourceCount"], 8)
+        self.assertEqual(summary["summary"]["sourceCount"], 9)
         self.assertEqual(summary["summary"]["totalCount"], 3)
         self.assertEqual(summary["summary"]["currentErrorCount"], 1)
         self.assertEqual(summary["summary"]["recentErrorCount"], 2)
@@ -294,6 +294,85 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
             "conversation_continuity_flush_failed",
         )
         self.assertNotIn("private", json.dumps(summary))
+
+    def test_fast_control_continuity_error_is_collected(self) -> None:
+        write_status(
+            self.root,
+            "fast_control_continuity/status.json",
+            {
+                "schema": "conversation_continuity.status.v1",
+                "state": "error",
+                "heartbeatAt": self.now,
+                "errorCount": 1,
+                "lastErrorAt": self.now,
+                "lastErrorCode": "conversation_continuity_commit_failed",
+                "lastErrorType": "OSError",
+                "errorCounters": {
+                    "conversation_continuity_commit_failed": 1,
+                },
+            },
+        )
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+        )
+
+        source = summary["sources"]["fastControlContinuity"]
+        self.assertEqual(summary["state"], "error")
+        self.assertEqual(summary["summary"]["sourceCount"], 9)
+        self.assertEqual(summary["summary"]["totalCount"], 1)
+        self.assertEqual(summary["summary"]["currentErrorCount"], 1)
+        self.assertTrue(source["hasCurrentError"])
+
+    def test_required_probe_failure_is_current_without_exception_count(self) -> None:
+        required_sources = {
+            "control_page": "controlPage",
+            "bot_api": "botApi",
+            "main_llm": "mainLlm",
+            "sub_llm": "subLlm",
+            "router_llm": "routerLlm",
+            "tts": "tts",
+            "stt": "stt",
+        }
+
+        def failed_service(service_id: str, *, required: bool) -> dict:
+            return {
+                "id": service_id,
+                "required": required,
+                "state": "down",
+                "checkedAt": self.now,
+                "checks": [
+                    {"kind": "tcp", "ok": False, "reason": "timeout"}
+                ],
+            }
+
+        service_health = {
+            service_id: failed_service(service_id, required=True)
+            for service_id in required_sources
+        }
+        service_health["vision"] = failed_service(
+            "vision",
+            required=False,
+        )
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+            service_health=service_health,
+        )
+
+        self.assertEqual(summary["state"], "error")
+        self.assertEqual(summary["summary"]["totalCount"], 0)
+        self.assertEqual(summary["summary"]["sourceCount"], 15)
+        self.assertEqual(summary["summary"]["currentErrorCount"], 7)
+        for source_id in required_sources.values():
+            source = summary["sources"][source_id]
+            self.assertEqual(source["state"], "down")
+            self.assertTrue(source["available"])
+            self.assertTrue(source["hasCurrentError"])
+        optional_source = summary["sources"]["vision"]
+        self.assertFalse(optional_source["available"])
+        self.assertFalse(optional_source["hasCurrentError"])
 
     def test_continuity_commit_latency_warning_is_projected_privately(
         self,
