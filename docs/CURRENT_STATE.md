@@ -2378,3 +2378,14 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - focused 34개, continuity 인접 68개, UI 전체 186개와 CI-equivalent 전체
   3,294개(skip 22), Python 구문 검사가 통과했다. 검증은 offline source/test이며 실행 중
   Control Page·LLM·TTS·Docker를 시작하거나 교체하지 않았다.
+
+## 2026-08-12 Discord autonomy-start runtime error producer
+
+- Discord `자율시작`의 engine 생성, 기존 cleanup, 새 start 실패는 기존
+  `DiscordRuntimeStatus` owner에 고정 `autonomy_start_failed`와 exception type만 기록한다.
+  기록기 자체의 일반 예외는 승인 회수와 고정 실패 응답을 막지 않는다.
+- engine start가 성공한 뒤 응답 전송만 실패한 경우는 시작 실패로 기록하거나 grant를
+  회수하지 않는다. cleanup/route/start await 취소는 오류 기록·응답 없이 기존 grant를 회수한 뒤 재전파한다.
+  관련 82개, Discord I/O 133개, Runtime Errors/Health 인접 70개와
+  CI-equivalent 전체 3,298개(skip 22)가 통과했다. 검증은 offline이며 실제 Discord·
+  Minecraft·Docker를 시작하지 않았다.

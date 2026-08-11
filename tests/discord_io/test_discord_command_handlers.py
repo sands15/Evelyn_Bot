@@ -457,6 +457,160 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
         self.assertEqual(grants, [])
 
+    def test_autonomy_start_reply_failure_does_not_revoke_running_engine(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=1))
+        events: list[str] = []
+        observed: list[tuple[str, str]] = []
+        revoked: list[str] = []
+
+        async def send(_text: str) -> None:
+            events.append("send")
+            raise ConnectionError("private reply failure")
+
+        class Engine:
+            async def stop(self) -> None:
+                events.append("stop")
+
+            async def start(self) -> None:
+                events.append("start")
+
+        ctx.send = send
+        with self.assertRaises(ConnectionError):
+            asyncio.run(
+                handle_autonomy_start_command(
+                    ctx,
+                    autonomy_enabled=True,
+                    get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                    is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
+                    enable_minecraft_autonomy_route=lambda _guild_id: None,
+                    grant_autonomy_authorization=lambda *_args, **_kwargs: (
+                        events.append("grant") or {"ok": True}
+                    ),
+                    revoke_autonomy_authorization=lambda *_args, **_kwargs: (
+                        revoked.append("revoke")
+                    ),
+                    guild_only_message=lambda: "guild only",
+                    record_runtime_error=lambda code, exc: observed.append(
+                        (code, type(exc).__name__)
+                    ),
+                )
+            )
+
+        self.assertEqual(events, ["stop", "grant", "start", "send"])
+        self.assertEqual(observed, [])
+        self.assertEqual(revoked, [])
+
+    def test_autonomy_start_cancellation_revokes_grant_and_propagates(self) -> None:
+        for cancelled_stage, expected_events in (
+            ("stop", ["stop", "revoke:start_failed"]),
+            ("route", ["stop", "route", "revoke:start_failed"]),
+            ("start", ["stop", "grant", "start", "revoke:start_failed"]),
+        ):
+            with self.subTest(cancelled_stage=cancelled_stage):
+                ctx = FakeContext(guild=SimpleNamespace(id=1))
+                events: list[str] = []
+                observed: list[str] = []
+
+                class Engine:
+                    async def stop(self) -> None:
+                        events.append("stop")
+                        if cancelled_stage == "stop":
+                            raise asyncio.CancelledError
+
+                    async def start(self) -> None:
+                        events.append("start")
+                        if cancelled_stage == "start":
+                            raise asyncio.CancelledError
+
+                async def enable_route(_guild_id: int) -> bool:
+                    events.append("route")
+                    if cancelled_stage == "route":
+                        raise asyncio.CancelledError
+                    return True
+
+                with self.assertRaises(asyncio.CancelledError):
+                    asyncio.run(
+                        handle_autonomy_start_command(
+                            ctx,
+                            autonomy_enabled=True,
+                            get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                            is_minecraft_autonomy_route_enabled=lambda _guild_id: (
+                                cancelled_stage == "route"
+                            ),
+                            enable_minecraft_autonomy_route=enable_route,
+                            grant_autonomy_authorization=lambda *_args, **_kwargs: (
+                                events.append("grant") or {"ok": True}
+                            ),
+                            revoke_autonomy_authorization=lambda *_args, **kwargs: (
+                                events.append(f"revoke:{kwargs['reason_code']}")
+                            ),
+                            guild_only_message=lambda: "guild only",
+                            record_runtime_error=lambda code, _exc: observed.append(code),
+                        )
+                    )
+
+                self.assertEqual(events, expected_events)
+                self.assertEqual(observed, [])
+                self.assertEqual(ctx.sent, [])
+
+    def test_autonomy_start_records_each_runtime_failure_stage(self) -> None:
+        for failed_stage in ("get", "stop", "start"):
+            with self.subTest(failed_stage=failed_stage):
+                ctx = FakeContext(guild=SimpleNamespace(id=1))
+                observed: list[tuple[str, str]] = []
+                revoked: list[str] = []
+
+                class Engine:
+                    async def stop(self) -> None:
+                        if failed_stage == "stop":
+                            raise RuntimeError("private cleanup failure")
+
+                    async def start(self) -> None:
+                        if failed_stage == "start":
+                            raise RuntimeError("private start failure")
+
+                def get_engine(_guild_id: int) -> Engine:
+                    if failed_stage == "get":
+                        raise RuntimeError("private create failure")
+                    return Engine()
+
+                asyncio.run(
+                    handle_autonomy_start_command(
+                        ctx,
+                        autonomy_enabled=True,
+                        get_or_create_autonomy_engine=get_engine,
+                        is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
+                        enable_minecraft_autonomy_route=lambda _guild_id: None,
+                        grant_autonomy_authorization=lambda *_args, **_kwargs: {
+                            "ok": True
+                        },
+                        revoke_autonomy_authorization=lambda *_args, **kwargs: (
+                            revoked.append(kwargs["reason_code"])
+                        ),
+                        guild_only_message=lambda: "guild only",
+                        record_runtime_error=lambda code, exc: observed.append(
+                            (code, type(exc).__name__)
+                        ),
+                    )
+                )
+
+                self.assertEqual(
+                    observed,
+                    [("autonomy_start_failed", "RuntimeError")],
+                )
+                self.assertEqual(
+                    revoked,
+                    [] if failed_stage == "get" else ["start_failed"],
+                )
+                self.assertEqual(
+                    ctx.sent,
+                    [
+                        "❌ 자율 행동 시작에 실패했어."
+                        if failed_stage == "get"
+                        else "❌ 자율 행동 시작에 실패했고 승인은 폐기했어."
+                    ],
+                )
+
     def test_autonomy_start_without_verified_minecraft_route_grants_assistant_only(
         self,
     ) -> None:

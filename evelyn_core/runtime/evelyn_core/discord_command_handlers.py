@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -159,6 +160,7 @@ async def handle_autonomy_start_command(
     grant_autonomy_authorization: Any,
     revoke_autonomy_authorization: Any,
     guild_only_message: Any,
+    record_runtime_error: Any = None,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -169,7 +171,9 @@ async def handle_autonomy_start_command(
     guild_id = ctx.guild.id
     try:
         engine = get_or_create_autonomy_engine(guild_id)
-    except Exception:
+    except Exception as exc:
+        if record_runtime_error is not None:
+            record_runtime_error("autonomy_start_failed", exc)
         await ctx.send("❌ 자율 행동 시작에 실패했어.")
         return
 
@@ -182,7 +186,15 @@ async def handle_autonomy_start_command(
 
     try:
         await engine.stop()
-    except Exception:
+    except asyncio.CancelledError:
+        revoke_autonomy_authorization(
+            guild_id,
+            reason_code="start_failed",
+        )
+        raise
+    except Exception as exc:
+        if record_runtime_error is not None:
+            record_runtime_error("autonomy_start_failed", exc)
         revoke_autonomy_authorization(
             guild_id,
             reason_code="start_failed",
@@ -194,6 +206,12 @@ async def handle_autonomy_start_command(
             minecraft_route_enabled = bool(
                 await enable_minecraft_autonomy_route(guild_id)
             )
+        except asyncio.CancelledError:
+            revoke_autonomy_authorization(
+                guild_id,
+                reason_code="start_failed",
+            )
+            raise
         except Exception:
             minecraft_route_enabled = False
 
@@ -210,13 +228,22 @@ async def handle_autonomy_start_command(
         return
     try:
         await engine.start()
-        await ctx.send("🤖 자율 행동 루프를 시작했어.")
-    except Exception:
+    except asyncio.CancelledError:
+        revoke_autonomy_authorization(
+            ctx.guild.id,
+            reason_code="start_failed",
+        )
+        raise
+    except Exception as exc:
+        if record_runtime_error is not None:
+            record_runtime_error("autonomy_start_failed", exc)
         revoke_autonomy_authorization(
             ctx.guild.id,
             reason_code="start_failed",
         )
         await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
+        return
+    await ctx.send("🤖 자율 행동 루프를 시작했어.")
 
 
 async def handle_autonomy_stop_command(

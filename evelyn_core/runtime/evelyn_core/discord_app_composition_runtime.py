@@ -176,7 +176,10 @@ class DiscordAppComposition:
     def _record_runtime_error(self, code: str, exc: BaseException) -> None:
         runtime_status = self.deps.events.runtime_status
         if runtime_status is not None:
-            runtime_status.record_error(code, exc)
+            try:
+                runtime_status.record_error(code, exc)
+            except Exception:
+                pass
 
     async def _recover_search_followups(self) -> None:
         deps = self.deps.events
@@ -424,6 +427,7 @@ class DiscordAppComposition:
             grant_autonomy_authorization=deps.grant_autonomy_authorization,
             revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
+            record_runtime_error=self._record_runtime_error,
         )
 
     async def autonomy_stop_command(self, ctx: Any) -> None:

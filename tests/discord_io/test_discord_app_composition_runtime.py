@@ -24,6 +24,7 @@ from evelyn_core.discord_app_composition_runtime import (  # noqa: E402
     DiscordEventCompositionDeps,
     build_discord_intents,
 )
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
 
 
 def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
@@ -272,6 +273,56 @@ class DiscordAppCompositionTests(unittest.TestCase):
         )
         self.assertNotIn(private_error, repr(events.mark_startup_component.call_args_list))
         self.assertNotIn(private_error, repr(events.log.call_args_list))
+
+    def test_autonomy_start_failure_records_type_only_runtime_error(self) -> None:
+        private_error = "PRIVATE_AUTONOMY_START C:\\private\\token"
+        private_observer_error = "PRIVATE_OBSERVER C:\\private\\observer"
+        runtime_status = DiscordRuntimeStatus(
+            gateway_ready=lambda: False,
+            bot_guilds=lambda: [],
+            voice_client_type=object,
+            now=lambda: 123.0,
+        )
+        original_record_error = runtime_status.record_error
+
+        def record_then_fail(code, exc) -> None:
+            original_record_error(code, exc)
+            raise OSError(private_observer_error)
+
+        runtime_status.record_error = Mock(side_effect=record_then_fail)
+        engine = SimpleNamespace(
+            stop=AsyncMock(),
+            start=AsyncMock(side_effect=RuntimeError(private_error)),
+        )
+        revoke = Mock()
+        composition = make_composition(
+            events=make_event_deps(runtime_status=runtime_status),
+            commands_deps=make_command_deps(
+                get_or_create_autonomy_engine=Mock(return_value=engine),
+                grant_autonomy_authorization=Mock(return_value={"ok": True}),
+                revoke_autonomy_authorization=revoke,
+            ),
+        )
+        composition.mark_text_session_from_command = Mock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7),
+            author=SimpleNamespace(id=3),
+            channel=SimpleNamespace(id=2),
+            message=SimpleNamespace(id=4, content="!autonomy-on"),
+            send=AsyncMock(),
+        )
+
+        asyncio.run(composition.autonomy_start_command(ctx))
+
+        snapshot = runtime_status.snapshot()
+        self.assertEqual(snapshot["lastErrorCode"], "autonomy_start_failed")
+        self.assertEqual(snapshot["lastErrorType"], "RuntimeError")
+        self.assertNotIn(private_error, repr(snapshot))
+        self.assertNotIn(private_observer_error, repr(snapshot))
+        revoke.assert_called_once_with(7, reason_code="start_failed")
+        ctx.send.assert_awaited_once_with(
+            "❌ 자율 행동 시작에 실패했고 승인은 폐기했어."
+        )
 
     def test_on_ready_recovers_promised_search_followups(self) -> None:
         recover = AsyncMock(

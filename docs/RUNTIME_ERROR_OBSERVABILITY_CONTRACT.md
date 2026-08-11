@@ -45,6 +45,13 @@ additive 필드로 기록한다.
 - `runtime_artifacts/conversation_continuity/status.json`
 - `runtime_artifacts/fast_control_continuity/status.json`
 
+Discord `자율시작`의 engine 생성, 기존 loop cleanup, 새 loop start에서 발생한
+일반 예외(`Exception`)는 `autonomy_start_failed`로 Discord owner counter에 기록한다.
+관측 기록기 자체의 일반 예외는 명령의 승인 회수·고정 실패 응답을 막지 않는다.
+engine start 뒤 성공 응답 전송 실패는 시작 실패로 오분류하거나 grant를 회수하지 않는다.
+기존 engine cleanup, 선택적 route 재연결 또는 새 start await의 취소는 오류로 기록하거나
+응답하지 않고 기존 grant를 회수한 뒤 같은 취소 신호를 재전파한다.
+
 Fast Control continuity status는 주기 heartbeat가 아니라 restore·commit·오류 시 갱신되는
 event snapshot이므로 최근 오류 창과 같은 1시간 freshness를 사용한다.
 
