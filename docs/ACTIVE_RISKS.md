@@ -43,8 +43,11 @@ executor builder를 production `RoutedAutonomyExecutor`에 전달한다. Discord
 `assistant:*` scope만 발급한다.
 `자율정지`는 executor를 끊되 process-local route intent를 유지하고, 명시적
 `마크종료`만 route intent를 먼저 비활성화한다. 뒤의 cleanup이 실패해도 intent는
-꺼진 채 유지되며, 다음 `자율시작`은 route를 다시 연결·검증해야 한다. enable·disable과
-lifecycle connect·disconnect는 같은 router lock으로 직렬화돼 intent와 물리 연결이 어긋나지 않는다.
+꺼진 채 유지된다. 다음 `자율시작`은 state label과 관계없이 engine stop을 먼저 끝낸다.
+보존된 route intent가 있으면 route를 재연결·검증하며, 그 결과에 따라 assistant-only 또는
+Minecraft allowlist를 포함한 grant를 발급한 뒤 start한다.
+enable·disable과 lifecycle
+connect·disconnect는 같은 router lock으로 직렬화돼 intent와 물리 연결이 어긋나지 않는다.
 engine start·stop도 cleanup 완료까지 같은 engine lock을 유지한다. 따라서 권한 거부 뒤 살아 있는
 disabled loop와 실패한 stop cleanup을 정리하지 않고 `running`으로 성공시키지 않는다.
 start 호출자 취소는 재전파해 cleanup 뒤 새 loop를 만들지 않는다. typed Minecraft executor도

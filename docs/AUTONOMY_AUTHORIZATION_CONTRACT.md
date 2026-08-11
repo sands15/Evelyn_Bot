@@ -1,7 +1,7 @@
 # Evelyn Autonomy Authorization And Outcome Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-12 KST
 
 이 문서는 이블린이 “허락된 세계에서 스스로 행동한다”는 목표를 현재
 런타임에서 어떻게 제한하고 검증하는지 정의한다. 기능 플래그, 저장된 상태,
@@ -39,14 +39,18 @@ Discord의 다음 변경성 명령은 허용된 Discord ID 또는 서버 관리�
 - `자율시작`, `자율정지`
 - `마크접속`, `마크종료`, `마크목표`
 
-`자율시작`은 해당 guild에 assistant action scope grant를 새로 발급한 뒤
-engine을 시작한다. 시작 실패 시 grant는 즉시 폐기한다. `자율정지`는 engine
+`자율시작`은 기존 state label과 관계없이 engine stop을 먼저 끝낸다. 보존된
+Minecraft route intent가 있으면 route를 다시 연결·검증한다. 그 결과에 따라
+assistant 기본 scope와 검증 성공 시에만 Minecraft allowlist를 포함한 grant를
+새로 발급한 뒤 engine을 시작한다. 시작 실패 시
+grant는 즉시 폐기한다. `자율정지`는 engine
 존재 여부와 관계없이 grant부터 철회하고 executor를 멈추되 process-local route
 intent는 유지한다. route 비활성화는 명시적 `마크종료`만 수행하며 intent를
 executor cleanup보다 먼저 지워 cleanup 오류가 권한 상태를 되살리지 못하게 한다.
 route enable·disable과 lifecycle connect·disconnect는 같은 guild router lock으로 직렬화한다.
 engine start·stop은 engine lock 아래 task cancel, executor cleanup, 상태 commit까지 직렬화한다.
-disabled stale loop나 실패한 cleanup이 남으면 이를 먼저 정리하고 성공한 뒤에만 새 loop를 시작한다.
+disabled stale loop나 실패한 cleanup이 남으면 이를 선택적인 route 재연결과 grant보다 먼저
+정리하고 성공한 뒤에만 새 loop를 시작한다.
 stale child 취소만 내부 처리하고 start 호출자 자신의 취소는 재전파한다.
 Minecraft executor는 readiness 확인 뒤 disconnect currentness와 inflight 등록을 같은
 admission lock에서 선형화한다. stop이 먼저 완료되면 world action을 dispatch하지 않는다.

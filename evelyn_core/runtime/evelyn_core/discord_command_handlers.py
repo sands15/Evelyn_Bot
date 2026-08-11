@@ -180,21 +180,15 @@ async def handle_autonomy_start_command(
     except Exception:
         minecraft_route_enabled = False
 
-    state = getattr(engine, "state", None)
-    engine_running = bool(
-        getattr(state, "enabled", False)
-        or getattr(state, "status", "") == "running"
-    )
-    if engine_running:
-        try:
-            await engine.stop()
-        except Exception:
-            revoke_autonomy_authorization(
-                guild_id,
-                reason_code="start_failed",
-            )
-            await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
-            return
+    try:
+        await engine.stop()
+    except Exception:
+        revoke_autonomy_authorization(
+            guild_id,
+            reason_code="start_failed",
+        )
+        await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
+        return
     if minecraft_route_enabled:
         try:
             minecraft_route_enabled = bool(

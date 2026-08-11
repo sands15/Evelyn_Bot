@@ -466,6 +466,9 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         class Engine:
             state = SimpleNamespace(status="idle", enabled=False)
 
+            async def stop(self) -> None:
+                return None
+
             async def start(self) -> None:
                 return None
 
@@ -508,6 +511,9 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         class Engine:
             state = SimpleNamespace(status="idle", enabled=False)
 
+            async def stop(self) -> None:
+                return None
+
             async def start(self) -> None:
                 return None
 
@@ -535,6 +541,109 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(revalidated, [11])
         self.assertEqual(granted_scopes, [ASSISTANT_AUTONOMY_ACTIONS])
+
+    def test_autonomy_restart_finishes_old_cleanup_before_route_enable(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=12))
+        events: list[str] = []
+
+        class MinecraftChild:
+            connected = False
+
+        child = MinecraftChild()
+
+        class Engine:
+            state = SimpleNamespace(
+                status="authorization_required",
+                enabled=False,
+            )
+            old_task_alive = True
+
+            async def stop(self) -> None:
+                events.append("stop")
+                self.old_task_alive = False
+                child.connected = False
+
+            async def start(self) -> None:
+                events.append("start")
+                if self.old_task_alive:
+                    child.connected = False
+
+        engine = Engine()
+
+        async def enable_route(_guild_id: int) -> bool:
+            events.append("route_enable")
+            child.connected = True
+            return True
+
+        def grant(_guild_id: int, _issuer_ref: str, *, scopes) -> dict:
+            del scopes
+            events.append("grant")
+            return {"ok": True}
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=True,
+                get_or_create_autonomy_engine=lambda _guild_id: engine,
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=enable_route,
+                grant_autonomy_authorization=grant,
+                revoke_autonomy_authorization=lambda *_args, **_kwargs: None,
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(events, ["stop", "route_enable", "grant", "start"])
+        self.assertTrue(child.connected)
+        self.assertEqual(ctx.sent, ["🤖 자율 행동 루프를 시작했어."])
+
+    def test_autonomy_restart_stop_failure_aborts_before_route_enable(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=13))
+        events: list[str] = []
+
+        class Engine:
+            state = SimpleNamespace(
+                status="authorization_required",
+                enabled=False,
+            )
+
+            async def stop(self) -> None:
+                events.append("stop")
+                raise RuntimeError("private cleanup failure")
+
+            async def start(self) -> None:
+                events.append("start")
+
+        async def enable_route(_guild_id: int) -> bool:
+            events.append("route_enable")
+            return True
+
+        def grant(_guild_id: int, _issuer_ref: str, *, scopes) -> dict:
+            del scopes
+            events.append("grant")
+            return {"ok": True}
+
+        def revoke(_guild_id: int, *, reason_code: str) -> None:
+            events.append(f"revoke:{reason_code}")
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=True,
+                get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=enable_route,
+                grant_autonomy_authorization=grant,
+                revoke_autonomy_authorization=revoke,
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(events, ["stop", "revoke:start_failed"])
+        self.assertEqual(
+            ctx.sent,
+            ["❌ 자율 행동 시작에 실패했고 승인은 폐기했어."],
+        )
 
     def test_command_failures_do_not_expose_exception_text(self) -> None:
         secret = (
