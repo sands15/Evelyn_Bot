@@ -276,7 +276,6 @@ class DiscordAppComposition:
         await self._recover_search_followups()
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:
-        _ = before
         deps = self.deps.events
         user = deps.bot_user()
         if user is None or member.id != user.id:
@@ -292,10 +291,19 @@ class DiscordAppComposition:
         target_channel = after.channel or voice_client.channel
         if target_channel is None:
             return
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        channel_changed = bool(
+            after_channel is not None
+            and getattr(before_channel, "id", None)
+            != getattr(after_channel, "id", None)
+        )
         try:
             rearmed_client = await deps.ensure_listening_voice_client(
                 guild,
                 target_channel,
+                force_listener_reset=channel_changed,
+                expected_voice_client=voice_client,
             )
             if not (
                 isinstance(rearmed_client, deps.voice_client_type)

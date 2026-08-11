@@ -23,11 +23,13 @@ from evelyn_core.voice_ingress_runtime import (  # noqa: E402
     flush_voice_utterance_buffer_from_runtime,
     process_member_audio_from_runtime,
     schedule_voice_utterance_item_from_runtime,
+    set_voice_transition_pending,
     voice_ingress_worker_from_runtime,
     voice_utterance_buffer_key,
 )
 from evelyn_core.voice_utterance import UtteranceAssemblyConfig, discord_pcm_seconds  # noqa: E402
 from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,45 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(private_detail, repr(harness.logs))
 
+    async def test_turn_cancellation_does_not_stop_shared_ingress_worker(self) -> None:
+        harness = IngressHarness()
+        registry = TurnScopeRegistry()
+        started = asyncio.Event()
+        processed: list[str] = []
+        for session_key in ("guild-a", "guild-b"):
+            await harness.queue.put(
+                {
+                    "session_key": session_key,
+                    "debug_meta": {},
+                }
+            )
+
+        async def process_member_audio(**item: Any) -> None:
+            if item["session_key"] == "guild-a":
+                scope = TurnScope("turn-a")
+                registry.replace_room_scope("guild:1:voice:9", scope)
+                scope.register_task()
+                started.set()
+                await asyncio.Event().wait()
+            processed.append(item["session_key"])
+
+        worker = asyncio.create_task(
+            voice_ingress_worker_from_runtime(
+                deps=replace(
+                    harness.deps(),
+                    process_member_audio=process_member_audio,
+                )
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        self.assertEqual(registry.cancel_matching_prefix("guild:1:voice:"), 1)
+        await asyncio.wait_for(harness.queue.join(), timeout=1.0)
+
+        self.assertFalse(worker.done())
+        self.assertEqual(processed, ["guild-b"])
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
     async def test_worker_drops_unbound_item_queued_before_validation_during_silence(self) -> None:
         harness = IngressHarness()
         await harness.queue.put(
@@ -265,14 +306,71 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("VOICE UTTERANCE MERGE" in message for message in harness.logs))
         self.assertNotIn("s1", harness.buffers)
 
+    async def test_channel_move_drops_buffered_and_queued_old_listener_audio(self) -> None:
+        harness = IngressHarness()
+        source_client = SimpleNamespace(
+            _listener_generation=4,
+            channel=SimpleNamespace(id=9),
+        )
+        member = SimpleNamespace(
+            id=42,
+            guild=SimpleNamespace(id=7, voice_client=source_client),
+        )
+        stale_item = {
+            "session_key": "voice:7:42",
+            "member": member,
+            "pcm_bytes": b"old-channel-pcm",
+            "debug_meta": {},
+            "voice_listener_binding": (source_client, 4, 9),
+        }
+
+        await schedule_voice_utterance_item_from_runtime(
+            stale_item,
+            deps=harness.deps(),
+        )
+        source_client._listener_generation = 5
+        source_client.channel = SimpleNamespace(id=10)
+        await flush_voice_utterance_buffer_from_runtime(
+            "voice:7:42",
+            deps=harness.deps(),
+        )
+
+        self.assertTrue(harness.queue.empty())
+        await harness.queue.put(dict(stale_item))
+        await harness.queue.put(
+            {
+                "session_key": "voice:7:42",
+                "member": member,
+                "pcm_bytes": b"unbound-old-channel-pcm",
+                "debug_meta": {},
+            }
+        )
+        worker = asyncio.create_task(
+            voice_ingress_worker_from_runtime(deps=harness.deps())
+        )
+        await asyncio.wait_for(harness.queue.join(), timeout=1.0)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+        self.assertEqual(harness.processed, [])
+        self.assertEqual(
+            harness.counters.count("listener_generation_stale_drop_count"),
+            3,
+        )
+
     async def test_process_member_audio_builds_ingress_item(self) -> None:
         scheduled: list[dict[str, Any]] = []
         calls: list[str] = []
+        voice_client = SimpleNamespace(
+            channel=SimpleNamespace(id=9),
+            _listener_generation=3,
+        )
         member = SimpleNamespace(
             id=42,
             bot=False,
-            guild=SimpleNamespace(id=7, voice_client=SimpleNamespace(channel=SimpleNamespace(id=9))),
+            guild=SimpleNamespace(id=7, voice_client=voice_client),
         )
+        listener_binding = (voice_client, 3, 9)
 
         async def ensure_startup_components_ready() -> None:
             calls.append("startup")
@@ -313,7 +411,15 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             monotonic=lambda: 123.0,
         )
 
-        await process_member_audio_from_runtime(member, b"pcm", {"unstable": True}, deps=deps)
+        await process_member_audio_from_runtime(
+            member,
+            b"pcm",
+            {
+                "unstable": True,
+                "_voice_listener_binding": listener_binding,
+            },
+            deps=deps,
+        )
 
         self.assertEqual(calls, ["startup", "worker"])
         self.assertEqual(len(scheduled), 1)
@@ -322,6 +428,8 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["pcm_bytes"], b"pcm")
         self.assertEqual(item["debug_meta"]["source"], "discord_voice")
         self.assertTrue(item["debug_meta"]["unstable"])
+        self.assertNotIn("_voice_listener_binding", item["debug_meta"])
+        self.assertIs(item["voice_listener_binding"], listener_binding)
         self.assertEqual(item["debug_meta"]["validation_session_id"], "validation-1")
         self.assertEqual(item["debug_meta"]["validation_step_id"], "03-interrupt")
         self.assertEqual(item["debug_meta"]["validation_attempt"], 2)
@@ -334,6 +442,29 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["owner_user_id_on_ingress"], 99)
         self.assertEqual(item["queue_depth_at_enqueue"], 3)
         self.assertEqual(item["enqueued_at"], 123.0)
+
+        scheduled.clear()
+        voice_client._evelyn_voice_move_pending = True
+        await process_member_audio_from_runtime(
+            member,
+            b"pcm",
+            {"_voice_listener_binding": listener_binding},
+            deps=deps,
+        )
+        self.assertEqual(scheduled, [])
+        del voice_client._evelyn_voice_move_pending
+
+        set_voice_transition_pending(member.guild.id, True)
+        try:
+            await process_member_audio_from_runtime(
+                member,
+                b"pcm",
+                {"_voice_listener_binding": listener_binding},
+                deps=deps,
+            )
+            self.assertEqual(scheduled, [])
+        finally:
+            set_voice_transition_pending(member.guild.id, False)
 
         for guild_id, channel_id in ((8, 9), (7, 10)):
             with self.subTest(guild_id=guild_id, channel_id=channel_id):

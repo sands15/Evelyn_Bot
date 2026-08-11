@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
 
 from .voice_orchestration import VoiceTranscriptReplyContext, VoiceTranscriptReplyDeps
+from .voice_ingress_runtime import voice_listener_binding_is_current
 
 
 @dataclass(frozen=True)
@@ -36,9 +38,22 @@ async def dispatch_voice_reply_from_runtime(
     room_key: str | None,
     person_key: str | None,
     session_memory_key: str | None,
+    voice_listener_binding: Any = None,
     reply_deps: VoiceTranscriptReplyDeps,
     deps: VoiceReplyDispatchDeps,
 ) -> None:
+    if not voice_listener_binding_is_current(member, voice_listener_binding):
+        return
+    if voice_listener_binding is not None:
+        get_voice_client = reply_deps.get_voice_client
+
+        def get_current_voice_client() -> Any:
+            if not voice_listener_binding_is_current(member, voice_listener_binding):
+                return None
+            return get_voice_client()
+
+        reply_deps = copy(reply_deps)
+        object.__setattr__(reply_deps, "get_voice_client", get_current_voice_client)
     meta = metrics.setdefault("meta", {})
     context = VoiceTranscriptReplyContext(
         guild_id=guild_id,
@@ -67,4 +82,6 @@ async def dispatch_voice_reply_from_runtime(
         person_key=person_key,
         session_memory_key=session_memory_key,
     )
+    if not voice_listener_binding_is_current(member, voice_listener_binding):
+        return
     await deps.process_voice_reply(context=context, deps=reply_deps)

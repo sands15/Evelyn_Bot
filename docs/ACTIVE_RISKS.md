@@ -387,6 +387,22 @@ stale 정리부터 replacement 생성·재사용까지 guild lock 안에서 직�
 client와 disconnect 도중 설치된 replacement를 재확인·재사용해 동시 재연결이 첫 성공을
 끊지 않는다. 실제
 `is_connected()`가 true인 client만 listener callback, warmup과 last-channel success를 갱신한다.
+채널 이동은 listener stop·generation 증가·tracked retry/task cancellation 요청과 bounded
+queue 교체 뒤 기존 guild voice TurnScope와 active TTS를 정지하고, playback이 남으면
+disconnect해 이동을 중단한다. 내부·외부 channel event는 같은 idempotent cleanup을
+재적용하되 guild lifecycle lock 안에서 현재 exact channel만 정리·재청취한다. lock 대기나
+cleanup 중 더 최신 이동이 생긴 stale event는 이전 channel로 client를 되돌리지 않는다.
+Discord receive와 Discord-target local mic의 internal
+client/generation/channel binding은 assembly·dequeue·STT 뒤·dispatch에서 재검증되며,
+TurnScope 취소는 per-item child에만 적용되어 shared ingress worker를 종료하지 않는다.
+connect·move 동안 pending ingress fence를 유지한다. 비치명 warmup은 lifecycle lock 밖에서
+실행해 새 channel event의 turn/TTS cleanup을 지연하지 않는다. event는 관측한 exact
+client/channel에만 cleanup을 적용한다. `move_to` 반환 뒤 실제 target channel ID가 아니면
+disconnect와 fixed failure로 닫아 false-success·last-channel 저장을 막는다.
+남은 검증 공백은 delayed retry·assembly·STT·reply/TTS 진행 중 실제 두 Discord 채널을
+이동해 이전 channel utterance가 새 channel reply/playback으로 이어지지 않고 target
+listener가 정상 재개되는지 관찰하는 live E2E다. source 경계만으로 완전한 cross-room live
+차단을 주장하지 않는다.
 last voice-channel state 저장 실패 운영 로그도
 `[VOICE STATE SAVE FAIL] errorType=<exception-type>`만 남긴다.
 Discord voice connect retry 실패 로그도 기존 attempt/channel metadata와 exception type만

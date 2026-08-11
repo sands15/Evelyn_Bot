@@ -14,6 +14,23 @@ from .voice_utterance import (
 from .voice_validation import validation_attempt_binding_is_current
 
 
+_VOICE_TRANSITION_GUILD_IDS: set[int] = set()
+
+
+def set_voice_transition_pending(guild_id: int, pending: bool) -> None:
+    if pending:
+        _VOICE_TRANSITION_GUILD_IDS.add(int(guild_id))
+    else:
+        _VOICE_TRANSITION_GUILD_IDS.discard(int(guild_id))
+
+
+def voice_transition_is_pending(guild_id: Any) -> bool:
+    try:
+        return int(guild_id) in _VOICE_TRANSITION_GUILD_IDS
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass(frozen=True)
 class VoiceIngressRuntimeDeps:
     voice_ingress_queue: asyncio.Queue[dict[str, Any]]
@@ -51,6 +68,33 @@ class VoiceIngressEntrypointDeps:
     monotonic: Callable[[], float] = time.monotonic
 
 
+def voice_listener_binding_is_current(
+    member: Any,
+    binding: Any,
+) -> bool:
+    guild = getattr(member, "guild", None)
+    current_client = getattr(guild, "voice_client", None)
+    if voice_transition_is_pending(getattr(guild, "id", None)) or getattr(
+        current_client,
+        "_evelyn_voice_move_pending",
+        False,
+    ):
+        return False
+    if binding is None:
+        return not hasattr(current_client, "_listener_generation")
+    if not isinstance(binding, tuple) or len(binding) != 3:
+        return False
+    source_client, source_generation, source_channel_id = binding
+    if isinstance(source_generation, bool) or not isinstance(source_generation, int):
+        return False
+    if current_client is not source_client:
+        return False
+    if getattr(current_client, "_listener_generation", None) != source_generation:
+        return False
+    current_channel_id = getattr(getattr(current_client, "channel", None), "id", None)
+    return current_channel_id == source_channel_id
+
+
 def voice_utterance_buffer_key(item: dict[str, Any]) -> str:
     session_key = str(item.get("session_key") or "")
     meta = item.get("debug_meta") if isinstance(item.get("debug_meta"), dict) else {}
@@ -76,10 +120,13 @@ async def process_member_audio_from_runtime(
     *,
     deps: VoiceIngressEntrypointDeps,
 ) -> None:
+    debug_meta_input = deps.normalize_voice_debug_meta(debug_meta)
+    voice_listener_binding = debug_meta_input.pop("_voice_listener_binding", None)
     await deps.ensure_startup_components_ready()
     if member is None or getattr(member, "bot", False):
         return
-    debug_meta_input = deps.normalize_voice_debug_meta(debug_meta)
+    if not voice_listener_binding_is_current(member, voice_listener_binding):
+        return
     source = deps.voice_ingress_source(debug_meta_input)
     if deps.should_drop_discord_audio_for_local_mic(getattr(member, "id", None), source=source):
         return
@@ -152,6 +199,8 @@ async def process_member_audio_from_runtime(
         queue_depth_at_enqueue=deps.voice_ingress_queue_depth(),
         enqueued_at=deps.monotonic(),
     )
+    if voice_listener_binding is not None:
+        item["voice_listener_binding"] = voice_listener_binding
     await deps.schedule_voice_utterance_item(item)
 
 
@@ -159,6 +208,15 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
     while True:
         item = await deps.voice_ingress_queue.get()
         try:
+            if not voice_listener_binding_is_current(
+                item.get("member"),
+                item.get("voice_listener_binding"),
+            ):
+                deps.increment_voice_pipeline_counter(
+                    "listener_generation_stale_drop_count"
+                )
+                deps.log("[VOICE QUEUE DROP] reason=listener_generation_stale")
+                continue
             dequeue_plan = deps.evaluate_voice_ingress_dequeue(
                 item,
                 now_monotonic=deps.monotonic(),
@@ -187,7 +245,17 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
                 continue
             process_item = dict(item)
             process_item.pop("enqueued_at", None)
-            await deps.process_member_audio(**process_item)
+            process_task = deps.create_task(
+                deps.process_member_audio(**process_item)
+            )
+            try:
+                await asyncio.shield(process_task)
+            except asyncio.CancelledError:
+                worker_task = asyncio.current_task()
+                if worker_task is not None and worker_task.cancelling():
+                    process_task.cancel()
+                    await asyncio.gather(process_task, return_exceptions=True)
+                    raise
         except Exception as exc:
             deps.log(f"[VOICE WORKER] 실패: errorType={type(exc).__name__}")
         finally:
@@ -235,6 +303,15 @@ async def flush_voice_utterance_buffer_from_runtime(
     if not buffer:
         return
     base_item = dict(buffer["base_item"])
+    if not voice_listener_binding_is_current(
+        base_item.get("member"),
+        base_item.get("voice_listener_binding"),
+    ):
+        deps.increment_voice_pipeline_counter(
+            "listener_generation_stale_drop_count"
+        )
+        deps.log("[VOICE UTTERANCE DROP] reason=listener_generation_stale")
+        return
     segments = list(buffer.get("segments") or [])
     merged_pcm = merge_discord_pcm_segments(segments, pad_ms=deps.voice_utterance_assembly_config.pad_ms)
     if not merged_pcm:
@@ -292,6 +369,13 @@ async def schedule_voice_utterance_item_from_runtime(
 
     pcm_bytes = bytes(item.get("pcm_bytes") or b"")
     buffer = deps.voice_utterance_buffers.get(key)
+    if (
+        buffer is not None
+        and buffer.get("base_item", {}).get("voice_listener_binding")
+        != item.get("voice_listener_binding")
+    ):
+        await flush_voice_utterance_buffer_from_runtime(key, deps=deps)
+        buffer = None
     if buffer is None:
         buffer = {
             "base_item": dict(item),

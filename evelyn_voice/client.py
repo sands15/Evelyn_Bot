@@ -776,7 +776,15 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
+        self._listener_generation = 0
         self.connected_at: float | None = None
+
+    def listener_binding(self) -> tuple[object, int, int | None]:
+        return (
+            self,
+            self._listener_generation,
+            getattr(self.channel, "id", None),
+        )
 
     def _set_internal_voice_reconnect_active(self, active: bool) -> None:
         self._internal_voice_reconnect_active = bool(active)
@@ -2262,7 +2270,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                     except Exception as e:
                         log.warning("VOICE MAP RETRY enqueue failed | idx=%d err=%r", idx, e)
 
-                asyncio.create_task(_requeue_map_retry())
+                retry_task = asyncio.create_task(_requeue_map_retry())
+                self._utterance_processing_tasks.add(retry_task)
+                retry_task.add_done_callback(self._utterance_processing_tasks.discard)
                 return
 
             self._log_unknown_ssrc_anomaly(
@@ -2824,6 +2834,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             segment_first_clean_decode_ms=segment_first_clean_decode_ms,
             segment_decoder_reset_before_first_clean=bool(decoder_stats.get("decoder_reset_before_first_clean")),
         )
+        voice_debug_meta["_voice_listener_binding"] = self.listener_binding()
         if voice_debug_meta["unstable"]:
             log.warning(
                 "VOICE UNSTABLE | idx=%d ssrc=%d reasons=%s packets=%d/%d plc=%d fec=%d outer=%d dave=%d opus=%d trim_ms=%.0f",
@@ -2866,6 +2877,8 @@ class EvelynVoiceClient(discord.VoiceClient):
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)
 
     def stop_listening(self) -> None:
+        self._listener_generation += 1
+
         if self._receive_task is not None:
             self._receive_task.cancel()
             self._receive_task = None
@@ -2881,6 +2894,9 @@ class EvelynVoiceClient(discord.VoiceClient):
         for task in list(self._utterance_processing_tasks):
             task.cancel()
         self._utterance_processing_tasks.clear()
+
+        self.media_queue = asyncio.Queue(maxsize=self.media_queue.maxsize)
+        self.utterance_queue = asyncio.Queue(maxsize=self.utterance_queue.maxsize)
 
         if self.sink is not None:
             self.sink.cleanup()

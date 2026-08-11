@@ -156,6 +156,18 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertIn(77, self.locks)
 
+        deferred = FakeVoiceClient(channel=channel)
+        channel.connect_results = [deferred]
+        guild.voice_client = None
+        deferred_result = await connect_evelyn_voice_client_from_runtime(
+            channel,
+            deps=self.build_deps(),
+            arm_listener=False,
+        )
+        self.assertIs(deferred_result, deferred)
+        self.assertIs(deferred.on_user_audio, self.process_member_audio)
+        self.assertEqual(deferred.listen_calls, 0)
+
     async def test_connect_serializes_stale_cleanup_and_reuses_replacement(self) -> None:
         guild = FakeGuild()
         channel = FakeChannel(guild)

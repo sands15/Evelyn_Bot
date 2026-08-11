@@ -552,6 +552,7 @@ class VoiceIoComposition:
         segment_id: int,
         ingress_during_reply: bool = False,
         owner_user_id_on_ingress: int | None = None,
+        voice_listener_binding: Any = None,
     ) -> None:
         await process_member_audio_pipeline_from_runtime(
             member,
@@ -566,5 +567,6 @@ class VoiceIoComposition:
             segment_id=segment_id,
             ingress_during_reply=ingress_during_reply,
             owner_user_id_on_ingress=owner_user_id_on_ingress,
+            voice_listener_binding=voice_listener_binding,
             deps=self.deps.member_audio_pipeline(),
         )

@@ -2319,3 +2319,22 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   포함하며 UI는 `기록된 예외`와 `현재 장애`를 구분한다. Optional payload-less 실패는
   desired-state 부재로 Runtime Health에만 남는다. Python backend는 다음 재시작부터 적용되며
   현재 실행 중 backend는 아직 이전 source 목록을 제공한다.
+
+## 2026-08-12 Discord voice listener channel-generation 경계
+
+- 채널 이동 시 `stop_listening()`은 listener generation을 올리고 tracked task와 delayed
+  SSRC retry에 cancellation을 요청하며 bounded media/utterance queue를 교체한다. 이어
+  기존 guild voice TurnScope와 active TTS를 정지하고, playback이 남으면 client를
+  disconnect해 이동을 중단한다. 정리가 끝난 뒤에만 `move_to`를 실행하고, 실제 channel ID가
+  target과 일치할 때만 새 listener와 last-channel 저장을 진행한다. 반환 뒤 target이 아니면
+  disconnect와 fixed `voice_channel_move_failed`로 닫는다. guild lifecycle lock은 요청된
+  이동과 관측 event를 직렬화하며, 관측 event는 현재 exact channel만 정리·재청취한다.
+  lock 대기 또는 cleanup 중 더 최신 이동이 생긴 stale event는 client를 되돌리지 않는다.
+- Discord receive와 Discord-target local mic의 internal client/generation/channel binding은
+  assembly, dequeue, STT 반환 뒤를 포함한 pipeline gate, reply dispatch와 delivery client
+  lookup에서 재검증된다. connect·move 동안 pending ingress fence를 유지한다. 비치명
+  warmup은 lifecycle lock을 놓은 뒤 실행하므로 그 사이 새 channel event가 이전 turn/TTS를
+  즉시 정리할 수 있다. TurnScope는 per-item child만 취소하므로 shared ingress worker는
+  다른 guild의 queue를 계속 처리한다. Discord `before→after` channel change는 내부·외부
+  모두 관측한 exact client/channel에만 같은 idempotent cleanup을 재적용한다.
+- 실제 Discord 두 채널 live E2E와 gateway/audio 장치 전이는 실행하지 않았다.

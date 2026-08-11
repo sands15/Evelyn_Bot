@@ -121,6 +121,20 @@ Implemented slices:
   short follow-up candidate, and room-owner/reply facade.
 - Voice STT flow helpers for wake interpretation, partial STT, full STT/rescore,
   final transcript assembly, and final wake-veto decision.
+- Discord voice channel changes stop the listener, advance its generation,
+  request cancellation of tracked work and delayed SSRC retries, reset bounded
+  queues, cancel prior guild voice TurnScopes and active TTS, then move, verify
+  the target channel, and listen when connected. A per-guild lifecycle lock
+  serializes requested moves and observed channel events. An observed event only
+  rearms the exact current channel; a stale event never moves the client back.
+  External and internal events both reapply cleanup, and incomplete moves fail closed.
+- Discord receive and Discord-routed local mic carry an internal
+  `(client, generation, channel)` binding rechecked through ingress assembly,
+  dequeue, STT pipeline gates, reply dispatch, and delivery client lookup.
+  The pending fence covers connect and move. Non-fatal warmup runs after the
+  lifecycle lock is released, so a later channel event can immediately quiesce
+  prior turns and TTS. Per-item child tasks let turn cancellation leave the
+  shared ingress worker alive.
 - Local TTS barge-in path: strong user speech during active local TTS can stop
   the local speaker stream and keep the accepted utterance from being suppressed.
 - Local mic capture freezes the exact playback generation on the first threshold

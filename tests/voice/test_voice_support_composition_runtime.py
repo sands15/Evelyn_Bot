@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
 import sys
 import unittest
+from collections import deque
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 
@@ -15,6 +18,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.voice_support_composition_runtime import (
     VoiceSupportComposition,
     VoiceSupportCompositionDeps,
+)
+from evelyn_core.voice_ingress_runtime import (
+    voice_listener_binding_is_current,
+    voice_transition_is_pending,
 )
 
 
@@ -39,6 +46,7 @@ class FakeVoiceClient:
         self.stop_calls = 0
         self.listen_calls = 0
         self.moves: list[FakeVoiceChannel] = []
+        self.events: list[str] = []
 
     def is_internal_voice_reconnect_active(self) -> bool:
         return False
@@ -51,16 +59,27 @@ class FakeVoiceClient:
 
     def stop_listening(self) -> None:
         self.stop_calls += 1
+        self.events.append("stop")
+        self.healthy = False
 
     def listen(self) -> None:
         self.listen_calls += 1
+        self.events.append("listen")
+        self.healthy = True
 
     async def move_to(self, channel: FakeVoiceChannel) -> None:
+        self.events.append("move")
         self.moves.append(channel)
         self.channel = channel
 
+    async def disconnect(self, *, force: bool = False) -> None:
+        self.events.append("disconnect")
+        self.connected = False
+
 
 class FakeGuild:
+    __slots__ = ("id", "voice_client", "channel")
+
     def __init__(self, voice_client=None, *, guild_id: int = 11, channel=None) -> None:
         self.id = guild_id
         self.voice_client = voice_client
@@ -100,6 +119,9 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ensure_startup_components_ready=AsyncMock(),
             voice_client_type=FakeVoiceClient,
             process_member_audio=lambda: callback,
+            cancel_voice_turns_for_guild=Mock(return_value=0),
+            stop_active_tts_playback=AsyncMock(return_value=False),
+            is_tts_playback_active=Mock(return_value=False),
             warmup_voice_path=AsyncMock(),
             save_last_voice_channel_state=Mock(),
             load_last_voice_channel_state=Mock(return_value={}),
@@ -214,13 +236,442 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         voice_client = FakeVoiceClient(old_channel, healthy=True)
         guild = FakeGuild(voice_client)
 
-        result = await VoiceSupportComposition(self.build_deps()).ensure_listening_voice_client(
+        def cancel_voice_turns(guild_id: int) -> int:
+            self.assertEqual(guild_id, 11)
+            voice_client.events.append("cancel_turns")
+            return 1
+
+        async def stop_playback(guild_id: int, *, reason: str) -> bool:
+            self.assertEqual((guild_id, reason), (11, "voice_channel_move"))
+            voice_client.events.append("cancel_playback")
+            return True
+
+        result = await VoiceSupportComposition(
+            self.build_deps(
+                cancel_voice_turns_for_guild=cancel_voice_turns,
+                stop_active_tts_playback=stop_playback,
+            )
+        ).ensure_listening_voice_client(
             guild,
             target_channel,
         )
 
         self.assertIs(result, voice_client)
         self.assertEqual(voice_client.moves, [target_channel])
+        self.assertFalse(hasattr(voice_client, "_evelyn_voice_move_pending"))
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "cancel_turns", "cancel_playback", "move", "listen"],
+        )
+
+    async def test_voice_client_move_stops_when_playback_remains_active(self) -> None:
+        old_channel = FakeVoiceChannel(channel_id=1, name="old")
+        target_channel = FakeVoiceChannel(channel_id=2, name="new")
+        voice_client = FakeVoiceClient(old_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+
+        async def stop_playback(_guild_id: int, *, reason: str) -> bool:
+            self.assertEqual(reason, "voice_channel_move")
+            voice_client.events.append("cancel_playback")
+            return False
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^voice_channel_move_playback_stop_failed$",
+        ):
+            await VoiceSupportComposition(
+                self.build_deps(
+                    cancel_voice_turns_for_guild=lambda _guild_id: voice_client.events.append(
+                        "cancel_turns"
+                    ),
+                    stop_active_tts_playback=stop_playback,
+                    is_tts_playback_active=lambda _guild_id: True,
+                )
+            ).ensure_listening_voice_client(guild, target_channel)
+
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "cancel_turns", "cancel_playback", "disconnect"],
+        )
+        self.assertEqual(voice_client.moves, [])
+
+    async def test_external_channel_move_forces_cleanup_without_second_move(self) -> None:
+        target_channel = FakeVoiceChannel(channel_id=2, name="new")
+        voice_client = FakeVoiceClient(target_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+
+        def cancel_voice_turns(_guild_id: int) -> int:
+            voice_client.events.append("cancel_turns")
+            return 1
+
+        async def stop_playback(_guild_id: int, *, reason: str) -> bool:
+            self.assertEqual(reason, "voice_channel_move")
+            voice_client.events.append("cancel_playback")
+            return True
+
+        result = await VoiceSupportComposition(
+            self.build_deps(
+                cancel_voice_turns_for_guild=cancel_voice_turns,
+                stop_active_tts_playback=stop_playback,
+            )
+        ).ensure_listening_voice_client(
+            guild,
+            target_channel,
+            force_listener_reset=True,
+        )
+
+        self.assertIs(result, voice_client)
+        self.assertEqual(voice_client.moves, [])
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "cancel_turns", "cancel_playback", "listen"],
+        )
+
+        missing_client_composition = VoiceSupportComposition(self.build_deps())
+        missing_client_composition.connect_evelyn_voice_client = AsyncMock()
+        self.assertIsNone(
+            await missing_client_composition.ensure_listening_voice_client(
+                FakeGuild(None),
+                target_channel,
+                force_listener_reset=True,
+            )
+        )
+        missing_client_composition.connect_evelyn_voice_client.assert_not_awaited()
+
+        observed_client = FakeVoiceClient(target_channel, healthy=True)
+        replacement_client = FakeVoiceClient(target_channel, healthy=True)
+        replacement_guild = FakeGuild(replacement_client)
+        replacement_deps = self.build_deps()
+        self.assertIsNone(
+            await VoiceSupportComposition(replacement_deps).ensure_listening_voice_client(
+                replacement_guild,
+                target_channel,
+                force_listener_reset=True,
+                expected_voice_client=observed_client,
+            )
+        )
+        self.assertEqual((replacement_client.stop_calls, replacement_client.listen_calls), (0, 0))
+        replacement_deps.cancel_voice_turns_for_guild.assert_not_called()
+        replacement_deps.stop_active_tts_playback.assert_not_awaited()
+        replacement_deps.save_last_voice_channel_state.assert_not_called()
+
+    async def test_external_channel_move_does_not_restore_stale_target_after_cleanup(self) -> None:
+        target_channel = FakeVoiceChannel(channel_id=2, name="observed")
+        newer_channel = FakeVoiceChannel(channel_id=3, name="newer")
+        voice_client = FakeVoiceClient(target_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+        save = Mock()
+
+        async def stop_playback(_guild_id: int, *, reason: str) -> bool:
+            self.assertEqual(reason, "voice_channel_move")
+            voice_client.events.append("cancel_playback")
+            voice_client.channel = newer_channel
+            return True
+
+        result = await VoiceSupportComposition(
+            self.build_deps(
+                cancel_voice_turns_for_guild=lambda _guild_id: voice_client.events.append(
+                    "cancel_turns"
+                ),
+                stop_active_tts_playback=stop_playback,
+                save_last_voice_channel_state=save,
+            )
+        ).ensure_listening_voice_client(
+            guild,
+            target_channel,
+            force_listener_reset=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "cancel_turns", "cancel_playback"],
+        )
+        self.assertEqual(voice_client.moves, [])
+        self.assertEqual(voice_client.listen_calls, 0)
+        save.assert_not_called()
+
+    async def test_new_connection_defers_listener_arm_to_composition(self) -> None:
+        target_channel = FakeVoiceChannel(channel_id=2, name="target")
+        voice_client = FakeVoiceClient(target_channel, healthy=False)
+        voice_client._listener_generation = 7
+        guild = FakeGuild(None)
+        member = SimpleNamespace(guild=guild)
+        save = Mock()
+        arm_listener_values = []
+
+        async def connect_runtime(
+            _target_channel: FakeVoiceChannel,
+            *,
+            deps,
+            arm_listener: bool = True,
+        ) -> FakeVoiceClient:
+            del deps
+            arm_listener_values.append(arm_listener)
+            guild.voice_client = voice_client
+            self.assertTrue(voice_transition_is_pending(guild.id))
+            self.assertFalse(
+                voice_listener_binding_is_current(
+                    member,
+                    (voice_client, 7, target_channel.id),
+                )
+            )
+            if arm_listener:
+                voice_client.listen()
+            return voice_client
+
+        composition = VoiceSupportComposition(
+            self.build_deps(save_last_voice_channel_state=save)
+        )
+        with patch(
+            "evelyn_core.voice_support_composition_runtime.connect_evelyn_voice_client_from_runtime",
+            side_effect=connect_runtime,
+        ):
+            result = await composition.ensure_listening_voice_client(guild, target_channel)
+
+        self.assertIs(result, voice_client)
+        self.assertEqual(arm_listener_values, [False])
+        self.assertEqual(voice_client.listen_calls, 1)
+        self.assertFalse(hasattr(voice_client, "_evelyn_voice_move_pending"))
+        self.assertFalse(voice_transition_is_pending(guild.id))
+        save.assert_called_once()
+
+    async def test_channel_event_cleanup_invalidates_prior_warmup_result(self) -> None:
+        target_channel = FakeVoiceChannel(channel_id=2, name="target")
+        voice_client = FakeVoiceClient(target_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+        save = Mock()
+        warmup_started = asyncio.Event()
+        release_warmup = asyncio.Event()
+        stop_playback_started = asyncio.Event()
+        release_stop_playback = asyncio.Event()
+        active_playback = True
+
+        async def warmup(*, reason: str, key: str) -> None:
+            self.assertEqual(reason, "voice_connect")
+            if key == "voice:11:2":
+                warmup_started.set()
+                await release_warmup.wait()
+
+        async def stop_playback(_guild_id: int, *, reason: str) -> bool:
+            nonlocal active_playback
+            self.assertEqual(reason, "voice_channel_move")
+            stop_playback_started.set()
+            await release_stop_playback.wait()
+            active_playback = False
+            return True
+
+        deps = self.build_deps(
+            warmup_voice_path=warmup,
+            stop_active_tts_playback=stop_playback,
+            is_tts_playback_active=lambda _guild_id: active_playback,
+            save_last_voice_channel_state=save,
+        )
+        composition = VoiceSupportComposition(deps)
+        prior = asyncio.create_task(
+            composition.ensure_listening_voice_client(guild, target_channel)
+        )
+        await asyncio.wait_for(warmup_started.wait(), timeout=1.0)
+        event = asyncio.create_task(
+            composition.ensure_listening_voice_client(
+                guild,
+                target_channel,
+                force_listener_reset=True,
+                expected_voice_client=voice_client,
+            )
+        )
+        try:
+            await asyncio.wait_for(stop_playback_started.wait(), timeout=1.0)
+            self.assertEqual(deps.cancel_voice_turns_for_guild.call_count, 1)
+            release_warmup.set()
+            prior_result = await asyncio.wait_for(prior, timeout=1.0)
+            self.assertIsNone(prior_result)
+            self.assertFalse(voice_client.is_listener_healthy())
+            self.assertTrue(hasattr(voice_client, "_evelyn_voice_move_pending"))
+            self.assertFalse(event.done())
+            release_stop_playback.set()
+            event_result = await asyncio.wait_for(event, timeout=1.0)
+        finally:
+            release_warmup.set()
+            release_stop_playback.set()
+            await asyncio.gather(prior, event, return_exceptions=True)
+
+        self.assertIs(event_result, voice_client)
+        self.assertFalse(active_playback)
+        self.assertIs(voice_client.channel, target_channel)
+        self.assertEqual(voice_client.moves, [])
+        self.assertEqual(save.call_count, 2)
+
+    async def test_voice_client_move_verifies_target_channel(self) -> None:
+        old_channel = FakeVoiceChannel(channel_id=1, name="old")
+        target_channel = FakeVoiceChannel(channel_id=2, name="new")
+        voice_client = FakeVoiceClient(old_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+        save = Mock()
+
+        async def stalled_move(channel: FakeVoiceChannel) -> None:
+            voice_client.events.append("move")
+            voice_client.moves.append(channel)
+
+        voice_client.move_to = stalled_move
+        with self.assertRaisesRegex(RuntimeError, "^voice_channel_move_failed$"):
+            await VoiceSupportComposition(
+                self.build_deps(save_last_voice_channel_state=save)
+            ).ensure_listening_voice_client(guild, target_channel)
+
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "move", "disconnect"],
+        )
+        self.assertEqual(voice_client.listen_calls, 0)
+        self.assertFalse(hasattr(voice_client, "_evelyn_voice_move_pending"))
+        save.assert_not_called()
+
+    async def test_concurrent_channel_moves_are_serialized(self) -> None:
+        old_channel = FakeVoiceChannel(channel_id=1, name="old")
+        first_target = FakeVoiceChannel(channel_id=2, name="first")
+        second_target = FakeVoiceChannel(channel_id=3, name="second")
+        voice_client = FakeVoiceClient(old_channel, healthy=True)
+        voice_client._listener_generation = 1
+        guild = FakeGuild(voice_client)
+        member = SimpleNamespace(guild=guild)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        original_move = voice_client.move_to
+        move_count = 0
+
+        async def ordered_move(channel: FakeVoiceChannel) -> None:
+            nonlocal move_count
+            move_count += 1
+            if move_count == 1:
+                voice_client.events.append("move")
+                voice_client.moves.append(channel)
+                first_started.set()
+                await release_first.wait()
+                voice_client.channel = channel
+                return
+            await original_move(channel)
+
+        voice_client.move_to = ordered_move
+        deps = self.build_deps()
+        composition = VoiceSupportComposition(deps)
+        first = asyncio.create_task(
+            composition.ensure_listening_voice_client(guild, first_target)
+        )
+        await asyncio.wait_for(first_started.wait(), timeout=1.0)
+        second = asyncio.create_task(
+            composition.ensure_listening_voice_client(guild, second_target)
+        )
+        await asyncio.sleep(0)
+        stale_event = asyncio.create_task(
+            composition.ensure_listening_voice_client(
+                guild,
+                first_target,
+                expected_voice_client=voice_client,
+            )
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(voice_client.moves, [first_target])
+        self.assertFalse(second.done())
+        self.assertFalse(
+            voice_listener_binding_is_current(
+                member,
+                (voice_client, 1, old_channel.id),
+            )
+        )
+
+        release_first.set()
+        first_result, second_result, stale_result = await asyncio.gather(
+            first,
+            second,
+            stale_event,
+        )
+        self.assertIs(first_result, voice_client)
+        self.assertIs(second_result, voice_client)
+        self.assertIsNone(stale_result)
+        self.assertEqual(voice_client.moves, [first_target, second_target])
+        self.assertIs(voice_client.channel, second_target)
+        self.assertEqual((voice_client.stop_calls, voice_client.listen_calls), (2, 2))
+        self.assertEqual(deps.cancel_voice_turns_for_guild.call_count, 2)
+        self.assertEqual(deps.stop_active_tts_playback.await_count, 2)
+        self.assertEqual(deps.save_last_voice_channel_state.call_count, 2)
+
+    async def test_stop_listening_cancels_delayed_map_retry(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = lambda *_args, **_kwargs: b""
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+            state_module = importlib.import_module("evelyn_voice.state")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.runtime = state_module.VoiceRuntimeState()
+        voice_client.channel = SimpleNamespace(members=[])
+        voice_client.connected_at = None
+        voice_client.dave_inner_fail_log_count = 0
+
+        now = asyncio.get_running_loop().time()
+        packet = {"sequence": 7, "payload": b"x", "received_at": now}
+        voice_client.pending_ssrc_packets = {42: deque([packet])}
+        voice_client.pending_inner_packets = {}
+        voice_client.pending_inner_log_times = {}
+        voice_client.unknown_ssrc_log_times = {}
+        voice_client.utterance_states = {}
+        voice_client.opus_decoders = {}
+        voice_client.opus_decoder_stats = {}
+        voice_client.reorder_states = {}
+        voice_client.media_queue = asyncio.Queue(maxsize=2000)
+        voice_client.utterance_queue = asyncio.Queue(maxsize=32)
+        voice_client._receive_task = None
+        voice_client._decrypt_task = None
+        voice_client._utterance_task = None
+        voice_client._utterance_processing_tasks = set()
+        voice_client._listener_generation = 0
+        voice_client.sink = None
+
+        self.assertEqual(voice_client.listener_binding(), (voice_client, 0, None))
+        client_source = (REPO_ROOT / "evelyn_voice" / "client.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'voice_debug_meta["_voice_listener_binding"] = self.listener_binding()',
+            client_source,
+        )
+
+        item = {"idx": 1, "ssrc": 42, "packets": [packet], "queued_at": now}
+        created_tasks: list[asyncio.Task] = []
+        real_create_task = asyncio.create_task
+
+        def capture_task(coro):
+            task = real_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        with (
+            patch.object(client_module, "VOICE_UNKNOWN_SSRC_RETRY_MS", 1.0),
+            patch.object(client_module, "VOICE_MAP_RETRY_MS", 1.0),
+            patch.object(client_module.asyncio, "create_task", capture_task),
+        ):
+            await voice_client._process_utterance_packets(item)
+            retry_task = created_tasks[-1]
+            voice_client.media_queue.put_nowait({"generation": "old"})
+            voice_client.utterance_queue.put_nowait({"generation": "old"})
+            voice_client.stop_listening()
+            await asyncio.gather(retry_task, return_exceptions=True)
+
+        self.assertTrue(voice_client.media_queue.empty())
+        self.assertTrue(voice_client.utterance_queue.empty())
+        self.assertEqual(voice_client._listener_generation, 1)
 
     async def test_restore_last_channel_updates_success_state(self) -> None:
         channel = FakeVoiceChannel()
@@ -258,9 +709,11 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_internal_reconnect_replaces_stale_client(self) -> None:
         channel = FakeVoiceChannel()
         stale_voice_client = FakeVoiceClient(channel, connected=False)
+        stale_voice_client._listener_generation = 9
         stale_voice_client.is_internal_voice_reconnect_active = Mock(return_value=True)
         replacement = FakeVoiceClient(channel, connected=True)
         guild = FakeGuild(stale_voice_client)
+        member = SimpleNamespace(guild=guild)
         warmup = AsyncMock()
         save = Mock()
         deps = self.build_deps(
@@ -268,8 +721,26 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             save_last_voice_channel_state=save,
         )
         composition = VoiceSupportComposition(deps)
-        composition.wait_for_internal_voice_reconnect = AsyncMock(return_value=None)
-        composition.connect_evelyn_voice_client = AsyncMock(return_value=replacement)
+
+        async def wait_for_reconnect(_channel: FakeVoiceChannel) -> None:
+            self.assertTrue(voice_transition_is_pending(guild.id))
+            self.assertFalse(
+                voice_listener_binding_is_current(
+                    member,
+                    (stale_voice_client, 9, channel.id),
+                )
+            )
+            return None
+
+        composition.wait_for_internal_voice_reconnect = AsyncMock(
+            side_effect=wait_for_reconnect
+        )
+
+        async def connect(_channel: FakeVoiceChannel) -> FakeVoiceClient:
+            guild.voice_client = replacement
+            return replacement
+
+        composition.connect_evelyn_voice_client = AsyncMock(side_effect=connect)
 
         result = await composition.ensure_listening_voice_client(guild, channel)
 
@@ -278,6 +749,7 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         composition.connect_evelyn_voice_client.assert_awaited_once_with(channel)
         self.assertEqual(replacement.listen_calls, 1)
         self.assertIsNotNone(replacement.on_user_audio)
+        self.assertFalse(voice_transition_is_pending(guild.id))
         warmup.assert_awaited_once_with(reason="voice_connect", key="voice:11:22")
         save.assert_called_once_with(
             guild,
@@ -292,7 +764,11 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         replacement = FakeVoiceClient(channel, connected=True, healthy=True)
         guild = FakeGuild(stale_voice_client)
         composition = VoiceSupportComposition(self.build_deps())
-        composition.connect_evelyn_voice_client = AsyncMock(return_value=replacement)
+        async def connect(_channel: FakeVoiceChannel) -> FakeVoiceClient:
+            guild.voice_client = replacement
+            return replacement
+
+        composition.connect_evelyn_voice_client = AsyncMock(side_effect=connect)
 
         result = await composition.ensure_listening_voice_client(guild, channel)
 

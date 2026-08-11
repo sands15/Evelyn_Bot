@@ -206,4 +206,8 @@ async def handle_local_mic_segment_from_runtime(
         return
     deps.local_mic_runtime_state["last_error"] = None
     routed_meta["routed_discord_user_id"] = int(getattr(target.member, "id", 0) or 0)
+    voice_client = getattr(getattr(target.member, "guild", None), "voice_client", None)
+    listener_binding = getattr(voice_client, "listener_binding", None)
+    if callable(listener_binding):
+        routed_meta["_voice_listener_binding"] = listener_binding()
     await deps.process_member_audio(target.member, pcm_bytes, routed_meta)

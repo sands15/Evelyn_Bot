@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .voice_ingress_runtime import voice_listener_binding_is_current
 from .voice_validation import validation_attempt_binding_is_current
 
 
@@ -39,9 +40,13 @@ async def process_member_audio_pipeline_from_runtime(
     segment_id: int,
     ingress_during_reply: bool = False,
     owner_user_id_on_ingress: int | None = None,
+    voice_listener_binding: Any = None,
     deps: VoiceMemberAudioPipelineDeps,
 ) -> None:
-    if not validation_attempt_binding_is_current(
+    def source_is_current() -> bool:
+        return voice_listener_binding_is_current(member, voice_listener_binding)
+
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -61,7 +66,7 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if ingress is None:
         return
-    if not validation_attempt_binding_is_current(
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -103,7 +108,7 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if wake is None:
         return
-    if not validation_attempt_binding_is_current(
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -129,7 +134,7 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if interrupt_gate is None:
         return
-    if not validation_attempt_binding_is_current(
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -154,7 +159,7 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if stt_execution is None:
         return
-    if not validation_attempt_binding_is_current(
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -202,7 +207,7 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if session_gate is None:
         return
-    if not validation_attempt_binding_is_current(
+    if not source_is_current() or not validation_attempt_binding_is_current(
         debug_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -227,6 +232,7 @@ async def process_member_audio_pipeline_from_runtime(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        voice_listener_binding=voice_listener_binding,
         reply_deps=deps.build_transcript_reply_deps(guild),
         deps=deps.build_reply_dispatch_deps(),
     )

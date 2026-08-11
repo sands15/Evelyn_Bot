@@ -47,6 +47,7 @@ async def connect_evelyn_voice_client_from_runtime(
     target_channel: Any,
     *,
     deps: DiscordVoiceConnectionRuntimeDeps,
+    arm_listener: bool = True,
 ) -> Any:
     guild_id = target_channel.guild.id
     lock = deps.voice_connect_locks.setdefault(guild_id, asyncio.Lock())
@@ -98,7 +99,7 @@ async def connect_evelyn_voice_client_from_runtime(
                 if not isinstance(vc, deps.voice_client_type):
                     raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
                 vc.on_user_audio = deps.process_member_audio
-                if not vc.is_listener_healthy():
+                if arm_listener and not vc.is_listener_healthy():
                     vc.listen()
                     deps.log(f"[VOICE CONNECT ARM] guild={guild_id} channel={target_channel.name}")
                 return vc

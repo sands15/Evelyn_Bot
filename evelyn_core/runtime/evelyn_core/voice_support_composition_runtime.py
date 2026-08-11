@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from .stt_text_runtime import (
 from .stt_transcription_runtime import transcribe_audio16k_from_runtime
 from .startup_audio_runtime import warmup_stt_sync_from_runtime
 from .tts_warmup_runtime import warmup_tts_server_from_runtime
+from .voice_ingress_runtime import set_voice_transition_pending
 from .voice_barge_in_continuity import (
     VOICE_BARGE_IN_EVENT_FINISH,
     build_voice_barge_in_continuity_snapshot_from_runtime,
@@ -68,6 +70,9 @@ class VoiceSupportCompositionDeps:
     ensure_startup_components_ready: Callable[..., Any]
     voice_client_type: type
     process_member_audio: Callable[[], Callable[..., Any]]
+    cancel_voice_turns_for_guild: Callable[[int], int]
+    stop_active_tts_playback: Callable[..., Any]
+    is_tts_playback_active: Callable[[int], bool]
     warmup_voice_path: Callable[..., Any]
     save_last_voice_channel_state: Callable[..., None]
     load_last_voice_channel_state: Callable[[], dict[str, Any]]
@@ -85,6 +90,7 @@ class VoiceSupportComposition:
 
     def __init__(self, deps: VoiceSupportCompositionDeps) -> None:
         self.deps = deps
+        self._guild_voice_locks: dict[int, asyncio.Lock] = {}
 
     def parse_barge_in_reason_label(self, raw_reason_code: str) -> str:
         return parse_barge_in_reason_label_from_runtime(raw_reason_code, deps=self.deps.continuity())
@@ -324,11 +330,75 @@ class VoiceSupportComposition:
         return await connect_evelyn_voice_client_from_runtime(
             target_channel,
             deps=self.deps.voice_connection(),
+            arm_listener=False,
         )
 
-    async def ensure_listening_voice_client(self, guild: Any, target_channel: Any) -> Any | None:
+    async def ensure_listening_voice_client(
+        self,
+        guild: Any,
+        target_channel: Any,
+        *,
+        force_listener_reset: bool = False,
+        expected_voice_client: Any | None = None,
+    ) -> Any | None:
+        lock = self._guild_voice_locks.setdefault(int(guild.id), asyncio.Lock())
+        async with lock:
+            set_voice_transition_pending(int(guild.id), True)
+            try:
+                voice_client = await self._ensure_listening_voice_client_locked(
+                    guild,
+                    target_channel,
+                    force_listener_reset=force_listener_reset,
+                    expected_voice_client=expected_voice_client,
+                )
+            finally:
+                set_voice_transition_pending(int(guild.id), False)
+        if voice_client is None:
+            return None
+        warmup_key = f"voice:{guild.id}:{getattr(target_channel, 'id', 'unknown')}"
+        try:
+            await self.deps.warmup_voice_path(reason="voice_connect", key=warmup_key)
+        except Exception as exc:
+            self.deps.log(
+                f"[VOICE PATH WARMUP FAIL] guild={guild.id} "
+                f"channel={getattr(target_channel, 'name', None)} err={exc!r}"
+            )
+        if (
+            not voice_client.is_connected()
+            or not voice_client.is_listener_healthy()
+            or bool(getattr(voice_client, "_evelyn_voice_move_pending", False))
+            or guild.voice_client is not voice_client
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != getattr(target_channel, "id", None)
+        ):
+            return None
+        return voice_client
+
+    async def _ensure_listening_voice_client_locked(
+        self,
+        guild: Any,
+        target_channel: Any,
+        *,
+        force_listener_reset: bool,
+        expected_voice_client: Any | None,
+    ) -> Any | None:
         await self.deps.ensure_startup_components_ready()
         voice_client = guild.voice_client
+        target_channel_id = getattr(target_channel, "id", None)
+
+        if expected_voice_client is not None and (
+            voice_client is not expected_voice_client
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != target_channel_id
+        ):
+            return None
+
+        if force_listener_reset and (
+            not isinstance(voice_client, self.deps.voice_client_type)
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != target_channel_id
+        ):
+            return None
 
         if voice_client is not None and not isinstance(voice_client, self.deps.voice_client_type):
             await voice_client.disconnect(force=True)
@@ -348,40 +418,106 @@ class VoiceSupportComposition:
         ):
             voice_client = None
 
-        if voice_client is None:
-            voice_client = await self.connect_evelyn_voice_client(target_channel)
-        elif voice_client.channel != target_channel:
-            await voice_client.move_to(target_channel)
-
-        if (
-            isinstance(voice_client, self.deps.voice_client_type)
-            and voice_client.is_connected()
+        if force_listener_reset and (
+            voice_client is None
+            or guild.voice_client is not voice_client
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != target_channel_id
         ):
-            voice_client.on_user_audio = self.deps.process_member_audio()
-            if not voice_client.is_listener_healthy():
-                try:
-                    voice_client.stop_listening()
-                except Exception:
-                    pass
-                voice_client.listen()
-                self.deps.log(f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}")
-            warmup_key = f"voice:{guild.id}:{getattr(target_channel, 'id', 'unknown')}"
-            try:
-                await self.deps.warmup_voice_path(reason="voice_connect", key=warmup_key)
-            except Exception as exc:
-                self.deps.log(
-                    f"[VOICE PATH WARMUP FAIL] guild={guild.id} "
-                    f"channel={getattr(target_channel, 'name', None)} err={exc!r}"
-                )
-            self.deps.save_last_voice_channel_state(
-                guild,
-                target_channel,
-                reason="ensure_listening",
-                manual_disconnect=False,
-            )
-            return voice_client
+            return None
 
-        return None
+        if expected_voice_client is not None and (
+            voice_client is not expected_voice_client
+            or guild.voice_client is not voice_client
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != target_channel_id
+        ):
+            return None
+
+        pending_client = None
+        transitioning = False
+        try:
+            if voice_client is None:
+                voice_client = await self.connect_evelyn_voice_client(target_channel)
+                pending_client = voice_client
+                transitioning = True
+                setattr(voice_client, "_evelyn_voice_move_pending", True)
+                if voice_client.is_listener_healthy():
+                    voice_client.stop_listening()
+            elif force_listener_reset or voice_client.channel != target_channel:
+                pending_client = voice_client
+                transitioning = True
+                setattr(voice_client, "_evelyn_voice_move_pending", True)
+                voice_client.stop_listening()
+                self.deps.cancel_voice_turns_for_guild(int(guild.id))
+                await self.deps.stop_active_tts_playback(
+                    int(guild.id),
+                    reason="voice_channel_move",
+                )
+                if self.deps.is_tts_playback_active(int(guild.id)):
+                    try:
+                        await voice_client.disconnect(force=True)
+                    except Exception:
+                        pass
+                    raise RuntimeError("voice_channel_move_playback_stop_failed") from None
+                if force_listener_reset and (
+                    guild.voice_client is not voice_client
+                    or getattr(getattr(voice_client, "channel", None), "id", None)
+                    != target_channel_id
+                ):
+                    return None
+                if not force_listener_reset and voice_client.channel != target_channel:
+                    await voice_client.move_to(target_channel)
+                    if (
+                        getattr(getattr(voice_client, "channel", None), "id", None)
+                        != target_channel_id
+                    ):
+                        try:
+                            await voice_client.disconnect(force=True)
+                        except Exception:
+                            pass
+                        raise RuntimeError("voice_channel_move_failed") from None
+
+            if (
+                isinstance(voice_client, self.deps.voice_client_type)
+                and voice_client.is_connected()
+            ):
+                if pending_client is None:
+                    pending_client = voice_client
+                    setattr(voice_client, "_evelyn_voice_move_pending", True)
+                voice_client.on_user_audio = self.deps.process_member_audio()
+                if (
+                    not voice_client.is_connected()
+                    or guild.voice_client is not voice_client
+                    or getattr(getattr(voice_client, "channel", None), "id", None)
+                    != target_channel_id
+                ):
+                    return None
+                if not voice_client.is_listener_healthy():
+                    if not transitioning:
+                        try:
+                            voice_client.stop_listening()
+                        except Exception:
+                            pass
+                    voice_client.listen()
+                    self.deps.log(
+                        f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}"
+                    )
+                self.deps.save_last_voice_channel_state(
+                    guild,
+                    target_channel,
+                    reason="ensure_listening",
+                    manual_disconnect=False,
+                )
+                return voice_client
+
+            return None
+        finally:
+            if pending_client is not None:
+                try:
+                    delattr(pending_client, "_evelyn_voice_move_pending")
+                except AttributeError:
+                    pass
 
     async def ensure_voice_client(self, message: Any) -> Any | None:
         if not message.guild:

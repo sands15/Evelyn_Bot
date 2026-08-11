@@ -22,6 +22,10 @@ from evelyn_core.local_mic_segment_runtime import (  # noqa: E402
     should_drop_discord_audio_for_local_mic_from_runtime,
     stop_local_mic_service_from_runtime,
 )
+from evelyn_core.voice_ingress_runtime import (  # noqa: E402
+    VoiceIngressEntrypointDeps,
+    process_member_audio_from_runtime,
+)
 
 
 class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -260,12 +264,60 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_routes_to_discord_target_when_present(self) -> None:
         state: dict[str, Any] = {"input_mode": "auto"}
-        calls: list[tuple[Any, bytes, dict[str, Any]]] = []
-        member = SimpleNamespace(id=42)
+        scheduled: list[dict[str, Any]] = []
+        voice_client = SimpleNamespace(
+            channel=SimpleNamespace(id=9),
+            _listener_generation=3,
+        )
+        listener_binding = (voice_client, 3, 9)
+        voice_client.listener_binding = lambda: listener_binding
+        member = SimpleNamespace(
+            id=42,
+            bot=False,
+            guild=SimpleNamespace(id=7, voice_client=voice_client),
+        )
         target = SimpleNamespace(member=member)
 
-        async def process_member_audio(target_member: Any, pcm_bytes: bytes, debug_meta: dict[str, Any]) -> None:
-            calls.append((target_member, pcm_bytes, debug_meta))
+        async def schedule_voice_utterance_item(item: dict[str, Any]) -> None:
+            scheduled.append(item)
+
+        async def ensure_startup_components_ready() -> None:
+            return None
+
+        ingress_deps = VoiceIngressEntrypointDeps(
+            ensure_startup_components_ready=ensure_startup_components_ready,
+            normalize_voice_debug_meta=lambda meta: dict(meta or {}),
+            voice_ingress_source=lambda meta: str(meta.get("source") or ""),
+            should_drop_discord_audio_for_local_mic=lambda *_args, **_kwargs: False,
+            ensure_voice_worker_started=lambda: None,
+            build_voice_ingress_context=lambda **_kwargs: SimpleNamespace(
+                room_session_key="room-session",
+                session_key="session-1",
+                room_key="room-key",
+                person_key="person-key",
+                session_memory_key="session-memory",
+            ),
+            next_segment_id=lambda _session_key: 1,
+            new_turn_id=lambda: "turn-1",
+            room_state_snapshot=lambda _room_session_key: {},
+            validation_context_provider=lambda **_kwargs: None,
+            build_voice_ingress_item=lambda **kwargs: dict(kwargs),
+            voice_ingress_queue_depth=lambda: 0,
+            schedule_voice_utterance_item=schedule_voice_utterance_item,
+            monotonic=lambda: 123.0,
+        )
+
+        async def process_member_audio(
+            target_member: Any,
+            pcm_bytes: bytes,
+            debug_meta: dict[str, Any],
+        ) -> None:
+            await process_member_audio_from_runtime(
+                target_member,
+                pcm_bytes,
+                debug_meta,
+                deps=ingress_deps,
+            )
 
         deps = LocalMicSegmentRuntimeDeps(
             local_mic_runtime_state=state,
@@ -281,7 +333,12 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await handle_local_mic_segment_from_runtime(b"pcm", {}, deps=deps)
 
         self.assertIsNone(state["last_error"])
-        self.assertEqual(calls, [(member, b"pcm", {"source": "local_mic", "routed_discord_user_id": 42})])
+        self.assertEqual(len(scheduled), 1)
+        self.assertIs(scheduled[0]["member"], member)
+        self.assertEqual(scheduled[0]["pcm_bytes"], b"pcm")
+        self.assertEqual(scheduled[0]["debug_meta"]["source"], "local_mic")
+        self.assertNotIn("_voice_listener_binding", scheduled[0]["debug_meta"])
+        self.assertIs(scheduled[0]["voice_listener_binding"], listener_binding)
 
     async def test_discord_input_mode_skips_segment(self) -> None:
         state: dict[str, Any] = {"input_mode": "discord", "segment_count": 0}

@@ -114,9 +114,11 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         *,
         deps: VoiceMemberAudioPipelineDeps | None = None,
         debug_meta: dict[str, Any] | None = None,
+        member: Any | None = None,
+        voice_listener_binding: Any = None,
     ) -> None:
         await process_member_audio_pipeline_from_runtime(
-            SimpleNamespace(id=7, display_name="정훈"),
+            member or SimpleNamespace(id=7, display_name="정훈"),
             b"pcm",
             debug_meta or {"source": "local_mic"},
             session_key="voice:11:7",
@@ -128,6 +130,7 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             segment_id=3,
             ingress_during_reply=True,
             owner_user_id_on_ingress=7,
+            voice_listener_binding=voice_listener_binding,
             deps=deps or self.deps,
         )
 
@@ -192,6 +195,34 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.run_pipeline(deps=replace(self.deps, run_stt_execution=no_stt))
 
         self.assertEqual(self.stage_names(), ["ingress", "wake", "interrupt", "stt"])
+
+    async def test_channel_move_during_stt_stops_before_reply_dispatch(self) -> None:
+        source_client = SimpleNamespace(
+            _listener_generation=8,
+            channel=SimpleNamespace(id=22),
+        )
+        member = SimpleNamespace(
+            id=7,
+            display_name="정훈",
+            guild=SimpleNamespace(id=11, voice_client=source_client),
+        )
+
+        async def move_during_stt(**kwargs: Any) -> Any:
+            self.events.append(("stt", kwargs))
+            source_client._listener_generation = 9
+            source_client.channel = SimpleNamespace(id=23)
+            return self.stt
+
+        await self.run_pipeline(
+            deps=replace(self.deps, run_stt_execution=move_during_stt),
+            member=member,
+            voice_listener_binding=(source_client, 8, 22),
+        )
+
+        self.assertEqual(
+            self.stage_names(),
+            ["ingress", "wake", "interrupt", "stt"],
+        )
 
     async def test_session_none_stops_before_dispatch(self) -> None:
         def rejected(**kwargs: Any) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +37,15 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             canned_wake_reply="네, 정훈님.",
         )
 
-    async def dispatch(self, *, metrics: dict[str, Any] | None = None) -> Any:
+    async def dispatch(
+        self,
+        *,
+        metrics: dict[str, Any] | None = None,
+        member: Any | None = None,
+        reply_deps: Any | None = None,
+        voice_listener_binding: Any = None,
+        deps: VoiceReplyDispatchDeps | None = None,
+    ) -> Any:
         metrics = metrics if metrics is not None else {"meta": {}}
         await dispatch_voice_reply_from_runtime(
             guild_id=11,
@@ -52,14 +61,15 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             rms=0.08,
             wake_detected=True,
             metrics=metrics,
-            member=SimpleNamespace(id=7, display_name="정훈"),
+            member=member or SimpleNamespace(id=7, display_name="정훈"),
             room_key="room-memory",
             person_key="person-memory",
             session_memory_key="session-memory",
-            reply_deps=self.reply_deps,
-            deps=self.deps,
+            voice_listener_binding=voice_listener_binding,
+            reply_deps=reply_deps or self.reply_deps,
+            deps=deps or self.deps,
         )
-        return self.calls[-1][0]
+        return self.calls[-1][0] if self.calls else None
 
     async def test_dispatch_builds_context_and_preserves_reply_dependencies(self) -> None:
         context = await self.dispatch()
@@ -105,6 +115,39 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.person_key, "person-memory")
         self.assertEqual(context.session_memory_key, "session-memory")
         self.assertEqual(context.member.display_name, "정훈")
+
+    async def test_channel_move_hides_replacement_client_during_delivery(self) -> None:
+        source_client = SimpleNamespace(
+            _listener_generation=2,
+            channel=SimpleNamespace(id=22),
+        )
+        member = SimpleNamespace(
+            id=7,
+            display_name="정훈",
+            guild=SimpleNamespace(id=11, voice_client=source_client),
+        )
+        replacement_client = object()
+        observed_clients: list[Any] = []
+        reply_deps = SimpleNamespace(
+            marker="reply-deps",
+            get_voice_client=lambda: replacement_client,
+        )
+
+        async def process_voice_reply(*, context: Any, deps: Any) -> None:
+            source_client._listener_generation = 3
+            source_client.channel = SimpleNamespace(id=23)
+            member.guild.voice_client = replacement_client
+            observed_clients.append(deps.get_voice_client())
+            self.calls.append((context, deps))
+
+        await self.dispatch(
+            member=member,
+            reply_deps=reply_deps,
+            voice_listener_binding=(source_client, 2, 22),
+            deps=replace(self.deps, process_voice_reply=process_voice_reply),
+        )
+
+        self.assertEqual(observed_clients, [None])
 
     def test_main_delegates_reply_context_dispatch_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

@@ -347,6 +347,56 @@ class DiscordAppCompositionTests(unittest.TestCase):
         ensure.assert_awaited_once()
         recover.assert_awaited_once_with()
 
+    def test_voice_channel_event_forces_cleanup_when_after_differs(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+                self.connected = True
+                self._listener_generation = 4
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            @staticmethod
+            def is_listening() -> bool:
+                return True
+
+        async def run_case() -> list[tuple[AsyncMock, bool]]:
+            old_channel = SimpleNamespace(id=8, name="Old")
+            new_channel = SimpleNamespace(id=9, name="New")
+            calls = []
+            for before_channel, expected_force in (
+                (old_channel, True),
+                (None, True),
+                (new_channel, False),
+            ):
+                client = VoiceClient(new_channel)
+                guild = SimpleNamespace(id=7, voice_client=client)
+                member = SimpleNamespace(id=99, guild=guild)
+                ensure = AsyncMock(return_value=client)
+                events = make_event_deps(
+                    voice_client_type=VoiceClient,
+                    ensure_listening_voice_client=ensure,
+                )
+                await make_composition(events=events).on_voice_state_update(
+                    member,
+                    SimpleNamespace(channel=before_channel),
+                    SimpleNamespace(channel=new_channel),
+                )
+                calls.append((ensure, expected_force))
+            return calls
+
+        for ensure, expected_force in asyncio.run(run_case()):
+            ensure.assert_awaited_once()
+            self.assertEqual(
+                ensure.await_args.kwargs["force_listener_reset"],
+                expected_force,
+            )
+            self.assertIs(
+                ensure.await_args.kwargs["expected_voice_client"],
+                ensure.await_args.args[0].voice_client,
+            )
+
     def test_on_message_resolves_fresh_handler_dependencies(self) -> None:
         handler_deps = object()
         events = make_event_deps(text_message_handler=Mock(return_value=handler_deps))

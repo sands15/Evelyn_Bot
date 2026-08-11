@@ -1340,18 +1340,18 @@ voice_support_composition = VoiceSupportComposition(
         omnivoice_source=lambda: build_omnivoice_source_runtime_deps(), stt_transcription=lambda: build_stt_transcription_runtime_deps(),
         stt_text=lambda: _build_stt_text_runtime_deps(), voice_connection=lambda: build_discord_voice_connection_runtime_deps(),
         set_tts_warmup_started=tts_warmup_started_state.set, partial_stt_max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
-        clean_text=clean_text, wake_audio_sec=WAKE_AUDIO_SEC,
-        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC, wake_max_tokens=WAKE_MAX_TOKENS,
+        clean_text=clean_text, wake_audio_sec=WAKE_AUDIO_SEC, wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC, wake_max_tokens=WAKE_MAX_TOKENS,
         wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS, apply_stt_post_corrections=apply_stt_post_corrections,
         strip_leading_voice_fillers=strip_leading_voice_fillers, extract_leading_wake_alias=extract_leading_wake_alias,
         fuzzy_leading_wake_alias=fuzzy_leading_wake_alias, looks_like_gibberish_probe=looks_like_gibberish_probe,
         slice_audio_window=slice_audio_window, ensure_startup_components_ready=ensure_startup_components_ready,
-        voice_client_type=EvelynVoiceClient, process_member_audio=lambda: process_member_audio,
+        voice_client_type=EvelynVoiceClient, process_member_audio=lambda: process_member_audio, is_tts_playback_active=tts_playback_manager.is_active,
+        cancel_voice_turns_for_guild=lambda guild_id: turn_scope_registry.cancel_matching_prefix(f"guild:{guild_id}:voice:"),
+        stop_active_tts_playback=lambda *args, **kwargs: stop_active_tts_playback(*args, **kwargs),
         warmup_voice_path=warmup_voice_path, save_last_voice_channel_state=save_last_voice_channel_state,
         load_last_voice_channel_state=load_last_voice_channel_state, increment_voice_pipeline_counter=increment_voice_pipeline_counter,
         voice_pipeline_state=voice_pipeline_state, voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
-        get_guild=bot.get_guild, voice_channel_type=discord.VoiceChannel,
-        now=time.time, log=print,
+        get_guild=bot.get_guild, voice_channel_type=discord.VoiceChannel, now=time.time, log=print,
     )
 )
 
