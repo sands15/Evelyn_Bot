@@ -69,6 +69,7 @@ class SearchFollowupRecoveryJournalTests(unittest.TestCase):
             intent_id,
             answer="민감한 검색 결과",
             display_text="민감한 검색 결과",
+            delivery_turn_id="turn-delivery",
         )
         journal.mark_delivery_ready(
             intent_id,
@@ -85,6 +86,11 @@ class SearchFollowupRecoveryJournalTests(unittest.TestCase):
             restored.pending()[0]["phase"],
             "delivery_attempted",
         )
+        self.assertEqual(restored.pending()[0]["turnId"], "turn-1")
+        self.assertEqual(
+            restored.pending()[0]["deliveryTurnId"],
+            "turn-delivery",
+        )
         self.assertTrue(restored.public_status()["rollbackProtected"])
 
     def test_same_session_supersedes_prior_intent(self) -> None:
@@ -96,6 +102,28 @@ class SearchFollowupRecoveryJournalTests(unittest.TestCase):
         self.assertFalse(journal.is_active(first))
         self.assertTrue(journal.is_active(second))
         self.assertEqual(len(journal.pending()), 1)
+
+    def test_precommit_uncertain_round_trip_stays_valid(self) -> None:
+        journal = self.journal()
+        intent_id = self.begin(journal)
+        journal.begin_delivery_prepare(
+            intent_id,
+            answer="민감한 검색 결과",
+            display_text="민감한 검색 결과",
+            delivery_turn_id="turn-delivery",
+        )
+
+        journal.mark_delivery_uncertain(
+            intent_id,
+            error_code="search_followup_source_turn_superseded",
+        )
+
+        restored = self.journal()
+        self.assertEqual(restored.public_status()["integrity"], "verified")
+        self.assertEqual(
+            restored.pending()[0]["phase"],
+            "request_unrecoverable",
+        )
 
     def test_deleted_or_tampered_journal_fails_closed(self) -> None:
         journal = self.journal()

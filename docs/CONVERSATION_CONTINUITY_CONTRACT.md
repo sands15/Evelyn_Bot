@@ -413,8 +413,17 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   확인한 뒤에만 세션 완료, durable commit과 로컬 TTS를 수행한다. 반환된 exact
   turn ID는 metrics와 모든 최종 sink에 고정되며 이전·경쟁 turn ID는 새 검색
   답변의 commit 증거가 아니다.
-- 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
-  기록한다. 같은 답변의 선택적 voice가 실패해도 중복 기록하지 않는다.
+- Discord text 검색 후속은 예약 시점의 canonical session과 source turn ID를
+  고정한다. 검색 완료 뒤 같은 channel/thread reply slot과 exact session lock을
+  `reply -> session` 순서로 잡고 source가 여전히 current일 때만 전달·기록한다.
+  successor가 source를 대체했으면 send/history/commit/memory/cognitive를 만들지 않는다.
+  성공한 결과 pair는 별도 delivery turn ID로 assistant state와 함께 exact commit한다.
+  recovery journal은 source turn과 delivery turn을 서로 다른 필드로 보존해 prepare 뒤
+  crash에서도 source를 새 delivery ID로 재개하고, 동일 query의 새 source는 이전 task를
+  취소·교체한다. recovery intent가 있는 경로는 delivery pair를 durable prepare한 뒤
+  전송하고, journal 없는 direct helper는 전송 성공 뒤 같은 임계구역에서 pair를 기록한다.
+  자동 voice 검색 후속은 안전한 voice TurnScope delivery owner가 없으므로 현재 예약·전달·
+  재시작 재생을 fail-closed하며 text history/checkpoint나 voice playback을 만들지 않는다.
 - 자율 후속 답변은 `send_discord_text`가 정상 반환한 시점을 되돌릴 수 없는 전달
   경계로 삼고 즉시 process-local 900초 ping fence를 세운다. 그 뒤 새 turn,
   history, active session과 continuity commit을 먼저 처리하고 선택적 memory/self-state를
@@ -464,7 +473,7 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 - 음성 답변은 재생 완료 뒤 같은 memory-exposure guard 안에서 exact assistant history와
   active session, process-local room owner를 먼저 반영하고 completion continuity commit을
   선택 작업보다 먼저 시도한다. commit이 durable receipt를 반환했다면 이후 benchmark,
-  memory update, cognitive gating이나 search follow-up 실패가 이미 들은 답변을 user-only
+  memory update나 cognitive gating 실패가 이미 들은 답변을 user-only
   restart 문맥으로 되돌리지 않는다. commit 자체의 실패는 기존 고정 오류 경계를 따르며
   선택 작업 실행을 막는 durable gate는 아니다. 실제 Discord-channel playback의 text projection은 기존
   finalization 경로가 반환된 뒤 캡처한 TurnScope가 취소되지 않았는지와 같은 playback
@@ -648,8 +657,10 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   무기록, 기록 실패 시 무재전송
 - Discord reference의 로컬 생성 실패·확정 4xx fallback과
   timeout·5xx·상태 없는 ambiguous failure의 무재전송
-- Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
-  경로의 전달·기록·commit 순서
+- Control Page 일반·검색, Discord text 검색 후속, 자율 후속, Discord 명령과 음성 완료
+  경로의 전달·기록·commit 순서, voice 검색 후속의 fail-closed 무부작용
+- Discord text 검색 후속의 immutable source-turn fence, 동일 query successor 교체,
+  dedicated delivery turn commit, prepare-crash 재개와 recovery 취소 claim 해제
 - 자율 후속의 canonical active Discord text recipient 선택, configured channel/thread-parent
   경계, 최신 active 우선순위, same-session generation 변경·만료·voice/default key 배제,
   busy/no-target 무부작용과 exact recipient restart 복구

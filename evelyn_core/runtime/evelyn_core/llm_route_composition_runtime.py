@@ -262,6 +262,7 @@ class LlmRouteComposition:
         channel_id: int | None,
         reply_to_message_id: int | None = None,
         source: str,
+        source_turn_id: str,
         turn_scope: Any | None = None,
         runtime_mode: str | None = None,
     ) -> None:
@@ -277,6 +278,7 @@ class LlmRouteComposition:
             channel_id=channel_id,
             reply_to_message_id=reply_to_message_id,
             source=source,
+            source_turn_id=source_turn_id,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
         )
@@ -293,6 +295,7 @@ class LlmRouteComposition:
         channel_id: int | None,
         reply_to_message_id: int | None,
         source: str,
+        source_turn_id: str,
         turn_scope: Any | None = None,
         runtime_mode: str | None = None,
     ) -> Any:
@@ -307,6 +310,7 @@ class LlmRouteComposition:
             channel_id=channel_id,
             reply_to_message_id=reply_to_message_id,
             source=source,
+            source_turn_id=source_turn_id,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
         )
@@ -323,6 +327,7 @@ class LlmRouteComposition:
         channel_id: int | None,
         reply_to_message_id: int | None = None,
         source: str,
+        source_turn_id: str,
         turn_scope: Any | None = None,
         runtime_mode: str | None = None,
         search_key: str | None = None,
@@ -338,6 +343,7 @@ class LlmRouteComposition:
             channel_id=channel_id,
             reply_to_message_id=reply_to_message_id,
             source=source,
+            source_turn_id=source_turn_id,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
             search_key=search_key,

@@ -443,40 +443,6 @@ def finalize_voice_reply_side_effects_from_runtime(
             metrics.setdefault("meta", {})[
                 "memory_writer_decision"
             ] = memory_writer_decision
-            search_requested = False
-            if not explicit_memory_write:
-                search_requested = bool(
-                    deps.apply_ask_gating(
-                        deps.read_cached_cognitive_state(
-                            guild_id,
-                            room_key=room_key,
-                            person_key=person_key,
-                            session_memory_key=session_memory_key,
-                        ),
-                        source="voice",
-                    ).get("action")
-                    == "search_then_answer"
-                )
-            if not explicit_memory_write:
-                deps.schedule_search_followup(
-                    guild_id,
-                    session_key,
-                    voice_reply.history_user_text,
-                    plain_answer,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    channel_id=None,
-                    source="search-followup-voice",
-                    force=search_requested,
-                    turn_scope=None,
-                    runtime_mode=runtime_mode,
-                    continuity_generation=(
-                        metrics.get("meta", {}).get(
-                            "continuity_generation"
-                        )
-                    ),
-                )
             metrics.setdefault("meta", {})[
                 "voice_reply_side_effects_state"
             ] = "durable"

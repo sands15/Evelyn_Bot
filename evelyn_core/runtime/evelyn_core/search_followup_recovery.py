@@ -179,6 +179,7 @@ class SearchFollowupRecoveryJournal:
             "guildId": _nonnegative_int(raw.get("guildId"), code="search_followup_guild_invalid"),
             "sessionKey": _bounded_key(raw.get("sessionKey"), required=True),
             "turnId": _bounded_key(raw.get("turnId")),
+            "deliveryTurnId": _bounded_key(raw.get("deliveryTurnId")),
             "roomKey": _bounded_key(raw.get("roomKey")),
             "personKey": _bounded_key(raw.get("personKey")),
             "sessionMemoryKey": _bounded_key(raw.get("sessionMemoryKey")),
@@ -384,6 +385,7 @@ class SearchFollowupRecoveryJournal:
                     "guildId": guild_id,
                     "sessionKey": normalized_session,
                     "turnId": turn_id,
+                    "deliveryTurnId": None,
                     "roomKey": room_key,
                     "personKey": person_key,
                     "sessionMemoryKey": session_memory_key,
@@ -486,6 +488,7 @@ class SearchFollowupRecoveryJournal:
         *,
         answer: str,
         display_text: str,
+        delivery_turn_id: str | None = None,
     ) -> None:
         if not intent_id:
             return
@@ -502,19 +505,23 @@ class SearchFollowupRecoveryJournal:
                 raise RuntimeError(
                     "search_followup_delivery_prepare_invalid"
                 )
-            entry.update(
-                {
-                    "phase": "delivery_preparing",
-                    "answerHash": content_sha256(answer),
-                    "displayHash": content_sha256(
-                        display_text,
-                        normalized=False,
-                    ),
-                    "deliveryGeneration": 0,
-                    "updatedAt": self._now(),
-                    "lastErrorCode": "",
-                }
-            )
+            update = {
+                "phase": "delivery_preparing",
+                "answerHash": content_sha256(answer),
+                "displayHash": content_sha256(
+                    display_text,
+                    normalized=False,
+                ),
+                "deliveryGeneration": 0,
+                "updatedAt": self._now(),
+                "lastErrorCode": "",
+            }
+            if delivery_turn_id is not None:
+                update["deliveryTurnId"] = _bounded_key(
+                    delivery_turn_id,
+                    required=True,
+                )
+            entry.update(update)
             self._write()
 
     def mark_delivery_attempted(self, intent_id: str | None) -> None:
@@ -540,6 +547,7 @@ class SearchFollowupRecoveryJournal:
             entry["phase"] = (
                 "delivery_uncertain"
                 if entry.get("answerHash")
+                and int(entry.get("deliveryGeneration") or 0) >= 1
                 else "request_unrecoverable"
             )
             entry["lastErrorCode"] = clean_text(error_code)[:120]

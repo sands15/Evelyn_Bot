@@ -51,6 +51,8 @@ class SearchMemoryDependencyCompositionDeps:
     session_followup_targets: MutableMapping[str, Any]
     background_search_tasks: MutableMapping[str, Any]
     inflight_search_tasks: MutableMapping[str, Any]
+    session_locks: MutableMapping[str, Any]
+    reply_slot_locks: MutableMapping[str, Any]
     apply_runtime_mode: Callable[..., Any]
     parse_response_action_tag: Callable[..., Any]
     answer_promises_search: Callable[..., bool]
@@ -68,7 +70,11 @@ class SearchMemoryDependencyCompositionDeps:
     format_display_text: Callable[..., str]
     speak_answer: Callable[..., Any]
     current_turn_id: Callable[..., Any]
+    start_new_turn: Callable[..., Any]
     append_history: Callable[..., Any]
+    mark_session_active: Callable[..., Any]
+    build_topic_id: Callable[..., Any]
+    active_conversation_text_sec: float
     schedule_memory_update: Callable[..., Any]
     attach_current_task: Callable[..., Any]
     detach_task: Callable[..., Any]
@@ -140,6 +146,8 @@ class SearchMemoryDependencyComposition:
             session_followup_targets=deps.session_followup_targets,
             background_search_tasks=deps.background_search_tasks,
             inflight_search_tasks=deps.inflight_search_tasks,
+            session_locks=deps.session_locks,
+            reply_slot_locks=deps.reply_slot_locks,
             apply_runtime_mode=deps.apply_runtime_mode,
             parse_response_action_tag=deps.parse_response_action_tag,
             answer_promises_search=deps.answer_promises_search,
@@ -159,7 +167,13 @@ class SearchMemoryDependencyComposition:
             format_display_text=deps.format_display_text,
             speak_answer=deps.speak_answer,
             current_turn_id=deps.current_turn_id,
+            start_new_turn=deps.start_new_turn,
             append_history=deps.append_history,
+            mark_session_active=deps.mark_session_active,
+            build_topic_id=deps.build_topic_id,
+            active_conversation_text_sec=(
+                deps.active_conversation_text_sec
+            ),
             schedule_memory_update=deps.schedule_memory_update,
             create_turn_scoped_task=deps.create_turn_scoped_task,
             attach_current_task=deps.attach_current_task,

@@ -653,7 +653,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         self.assertNotIn("private-token", str(logs))
         self.assertIn("RuntimeError", str(logs))
 
-    def test_records_memory_search_and_session_side_effects(self) -> None:
+    def test_records_memory_and_session_side_effects(self) -> None:
         speculative = {"session-1": {"text": "old"}}
         calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
@@ -725,14 +725,9 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         self.assertEqual(by_name["append_history"][0], ("session-1", "검색해줘", "답변"))
         self.assertEqual(by_name["schedule_memory_update"][1]["user_speaker"], "정훈")
         self.assertEqual(by_name["schedule_memory_update"][1]["runtime_mode"], "normal")
-        self.assertTrue(by_name["schedule_search_followup"][1]["force"])
-        self.assertEqual(by_name["schedule_search_followup"][1]["source"], "search-followup-voice")
-        self.assertEqual(
-            by_name["schedule_search_followup"][1][
-                "continuity_generation"
-            ],
-            4,
-        )
+        self.assertNotIn("read_cached_cognitive_state", by_name)
+        self.assertNotIn("apply_ask_gating", by_name)
+        self.assertNotIn("schedule_search_followup", by_name)
         self.assertEqual(by_name["mark_session_active"][1]["ttl_sec"], 12.0)
         self.assertTrue(by_name["mark_session_active"][1]["awaiting_user_reply"])
         self.assertEqual(by_name["set_room_owner"][0], ("room-1", 42))
@@ -757,14 +752,6 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             ),
             [name for name, _args, _kwargs in calls].index(
                 "commit_session_continuity"
-            ),
-        )
-        self.assertLess(
-            [name for name, _args, _kwargs in calls].index(
-                "commit_session_continuity"
-            ),
-            [name for name, _args, _kwargs in calls].index(
-                "schedule_search_followup"
             ),
         )
 
@@ -1338,7 +1325,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
 
         self.assertEqual(stored_receipts, [receipt])
         self.assertIn("continuity", calls)
-        self.assertIn("followup", calls)
+        self.assertNotIn("followup", calls)
         self.assertEqual(
             metrics["meta"]["voice_reply_side_effects_state"],
             "durable",

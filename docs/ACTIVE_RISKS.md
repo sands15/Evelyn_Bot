@@ -265,10 +265,12 @@ awaiting follow-up의 `active_until` 만료를 실행 중에도 강제한다. �
 명시적 호출·reply만 기존 정책으로 처리한다. 실제 Discord 검증은 아직 남아 있다.
 
 완료 턴이 1초 periodic writer를 기다리던 crash-loss 창도 닫았다. Discord
-text는 실제 전송 뒤 완료 상태와 checkpoint를 먼저 durable commit하고
-선택적 TTS를 실행한다. Control Page 일반·검색, 검색 후속, 자율 후속,
-Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 사용한다.
-commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
+일반 text는 실제 전송 뒤 완료 상태와 checkpoint를 먼저 durable commit하고
+선택적 TTS를 실행한다. Control Page 일반·검색, 자율 후속, Discord 명령과
+음성 재생 완료 경로도 전달 효과에 맞는 즉시 commit 계약을 사용한다.
+recovery intent가 있는 Discord text 검색 후속은 dedicated delivery pair를 먼저
+durable prepare한 뒤 전송하며, journal 없는 direct helper만 전송 성공 뒤 기록한다.
+commit 실패는 이미 발생한 전달 효과를 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
 
 자율 후속은 Discord send await의 정상 반환을 terminal delivery boundary로 삼아
@@ -294,7 +296,7 @@ text turn에 넘긴다. normal handler의 direct target writer는 durable claim�
 
 음성 재생 완료 경로는 exact assistant history, active follow-up과 process-local room owner
 반영, completion continuity commit 시도를 같은 memory-exposure guard 안에서 먼저 처리한 뒤
-benchmark, memory write, cognitive gating과 search follow-up을 실행한다. commit이 durable하면
+benchmark, memory write와 cognitive gating을 실행한다. commit이 durable하면
 후속 선택 작업 실패가 이미 들은 assistant pair와 active follow-up checkpoint를 되돌리지
 않는다. commit 자체의 실패는 기존 고정 오류 경계를 따르며, room owner 자체의 restart 복구,
 선택적 예외 전파와 실제 장치 검증은 이 변경의 보장이 아니다.
@@ -308,9 +310,9 @@ streaming의 이 턴별 queued/played chunk 수를 투영하므로 부분 재생
 뒤늦게 attach되면 즉시 거부하고, 새 background task는 coroutine 본문 실행 전에
 취소한다. voice worker의 catch-all 로그에는 exception type만 남긴다.
 
-Voice search follow-up의 최초 전달과 재시작 복구도 별도 playback metrics를
-전달한다. 명시적 무재생은 최초 continuity를 commit하지 않으며, 복구에서는
-`delivery_uncertain`으로 남겨 자동 재전송하지 않는다. Router fallback metadata와
+자동 voice search follow-up은 exact TurnScope delivery owner가 없어 예약·직접 전달·
+재시작 playback을 fail-closed한다. text history/continuity나 voice playback을 만들지
+않으며, voice lifecycle 결박 없이 자동 재도입하지 않는다. Router fallback metadata와
 Local Bridge turn과 TTS warmup/control status·log도 upstream 예외 원문 대신 고정
 코드와 exception type만 보존한다. Local mic capture 실패도 같은 projection으로
 Control Page 상태와 Main dependency context를 닫는다. warmup의 non-200 HTTP body는 읽지 않는다.
@@ -452,11 +454,11 @@ last voice-channel state 저장 실패 운영 로그도
 Discord voice connect retry 실패 로그도 기존 attempt/channel metadata와 exception type만
 남기며, retry를 모두 소진하면 fixed `voice_connect_failed` wrapper만 caller에 전달한다.
 
-재시작 때 아직 재생을 시도하지 않은 voice search follow-up은 음성 연결이 없다는
-이유만으로 `delivery_uncertain`에 고정하지 않는다. recovery claim만 해제하고
-`delivery_ready`를 유지하며, 실제 connected client 재무장 직후 같은 recovery를 다시
-실행한다. 재생 직전 `delivery_attempted` 전이는 그대로라 모호한 재생 실패는 자동
-재시도하지 않는다.
+Discord text 검색 후속은 예약 시점의 canonical source turn과 완료 결과의 dedicated
+delivery turn을 분리하고, 같은 reply/session lock 안에서 source currentness를 확인한다.
+successor가 먼저 시작했으면 모든 sink를 생략하며, 동일 query successor는 이전 task를
+교체한다. recovery journal은 두 turn ID를 분리해 prepare crash를 재개하고, 취소된
+in-process claim은 해제한다. 실제 Discord latency·process crash timing은 live 미검증이다.
 
 다음 조치: 사용자가 별도 Discord 검증 세션을 시작할 때 개인 scope를 설정하고
 Control Page→Discord, Discord text→Control Page, Discord voice→Control Page를

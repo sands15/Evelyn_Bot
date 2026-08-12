@@ -113,7 +113,7 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
             "voice_response_runtime.py": 2,
             "voice_route_execution.py": 4,
             "search_answer_runtime.py": 1,
-            "search_followup_runtime.py": 7,
+            "search_followup_runtime.py": 5,
             "autonomy_runtime_factory.py": 1,
         }
         for filename, minimum_count in expected_calls.items():

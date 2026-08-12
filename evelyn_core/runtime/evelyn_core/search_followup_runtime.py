@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
+from .discord_ingress import build_text_ingress_context
 from .conversation_memory_exposure import (
     capture_combined_memory_exposure,
     filter_conversation_history_for_memory_exposure,
@@ -33,6 +35,8 @@ class SearchFollowupRuntimeDeps:
     session_followup_targets: dict[str, dict[str, int]]
     background_search_tasks: dict[str, asyncio.Task]
     inflight_search_tasks: dict[str, asyncio.Task]
+    session_locks: dict[str, asyncio.Lock]
+    reply_slot_locks: dict[str, asyncio.Lock]
     apply_runtime_mode: Callable[[str], dict[str, Any]]
     parse_response_action_tag: Callable[[str], tuple[Any, str]]
     answer_promises_search: Callable[[str], bool]
@@ -52,7 +56,11 @@ class SearchFollowupRuntimeDeps:
     format_display_text: Callable[..., str]
     speak_answer: Callable[..., Awaitable[Any]]
     current_turn_id: Callable[[str | None], Any]
+    start_new_turn: Callable[[str | None], str]
     append_history: Callable[..., Any]
+    mark_session_active: Callable[..., Any]
+    build_topic_id: Callable[..., str]
+    active_conversation_text_sec: float
     schedule_memory_update: Callable[..., Any]
     create_turn_scoped_task: Callable[..., asyncio.Task]
     attach_current_task: Callable[[Any], asyncio.Task | None]
@@ -63,6 +71,46 @@ class SearchFollowupRuntimeDeps:
     continuity_status: Callable[[], dict[str, Any]] | None = None
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
     log: Callable[..., Any] = print
+
+
+_TEXT_SEARCH_SESSION = re.compile(
+    r"^guild:(?P<guild>\d+):text:(?P<channel>\d+)"
+    r"(?::thread:(?P<thread>\d+))?:user:(?P<user>\d+)$"
+)
+
+
+def _text_search_ingress(
+    session_key: object,
+    *,
+    guild_id: int,
+    channel_id: object,
+) -> Any | None:
+    if not isinstance(session_key, str):
+        return None
+    match = _TEXT_SEARCH_SESSION.fullmatch(session_key)
+    if match is None:
+        return None
+    parsed = {
+        name: int(value) if value is not None else None
+        for name, value in match.groupdict().items()
+    }
+    if (
+        parsed["guild"] != guild_id
+        or any(
+            value is not None and value <= 0
+            for value in parsed.values()
+        )
+        or type(channel_id) is not int
+        or channel_id != parsed["channel"]
+    ):
+        return None
+    ingress = build_text_ingress_context(
+        guild_id=parsed["guild"],
+        channel_id=parsed["channel"],
+        user_id=parsed["user"],
+        thread_id=parsed["thread"],
+    )
+    return ingress if ingress.session_key == session_key else None
 
 
 def build_search_query_from_runtime(
@@ -95,20 +143,50 @@ async def deliver_proactive_followup_from_runtime(
     channel_id: int | None,
     reply_to_message_id: int | None = None,
     source: str,
+    source_turn_id: str | None,
+    completed_state: dict[str, Any] | None = None,
     turn_scope: Any | None = None,
     runtime_mode: str | None = None,
     recovery_intent_id: str | None = None,
 ) -> bool:
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
+    if "voice" in clean_text(source).lower():
+        if recovery_intent_id is not None and deps.search_followup_recovery is not None:
+            deps.search_followup_recovery.mark_delivery_uncertain(
+                recovery_intent_id,
+                error_code="search_followup_delivery_owner_unavailable",
+            )
+        deps.log(
+            "[SEARCH] voice_followup_owner_unavailable "
+            f"guild={guild_id}"
+        )
+        return False
     plain_answer = strip_omnivoice_tags(answer) or answer
-    guild = deps.bot.get_guild(guild_id)
     target_channel_id = channel_id
     stored_target = deps.session_followup_targets.get(session_key, {}) if session_key is not None else {}
     if target_channel_id is None and session_key is not None:
         target_channel_id = stored_target.get("channel_id")
     reply_target_id = reply_to_message_id if reply_to_message_id is not None else stored_target.get("message_id")
+    ingress = _text_search_ingress(
+        session_key,
+        guild_id=guild_id,
+        channel_id=target_channel_id,
+    )
+    source_turn_id = clean_text(source_turn_id)
+    if ingress is None or not source_turn_id:
+        if recovery_intent_id is not None and deps.search_followup_recovery is not None:
+            deps.search_followup_recovery.mark_delivery_uncertain(
+                recovery_intent_id,
+                error_code="search_followup_delivery_owner_unavailable",
+            )
+        deps.log(
+            "[SEARCH] followup_delivery_owner_unavailable "
+            f"guild={guild_id} session={session_key}"
+        )
+        return False
     prepared = False
+    delivery_turn_id = ""
     display_answer = deps.format_display_text(
         answer,
         session_key=session_key,
@@ -119,9 +197,10 @@ async def deliver_proactive_followup_from_runtime(
     )
 
     async def prepare_durable_followup() -> None:
-        nonlocal prepared
+        nonlocal prepared, delivery_turn_id
         if prepared:
             return
+        delivery_turn_id = deps.start_new_turn(None)
         if recovery_intent_id is not None:
             recovery = deps.search_followup_recovery
             if recovery is None:
@@ -132,7 +211,12 @@ async def deliver_proactive_followup_from_runtime(
                 recovery_intent_id,
                 answer=plain_answer,
                 display_text=display_answer,
+                delivery_turn_id=delivery_turn_id,
             )
+        deps.start_new_turn(
+            session_key,
+            turn_id=delivery_turn_id,
+        )
         with memory_exposure_guard(
             expected_position=delivery_exposure_position,
             required=(delivery_exposure_position is not None),
@@ -145,11 +229,25 @@ async def deliver_proactive_followup_from_runtime(
                 guild_id=guild_id,
                 memory_receipt=delivery_memory_receipt_ref,
             )
+            deps.mark_session_active(
+                session_key,
+                user_id=ingress.user_id,
+                ttl_sec=deps.active_conversation_text_sec,
+                speaker="assistant",
+                awaiting_user_reply=False,
+                topic_id=deps.build_topic_id(
+                    query,
+                    "search_followup",
+                    plain_answer,
+                ),
+                answer_text=plain_answer,
+                user_text=query,
+            )
             try:
                 continuity_status = (
                     await deps.commit_session_continuity(
                         session_key,
-                        str(deps.current_turn_id(session_key) or ""),
+                        delivery_turn_id,
                     )
                 )
                 continuity_receipt = require_durable_continuity_receipt(
@@ -162,19 +260,81 @@ async def deliver_proactive_followup_from_runtime(
                     f"errorType={type(exc).__name__}"
                 )
                 raise
-            deps.schedule_memory_update(
-                guild_id,
-                query,
-                plain_answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source=source,
-                user_speaker="search_task",
-                assistant_speaker="Evelyn",
-                turn_scope=turn_scope,
-                runtime_mode=runtime_mode,
-            )
+            try:
+                deps.schedule_memory_update(
+                    guild_id,
+                    query,
+                    plain_answer,
+                    room_key=ingress.room_key,
+                    person_key=ingress.person_key,
+                    session_memory_key=ingress.session_memory_key,
+                    source=source,
+                    user_speaker="search_task",
+                    assistant_speaker="Evelyn",
+                    turn_scope=turn_scope,
+                    runtime_mode=runtime_mode,
+                )
+            except MemoryDeletionJournalIntegrityError:
+                raise
+            except Exception as exc:
+                deps.log(
+                    "[SEARCH] memory_update_failed "
+                    f"guild={guild_id} errorType={type(exc).__name__}"
+                )
+            try:
+                removed = deps.resolve_open_question_rows(
+                    guild_id,
+                    query,
+                    plain_answer,
+                )
+                for scope_type, scope_key in (
+                    ("room", ingress.room_key),
+                    ("person", ingress.person_key),
+                    ("session", ingress.session_memory_key),
+                ):
+                    if scope_key:
+                        removed += deps.resolve_open_question_rows(
+                            guild_id,
+                            query,
+                            plain_answer,
+                            scope_type=scope_type,
+                            scope_key=scope_key,
+                        )
+                if removed:
+                    deps.log(
+                        "[SEARCH] resolved_open_questions "
+                        f"guild={guild_id} removed={removed}"
+                    )
+            except Exception as exc:
+                deps.log(
+                    "[SEARCH] open_question_resolution_failed "
+                    f"guild={guild_id} errorType={type(exc).__name__}"
+                )
+            if completed_state is not None:
+                try:
+                    deps.write_json_file(
+                        deps.cognitive_state_path(guild_id),
+                        completed_state,
+                    )
+                    for scope_type, scope_key in (
+                        ("room", ingress.room_key),
+                        ("person", ingress.person_key),
+                        ("session", ingress.session_memory_key),
+                    ):
+                        if scope_key:
+                            deps.write_json_file(
+                                deps.cognitive_state_path(
+                                    guild_id,
+                                    scope_type=scope_type,
+                                    scope_key=scope_key,
+                                ),
+                                completed_state,
+                            )
+                except Exception as exc:
+                    deps.log(
+                        "[SEARCH] cognitive_state_update_failed "
+                        f"guild={guild_id} errorType={type(exc).__name__}"
+                    )
         if recovery_intent_id is not None:
             recovery.mark_delivery_ready(
                 recovery_intent_id,
@@ -186,9 +346,7 @@ async def deliver_proactive_followup_from_runtime(
             )
         prepared = True
 
-    if recovery_intent_id is not None:
-        await prepare_durable_followup()
-
+    channel = None
     if target_channel_id is not None:
         channel = deps.bot.get_channel(target_channel_id)
         if channel is None:
@@ -196,71 +354,55 @@ async def deliver_proactive_followup_from_runtime(
                 channel = await deps.bot.fetch_channel(target_channel_id)
             except Exception:
                 channel = None
-        if channel is not None and hasattr(channel, "send"):
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
+    reply_lock = deps.reply_slot_locks.setdefault(
+        ingress.reply_slot_key,
+        asyncio.Lock(),
+    )
+    state_lock = deps.session_locks.setdefault(
+        ingress.session_key,
+        asyncio.Lock(),
+    )
+    async with reply_lock:
+        async with state_lock:
+            if clean_text(deps.current_turn_id(session_key)) != source_turn_id:
+                if recovery_intent_id is not None and deps.search_followup_recovery is not None:
+                    deps.search_followup_recovery.mark_delivery_uncertain(
+                        recovery_intent_id,
+                        error_code="search_followup_source_turn_superseded",
+                    )
+                deps.log(
+                    "[SEARCH] followup_source_turn_superseded "
+                    f"guild={guild_id} session={session_key}"
+                )
+                return False
+
             if recovery_intent_id is not None:
-                deps.search_followup_recovery.mark_delivery_attempted(
-                    recovery_intent_id
-                )
-            with memory_exposure_guard(
-                expected_position=delivery_exposure_position,
-                required=(delivery_exposure_position is not None),
-                index_dir=deps.memory_index_dir,
-            ):
-                await deps.send_discord_text(
-                    channel,
-                    display_answer,
-                    reference_message_id=reply_target_id,
-                    reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
-                )
-            if recovery_intent_id is not None:
-                deps.search_followup_recovery.complete(
-                    recovery_intent_id
-                )
-            else:
                 await prepare_durable_followup()
 
-    vc = guild.voice_client if guild else None
-    if vc is not None and vc.is_connected():
-        try:
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            if recovery_intent_id is not None and deps.search_followup_recovery.is_active(
-                recovery_intent_id
-            ):
-                deps.search_followup_recovery.mark_delivery_attempted(
-                    recovery_intent_id
-                )
-            with memory_exposure_guard(
-                expected_position=delivery_exposure_position,
-                required=(delivery_exposure_position is not None),
-                index_dir=deps.memory_index_dir,
-            ):
-                playback_metrics: dict[str, Any] = {"meta": {}}
-                await deps.speak_answer(
-                    vc,
-                    answer,
-                    turn_id=deps.current_turn_id(session_key),
-                    session_key=session_key,
-                    turn_scope=turn_scope,
-                    metrics=playback_metrics,
-                )
-                if playback_metrics["meta"].get("playback_completed") is False:
-                    raise RuntimeError("tts_playback_not_completed")
-            if recovery_intent_id is not None:
-                deps.search_followup_recovery.complete(
-                    recovery_intent_id
-                )
-            else:
-                await prepare_durable_followup()
-        except MemoryDeletionJournalIntegrityError:
-            raise
-        except Exception as e:
-            deps.log(
-                "[SEARCH] proactive TTS 실패 "
-                f"errorType={type(e).__name__}"
-            )
+            if channel is not None and hasattr(channel, "send"):
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                if recovery_intent_id is not None:
+                    deps.search_followup_recovery.mark_delivery_attempted(
+                        recovery_intent_id
+                    )
+                with memory_exposure_guard(
+                    expected_position=delivery_exposure_position,
+                    required=(delivery_exposure_position is not None),
+                    index_dir=deps.memory_index_dir,
+                ):
+                    await deps.send_discord_text(
+                        channel,
+                        display_answer,
+                        reference_message_id=reply_target_id,
+                        reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
+                    )
+                if recovery_intent_id is not None:
+                    deps.search_followup_recovery.complete(
+                        recovery_intent_id
+                    )
+                else:
+                    await prepare_durable_followup()
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
@@ -395,6 +537,27 @@ async def recover_search_followups_from_runtime(
         delivery_claimed = False
         try:
             if entry["phase"] == "request_unrecoverable":
+                counts["uncertain"] += 1
+                continue
+            if entry["source"] == "voice":
+                recovery.mark_delivery_uncertain(
+                    intent_id,
+                    error_code="search_followup_delivery_owner_unavailable",
+                )
+                counts["uncertain"] += 1
+                continue
+            if (
+                entry["phase"] in {
+                    "delivery_preparing",
+                    "delivery_ready",
+                    "delivery_attempted",
+                }
+                and not clean_text(entry.get("deliveryTurnId"))
+            ):
+                recovery.mark_delivery_uncertain(
+                    intent_id,
+                    error_code="search_followup_delivery_turn_unavailable",
+                )
                 counts["uncertain"] += 1
                 continue
             if not _continuity_can_recover(
@@ -533,6 +696,7 @@ async def recover_search_followups_from_runtime(
                         channel_id=entry.get("channelId"),
                         reply_to_message_id=entry.get("replyToMessageId"),
                         source=f"search-followup-recovery-{entry['source']}",
+                        source_turn_id=clean_text(entry.get("turnId")),
                         recovery_intent_id=intent_id,
                     )
                     deps.background_search_tasks[session_key] = task
@@ -578,98 +742,91 @@ async def recover_search_followups_from_runtime(
                 channel = deps.bot.get_channel(channel_id)
                 if channel is None:
                     channel = await deps.bot.fetch_channel(channel_id)
-            if channel is not None and hasattr(channel, "send"):
-                bot_user_id = getattr(
-                    getattr(deps.bot, "user", None),
-                    "id",
-                    None,
+            ingress = _text_search_ingress(
+                session_key,
+                guild_id=guild_id,
+                channel_id=channel_id,
+            )
+            if (
+                channel is not None
+                and hasattr(channel, "send")
+                and ingress is not None
+            ):
+                reply_lock = deps.reply_slot_locks.setdefault(
+                    ingress.reply_slot_key,
+                    asyncio.Lock(),
                 )
-                if entry["phase"] != "delivery_ready":
-                    delivery_exists = await _channel_contains_followup(
-                        channel,
-                        display_text,
-                        bot_user_id=bot_user_id,
-                        after_message_id=reply_to_message_id,
-                        discord_object_factory=deps.discord_object_factory,
-                    )
-                    if delivery_exists is True:
+                state_lock = deps.session_locks.setdefault(
+                    ingress.session_key,
+                    asyncio.Lock(),
+                )
+                async with reply_lock:
+                    async with state_lock:
+                        if clean_text(deps.current_turn_id(session_key)) != clean_text(
+                            entry.get("deliveryTurnId")
+                        ):
+                            recovery.mark_delivery_uncertain(
+                                intent_id,
+                                error_code="search_followup_source_turn_superseded",
+                            )
+                            recovery.release_recovery_claim(intent_id)
+                            counts["uncertain"] += 1
+                            continue
+                        bot_user_id = getattr(
+                            getattr(deps.bot, "user", None),
+                            "id",
+                            None,
+                        )
+                        if entry["phase"] != "delivery_ready":
+                            delivery_exists = await _channel_contains_followup(
+                                channel,
+                                display_text,
+                                bot_user_id=bot_user_id,
+                                after_message_id=reply_to_message_id,
+                                discord_object_factory=deps.discord_object_factory,
+                            )
+                            if delivery_exists is True:
+                                recovery.complete(intent_id)
+                                counts["verified"] += 1
+                                continue
+                            if delivery_exists is None:
+                                recovery.mark_delivery_uncertain(
+                                    intent_id,
+                                    error_code=(
+                                        "search_followup_delivery_history_inconclusive"
+                                    ),
+                                )
+                                recovery.release_recovery_claim(intent_id)
+                                counts["uncertain"] += 1
+                                continue
+                        recovery.mark_delivery_attempted(intent_id)
+                        with memory_exposure_guard(
+                            expected_position=recovery_exposure_position,
+                            required=(recovery_exposure_position is not None),
+                            index_dir=deps.memory_index_dir,
+                        ):
+                            await deps.send_discord_text(
+                                channel,
+                                display_text,
+                                reference_message_id=reply_to_message_id,
+                                reference_factory=lambda message_id: deps.discord_object_factory(
+                                    id=message_id
+                                ),
+                            )
                         recovery.complete(intent_id)
-                        counts["verified"] += 1
+                        counts["redelivered"] += 1
                         continue
-                    if delivery_exists is None:
-                        recovery.mark_delivery_uncertain(
-                            intent_id,
-                            error_code=(
-                                "search_followup_delivery_history_inconclusive"
-                            ),
-                        )
-                        recovery.release_recovery_claim(
-                            intent_id
-                        )
-                        counts["uncertain"] += 1
-                        continue
-                recovery.mark_delivery_attempted(intent_id)
-                with memory_exposure_guard(
-                    expected_position=recovery_exposure_position,
-                    required=(
-                        recovery_exposure_position is not None
-                    ),
-                    index_dir=deps.memory_index_dir,
-                ):
-                    await deps.send_discord_text(
-                        channel,
-                        display_text,
-                        reference_message_id=reply_to_message_id,
-                        reference_factory=lambda message_id: deps.discord_object_factory(
-                            id=message_id
-                        ),
-                    )
-                recovery.complete(intent_id)
-                counts["redelivered"] += 1
-                continue
 
-            guild = deps.bot.get_guild(guild_id)
-            voice_client = getattr(guild, "voice_client", None)
-            if (
-                entry["phase"] == "delivery_ready"
-                and entry["source"] == "voice"
-                and voice_client is not None
-                and voice_client.is_connected()
-            ):
-                recovery.mark_delivery_attempted(intent_id)
-                with memory_exposure_guard(
-                    expected_position=recovery_exposure_position,
-                    required=(
-                        recovery_exposure_position is not None
-                    ),
-                    index_dir=deps.memory_index_dir,
-                ):
-                    playback_metrics: dict[str, Any] = {"meta": {}}
-                    await deps.speak_answer(
-                        voice_client,
-                        answer,
-                        turn_id=entry.get("turnId"),
-                        session_key=session_key,
-                        turn_scope=None,
-                        metrics=playback_metrics,
-                    )
-                    if playback_metrics["meta"].get("playback_completed") is False:
-                        raise RuntimeError("tts_playback_not_completed")
-                recovery.complete(intent_id)
-                counts["redelivered"] += 1
-                continue
-            if (
-                entry["phase"] == "delivery_ready"
-                and entry["source"] == "voice"
-            ):
-                recovery.release_recovery_claim(intent_id)
-                continue
             recovery.mark_delivery_uncertain(
                 intent_id,
                 error_code="search_followup_delivery_unverifiable",
             )
             counts["uncertain"] += 1
             recovery.release_recovery_claim(intent_id)
+        except asyncio.CancelledError:
+            if delivery_claimed:
+                recovery.release_recovery_claim(intent_id)
+            raise
         except Exception as exc:
             if delivery_claimed:
                 recovery.release_recovery_claim(intent_id)
@@ -699,6 +856,7 @@ def schedule_search_followup_singleflight_from_runtime(
     channel_id: int | None,
     reply_to_message_id: int | None,
     source: str,
+    source_turn_id: str,
     turn_scope: Any | None = None,
     runtime_mode: str | None = None,
     recovery_intent_id: str | None = None,
@@ -706,7 +864,8 @@ def schedule_search_followup_singleflight_from_runtime(
     search_key = normalize_search_key(session_key, query)
     existing = deps.inflight_search_tasks.get(search_key)
     if existing is not None and not existing.done():
-        return existing
+        existing.cancel()
+        deps.inflight_search_tasks.pop(search_key, None)
     task = deps.create_turn_scoped_task(
         run_search_followup_from_runtime(
             guild_id,
@@ -719,6 +878,7 @@ def schedule_search_followup_singleflight_from_runtime(
             channel_id=channel_id,
             reply_to_message_id=reply_to_message_id,
             source=source,
+            source_turn_id=source_turn_id,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
             search_key=search_key,
@@ -742,6 +902,7 @@ async def run_search_followup_from_runtime(
     channel_id: int | None,
     reply_to_message_id: int | None = None,
     source: str,
+    source_turn_id: str,
     turn_scope: Any | None = None,
     runtime_mode: str | None = None,
     search_key: str | None = None,
@@ -815,21 +976,6 @@ async def run_search_followup_from_runtime(
             recovery_intent_id
         ):
             return
-        try:
-            removed = deps.resolve_open_question_rows(guild_id, query, answer)
-            if room_key:
-                removed += deps.resolve_open_question_rows(guild_id, query, answer, scope_type="room", scope_key=room_key)
-            if person_key:
-                removed += deps.resolve_open_question_rows(guild_id, query, answer, scope_type="person", scope_key=person_key)
-            if session_memory_key:
-                removed += deps.resolve_open_question_rows(guild_id, query, answer, scope_type="session", scope_key=session_memory_key)
-            if removed:
-                deps.log(f"[SEARCH] resolved_open_questions guild={guild_id} removed={removed}")
-        except Exception as exc:
-            deps.log(
-                "[SEARCH] open_question_resolution_failed "
-                f"guild={guild_id} errorType={type(exc).__name__}"
-            )
         completed_state = {
             "action": "answer",
             "confidence": 0.0 if last_error is not None else 1.0,
@@ -849,19 +995,6 @@ async def run_search_followup_from_runtime(
             "retrieved_context_ids": [],
             "updated_at": int(time.time()),
         }
-        try:
-            deps.write_json_file(deps.cognitive_state_path(guild_id), completed_state)
-            if room_key:
-                deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type="room", scope_key=room_key), completed_state)
-            if person_key:
-                deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type="person", scope_key=person_key), completed_state)
-            if session_memory_key:
-                deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key), completed_state)
-        except Exception as exc:
-            deps.log(
-                "[SEARCH] cognitive_state_update_failed "
-                f"guild={guild_id} errorType={type(exc).__name__}"
-            )
         if turn_scope is not None:
             turn_scope.raise_if_cancelled()
         await deliver_proactive_followup_from_runtime(
@@ -876,6 +1009,8 @@ async def run_search_followup_from_runtime(
             channel_id=channel_id,
             reply_to_message_id=reply_to_message_id,
             source=source,
+            source_turn_id=source_turn_id,
+            completed_state=completed_state,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
             recovery_intent_id=recovery_intent_id,
@@ -920,6 +1055,12 @@ def schedule_search_followup_from_runtime(
 ) -> None:
     if not guild_id:
         return
+    if "voice" in clean_text(source).lower():
+        deps.log(
+            "[SEARCH] voice_followup_owner_unavailable "
+            f"guild={guild_id}"
+        )
+        return
     opts = deps.apply_runtime_mode(runtime_mode or "normal")
     tagged_action, stripped_answer = deps.parse_response_action_tag(answer)
     wants_search_by_tag = tagged_action == "search"
@@ -936,15 +1077,16 @@ def schedule_search_followup_from_runtime(
     task_key = deps.runtime_session_key(session_key=session_key, guild_id=guild_id)
     if task_key is None:
         return
+    source_turn_id = clean_text(deps.current_turn_id(task_key))
+    if not source_turn_id:
+        deps.log(
+            "[SEARCH] source_turn_unavailable "
+            f"guild={guild_id} session={task_key}"
+        )
+        return
     if channel_id is not None or reply_to_message_id is not None:
         deps.remember_session_followup_target(task_key, channel_id=channel_id, message_id=reply_to_message_id)
     search_key = normalize_search_key(task_key, query)
-    for existing_key, existing_task in list(deps.inflight_search_tasks.items()):
-        if not existing_key.startswith(f"{task_key}:"):
-            continue
-        if existing_key == search_key:
-            if existing_task is not None and not existing_task.done():
-                return
     recovery_intent_id = None
     if (
         deps.search_followup_recovery is not None
@@ -957,7 +1099,7 @@ def schedule_search_followup_from_runtime(
                 guild_id=guild_id,
                 session_key=task_key,
                 source="voice" if "voice" in source else "text",
-                turn_id=deps.current_turn_id(task_key),
+                turn_id=source_turn_id,
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
@@ -1020,6 +1162,7 @@ def schedule_search_followup_from_runtime(
         channel_id=channel_id,
         reply_to_message_id=reply_to_message_id,
         source=source,
+        source_turn_id=source_turn_id,
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
         recovery_intent_id=recovery_intent_id,

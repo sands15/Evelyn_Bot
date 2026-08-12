@@ -137,9 +137,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     성공하면 그 실패 턴을 history와 checkpoint에 즉시 남긴다. fallback
     전송이 실패하거나 모호하면 기록하지 않고, 기록 실패 때문에 같은
     fallback을 다시 보내지 않는다.
-  - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
-    완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
-    `conversation_continuity_commit_failed`만 기록한다.
+  - Control Page 일반·검색, Discord text 검색 후속, 자율 후속, Discord 명령과
+    음성 재생 완료는 같은 durable receipt validator를 사용한다. 각 전달 경로의
+    effect 순서는 별도 계약을 따르며 commit 실패 때문에 이미 발생한 전달을
+    중복 실행하지 않는다.
   - Discord와 local speaker 음성은 playback pipeline이
     `playback_completed=false`를 명시한 stale validation·무재생·부분 재생 결과를
     완료로 확정하지 않는다. Local streaming은 전역 누계가 아니라 이 턴의 exact
@@ -149,9 +150,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     ingress `turnId`로 checkpoint하고 assistant text·receipt는 버린다. checkpoint 뒤
     journal 삭제가 실패하면 exact current turn과 마지막 user row로 재시작에서 한 번
     정리하며, 다음 Fast prompt는 이를 미응답 문맥으로 소비한다.
-  - Voice search follow-up의 최초 전달과 재시작 복구도 같은 playback metrics를
-    소비한다. 무재생 최초 전달은 history/continuity를 commit하지 않고, 복구 중
-    무재생은 `delivery_uncertain`으로 보존해 자동 재전송하지 않는다.
+  - 자동 voice search follow-up은 exact voice TurnScope delivery owner가 없으므로
+    현재 예약·직접 전달·재시작 재생을 fail-closed한다. voice playback이나
+    text history/continuity를 만들지 않으며 별도 voice lifecycle 설계가 남아 있다.
   - 취소된 `TurnScope`에 current task가 늦게 attach되면 즉시 거부하고, 새
     background task는 coroutine 본문 실행 전에 취소한다. 음성 worker의 처리
     예외 로그는 exception type만 남기고 원문 메시지는 기록하지 않는다.
@@ -2267,9 +2268,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   Discord voice connect retry 실패 로그는 기존 attempt/channel metadata와 exception
   type만 남기고, 모든 retry가 실패하면 원문 대신 fixed `voice_connect_failed` wrapper만
   caller에 전달한다.
-- 전달 시도 전인 Discord voice search follow-up은 시작 시 연결이 없으면 claim만
-  해제하고 `delivery_ready`를 유지한다. connected client 재무장 직후 recovery를 다시
-  실행하며, `delivery_attempted` 뒤의 모호한 실패는 자동 재생하지 않는다.
+- 자동 Discord voice search follow-up은 exact voice TurnScope delivery owner가 없으므로
+  예약·직접 전달·recovery playback을 fail-closed한다. 과거 pending voice intent도 전송하지
+  않고 terminal uncertainty로 남기며, 재도입에는 voice lifecycle 결박이 필요하다.
 - Discord playback은 prior source와 `after` callback을 기존 `OMNIVOICE_TIMEOUT_SEC`
   (기본 180초)로 제한한다. timeout은 같은 source가 current일 때만 voice client를 정지하고
   기존 failure 경로로 전파되어 room lock과 user-only continuity를 정확히 한 번 정리한다.
@@ -2486,7 +2487,7 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   선행 precommit의 user-only tail만 복구될 수 있었다.
 - 같은 memory-exposure guard 안에서 exact assistant append, session snapshot과 active TTL,
   process-local room owner 반영, completion commit 시도를 먼저 실행한다. 기존 benchmark,
-  memory update, cognitive gating과 search follow-up은 그 뒤에 실행한다. commit이 durable하면
+  memory update와 cognitive gating은 그 뒤에 실행한다. commit이 durable하면
   선택적 예외가 계속 전파되더라도 persisted completion pair와 active follow-up state를
   되돌리지 않는다. commit 자체의 실패는 기존 고정 오류 경계를 유지한다.
 - 실제 `SessionStateStore`와 `SessionContinuityCheckpoint` 회귀는 memory update `OSError` 뒤
@@ -2617,3 +2618,23 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 변경 직결 72개, autonomy 인접 132개, Discord I/O 139개와 CI-equivalent 전체
   3,331개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline fake Discord와 actual
   `SessionStateStore`/checkpoint/status이며 실제 Discord·LLM·heartbeat·Docker를 기동하지 않았다.
+
+## 2026-08-12 Discord text search-followup source/delivery turn binding
+
+- 실제 `SessionStateStore`·checkpoint·recovery journal에서 검색 A가 실행 중인 동안 같은
+  session의 successor B를 시작하면, 기존 delivery가 A의 query/result pair를 mutable B
+  turn ID로 commit해 fresh restart에서도 B가 완료된 것처럼 복구하는 경계를 재현했다.
+- 예약 시 canonical Discord text source turn ID를 고정하고, 결과 전달은 같은
+  channel/thread reply slot과 exact session lock을 `reply -> session` 순서로 잡은 뒤 source가
+  여전히 current일 때만 진행한다. 성공한 pair는 별도 delivery turn ID로 assistant state와
+  함께 exact commit한다. 같은 query의 successor는 이전 task를 취소·교체한다.
+- recovery journal은 immutable source `turnId`와 `deliveryTurnId`를 분리한다. prepare 직후
+  crash는 source anchor로 새 delivery turn을 만들며, recovery 취소는 process-local claim을
+  해제한다. durable commit 뒤 일반 memory 후처리 실패는 type-only로 격리해 전송을 계속하되
+  memory deletion integrity 신호는 재전파한다.
+- exact voice TurnScope delivery owner가 없는 자동 voice search follow-up은 예약·직접 전달·
+  recovery playback을 모두 fail-closed한다. 이는 일시적 기능 축소이며 별도 voice lifecycle
+  결박 없이는 재도입하지 않는다.
+- 검색 후속·memory exposure·composition·voice side-effect 직결/인접 65개와
+  CI-equivalent 전체 3,340개(skip 22), main 2,500줄/158자 구조 예산과 diff check가 통과했다.
+  검증은 offline이며 실제 Discord·검색 서비스·음성·Docker는 기동하지 않았다.

@@ -131,9 +131,14 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
             path=root / "recovery.json"
         )
         channel_id = 8 if source == "text" else None
+        session_key = (
+            "guild:7:text:8:user:9"
+            if source == "text"
+            else "guild:7:voice:8:user:9"
+        )
         intent_id = recovery.begin(
             guild_id=7,
-            session_key="session-1",
+            session_key=session_key,
             source=source,
             turn_id="turn-1",
             room_key=None,
@@ -151,6 +156,7 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
                 intent_id,
                 answer="검색 결과 답변",
                 display_text="검색 결과 답변",
+                delivery_turn_id="delivery-turn",
             )
         if phase == "delivery_ready":
             recovery.mark_delivery_ready(
@@ -228,6 +234,7 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
                 "send_discord_text": send,
                 "speak_answer": speak,
                 "format_display_text": display,
+                "current_turn_id": lambda _key: "delivery-turn",
                 "search_followup_recovery": recovery,
                 "continuity_status": lambda: {
                     "checkpointGeneration": 5,
@@ -304,7 +311,7 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
                             self.assertEqual(spoken, [])
                             self.assertEqual(result["uncertain"], 1)
 
-    async def test_current_not_used_and_bound_pairs_redeliver(self) -> None:
+    async def test_current_text_pairs_redeliver_and_voice_fails_closed(self) -> None:
         for state in ("not_used", "bound"):
             for source in ("text", "voice"):
                 with self.subTest(state=state, source=source):
@@ -325,14 +332,21 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
                                     source=source,
                                 )
                             )
-                        self.assertEqual(result["redelivered"], 1)
+                        self.assertEqual(
+                            result["redelivered"],
+                            1 if source == "text" else 0,
+                        )
+                        self.assertEqual(
+                            result["uncertain"],
+                            0 if source == "text" else 1,
+                        )
                         self.assertEqual(
                             sent,
                             ["검색 결과 답변"] if source == "text" else [],
                         )
                         self.assertEqual(
                             spoken,
-                            ["검색 결과 답변"] if source == "voice" else [],
+                            [],
                         )
 
     async def test_bound_pair_version_race_blocks_before_delivery(self) -> None:
