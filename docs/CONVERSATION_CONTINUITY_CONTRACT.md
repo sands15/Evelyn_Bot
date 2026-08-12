@@ -419,6 +419,11 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
   Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다. 저장 기억을 쓰지
   않은 명령 답변은 `not_used` receipt로 기록해 완료 assistant 행을 보존한다.
+- guild-prefixed 명령 dispatch는 같은 guild/channel/thread의 일반 Discord text와
+  동일한 reply-slot lock을 사용한다. 먼저 시작한 일반 턴이 정상 또는 고정 실패 reply의
+  delivery·continuity 기록과 선택적 voice plan을 마칠 때까지 명령은 기다리고, 그 뒤
+  명령의 send·continuity를 실행한다. 명령이 slot을 먼저 잡은 동안 들어온 일반 턴은 기존 busy-drop 정책을 따른다.
+  이는 전송·commit 순서 선형화이며 명령 우선순위나 진행 중 턴 취소를 뜻하지 않는다.
 - Discord text ingress가 LLM 없이 직접 처리하는 `/remember`, `/memory remember`와
   엄격한 `기억해줘:`의 저장 결과 답변도 저장 기억을 사용해 생성한 답변이 아니다.
   memory-write receipt는 mutation evidence로만 유지하고, exact `not_used` response
@@ -628,6 +633,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   무관측·무재시도·ambiguity, stale memory exposure의 send 전 거부와 일반 text-send 실패 비간섭
 - Discord 명령 19개와 권한 거부 응답의 단일 post-delivery owner,
   전송 실패 시 무기록, Minecraft 중복 commit 방지
+- 실패하는 일반 Discord text를 멈춘 same-slot prefixed command의 대기, 고정 실패
+  reply commit 뒤 command callback 실행 순서와 command wrapper의 무재진입 완료
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
 - Runtime Errors의 privacy 및 stale/current-error 판정
 - 완료 턴 commit의 20표본 warming/warning 판정, bounded percentile과

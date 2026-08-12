@@ -210,6 +210,113 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "remember")
         self.assertEqual(calls[-1], ("process_commands", "!status"))
 
+    def test_prefixed_command_waits_for_inflight_failure_reply(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def scenario() -> None:
+            started = asyncio.Event()
+            release = asyncio.Event()
+            channel = FakeChannel()
+
+            async def held_stream(_channel, _user_text, **_kwargs):
+                started.set()
+                await release.wait()
+                raise RuntimeError("generation_failed")
+
+            async def process_commands(message) -> None:
+                if str(message.content).startswith("!"):
+                    calls.append(("command", message.content))
+                    await message.channel.send("new command reply")
+
+            def fail_observer(*_args, **_kwargs) -> None:
+                raise RuntimeError("observer_failed")
+
+            deps = make_deps(
+                calls,
+                process_commands=process_commands,
+                stream_text_reply=held_stream,
+                log=fail_observer,
+                log_voice_bottleneck_summary=fail_observer,
+            )
+            guild = SimpleNamespace(id=1, name="Guild")
+            normal = asyncio.create_task(
+                handle_discord_text_message(
+                    make_message(
+                        content="Evelyn slow",
+                        guild=guild,
+                        channel=channel,
+                        message_id=101,
+                    ),
+                    deps,
+                )
+            )
+            await started.wait()
+            command = asyncio.create_task(
+                handle_discord_text_message(
+                    make_message(
+                        content="!status",
+                        guild=guild,
+                        channel=channel,
+                        message_id=102,
+                    ),
+                    deps,
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(command.done())
+            release.set()
+            await asyncio.gather(normal, command)
+            self.assertEqual(len(channel.sent), 2)
+            self.assertTrue(channel.sent[0].endswith("(text_turn_failed)"))
+            self.assertEqual(channel.sent[1], "new command reply")
+            self.assertEqual(
+                [
+                    name
+                    for name, _value in calls
+                    if name in {"finish", "commit_continuity", "command"}
+                ],
+                ["finish", "commit_continuity", "command"],
+            )
+
+        asyncio.run(scenario())
+
+    def test_summary_observer_does_not_mask_text_turn_cancellation(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def scenario() -> None:
+            delivery_started = asyncio.Event()
+
+            async def block_stream(_channel, _user_text, **kwargs):
+                await kwargs["before_text_delivery"](
+                    answer_text="answer",
+                    final_text="answer",
+                    metrics={"meta": {}},
+                )
+                delivery_started.set()
+                await asyncio.Event().wait()
+
+            def fail_summary(*_args, **_kwargs) -> None:
+                raise RuntimeError("summary_failed")
+
+            deps = make_deps(
+                calls,
+                stream_text_reply=block_stream,
+                log_voice_bottleneck_summary=fail_summary,
+            )
+            task = asyncio.create_task(
+                handle_discord_text_message(
+                    make_message(guild=SimpleNamespace(id=1, name="Guild")),
+                    deps,
+                )
+            )
+            await delivery_started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(next(iter(deps.reply_slot_locks.values())).locked())
+
+        asyncio.run(scenario())
+
     def test_handler_runs_full_text_turn_and_records_side_effects(self) -> None:
         calls: list[tuple[str, object]] = []
         deps = make_deps(calls)

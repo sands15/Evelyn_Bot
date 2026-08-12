@@ -2542,3 +2542,18 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - privacy 집중 99개, memory 전체 307개(skip 1), CI-equivalent 전체 3,313개(skip 22),
   Python 구문·diff check가 통과했다. 검증은 offline이며 실제 Discord·사용자 memory·배포
   runtime·Docker를 기동하거나 수정하지 않았다.
+
+## 2026-08-12 Discord prefixed-command reply-slot ordering
+
+- 같은 channel에서 느린 일반 text A가 reply slot을 점유한 동안 `!status` B를 보내면,
+  기존 command precheck가 slot을 우회해 B를 먼저 전달하고 전용 command turn을 commit한
+  뒤 A의 정상 답변이 전송되는 역전을 재현했다. 또 A가 생성 중 실패하면 lock이 먼저 풀려
+  B가 고정 실패 reply와 그 continuity를 추월하는 failure-path old-red도 확인했다.
+- guild-prefixed command의 `process_commands()` 전체를 기존 exact guild/channel/thread
+  reply-slot lock으로 감쌌고, 예외에서는 같은 lock을 고정 실패 reply의 delivery·continuity까지
+  유지한다. 일반 A가 먼저면 이 경계와 선택적 voice가 끝난 뒤 B가 실행되고, B가 먼저면 뒤 일반 turn은 기존 busy-drop을 따른다. 새 scope·queue·
+  admission owner나 command preemption은 추가하지 않았다.
+- 생성 실패 logger가 던져도 fallback을 계속하고 summary observer 실패가 취소를 덮지
+  않는 회귀를 포함해 command/text 28개, Discord I/O 137개, continuity 인접 62개,
+  CI-equivalent 전체 3,315개(skip 22), Python 구문·diff
+  check가 통과했다. 검증은 offline fake Discord channel/event이며 실제 Discord·LLM·TTS는 기동하지 않았다.

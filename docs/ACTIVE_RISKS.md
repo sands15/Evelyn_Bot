@@ -352,6 +352,13 @@ session과 turn ID를 writer에 넘기고, writer는 `maxSessions` 상한
 status에는 대상 session/turn 값이 아니라 검증 여부만 남는다. 기존 user turn이
 없는 자율 후속과 Discord 명령은 실제 전달마다 전용 turn ID를 새로 발급한다.
 
+guild-prefixed 명령도 일반 Discord text와 같은 exact channel/thread reply slot으로
+직렬화한다. 일반 reply가 먼저면 정상 또는 고정 실패 reply의 전달·continuity와 선택적
+voice 경계 뒤 명령을 실행해 새 command reply 다음에 오래된 normal reply가 붙는 역전을 막는다. 명령이 먼저면 뒤
+normal turn은 기존 busy-drop 정책을 따른다. 진행 중 normal turn을 취소하는 urgent-command
+preemption은 구현하지 않았으므로, 긴 선택적 TTS 동안 명령이 기다릴 수 있는 latency와
+실제 Discord 동시 입력은 live 미검증으로 남는다.
+
 `67a7adf`는 Discord reference 전송의 fallback도 같은 중복 방지 경계로
 좁혔다. reference 생성이 네트워크 전에 로컬에서 실패했거나 Discord가 첫
 요청을 비모호 4xx로 확실히 거부한 경우에만 일반 메시지를 한 번 보낸다.

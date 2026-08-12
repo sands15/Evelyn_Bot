@@ -94,15 +94,23 @@ class _PreparedDiscordTextTurn:
 class _PreAcquiredReplyLock:
     def __init__(self, lock: asyncio.Lock) -> None:
         self.lock = lock
+        self.owns_lock = True
 
     async def __aenter__(self) -> asyncio.Lock:
         if not self.lock.locked():
+            self.owns_lock = False
             raise RuntimeError("conversation_ingress_reply_lock_lost")
         return self.lock
 
-    async def __aexit__(self, *_args: Any) -> bool:
-        self.lock.release()
+    async def __aexit__(self, exc_type: Any, *_args: Any) -> bool:
+        if exc_type is None:
+            self.release()
         return False
+
+    def release(self) -> None:
+        if self.owns_lock:
+            self.lock.release()
+            self.owns_lock = False
 
 
 async def _prepare_durable_text_turn(
@@ -310,7 +318,12 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         command_only_channel_ids=deps.get_guild_command_only_channel_ids(message.guild.id),
     )
     if precheck.action == "process_commands":
-        await deps.process_commands(message)
+        reply_lock = deps.reply_slot_locks.setdefault(
+            ingress.reply_slot_key,
+            asyncio.Lock(),
+        )
+        async with reply_lock:
+            await deps.process_commands(message)
         return
     if precheck.action == "ignore":
         return
@@ -539,8 +552,9 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             )
             return False
 
+    reply_lock_guard = _PreAcquiredReplyLock(reply_lock)
     try:
-        async with _PreAcquiredReplyLock(reply_lock):
+        async with reply_lock_guard:
             async with message.channel.typing():
                 if is_explicit_memory_confirmation_command(
                     user_text
@@ -762,7 +776,10 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         text_turn_summary_logged = True
 
     except Exception as exc:
-        deps.log("전체 오류 type=", type(exc).__name__)
+        try:
+            deps.log("전체 오류 type=", type(exc).__name__)
+        except Exception:
+            pass
         await mark_ingress_delivery_ambiguous_if_needed()
         if not text_delivered and not ingress_response_bound:
             failure_reply = public_failure_message(
@@ -831,15 +848,19 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         type(record_exc).__name__,
                     )
     finally:
+        reply_lock_guard.release()
         if text_metrics and not text_turn_summary_logged:
             text_metrics.setdefault("meta", {})["error_layer"] = "text_turn"
             text_metrics.setdefault("meta", {}).setdefault("error", "text_turn_aborted_before_summary")
-            deps.log_voice_bottleneck_summary(
-                text_metrics,
-                label="text_turn",
-                extra="error=true",
-                event_name="text_turn_summary",
-            )
+            try:
+                deps.log_voice_bottleneck_summary(
+                    text_metrics,
+                    label="text_turn",
+                    extra="error=true",
+                    event_name="text_turn_summary",
+                )
+            except Exception:
+                pass
         deps.detach_task(turn_scope, turn_task)
         deps.clear_room_turn_scope(session_key, turn_scope)
 

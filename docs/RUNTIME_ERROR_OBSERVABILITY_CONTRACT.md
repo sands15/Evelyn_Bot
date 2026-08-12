@@ -65,6 +65,10 @@ memory 또는 self-state 후처리에서 발생한 일반 예외는
 진행을 바꾸지 않는다. 취소와 memory deletion integrity 신호는 이 일반 오류 경계에서
 삼키지 않는다.
 
+Discord text 생성 실패의 type-only logger와 turn-summary observer도 best-effort다.
+이 observer들의 일반 예외는 고정 `text_turn_failed` 응답·continuity를 막지 않으며,
+진행 중 text turn의 취소 신호를 다른 예외로 바꾸지 않는다.
+
 Fast Control continuity status는 주기 heartbeat가 아니라 restore·commit·오류 시 갱신되는
 event snapshot이므로 최근 오류 창과 같은 1시간 freshness를 사용한다.
 
