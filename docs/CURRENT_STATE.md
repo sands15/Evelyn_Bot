@@ -2494,3 +2494,21 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - continuity 직결 46개(skip 1), 인접 95개(skip 1), CI-equivalent 전체
   3,309개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
   Discord·LLM·Docker를 기동하지 않았다.
+
+## 2026-08-12 autonomy stop Runtime Error ownership
+
+- 실제 `DiscordAppComposition`에서 `자율정지` engine cleanup이 실패하면 grant 회수와
+  고정 응답은 실행됐지만 shared `DiscordRuntimeStatus`의 code/type은 빈 값이었다.
+  cleanup 성공 뒤 성공 응답만 실패한 경우도 같은 catch가 정지 실패로 오분류해 두 번째
+  실패 응답을 시도했다.
+- stop의 일반 예외만 고정 `autonomy_stop_failed`와 exception type으로 shared Discord
+  Runtime Errors에 기록한다. composition의 기존 no-throw observer를 재사용하므로 관측기
+  실패가 grant 회수·고정 응답을 막지 않는다. 성공 응답은 cleanup try 밖에 두어 전송
+  실패를 정지 실패로 기록하거나 재응답하지 않고, 취소는 기존처럼 그대로 전파한다.
+- actual `AutonomyEngine`의 child loop cleanup을 기다리는 동안 caller가 취소되면 기존
+  `suppress(CancelledError)`가 caller 취소까지 삼켜 성공 응답으로 진행하던 경계도 닫았다.
+  start와 같은 current-task cancellation 판별로 caller 취소만 재전파하고, child 자체
+  cancellation은 계속 drain한다. 취소된 cleanup은 `stopping`에 남아 다음 stop이 재시도한다.
+- 변경 직결 3개, autonomy core 62개, Discord I/O 135개, Runtime Errors 인접 21개,
+  CI-equivalent 전체 3,312개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
+  Discord·Minecraft·Docker를 기동하지 않았다.

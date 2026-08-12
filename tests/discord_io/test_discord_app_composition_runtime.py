@@ -324,6 +324,58 @@ class DiscordAppCompositionTests(unittest.TestCase):
             "❌ 자율 행동 시작에 실패했고 승인은 폐기했어."
         )
 
+    def test_autonomy_stop_failure_records_type_only_runtime_error(self) -> None:
+        private_error = "PRIVATE_AUTONOMY_STOP C:\\private\\token"
+        private_observer_error = "PRIVATE_OBSERVER C:\\private\\observer"
+        runtime_status = DiscordRuntimeStatus(
+            gateway_ready=lambda: False,
+            bot_guilds=lambda: [],
+            voice_client_type=object,
+            now=lambda: 123.0,
+        )
+        original_record_error = runtime_status.record_error
+
+        def record_then_fail(code, exc) -> None:
+            original_record_error(code, exc)
+            raise OSError(private_observer_error)
+
+        runtime_status.record_error = Mock(side_effect=record_then_fail)
+        revoke = Mock()
+        composition = make_composition(
+            events=make_event_deps(runtime_status=runtime_status),
+            commands_deps=make_command_deps(
+                autonomy_engines={
+                    7: SimpleNamespace(
+                        stop=AsyncMock(
+                            side_effect=RuntimeError(private_error)
+                        )
+                    )
+                },
+                revoke_autonomy_authorization=revoke,
+            ),
+        )
+        composition.mark_text_session_from_command = Mock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7),
+            author=SimpleNamespace(id=3),
+            channel=SimpleNamespace(id=2),
+            message=SimpleNamespace(id=4, content="!autonomy-off"),
+            send=AsyncMock(),
+        )
+
+        asyncio.run(composition.autonomy_stop_command(ctx))
+
+        snapshot = runtime_status.snapshot()
+        self.assertEqual(snapshot["lastErrorCode"], "autonomy_stop_failed")
+        self.assertEqual(snapshot["lastErrorType"], "RuntimeError")
+        self.assertNotIn(private_error, repr(snapshot))
+        self.assertNotIn(private_observer_error, repr(snapshot))
+        revoke.assert_called_once_with(7, reason_code="explicit_autonomy_stop")
+        self.assertIn(
+            "autonomy_stop_failed",
+            ctx.send.await_args.args[0],
+        )
+
     def test_on_ready_recovers_promised_search_followups(self) -> None:
         recover = AsyncMock(
             return_value={

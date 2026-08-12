@@ -500,6 +500,38 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(observed, [])
         self.assertEqual(revoked, [])
 
+    def test_autonomy_stop_reply_failure_is_not_cleanup_failure(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=1))
+        events: list[str] = []
+        observed: list[tuple[str, str]] = []
+
+        async def send(_text: str) -> None:
+            events.append("send")
+            raise ConnectionError("private reply failure")
+
+        class Engine:
+            async def stop(self) -> None:
+                events.append("stop")
+
+        ctx.send = send
+        with self.assertRaises(ConnectionError):
+            asyncio.run(
+                handle_autonomy_stop_command(
+                    ctx,
+                    autonomy_engines={1: Engine()},
+                    revoke_autonomy_authorization=(
+                        lambda *_args, **_kwargs: events.append("revoke")
+                    ),
+                    guild_only_message=lambda: "guild only",
+                    record_runtime_error=lambda code, exc: observed.append(
+                        (code, type(exc).__name__)
+                    ),
+                )
+            )
+
+        self.assertEqual(events, ["revoke", "stop", "send"])
+        self.assertEqual(observed, [])
+
     def test_autonomy_start_cancellation_revokes_grant_and_propagates(self) -> None:
         for cancelled_stage, expected_events in (
             ("stop", ["stop", "revoke:start_failed"]),

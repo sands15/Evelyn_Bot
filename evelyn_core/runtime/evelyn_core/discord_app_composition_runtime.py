@@ -438,6 +438,7 @@ class DiscordAppComposition:
             autonomy_engines=deps.autonomy_engines,
             revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
+            record_runtime_error=self._record_runtime_error,
         )
 
     async def autonomy_status_command(self, ctx: Any) -> None:

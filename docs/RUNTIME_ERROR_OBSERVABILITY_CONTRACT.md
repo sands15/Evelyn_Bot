@@ -52,6 +52,12 @@ engine start 뒤 성공 응답 전송 실패는 시작 실패로 오분류하거
 기존 engine cleanup, 선택적 route 재연결 또는 새 start await의 취소는 오류로 기록하거나
 응답하지 않고 기존 grant를 회수한 뒤 같은 취소 신호를 재전파한다.
 
+Discord `자율정지`는 grant를 먼저 회수하고, engine cleanup의 일반 예외만
+`autonomy_stop_failed`와 exception type으로 같은 Discord owner counter에 기록한다.
+관측 기록기 자체의 일반 예외는 고정 실패 응답을 막지 않는다. cleanup이 성공한 뒤의
+성공 응답 전송 실패는 정지 실패로 기록하거나 두 번째 실패 응답을 보내지 않고 그대로
+전파한다. cleanup 취소도 오류로 기록하거나 응답하지 않고 같은 취소 신호를 재전파한다.
+
 자율 후속의 Discord 전송이 정상 반환한 뒤 history, active session, continuity,
 memory 또는 self-state 후처리에서 발생한 일반 예외는
 `autonomy_followup_finalize_failed`와 exception type만 같은 Discord owner counter에

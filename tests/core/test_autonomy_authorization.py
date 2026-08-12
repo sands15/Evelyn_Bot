@@ -604,6 +604,45 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.state.status, "running")
         await engine.stop()
 
+    async def test_stop_propagates_caller_cancellation_during_cleanup(
+        self,
+    ) -> None:
+        class BlockingDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.disconnect_started = asyncio.Event()
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                if inner_self.disconnect_count == 1:
+                    inner_self.disconnect_started.set()
+                    await asyncio.Event().wait()
+
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = BlockingDisconnectExecutor()
+        engine = self.engine(executor)
+        await engine.start()
+        stop_task = asyncio.create_task(engine.stop())
+        await asyncio.wait_for(
+            executor.disconnect_started.wait(),
+            timeout=1.0,
+        )
+
+        stop_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await stop_task
+
+        self.assertEqual(executor.disconnect_count, 1)
+        self.assertEqual(engine.state.status, "stopping")
+        await engine.stop()
+        self.assertEqual(executor.disconnect_count, 2)
+        self.assertEqual(engine.state.status, "idle")
+
     async def test_start_retries_failed_stop_cleanup_before_reconnect(
         self,
     ) -> None:

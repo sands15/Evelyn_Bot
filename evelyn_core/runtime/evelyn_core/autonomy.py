@@ -314,8 +314,12 @@ class AutonomyEngine:
             self._task = None
             if task is not None:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                try:
                     await task
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
             await self._disconnect_executor_once()
             self.state.status = "idle"
             self.state.updated_at = time.time()

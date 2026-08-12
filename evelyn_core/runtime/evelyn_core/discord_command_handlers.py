@@ -252,6 +252,7 @@ async def handle_autonomy_stop_command(
     autonomy_engines: dict[int, Any],
     revoke_autonomy_authorization: Any,
     guild_only_message: Any,
+    record_runtime_error: Any = None,
     log: Any = print,
 ) -> None:
     if ctx.guild is None:
@@ -267,12 +268,15 @@ async def handle_autonomy_stop_command(
         return
     try:
         await engine.stop()
-        await ctx.send("🛑 자율 행동 루프를 멈췄어.")
     except Exception as exc:
+        if record_runtime_error is not None:
+            record_runtime_error("autonomy_stop_failed", exc)
         log("자율 행동 정지 오류 type=", type(exc).__name__)
         await ctx.send(
             public_failure_message("autonomy_stop_failed")
         )
+        return
+    await ctx.send("🛑 자율 행동 루프를 멈췄어.")
 
 
 async def handle_autonomy_status_command(
