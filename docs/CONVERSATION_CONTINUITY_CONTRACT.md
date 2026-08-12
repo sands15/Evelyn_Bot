@@ -251,12 +251,15 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
   session stale·guild revocation·reset 경계를 판정한다. revoked target은
   revocation 시각을 경계로 보존하고, target이 전혀 없거나 owner가 empty이면
   owner `savedAt`을 reset 경계로 유지한다.
-- cross-surface reader는 선택 대상 row의 `lastActiveAgoSec`가 누락되거나
-  bool·음수·비유한이면 해당 snapshot을 거부한다. owner restore는 이전
-  checkpoint history를 보수적인 만료 활동시각으로만 복구하고 다음 실제
-  durable rewrite에서 새 필드를 쓴다.
-  따라서 무관한 user/session의 후속 commit이 대상 session을 최신으로 만들거나
-  철회·reset 전 문맥을 되살리지 않는다.
+- owner restore는 checkpoint 자체 age와 각 row의 `lastActiveAgoSec`를 합친
+  effective age가 `maxAgeSec`를 넘으면 그 session의 history·active state를
+  복구하지 않는다. `lastActiveAgoSec`가 누락되거나 bool·음수·비유한인 row도
+  age를 증명할 수 없으므로 row 단위로 제외한다. raw legacy checkpoint와
+  generation-0 head/rollback anchor는 유지하지만 legacy history를 prompt/store에
+  투영하지 않으며, 새 실제 turn의 다음 durable write만 그 anchor에서 v2로 잇는다.
+  cross-surface reader도 같은 손상 metadata snapshot을 거부한다. 따라서 무관한
+  user/session의 후속 flush가 만료 session을 최신으로 만들거나 철회·reset 전
+  문맥을 되살리지 않는다.
 - 선택 session 활동시각으로 owner chunk 순서를 정하고 현재 user input과 인접
   중복을 제거한 뒤 Main의 최신 eligible session 한 개에서 기본 최근 8개만
   prompt에 넣는다. 상대 활동시각과 session ID는 새 artifact·public status에
@@ -647,7 +650,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
 - Discord guild/user exact scope, 다른 member/server 제외와 content-free
   status
-- session `lastActiveAgoSec` 검증·restart 복원, 선택 session 활동시각 순서,
+- session `lastActiveAgoSec` 검증·restart 복원, checkpoint/row effective-age
+  만료 제외, legacy row 무투영·anchor 보존, 선택 session 활동시각 순서,
   현재 input 제거, bounded merge와 양방향 Main/Fast prompt 주입
 - 무관한 session commit 뒤에도 선택 session stale·guild revocation과 더 최신
   empty/reset boundary가 다른 owner의 오래된 대화를 되살리지 않는지 검증

@@ -371,8 +371,12 @@ TTL, privacy policy와 revocation ledger를 read-only로 검증한다. Main/Disc
 Fast Control은 선택 session의 durable 상대 활동시각으로 bounded recent
 context를 양방향 사용한다. 무관한 session의 후속 commit은 대상 session을
 재정렬·갱신하거나 철회/reset 전 문맥을 되살리지 못한다. 선택 대상의
-누락·손상된 활동 metadata는 cross-surface에서 거부하고 owner restore에서는
-보수적인 만료 시각으로 복구한다. target scope가 없는 checkpoint의 owner `savedAt`은 삭제
+누락·손상된 활동 metadata는 cross-surface와 owner restore에서 모두 거부한다.
+owner restore도 checkpoint age와 row `lastActiveAgoSec`를 합친 effective age가
+`maxAgeSec`를 넘는 session을 history/active state에 투영하지 않아 다른 session의
+fresh flush가 만료 문맥을 되살리지 못한다. raw legacy artifact와 generation-0
+anchor는 보존하지만 age를 증명할 수 없는 history는 자동 복구하지 않고 새 실제
+turn만 다음 v2 generation으로 잇는다. target scope가 없는 checkpoint의 owner `savedAt`은 삭제
 tombstone을 별도로 저장하지 않는 현재 schema에서 reset 부활을 막는
 fail-closed 경계라, 무관한 commit과 실제 reset을 구분하지 못하면 상대 문맥을
 보수적으로 생략할 수 있다. 중앙 mutation owner나 새 tombstone store는

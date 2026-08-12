@@ -1646,6 +1646,8 @@ class SessionContinuityCheckpoint:
                     if activity_known
                     else self.max_age_sec + 1.0
                 )
+                if age_sec + last_active_ago_sec > self.max_age_sec:
+                    continue
                 selected_activity_at = max(
                     0.0,
                     saved_at - last_active_ago_sec,

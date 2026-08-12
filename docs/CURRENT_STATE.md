@@ -181,7 +181,12 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     reset boundary로 취급해 다른 owner의 오래된 대화가 삭제 뒤 되살아나지
     않는다. 공개 상태는 count/generation/고정 code만 포함한다.
   - v2 session row는 checkpoint 시점 기준 `lastActiveAgoSec`를 저장하고,
-    restart에서는 checkpoint age와 합쳐 process-local 활동시각을 복원한다.
+    restart에서는 checkpoint age와 합쳐 process-local 활동시각을 복원한다. 합친
+    effective age가 `maxAgeSec`를 넘으면 해당 history와 active state를 복구하지
+    않으므로 다른 session의 최신 flush가 만료 row의 수명을 늘리지 못한다.
+    누락·bool·음수·비유한 activity metadata도 owner restore에서 row 단위로
+    제외한다. raw legacy artifact와 generation-0 anchor는 보존하되 history는
+    자동 투영하지 않고 새 실제 turn만 다음 v2 generation으로 잇는다.
     verifier는 설정된 scope의 선택 session 활동시각으로 Main/Fast ordering,
     stale, guild revocation과 reset을 판정한다. 다른 Main session의 후속 commit은
     오래된 대상 session을 최신으로 만들지 못하며, 선택 대상의 누락·손상된 활동
@@ -2473,4 +2478,19 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   원격 전달 모호성, process crash exactly-once 또는 durable outbox를 뜻하지 않는다.
 - 변경 직결 22개, autonomy/Runtime Errors 인접 160개, CI-equivalent 전체
   3,308개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
+  Discord·LLM·Docker를 기동하지 않았다.
+
+## 2026-08-12 per-session continuity restore expiry
+
+- `maxAgeSec=60`에서 A가 101초 묵은 뒤 B의 fresh flush가 checkpoint `savedAt`을
+  갱신하면 restart artifact age는 1초가 되어, effective age 102초인 A와 fresh B가
+  모두 복구되는 경계를 actual `SessionStateStore`와 checkpoint로 재현했다. 다음 A
+  text turn history에도 만료 문맥이 다시 들어갔다.
+- restore는 mutation 전에 `checkpoint age + lastActiveAgoSec`를 row별로 계산하고
+  max age를 넘는 history/active state를 제외한다. activity age가 누락·bool·음수·
+  비유한인 legacy/손상 row도 자동 복구하지 않는다. raw legacy checkpoint의
+  generation-0 anchor와 rollback protection은 유지하고, 새 실제 turn만 v2
+  generation-1로 chain한다. schema나 새 owner는 추가하지 않았다.
+- continuity 직결 46개(skip 1), 인접 95개(skip 1), CI-equivalent 전체
+  3,309개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
   Discord·LLM·Docker를 기동하지 않았다.

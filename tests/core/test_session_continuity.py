@@ -249,6 +249,15 @@ class SessionContinuityTests(unittest.TestCase):
                 "contentFree": True,
             },
         )
+        store.update_session_state(
+            "guild:1:text:2:user:3",
+            user_id=3,
+            speaker="assistant",
+            awaiting_user_reply=False,
+            topic_id="memory-topic",
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=100.0,
+        )
         clock = FakeClock(wall=1000.0, monotonic=100.0)
         manager = self.manager(store, clock)
 
@@ -800,20 +809,27 @@ class SessionContinuityTests(unittest.TestCase):
         )
         self.assertEqual(legacy_head["generation"], 0)
         self.assertTrue(restored["rollbackProtected"])
-        self.assertEqual(
-            restored_store.last_active_at[
-                "guild:1:text:2:user:3"
-            ],
-            -402.0,
-        )
+        session_key = "guild:1:text:2:user:3"
+        self.assertEqual(restored["restoredSessionCount"], 0)
+        self.assertNotIn(session_key, restored_store.histories)
 
-        restored_store.histories[
-            "guild:1:text:2:user:3"
-        ].extend(
-            [
-                {"role": "user", "content": "마이그레이션 뒤 턴"},
-                {"role": "assistant", "content": "이어갈게"},
-            ]
+        restored_store.start_new_turn(
+            session_key,
+            turn_id="migration-turn",
+            now_monotonic=500.0,
+        )
+        restored_store.record_command_assistant_turn(
+            session_key,
+            "마이그레이션 뒤 턴",
+            "이어갈게",
+            system_prompt="current system prompt",
+            max_history_items=12,
+            guild_id=1,
+            user_id=3,
+            awaiting_user_reply=False,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+            now_monotonic=500.0,
         )
         restored_clock.wall = 1002.0
         migrated = manager.flush()
@@ -827,9 +843,16 @@ class SessionContinuityTests(unittest.TestCase):
             SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
         )
         self.assertEqual(current["generation"], 1)
-        self.assertGreater(
+        self.assertEqual(
             current["sessions"][0]["state"]["lastActiveAgoSec"],
-            900.0,
+            0.0,
+        )
+        self.assertEqual(
+            [
+                row["content"]
+                for row in current["sessions"][0]["history"]
+            ],
+            ["마이그레이션 뒤 턴", "이어갈게"],
         )
         self.assertEqual(
             current["previousHash"],
@@ -855,6 +878,71 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(restored_store.histories, {})
         self.assertEqual(restored_store.awaiting_user_reply, {})
         self.assertFalse(self.checkpoint_path.exists())
+
+    def test_fresh_session_flush_does_not_extend_expired_other_session(
+        self,
+    ) -> None:
+        expired_key = "guild:1:text:2:user:3"
+        source_clock = FakeClock(wall=1000.0, monotonic=100.0)
+        source = self.populated_store()
+        manager = self.manager(
+            source,
+            source_clock,
+            max_age_sec=60.0,
+        )
+        manager.flush()
+
+        source_clock.wall = 1101.0
+        source_clock.monotonic = 201.0
+        fresh_key = self.add_other_guild(source)
+        source.update_session_state(
+            fresh_key,
+            user_id=6,
+            speaker="assistant",
+            awaiting_user_reply=True,
+            topic_id="topic-2",
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=201.0,
+        )
+        manager.flush()
+
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        rows = {
+            row["sessionKey"]: row for row in payload["sessions"]
+        }
+        self.assertEqual(payload["savedAt"], 1101.0)
+        self.assertEqual(
+            rows[expired_key]["state"]["lastActiveAgoSec"],
+            101.0,
+        )
+
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1102.0, monotonic=500.0),
+            max_age_sec=60.0,
+        ).restore()
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(restored["restoredSessionCount"], 1)
+        self.assertNotIn(expired_key, restored_store.histories)
+        self.assertIn(fresh_key, restored_store.histories)
+        started = restored_store.begin_user_text_turn(
+            expired_key,
+            "새 질문",
+            system_prompt="current system prompt",
+            active_conversation_awaiting_reply_sec=90.0,
+            max_history_items=12,
+            guild_id=1,
+            user_id=3,
+            now_monotonic=500.0,
+        )
+        self.assertNotIn(
+            "내가 하던 이야기를 기억해",
+            str(started.history),
+        )
 
     def test_corrupt_checkpoint_is_rejected_without_raw_error_text(self) -> None:
         self.checkpoint_path.write_text(
