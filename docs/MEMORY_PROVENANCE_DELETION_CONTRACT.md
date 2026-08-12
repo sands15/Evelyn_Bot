@@ -80,6 +80,33 @@ session에서 자동 추정하지 않는다. 현재 authenticated principal이 �
 새 근거 또는 별도 명시적 owner-assignment 절차가 생기기 전까지 prompt에서는
 fail-closed한다.
 
+### Legacy layered raw scope authorization
+
+`conversation_turn` provenance와 `attributed` 판정은 raw row의 계보를 증명할 뿐,
+guild 전체에 그 본문을 노출할 권한은 증명하지 않는다. trusted `person_key`가 있는
+Main 조회는 guild raw와 guild `vault_raw`를 selection, render, count, receipt 전에
+제외한다. 현재 ingress의 room raw는 그 방의 공유 문맥으로 유지하고 exact person
+layer와 사용자 결합 session layer도 유지한다.
+
+새 person-bound turn은 guild raw JSONL에 중복 저장하지 않고 room/person/session
+raw에만 기록한다. 기존 guild raw와 일자별 vault mirror는 disk·legacy coverage에
+남고 기존 guild reset과 일자별 note 관리 동작도 유지하지만, person-bound prompt에
+자동 투영하지 않는다. guild/session/evidence ID나 본문에서 person을 추정하거나 기존
+row를 자동 migration하지 않는다. 제외된 guild row의 count와 opaque ID도 prompt
+receipt에 남기지 않는다.
+
+`person_key`가 없는 local/legacy 흐름은 기존 guild/room과 요청된 session fallback을
+유지하는 호환성 예외다. 이 경계는 current room의 Discord permission을 재검증하거나
+모든 layered memory를 principal별로 격리한다는 보장이 아니다. 새 owner token, cache
+schema 또는 저장 schema는 이 legacy raw 경계에 추가하지 않는다.
+
+self-identity review queue는 owner-authorized memory가 아니라 사람 검토용 runtime
+artifact다. owner 없는 queue copy의 `review_candidate|pending` 원문은 queue와 명시적
+review export에 남기되 self-identity runtime-state renderer가 tone hint로 읽지 않는다.
+renderer는 reviewed identity profile만 사용하고 queue 상태를 자동 승격하지 않는다.
+같은 턴 원문의 별도 scope-authorized history/raw 사용과 삭제 의미는 바꾸지 않으며,
+기존 queue를 자동 삭제·이관하거나 새 owner scope를 붙이지 않는다.
+
 ## Legacy provenance backfill audit
 
 과거 note에 `derived_from`이 비어 있는 경우 Control Page의
@@ -252,7 +279,9 @@ loop나 cognitive refresh가 살아 있는 guild reset은 continuity·파일 mut
 
 guild/room/person/session의 stored summary, fact, question과 assistant raw는 vault note
 삭제 현재성을 증명하는 receipt가 없으므로 layered prompt 입력에서 전역 보류한다.
-exact user raw만 기존 evidence shape 검사를 거쳐 사용할 수 있다. 같은 원문이
+exact user raw도 person-bound 요청에서는 허용된 room/person/session layer에서,
+person key가 없는 호환 경로에서는 guild/room과 요청된 session layer에서 기존
+evidence shape 검사를 통과해야만 사용할 수 있다. 같은 원문이
 `legacy/*` mirror나 `daily/*` conversation note, semantic derived note로 우회하지
 못하도록 live vault recall과 hot context는 `conversation|derived|legacy` source type을
 제외한다. retrieval cache는 `memory.retrieval-cache.v3`, hot context는

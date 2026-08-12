@@ -153,7 +153,8 @@ def write_memory_turn_records(
         memory_answer,
         source=source,
     )
-    append_raw_rows(guild_id, rows, mirror_daily=False)
+    if person_key is None:
+        append_raw_rows(guild_id, rows, mirror_daily=False)
     if room_key:
         append_raw_rows(guild_id, rows, scope_type="room", scope_key=room_key, mirror_daily=False)
     if person_key:

@@ -60,7 +60,7 @@ class MemoryLayersTests(unittest.TestCase):
         )
         self.assertNotIn(private_error, str(log.call_args))
 
-    def test_collect_memory_layers_reads_all_requested_scopes(self) -> None:
+    def test_collect_memory_layers_hides_guild_raw_for_person_bound_request(self) -> None:
         with TemporaryMemoryRoot():
             scopes = [
                 ("guild", None, "공용 방 기억", "guild summary"),
@@ -138,6 +138,11 @@ class MemoryLayersTests(unittest.TestCase):
                 person_key="person-1",
                 session_memory_key="session-1",
             )
+            shared_layers = collect_memory_layers(
+                123,
+                room_key="room-1",
+                session_memory_key="session-1",
+            )
             stored_questions = {
                 scope_type: (
                     memory.read_jsonl(
@@ -165,18 +170,22 @@ class MemoryLayersTests(unittest.TestCase):
             self.assertEqual(layer["scope_key"], scope_key)
             self.assertEqual(layer["summary"], "")
             self.assertEqual(layer["summary_provenance"], {})
-            self.assertEqual(len(layer["raw"]), 1)
-            self.assertEqual(len(layer["vault_raw"]), 1)
-            self.assertEqual(layer["raw"][0]["text"], f"{key} raw")
-            self.assertEqual(layer["vault_raw"][0]["text"], f"{key} raw")
-            self.assertEqual(layer["raw"][0]["evidence_id"], f"turn:{key}-turn:user")
-            self.assertEqual(layer["vault_raw"][0]["source_turn_id"], f"{key}-turn")
-            self.assertNotIn("private_metadata", layer["raw"][0])
+            expected_rows = 0 if key == "guild" else 1
+            self.assertEqual(len(layer["raw"]), expected_rows)
+            self.assertEqual(len(layer["vault_raw"]), expected_rows)
+            if expected_rows:
+                self.assertEqual(layer["raw"][0]["text"], f"{key} raw")
+                self.assertEqual(layer["vault_raw"][0]["text"], f"{key} raw")
+                self.assertEqual(layer["raw"][0]["evidence_id"], f"turn:{key}-turn:user")
+                self.assertEqual(layer["vault_raw"][0]["source_turn_id"], f"{key}-turn")
+                self.assertNotIn("private_metadata", layer["raw"][0])
             self.assertEqual(layer["facts"], [])
             self.assertEqual(layer["questions"], [])
             hot_questions, mirrored_questions = stored_questions[key]
             self.assertEqual(hot_questions[0]["text"], f"{key} question")
             self.assertEqual(mirrored_questions[0]["text"], f"{key} question")
+        self.assertEqual(len(shared_layers["guild"]["raw"]), 1)
+        self.assertEqual(len(shared_layers["room"]["raw"]), 1)
 
     def test_unreceipted_derived_layers_are_absent_from_prompts(self) -> None:
         stale_summary = "PRIVATE_STALE_SUMMARY"

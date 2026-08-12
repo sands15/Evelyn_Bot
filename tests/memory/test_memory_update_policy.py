@@ -149,7 +149,7 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
         self.assertNotIn("secret text", redacted)
         self.assertEqual(unredacted, text)
 
-    def test_write_memory_turn_records_writes_all_scopes_and_vault(self) -> None:
+    def test_write_memory_turn_records_skips_guild_raw_for_person_bound_turn(self) -> None:
         raw_calls = []
         vault_calls = []
 
@@ -177,12 +177,31 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
         self.assertTrue(result.vault_mirrored)
         self.assertEqual(result.identity_record_decision["source"], "text")
         self.assertEqual(result.rows[0]["evidence_id"], "turn:turn-write-1:user")
-        self.assertEqual(len(raw_calls), 4)
+        self.assertEqual(len(raw_calls), 3)
         self.assertEqual(raw_calls[0][0][:2], (123, result.rows))
-        self.assertEqual(raw_calls[1][1]["scope_type"], "room")
-        self.assertEqual(raw_calls[2][1]["scope_type"], "person")
-        self.assertEqual(raw_calls[3][1]["scope_type"], "session")
+        self.assertEqual(raw_calls[0][1]["scope_type"], "room")
+        self.assertEqual(raw_calls[1][1]["scope_type"], "person")
+        self.assertEqual(raw_calls[2][1]["scope_type"], "session")
         self.assertEqual(vault_calls[0][1]["scope_labels"], ["guild", "room:room", "person:person", "session:session"])
+
+        raw_calls.clear()
+        write_memory_turn_records(
+            123,
+            "shared user",
+            "shared answer",
+            room_key="room",
+            person_key=None,
+            session_memory_key="session",
+            source="text",
+            turn_id="turn-write-2",
+            record_identity_turn=record_identity,
+            append_raw_rows=lambda *args, **kwargs: raw_calls.append((args, kwargs)),
+            append_vault_rows=lambda *_args, **_kwargs: None,
+        )
+        self.assertEqual(len(raw_calls), 3)
+        self.assertNotIn("scope_type", raw_calls[0][1])
+        self.assertEqual(raw_calls[1][1]["scope_type"], "room")
+        self.assertEqual(raw_calls[2][1]["scope_type"], "session")
 
     def test_write_memory_turn_records_marks_vault_failure(self) -> None:
         logs = []

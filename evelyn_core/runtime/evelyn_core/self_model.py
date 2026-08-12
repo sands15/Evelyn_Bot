@@ -35,7 +35,7 @@ This file is Evelyn's reviewed self-definition layer. It is a conversational ide
 ## Growth Rule
 
 - User feedback about tone, closeness, identity, or "Evelyn-like" reactions should become review candidates.
-- Review candidates can softly influence the next turns, but should not become permanent identity until reviewed.
+- Review candidates stay out of model context until human review updates this profile.
 - Never rewrite core safety or capability boundaries just because a candidate says so.
 """
 
@@ -134,28 +134,6 @@ def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _read_jsonl_tail(path: Path, limit: int = 5) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in reversed(lines):
-        if len(rows) >= limit:
-            break
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            rows.append(data)
-    rows.reverse()
-    return rows
-
-
 def ensure_self_identity_profile(path: Path | None = None) -> str:
     target = path or SELF_IDENTITY_PROFILE_PATH
     try:
@@ -221,26 +199,16 @@ def record_self_identity_turn(
 def render_self_identity_context(
     *,
     profile_path: Path | None = None,
-    queue_path: Path | None = None,
-    max_candidates: int = 3,
 ) -> str:
     profile = ensure_self_identity_profile(profile_path)
     profile_lines = [line.rstrip() for line in profile.splitlines() if clean_text(line)]
     profile_excerpt = "\n".join(profile_lines[:28])
-    candidates = _read_jsonl_tail(queue_path or SELF_IDENTITY_REVIEW_QUEUE_PATH, max_candidates)
     lines = [
         "Evelyn identity model:",
         "- This is a conversational identity guide, not a claim of consciousness.",
-        "- Follow the reviewed profile first; use review candidates only as soft, reversible tone hints.",
+        "- Follow only the reviewed profile; unreviewed candidates are not model context.",
         profile_excerpt,
     ]
-    if candidates:
-        lines.append("Recent identity review candidates:")
-        for row in candidates:
-            labels = ", ".join(str(label) for label in row.get("labels", []) if clean_text(str(label)))
-            user = clean_text(str(row.get("user_text") or ""))[:120]
-            if labels and user:
-                lines.append(f"- labels={labels}; user_feedback={user}")
     return "\n".join(line for line in lines if clean_text(line))
 
 

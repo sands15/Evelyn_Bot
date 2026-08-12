@@ -963,11 +963,26 @@ recall receipt가 `attributed`가 되고, 정상 pinned hot-context의 ID가 손
 이 절의 P1은 과거 기억의 근거 누락과 재합성·사용자 확인 품질이지 이 승격 경로가
 아니다.
 
-새로 저장되는 raw 대화 row는 content-free stable evidence ID와 source turn
-ID를 guild/room/person/session scope에 동일하게 보존한다. 그러나 assistant raw는
-vault note 삭제 현재성 receipt가 없으므로 prompt에서 전역 보류한다. exact user raw만
-기존 evidence 검사 뒤 사용할 수 있고, 기존 raw row는 내용을 이용해 ID를 소급
-추론하지 않는다.
+새로 저장되는 raw 대화 row는 content-free stable evidence ID와 source turn ID를
+보존한다. person-bound turn은 guild raw JSONL 중복을 만들지 않고 room/person/사용자
+결합 session에 기록한다. trusted person-bound 조회는 기존 guild raw와 guild
+`vault_raw`를 prompt selection·count·receipt 전에 제외해 다른 channel의 principal로
+퍼지는 guild fallback을 닫는다. 현재 ingress room 공유와 person/session continuity는
+유지하고, 기존 row의 owner를 내용·guild/session/evidence로 소급 추론하지 않는다.
+assistant raw는 vault note 삭제 현재성 receipt가 없으므로 계속 전역 보류한다.
+
+이 경계는 current room permission/history authorization을 다시 검증하지 않는다.
+같은 room의 공유 raw, `person_key`가 없는 local/legacy guild/room 및 요청된 session
+fallback, 기존 guild raw와 일자별 mirror의 disk·legacy coverage 잔존은 호환성 위험으로
+남는다. 기존 guild reset과 일자별 note 관리 동작은 유지하지만 해당 artifact를 자동
+owner migration하지 않는다. 실제 다인 Discord channel과 local legacy 흐름은 live로
+검증하지 않았다.
+
+self-identity review queue도 principal scope가 없는 local artifact다. owner 없는 queue copy는
+self-identity runtime-state hint로 읽지 않고 renderer는 reviewed profile만 사용하지만, 원문과
+label은 기존 queue·사람용 export·decision metadata에 남을 수 있고 같은 턴의 별도
+scope-authorized history/raw 의미도 유지된다. 실제 사람 검토·승격 workflow와 오래된 queue
+정리는 live로 검증하지 않았고, 후보를 자동 owner 추정·migration하지 않는다.
 
 새로 생성되는 rolling summary는 본문 hash에 묶인 content-free sidecar에 자체
 파생 evidence ID와 실제 Summary LLM 입력 evidence/turn ID를 기록한다. 새
@@ -1213,9 +1228,10 @@ assistant-history 의사결정 신호를 남기지 않으며 후속 대화에는
 proactive open-question queue는 deletion-current receipt가 없어 선택·mark를 전역
 fail-closed했고 새 raw/ask text 복제도 저장하지 않는다. 과거 queue/pending 원문은
 index sync에서 제거한다. stored summary/fact/question과 assistant raw도 같은
-lineage 공백 때문에 prompt에서 보류하지만, exact user raw와 모델이 현재 답변에
-직접 넣은 명시적 질문은 유지된다. 기능 재활성화는 exact receipt와 tombstone
-검증이 생긴 뒤에만 가능하다.
+lineage 공백 때문에 prompt에서 보류하지만, person-bound 요청의 room/person/session
+또는 person key 없는 호환 경로의 guild/room과 요청된 session layer에서 evidence 검사를
+통과한 exact user raw와 모델이 현재 답변에 직접 넣은 명시적 질문은 유지된다. 기능 재활성화는
+exact receipt와 tombstone 검증이 생긴 뒤에만 가능하다.
 Main/Fast Control의 actual HTTP write와 Discord/TTS playback handoff가 같은 deletion
 position을 재검사한다. TTS-bound Local Bridge reply는 HTTP EOF를 성공으로 쓰지 않고
 software-playback ACK 뒤 server-side currentness를 재검증해 commit한다. receipt와 boundary 메타데이터에는 대화

@@ -22,7 +22,6 @@ from evelyn_core.self_model import (
     ensure_idle_activity,
     ensure_self_identity_profile,
     record_self_identity_turn,
-    render_self_identity_context,
     render_self_judgment_context,
     render_self_state_context,
     select_self_impulse,
@@ -149,7 +148,7 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
         self.assertIn(state.idle_activity, context)
         self.assertIn(state.idle_activity_label, context)
 
-    def test_identity_profile_and_review_candidates_render(self) -> None:
+    def test_self_context_renders_reviewed_identity_without_unreviewed_candidates(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             profile_path = root / "identity.md"
@@ -166,15 +165,27 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
                 queue_path=queue_path,
             )
             self.assertTrue(decision["recorded"])
+            queue_text = queue_path.read_text(encoding="utf-8")
+            self.assertIn("tone_feedback", queue_text)
+            self.assertIn("말투가 아직 친근하지 않아", queue_text)
 
-            context = render_self_identity_context(
-                profile_path=profile_path,
-                queue_path=queue_path,
-            )
+            with (
+                patch(
+                    "evelyn_core.self_model.SELF_IDENTITY_PROFILE_PATH",
+                    profile_path,
+                ),
+                patch(
+                    "evelyn_core.self_model.SELF_IDENTITY_REVIEW_QUEUE_PATH",
+                    queue_path,
+                ),
+            ):
+                context = render_self_state_context(EvelynSelfState())
             self.assertIn("Evelyn identity model:", context)
-            self.assertIn("tone_feedback", context)
-            self.assertIn("suffix_balance", context)
-            self.assertIn("말투가 아직 친근하지 않아", context)
+            self.assertIn("Evelyn Identity Profile", context)
+            self.assertNotIn("Recent identity review candidates:", context)
+            self.assertNotIn("tone_feedback", context)
+            self.assertNotIn("suffix_balance", context)
+            self.assertNotIn("말투가 아직 친근하지 않아", context)
 
     def test_identity_review_write_failure_is_content_free(self) -> None:
         private_error = "PRIVATE_IDENTITY_ERROR:/synthetic/identity-review.jsonl"

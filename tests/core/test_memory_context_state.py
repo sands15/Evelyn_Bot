@@ -1,5 +1,6 @@
 import contextlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+import evelyn_core.memory as memory  # noqa: E402
 from evelyn_core.memory_context_state import (  # noqa: E402
     build_memory_context,
     build_memory_context_payload,
@@ -27,6 +29,9 @@ from evelyn_core.memory_deletion_journal import (  # noqa: E402
 from evelyn_core.memory_deletion_outbound import (  # noqa: E402
     current_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
+)
+from evelyn_core.memory_update_policy import (  # noqa: E402
+    write_memory_turn_records,
 )
 
 
@@ -280,6 +285,60 @@ class MemoryContextStateTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("PRIVATE_RAW_TEXT", str(receipt))
+
+    def test_person_raw_turn_does_not_leak_through_guild_layer(self) -> None:
+        canary = "A_ONLY_PRIVATE_MEMORY_CANARY"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            memory,
+            "MEMORY_ROOT",
+            Path(temp_dir),
+        ), patch(
+            "evelyn_core.memory_context_state.build_memory_vault_context",
+            return_value="",
+        ), patch(
+            "evelyn_core.memory_context_state.read_layered_cognitive_state",
+            return_value={},
+        ):
+            write_memory_turn_records(
+                123,
+                canary,
+                "private answer",
+                room_key="text:100",
+                person_key="user:11",
+                session_memory_key="session-a:user:11",
+                source="text",
+                turn_id="private-turn-a",
+                record_identity_turn=lambda *_args, **_kwargs: {"ok": True},
+                append_raw_rows=memory.append_raw_transcript_rows,
+                append_vault_rows=lambda *_args, **_kwargs: None,
+            )
+            owner_receipt: dict[str, object] = {}
+            owner_context = build_memory_context(
+                123,
+                "다시 알려줘",
+                cognitive_state={},
+                room_key="text:200",
+                person_key="user:11",
+                session_memory_key="session-b:user:11",
+                receipt=owner_receipt,
+            )
+            other_receipt: dict[str, object] = {}
+            other_context = build_memory_context(
+                123,
+                "다시 알려줘",
+                cognitive_state={},
+                room_key="text:300",
+                person_key="user:22",
+                session_memory_key="session-c:user:22",
+                receipt=other_receipt,
+            )
+
+        self.assertIn(canary, owner_context)
+        self.assertEqual(owner_receipt["groundingState"], "attributed")
+        self.assertNotIn(canary, other_context)
+        self.assertEqual(other_receipt["groundingState"], "empty")
+        self.assertEqual(other_receipt["legacyItemCount"], 0)
+        self.assertEqual(other_receipt["legacyEvidenceIds"], [])
 
     def test_derived_legacy_items_report_content_free_input_lineage(self) -> None:
         layers = {

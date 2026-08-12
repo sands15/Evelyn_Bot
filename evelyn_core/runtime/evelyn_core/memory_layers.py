@@ -26,6 +26,7 @@ def collect_memory_layers(
     session_memory_key: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     # ponytail: expose derived layers only after they gain a deletion-current receipt.
+    principal_bound = person_key is not None
     layers: dict[str, dict[str, Any]] = {
         "guild": {
             "label": "공용 방 기억",
@@ -33,8 +34,8 @@ def collect_memory_layers(
             "scope_key": None,
             "summary": "",
             "summary_provenance": {},
-            "raw": _user_rows(read_jsonl(memory_raw_path(guild_id))),
-            "vault_raw": _user_rows(read_vault_raw_rows(guild_id)),
+            "raw": [] if principal_bound else _user_rows(read_jsonl(memory_raw_path(guild_id))),
+            "vault_raw": [] if principal_bound else _user_rows(read_vault_raw_rows(guild_id)),
             "facts": [],
             "questions": [],
         }

@@ -461,10 +461,14 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     content-free receipt를 반환한다. 사용자 주입 memory provider처럼 exact
     note ID를 증명하지 못하는 경로는 `unattributed`로 표시한다.
   - 새 raw 대화 memory row는 현재 turn ID에서 만든 stable `evidence_id`,
-    `source_turn_id`, 고정 `conversation_turn` kind를 guild/room/person/session
-    raw JSONL에 동일하게 보존하고 JSONL mirror가 활성인 호출도 같은 필드를
-    유지한다. ID에는 발화 내용이 들어가지 않으며 allowlist 형식에 맞지 않는
-    metadata는 저장하지 않는다.
+    `source_turn_id`, 고정 `conversation_turn` kind를 보존한다. person-bound turn은
+    guild raw JSONL 중복을 만들지 않고 room/person/사용자 결합 session raw에 기록한다.
+    person key가 없는 호환 경로는 기존 guild/room과 요청된 session fallback을 유지한다.
+    ID에는 발화 내용이 들어가지 않으며 allowlist 형식에 맞지 않는 metadata는 저장하지 않는다.
+  - trusted person-bound 조회는 기존 guild raw와 guild `vault_raw`를 selection·render·
+    count·receipt 전에 제외한다. 현재 ingress room은 공유 문맥으로 남고 exact person과
+    사용자 결합 session은 유지한다. 제외된 guild row의 count·opaque ID도 공개 receipt에
+    남기지 않으며, 기존 guild artifact에서 owner를 추정하거나 자동 migration하지 않는다.
   - receipt와 turn summary는 실제 prompt에 선택된 raw row의 evidence/turn
     ID를 domain-separated `opaque-evidence-*`/`opaque-turn-*`로 투영한 값과
     attributed/unattributed legacy 항목 수를 공개한다. 새 rolling
@@ -473,7 +477,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     fail-closed로 버린다. 새 facts/questions도 같은 실제 입력 ID와 별도 파생
     evidence ID를 JSONL과 mirror에 보존한다. 다만 이 turn-level provenance에는
     vault note 삭제 현재성을 증명하는 receipt가 없으므로 stored summary/fact/question과
-    assistant raw는 prompt 입력에서 보류한다. exact user raw와 현재 턴만 사용한다.
+    assistant raw는 prompt 입력에서 보류한다. exact user raw도 person-bound 요청의
+    room/person/session 또는 person key 없는 호환 경로의 guild/room과 요청된 session
+    layer에서 evidence 검사를 통과한 경우에만 현재 턴과 함께 사용한다.
   - receipt와 turn summary는 새 파생 항목, 직접 입력 evidence와 source turn의
     안정적인 opaque projection만 content-free 필드로 공개한다. 원본 ID는
     content-bearing/source sidecar 안에만 남는다. 공개 projection은
@@ -538,6 +544,10 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     vault maintenance 실패 로그의 예외 detail도 `errorType=<exception-type>`만 남긴다.
     background cognitive refresh 실패 로그도 session key·reason·예외 메시지를 제외하고
     fixed prefix와 exception type만 남긴다.
+  - owner 없는 self-identity review queue copy의 user/assistant 원문은 사람 검토·export에
+    남기되 self-identity runtime-state section이 soft tone hint로 읽지 않는다. renderer는
+    reviewed identity profile만 사용하고 pending candidate를 자동 승격하지 않는다. 같은
+    턴 원문의 별도 scope-authorized history/raw 사용과 label decision metadata는 유지한다.
   - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
     단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
@@ -1754,7 +1764,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   fail-closed한다.
 - legacy layered memory는 deletion-current lineage가 생길 때까지 stored summary,
   facts, questions와 assistant raw를 Main/cognitive/writeback 입력에서 전역 보류한다.
-  exact user raw만 기존 evidence 검사를 거쳐 사용할 수 있다. 같은 원문을 복제한
+  exact user raw도 person-bound 요청의 room/person/session 또는 person key 없는 호환
+  경로의 guild/room과 요청된 session layer에서 기존 evidence 검사를 통과해야 한다. 같은 원문을 복제한
   legacy mirror, daily conversation과 semantic derived note도 live recall/hot context에서
   제외한다. retrieval cache v2와 hot-context recall policy marker가 과거 cache 재사용을
   막는다. provenance-bearing `open_questions.jsonl` 저장·감사, explicit user/system
@@ -2512,3 +2523,22 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 변경 직결 3개, autonomy core 62개, Discord I/O 135개, Runtime Errors 인접 21개,
   CI-equivalent 전체 3,312개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
   Discord·Minecraft·Docker를 기동하지 않았다.
+
+## 2026-08-12 person-bound legacy raw and identity-review prompt isolation
+
+- actual temp memory root에서 Discord A의 person-bound turn이 guild raw fallback을 통해
+  다른 room/user B의 Main prompt와 receipt에 `attributed`로 들어가던 경계를 재현했다.
+  별도 actual `record_self_identity_turn`→`render_self_state_context` 경로에서도 tone/identity
+  candidate의 owner 없는 queue copy가 self-model runtime-state hint로 렌더링됐다.
+- person-bound write는 guild raw JSONL 중복만 생략하고 room/person/사용자 결합 session을
+  유지한다. person-bound read는 기존 guild raw와 guild `vault_raw`를 selection·render·
+  count·receipt 전에 제외한다. current room 공유, same-person cross-room continuity와 person
+  key 없는 local/legacy guild/room 및 요청된 session fallback은 유지하며 permission/history
+  authorization을 새로 검증한다고 과장하지 않는다.
+- identity review queue와 export는 그대로 유지하되 owner 없는 queue copy를 self-identity
+  runtime-state hint로 읽지 않는다. renderer는 reviewed identity profile만 사용한다. 같은 턴
+  원문의 별도 scope-authorized history/raw 사용은 유지하고, 기존 queue를 자동 삭제·owner
+  추정·migration하지 않는다. 새 schema·owner token·cache는 추가하지 않았다.
+- privacy 집중 99개, memory 전체 307개(skip 1), CI-equivalent 전체 3,313개(skip 22),
+  Python 구문·diff check가 통과했다. 검증은 offline이며 실제 Discord·사용자 memory·배포
+  runtime·Docker를 기동하거나 수정하지 않았다.
