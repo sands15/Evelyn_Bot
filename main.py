@@ -24,7 +24,6 @@ os.environ.setdefault("EVELYN_CORE_ROOT", str(PROJECT_ROOT / "evelyn_core"))
 os.environ.setdefault("EVELYN_CORE_RUNTIME", str(EVELYN_CORE_RUNTIME))
 if str(EVELYN_CORE_RUNTIME) not in sys.path:
     sys.path.insert(0, str(EVELYN_CORE_RUNTIME))
-
 import aiohttp
 from aiohttp import web
 import numpy as np
@@ -632,12 +631,13 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         autonomy_engines=autonomy_engines, get_guild=bot.get_guild,
         get_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
         get_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids, session_followup_targets=session_state_store.followup_targets,
-        clean_text=clean_text, send_discord_text=send_discord_text,
+        session_last_active_at=session_state_store.last_active_at, is_session_active_for_user=is_session_active_for_user,
+        session_locks=session_locks, reply_slot_locks=reply_slot_locks,
+        reply_slot_admission_locks=reply_slot_admission_locks, clean_text=clean_text, send_discord_text=send_discord_text,
         question_cooldown_hit=question_cooldown_hit, evaluate_proactive_question_gate=evaluate_proactive_question_gate,
         proactive_question_scope_candidates=proactive_question_scope_candidates, select_question_to_ask=select_question_to_ask,
-        runtime_session_key=runtime_session_key, get_conversation_history=get_conversation_history,
+        get_conversation_history=get_conversation_history, monotonic=time.monotonic, autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index", pick_recent_user_text=pick_recent_user_text, localtime=time.localtime,
-        monotonic=time.monotonic, autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
         autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks, read_cached_cognitive_state=read_cached_cognitive_state,
         read_vision_watch_state=read_vision_watch_state, local_tts_snapshot=local_tts_playback_manager.snapshot,
         serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(), get_active_session_count=lambda: len(session_state_store.active_until),

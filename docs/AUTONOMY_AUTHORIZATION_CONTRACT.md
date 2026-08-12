@@ -120,6 +120,15 @@ ping fence가 search-pending과 unresolved maintain 계획의 즉시 재생성�
 await 내부 취소·timeout의 원격 전달 여부와 process crash exactly-once는 이 증거의
 보장이 아니다.
 
+대화형 `assistant:send_followup`과 `maybe_ping_user`는 현재 active인 canonical Discord
+text user session과 그 exact message/channel/last-active snapshot을 먼저 결박한다. 명시적
+관찰채널은 exact channel 또는 thread parent 경계이며, 허용 후보 안에서는 가장 최근 active
+session이 우선한다. voice/default/noncanonical target, 만료·변경된 target과 busy reply slot은
+전송 전 각각 `no_followup_channel` 또는 `followup_reply_slot_busy`로 blocked된다. 이 두
+일시적 precondition은 effect evidence나 Runtime Error가 아니며 blocked retry count를 누적하지
+않는다. `maybe_ping_user`는 reply slot과 currentness를 확보한 뒤에만 proactive question을
+mark하므로 busy 결과가 queue/cooldown을 소비하지 않는다.
+
 `maybe_ping_user`는 실제 메시지를 보냈을 때 `discord_send_completed`, 보낼
 필요가 없음을 gate에서 확인했을 때 `proactive_gate_completed`만 허용한다.
 다른 action의 올바른 코드를 교차 제출해도 검증되지 않는다. Minecraft policy는

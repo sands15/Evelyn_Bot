@@ -49,6 +49,7 @@ _AUTONOMY_RESULT_REASONS = frozenset(
         "executor_result_invalid",
         "explicit_postcondition_verified",
         "food_step_skipped",
+        "followup_reply_slot_busy",
         "hazard_interrupt",
         "hazard_step_skipped",
         "hostile_interrupt",

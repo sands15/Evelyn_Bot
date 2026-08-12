@@ -447,7 +447,7 @@ class AutonomyEngine:
             action_key = self._action_key(step) if step else ""
             interrupt_reason = clean_text(str(step_result.get("reason", "")))
             if step_result.get("status") == "blocked" and action_key:
-                if interrupt_reason in {"hazard_interrupt", "hostile_interrupt", "low_health_interrupt", "shield_not_in_inventory", "no_food_in_inventory", "no_food_source_detected"}:
+                if interrupt_reason in {"followup_reply_slot_busy", "hazard_interrupt", "hostile_interrupt", "low_health_interrupt", "no_followup_channel", "shield_not_in_inventory", "no_food_in_inventory", "no_food_source_detected"}:
                     self._blocked_counts.pop(action_key, None)
                 else:
                     self._blocked_counts[action_key] += 1

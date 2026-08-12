@@ -29,6 +29,7 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
         reset_index = source.index(
             "guild_runtime_reset_composition = GuildRuntimeResetComposition("
         )
+        autonomy_source = source[composition_index:reset_index]
 
         self.assertLess(composition_index, reset_index)
         self.assertIn(
@@ -38,8 +39,15 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
         self.assertNotIn("get_or_create_autonomy_engine_from_runtime", source)
         self.assertIn(
             "record_runtime_error=lambda code, exc: discord_runtime_status.record_error(code, exc)",
-            source,
+            autonomy_source,
         )
+        for binding in (
+            "is_session_active_for_user=is_session_active_for_user",
+            "session_locks=session_locks",
+            "reply_slot_locks=reply_slot_locks",
+            "reply_slot_admission_locks=reply_slot_admission_locks",
+        ):
+            self.assertIn(binding, autonomy_source)
 
     def test_composition_keeps_public_builder_and_engine_signatures(self) -> None:
         module = ast.parse(

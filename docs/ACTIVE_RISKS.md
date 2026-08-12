@@ -279,6 +279,19 @@ search-pending/unresolved 관찰이 4초 poll마다 같은 답변을 다시 보�
 회귀로 닫혔다. 실제 Discord timeout·취소의 원격 전달 모호성, process crash와 live
 heartbeat 투영은 여전히 검증되지 않았으며 exactly-once나 durable outbox는 아니다.
 
+대화형 자율 후속의 source-level recipient는 active canonical Discord text user session으로
+제한된다. 명시적 관찰채널 또는 thread parent 경계 안에서 가장 최근 active target을 고르고,
+observation의 session/message/channel/last-active snapshot이 바뀌거나 만료되면 전송 전에
+blocked한다. 같은 reply slot은 send부터 exact recipient commit까지 유지하며 cognitive refresh와
+prefixed command도 `reply -> session` 순서로 직렬화한다. normal reply가 먼저면 refresh가
+nonwaiting으로 물러나고, refresh가 먼저면 exact session lock을 잡은 뒤 reply slot을 한 후속
+text turn에 넘긴다. normal handler의 direct target writer는 durable claim과 turn begin 뒤에만
+실행되므로 busy/ignored/redelivery ingress가 recipient generation을 바꾸지 않는다. 전달·기록에
+성공한 plain-text prefixed command reply는 기존 command-continuity 경로로 target을 갱신할 수 있다.
+다만 실제 multi-user/thread Discord에서의 permission,
+채널 삭제·reconnect, latency, 동시에 여러 successor가 오는 경우와 process crash는 live
+미검증이며, voice session은 이 text recipient 계약에 포함되지 않는다.
+
 음성 재생 완료 경로는 exact assistant history, active follow-up과 process-local room owner
 반영, completion continuity commit 시도를 같은 memory-exposure guard 안에서 먼저 처리한 뒤
 benchmark, memory write, cognitive gating과 search follow-up을 실행한다. commit이 durable하면
@@ -610,6 +623,9 @@ degraded다. 다음 조치는 사용자가 각 surface를 승인해 기동할 �
 exact source identity가 유지되는지 확인하는 것이다. Discord normal text failure는 source에서
 shared status에 fixed `discord_text_turn_failed`/type/count를 기록하지만, 실제 gateway 실패와
 다음 heartbeat의 Runtime Errors 표시까지 잇는 live 검증은 아직 수행하지 않았다.
+자율 후속 `send_discord_text` await 자체의 일반 예외도 fixed
+`autonomy_followup_send_failed`/type/count로 같은 shared
+status에 기록을 시도하지만 실제 Discord send 실패와 heartbeat 표시는 live 미검증이다.
 
 ## P0 source 완료 — Control Page capture owner 배포·live 경합 미검증
 

@@ -65,6 +65,13 @@ memory 또는 self-state 후처리에서 발생한 일반 예외는
 진행을 바꾸지 않는다. 취소와 memory deletion integrity 신호는 이 일반 오류 경계에서
 삼키지 않는다.
 
+자율 후속의 `send_discord_text` await 자체가 일반 예외를 내면 shared
+`DiscordRuntimeStatus`에 고정 `autonomy_followup_send_failed`, exception type과
+process-lifetime count 기록을 시도한 뒤 원래 예외를 재전파한다. recorder 자체의 일반 예외는
+원래 send 실패를 바꾸지 않는다. 취소와 memory deletion integrity 신호, 대상 없음·변경·만료와
+reply-slot busy 같은 전송 전 blocked 결과는 이 오류 counter에 넣지 않는다. 기록 성공분은 다음
+Discord status projection/heartbeat에서 기존 Runtime Errors source로 보일 수 있다.
+
 Discord text의 기존 outer failure boundary에 도달한 일반 예외는 shared
 `DiscordRuntimeStatus`에 고정 `discord_text_turn_failed`, exception type과
 process-lifetime count 기록을 시도한다. 다음 status heartbeat에서 기존 Discord Runtime

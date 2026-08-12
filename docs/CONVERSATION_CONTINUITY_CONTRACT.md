@@ -414,6 +414,23 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   남는다. 취소와 memory deletion integrity 신호는 재전파하지만 이미 정상 반환한
   전송의 ping fence는 유지한다. 이는 같은 프로세스의 자동 재실행만 막으며 send await
   내부의 모호한 전달이나 process crash exactly-once를 보장하지 않는다.
+- 대화형 자율 후속은 process-local follow-up target map에서 canonical하고 아직 active인
+  Discord text user session만 고른다. voice/default/noncanonical key는 제외한다. 명시적
+  관찰채널이 있으면 exact channel 또는 thread parent가 그 경계 안에 있어야 하고, 허용된
+  후보 중 가장 최근 active session을 선택한다. observation은 exact session, message ID,
+  channel object와 last-active 값을 함께 고정하며 action은 같은 reply slot을 nonwaiting으로
+  claim한 뒤 네 값을 다시 확인한다. 대상 없음·만료·변경 또는 busy이면 proactive question을
+  mark하거나 send/ping/history/commit/memory를 만들지 않고 blocked로 반환한다. content-free
+  status/오류 알림의 channel 선택은 이 대화 recipient 계약과 별도다.
+- 자율 후속은 reply slot을 Discord send부터 exact recipient session의 history/active/required
+  continuity commit까지 유지하고, state mutation은 기존 `reply -> session` lock 순서를 쓴다.
+  cognitive refresh도 같은 slot을 nonwaiting claim해 currentness를 확인하고 exact session lock을
+  잡은 뒤 reply slot을 다음 text turn에 넘긴 채 scoped update를 마친다. prefixed command도 같은
+  `reply -> session` 순서다. 일반 text handler의 direct target writer는 durable ingress claim과
+  user turn begin이 성공한 뒤 그 임계구역에서만 실행되므로 busy·ignored·redelivery ingress는
+  target을 바꾸지 않는다. 실제 plain-text 응답의 전송·기록에 성공한 guild-prefixed command는
+  기존 command-continuity 경로로 target을 갱신할 수 있다. 이는 process-local 한 turn handoff이며
+  모든 입력 queue, preemption, durable outbox 또는 exactly-once를 보장하지 않는다.
 - Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다. Discord 명령은
   composition이 주입한 단일 context owner가 성공한 plain-text
   `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
@@ -623,6 +640,11 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   timeout·5xx·상태 없는 ambiguous failure의 무재전송
 - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
   경로의 전달·기록·commit 순서
+- 자율 후속의 canonical active Discord text recipient 선택, configured channel/thread-parent
+  경계, 최신 active 우선순위, same-session generation 변경·만료·voice/default key 배제,
+  busy/no-target 무부작용과 exact recipient restart 복구
+- 자율 후속 send·commit, cognitive refresh와 prefixed command의 `reply -> session` 직렬화,
+  양방향 handoff·취소·예외 lock 정리와 proactive mark-before-claim 방지
 - Local Bridge playback 실패의 exact user-only checkpoint, journal 삭제 재시도와
   fresh restart 뒤 미응답 user tail 복구
 - Discord voice 수락 turn의 pre-delivery user-only commit, commit 실패 시 downstream

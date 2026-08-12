@@ -202,15 +202,51 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
 
         self.assertEqual(calls, [("process_commands", "Evelyn hi")])
 
-    def test_handler_routes_prefixed_guild_message_to_commands(self) -> None:
+    def test_prefixed_command_does_not_preseed_followup_target(self) -> None:
         calls: list[tuple[str, object]] = []
         deps = make_deps(calls)
         message = make_message(content="!status", guild=SimpleNamespace(id=1, name="Guild"))
 
         asyncio.run(handle_discord_text_message(message, deps))
 
-        self.assertEqual(calls[0][0], "remember")
+        self.assertFalse(any(name == "remember" for name, _ in calls))
         self.assertEqual(calls[-1], ("process_commands", "!status"))
+
+    def test_prefixed_command_waits_for_exact_session_state(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def scenario() -> None:
+            deps = make_deps(calls)
+            session_key = "guild:1:text:2:user:3"
+            state_lock = deps.session_locks.setdefault(
+                session_key,
+                asyncio.Lock(),
+            )
+            await state_lock.acquire()
+            task = asyncio.create_task(
+                handle_discord_text_message(
+                    make_message(
+                        content="!status",
+                        guild=SimpleNamespace(id=1, name="Guild"),
+                    ),
+                    deps,
+                )
+            )
+            await asyncio.sleep(0)
+            reply_lock = deps.reply_slot_locks[
+                "guild:1:reply:text:2"
+            ]
+            self.assertTrue(reply_lock.locked())
+            self.assertFalse(any(
+                name == "process_commands" for name, _value in calls
+            ))
+            state_lock.release()
+            await task
+            self.assertEqual(calls, [("process_commands", "!status")])
+            self.assertFalse(reply_lock.locked())
+            self.assertFalse(state_lock.locked())
+
+        asyncio.run(scenario())
 
     def test_prefixed_command_waits_for_inflight_failure_reply(self) -> None:
         calls: list[tuple[str, object]] = []
@@ -568,6 +604,16 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             ),
         )
         self.assertIn(("summary", "text_turn_summary"), calls)
+        self.assertIn(
+            (
+                "remember",
+                (
+                    "guild:1:text:2:user:3",
+                    {"channel_id": 2, "message_id": 99},
+                ),
+            ),
+            calls,
+        )
         self.assertEqual(
             calls[-1],
             ("process_commands", "Evelyn hi"),
@@ -1324,6 +1370,7 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
         channel = asyncio.run(scenario())
         self.assertEqual(claim_count, 0)
         self.assertEqual(channel.sent, [])
+        self.assertFalse(any(name == "remember" for name, _ in calls))
 
     def test_restart_reconciles_critical_phases_or_disables_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

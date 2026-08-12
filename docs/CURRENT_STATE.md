@@ -2570,3 +2570,28 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 변경 직결 41개, Discord I/O 138개, continuity 인접 62개, Runtime Errors/Health/UI
   40개와 CI-equivalent 전체 3,316개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline fake Discord와 actual
   `DiscordRuntimeStatus`이며 실제 gateway·heartbeat·Control Page 표시는 기동하지 않았다.
+
+## 2026-08-12 autonomy exact Discord text recipient continuity
+
+- 실제 canonical A/B user session과 checkpoint를 사용하면 기존 autonomy는 target-map key를
+  버리고 configured channel에 전송한 뒤 `guild:<id>:default`에 history/active/commit해, 다음
+  exact user prompt와 restart 문맥에서 전달한 후속을 잃었다. 만료 session, 같은 session의 더
+  새 message, busy reply slot과 cognitive refresh/command 경합도 별도 offline old-red로 고정했다.
+- 대화형 observation은 active canonical Discord text target만 session/message/channel identity/
+  last-active snapshot으로 결박한다. 명시적 관찰채널 또는 thread parent 안에서 가장 최근 active
+  candidate를 고르고 voice/default/noncanonical·만료·변경 target은 제외한다. send와 required
+  continuity는 exact recipient의 기존 reply/session lock과 room/person/user-session memory scope를
+  사용하며 fresh restore에서 exact user/assistant pair와 `not_used` receipt를 확인했다.
+- busy/no-target은 question mark나 send/ping/history/commit/memory 없이 transient blocked로 남는다.
+  cognitive refresh는 reply slot을 nonwaiting claim해 exact session을 확보한 뒤 slot을 다음 text
+  turn에 넘기고 session lock 아래 update를 끝낸다. prefixed command도 `reply -> session` 순서를
+  사용한다. normal handler의 direct target writer는 durable claim+turn begin 성공 뒤에만 실행되어
+  busy/ignored/redelivery ingress를 제외한다. 전달·기록된 plain-text command reply는 기존 command
+  continuity 경로로 target을 갱신할 수 있다.
+- `send_discord_text` await 자체의 일반 예외는 shared status에
+  `autonomy_followup_send_failed`와 type/count만
+  best-effort로 기록하고 원래 예외를 재전파한다. 취소·memory integrity와 blocked 결과는
+  기록하지 않으며 모든 소유 lock을 해제한다. 새 target schema·queue·owner는 추가하지 않았다.
+- 변경 직결 72개, autonomy 인접 132개, Discord I/O 139개와 CI-equivalent 전체
+  3,331개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline fake Discord와 actual
+  `SessionStateStore`/checkpoint/status이며 실제 Discord·LLM·heartbeat·Docker를 기동하지 않았다.

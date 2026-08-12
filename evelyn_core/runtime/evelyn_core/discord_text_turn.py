@@ -158,6 +158,12 @@ async def _prepare_durable_text_turn(
                 state_lock=state_lock,
                 reply_lock=reply_lock,
             )
+            if prepared_turn is not None:
+                deps.remember_session_followup_target(
+                    ingress.session_key,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                )
             keep_reply_lock = prepared_turn is not None
             return prepared_turn
     finally:
@@ -309,8 +315,6 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     room_key = ingress.room_key
     person_key = ingress.person_key
     session_memory_key = ingress.session_memory_key
-    deps.remember_session_followup_target(session_key, channel_id=message.channel.id, message_id=message.id)
-
     prefix = deps.get_guild_command_prefix(message.guild.id)
     precheck = decide_text_message_precheck(
         content=message.content,
@@ -323,8 +327,13 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             ingress.reply_slot_key,
             asyncio.Lock(),
         )
+        state_lock = deps.session_locks.setdefault(
+            session_key,
+            asyncio.Lock(),
+        )
         async with reply_lock:
-            await deps.process_commands(message)
+            async with state_lock:
+                await deps.process_commands(message)
         return
     if precheck.action == "ignore":
         return

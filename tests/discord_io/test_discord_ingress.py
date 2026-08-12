@@ -64,7 +64,12 @@ class DiscordIngressTests(unittest.TestCase):
         voice_parent = Obj(id=30, kind="voice")
         thread_channel = Obj(id=4, parent=text_parent)
         non_thread_channel = Obj(id=5, parent=voice_parent)
-        message = Obj(guild=Obj(id=1), channel=thread_channel, author=Obj(id=3))
+        message = Obj(
+            id=99,
+            guild=Obj(id=1),
+            channel=thread_channel,
+            author=Obj(id=3),
+        )
 
         context = build_text_ingress_context_from_message(
             message,
@@ -72,6 +77,7 @@ class DiscordIngressTests(unittest.TestCase):
         )
 
         self.assertEqual(context.thread_id, 4)
+        self.assertEqual(context.message_id, 99)
         self.assertEqual(context.session_key, "guild:1:text:4:thread:4:user:3")
         self.assertIsNone(resolve_text_thread_id(non_thread_channel, is_thread_parent=lambda parent: getattr(parent, "kind", "") == "text"))
 

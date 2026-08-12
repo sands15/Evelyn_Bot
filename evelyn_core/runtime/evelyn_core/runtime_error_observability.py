@@ -22,6 +22,7 @@ _KNOWN_ERROR_CODES = frozenset(
     {
         "automatic_restart_budget_exhausted",
         "autonomy_followup_finalize_failed",
+        "autonomy_followup_send_failed",
         "autonomy_start_failed",
         "autonomy_stop_failed",
         "chat_stream_failed",

@@ -18,13 +18,17 @@ class AutonomyRuntimeCompositionDeps:
     get_observe_channel_ids: Callable[..., Any]
     get_command_only_channel_ids: Callable[..., Any]
     session_followup_targets: MutableMapping[str, Any]
+    session_last_active_at: MutableMapping[str, float]
+    is_session_active_for_user: Callable[..., bool]
+    session_locks: MutableMapping[str, Any]
+    reply_slot_locks: MutableMapping[str, Any]
+    reply_slot_admission_locks: MutableMapping[str, Any]
     clean_text: Callable[[str], str]
     send_discord_text: Callable[..., Any]
     question_cooldown_hit: Callable[..., Any]
     evaluate_proactive_question_gate: Callable[..., Any]
     proactive_question_scope_candidates: Callable[..., Any]
     select_question_to_ask: Callable[..., Any]
-    runtime_session_key: Callable[..., str]
     get_conversation_history: Callable[..., Any]
     memory_index_dir: Path
     pick_recent_user_text: Callable[..., Any]
@@ -83,13 +87,21 @@ class AutonomyRuntimeComposition:
             get_observe_channel_ids=deps.get_observe_channel_ids,
             get_command_only_channel_ids=deps.get_command_only_channel_ids,
             session_followup_targets=deps.session_followup_targets,
+            session_last_active_at=deps.session_last_active_at,
+            is_session_active_for_user=(
+                deps.is_session_active_for_user
+            ),
+            session_locks=deps.session_locks,
+            reply_slot_locks=deps.reply_slot_locks,
+            reply_slot_admission_locks=(
+                deps.reply_slot_admission_locks
+            ),
             clean_text=deps.clean_text,
             send_discord_text=deps.send_discord_text,
             question_cooldown_hit=deps.question_cooldown_hit,
             evaluate_proactive_question_gate=deps.evaluate_proactive_question_gate,
             proactive_question_scope_candidates=deps.proactive_question_scope_candidates,
             select_question_to_ask=deps.select_question_to_ask,
-            runtime_session_key=deps.runtime_session_key,
             get_conversation_history=deps.get_conversation_history,
             memory_index_dir=deps.memory_index_dir,
             pick_recent_user_text=deps.pick_recent_user_text,
