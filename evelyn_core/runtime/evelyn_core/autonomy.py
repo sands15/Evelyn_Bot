@@ -612,7 +612,9 @@ class AutonomyEngine:
             known_followup_channels = int(observation.get("known_followup_channels", 0) or 0)
             inflight_requests = int(observation.get("inflight_llm_requests", 0) or 0)
             recent_context_items = int(observation.get("recent_context_items", 0) or 0)
-            last_autonomy_ping_sec = float(observation.get("last_autonomy_ping_sec", 999999) or 999999)
+            last_autonomy_ping_sec = float(
+                observation.get("last_autonomy_ping_sec", 999999)
+            )
             repeated_blocked = bool(observation.get("repeated_blocked_action", False))
             quiet_hours = bool(observation.get("quiet_hours", False))
             unresolved_items = int(observation.get("unresolved_items", 0) or 0)
@@ -631,9 +633,9 @@ class AutonomyEngine:
                 needs.append(AutonomyNeed("refresh_cognitive", priority, detail="최근 문맥 기준 router/cognitive 재평가 필요", metadata={"domain": "assistant"}))
             if active_sessions > 0 and recent_context_items > 0 and not repeated_blocked:
                 needs.append(AutonomyNeed("summarize", 0.35, detail="최근 문맥을 짧게 요약할 수 있음", metadata={"domain": "assistant"}))
-            if search_pending and known_followup_channels > 0 and inflight_requests == 0:
+            if search_pending and known_followup_channels > 0 and inflight_requests == 0 and last_autonomy_ping_sec >= 900:
                 needs.append(AutonomyNeed("maintain", 0.34, detail="검색 후속 응답이 필요함", metadata={"domain": "assistant", "text": "아까 이어서 실제로 찾아본 결과를 정리해볼게."}))
-            if unresolved_items > 0 and known_followup_channels > 0 and not quiet_hours:
+            if unresolved_items > 0 and known_followup_channels > 0 and not quiet_hours and last_autonomy_ping_sec >= 900:
                 needs.append(AutonomyNeed("maintain", 0.28, detail="미해결 문맥 후속이 필요함", metadata={"domain": "assistant", "text": "아직 덜 끝난 문맥이 있어서 이어서 챙겨볼게."}))
             if queued_question_available and known_followup_channels > 0 and active_sessions > 0 and impulse != "stay_silent" and gate_reason not in {"quiet_hours", "answer_inflight", "proactive_cooldown", "hourly_limit"}:
                 impulse_text = {

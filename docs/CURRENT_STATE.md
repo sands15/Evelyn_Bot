@@ -2456,3 +2456,21 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   17개, voice/continuity 인접 67개, voice 전체 669개(skip 5), CI-equivalent 전체
   3,307개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제 Discord,
   마이크, 스피커, LLM, TTS, Docker를 기동하지 않았다.
+
+## 2026-08-12 autonomy delivered-followup terminal boundary
+
+- 실제 Default/Routed executor와 `AutonomyEngine`에서 Discord follow-up 전송 성공 뒤
+  memory update가 `OSError`를 내면 action이 generic executor failure가 되고 cursor 0을
+  유지해, 4초 poll마다 같은 follow-up과 오류 알림을 다시 보내는 경계를 재현했다.
+- send await가 정상 반환하면 즉시 900초 ping fence를 세운다. 그 뒤 새 turn, history,
+  active session과 continuity commit을 선택적 memory/self-state보다 먼저 처리한다.
+  post-send 일반 예외는 shared `DiscordRuntimeStatus`에 고정
+  `autonomy_followup_finalize_failed`와 exception type만 기록하고, verified
+  `discord_send_completed` 결과와 plan cursor를 유지한다. observer와 logger의 일반
+  예외도 전달 결과를 바꾸지 않으며 취소·memory deletion integrity 신호는 재전파한다.
+- search-pending과 unresolved maintain need는 같은 900초 fence 안에서 다시 만들지 않는다.
+  이 보장은 send의 정상 반환 뒤 같은 프로세스의 자동 재실행에 한정하며 timeout·취소의
+  원격 전달 모호성, process crash exactly-once 또는 durable outbox를 뜻하지 않는다.
+- 변경 직결 22개, autonomy/Runtime Errors 인접 160개, CI-equivalent 전체
+  3,308개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline이며 실제
+  Discord·LLM·Docker를 기동하지 않았다.

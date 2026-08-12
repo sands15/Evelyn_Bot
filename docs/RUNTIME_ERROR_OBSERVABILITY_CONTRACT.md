@@ -52,6 +52,13 @@ engine start 뒤 성공 응답 전송 실패는 시작 실패로 오분류하거
 기존 engine cleanup, 선택적 route 재연결 또는 새 start await의 취소는 오류로 기록하거나
 응답하지 않고 기존 grant를 회수한 뒤 같은 취소 신호를 재전파한다.
 
+자율 후속의 Discord 전송이 정상 반환한 뒤 history, active session, continuity,
+memory 또는 self-state 후처리에서 발생한 일반 예외는
+`autonomy_followup_finalize_failed`와 exception type만 같은 Discord owner counter에
+기록한다. 관측기와 type-only logger의 일반 예외는 이미 전달된 action 결과나 plan
+진행을 바꾸지 않는다. 취소와 memory deletion integrity 신호는 이 일반 오류 경계에서
+삼키지 않는다.
+
 Fast Control continuity status는 주기 heartbeat가 아니라 restore·commit·오류 시 갱신되는
 event snapshot이므로 최근 오류 창과 같은 1시간 freshness를 사용한다.
 

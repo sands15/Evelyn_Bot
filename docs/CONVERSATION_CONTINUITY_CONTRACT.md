@@ -402,8 +402,17 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   답변의 commit 증거가 아니다.
 - 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
   기록한다. 같은 답변의 선택적 voice가 실패해도 중복 기록하지 않는다.
-- 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.
-  Discord 명령은 composition이 주입한 단일 context owner가 성공한 plain-text
+- 자율 후속 답변은 `send_discord_text`가 정상 반환한 시점을 되돌릴 수 없는 전달
+  경계로 삼고 즉시 process-local 900초 ping fence를 세운다. 그 뒤 새 turn,
+  history, active session과 continuity commit을 먼저 처리하고 선택적 memory/self-state를
+  실행한다. 이 후처리의 일반 예외는 고정 코드와 type으로 관측하되 전달 성공
+  `discord_send_completed`를 실패로 바꾸거나 plan cursor를 되돌려 같은 maintain
+  답변을 다시 보내지 않는다. commit이 완료되지 않았다면 `continuityDurable=false`로
+  남는다. 취소와 memory deletion integrity 신호는 재전파하지만 이미 정상 반환한
+  전송의 ping fence는 유지한다. 이는 같은 프로세스의 자동 재실행만 막으며 send await
+  내부의 모호한 전달이나 process crash exactly-once를 보장하지 않는다.
+- Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다. Discord 명령은
+  composition이 주입한 단일 context owner가 성공한 plain-text
   `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
   Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다. 저장 기억을 쓰지
   않은 명령 답변은 `not_used` receipt로 기록해 완료 assistant 행을 보존한다.

@@ -112,6 +112,14 @@ assistant 기본 executor의 대표 증거 코드는 다음과 같다.
 - proactive gate만 확인한 무동작: `proactive_gate_completed`
 - 부작용 없는 idle: `no_side_effect_required`
 
+`assistant:send_followup`의 `discord_send_completed`는 Discord send await가 정상
+반환했다는 effect 증거다. 그 뒤 history/session/continuity 또는 선택적 memory/self-state
+후처리의 일반 예외는 이 effect를 미전달로 바꾸지 않으며, verified 결과와 현재 grant를
+다시 확인한 뒤 plan cursor를 전진시킨다. 같은 프로세스에서는 전송 직후 세운 900초
+ping fence가 search-pending과 unresolved maintain 계획의 즉시 재생성을 막는다. send
+await 내부 취소·timeout의 원격 전달 여부와 process crash exactly-once는 이 증거의
+보장이 아니다.
+
 `maybe_ping_user`는 실제 메시지를 보냈을 때 `discord_send_completed`, 보낼
 필요가 없음을 gate에서 확인했을 때 `proactive_gate_completed`만 허용한다.
 다른 action의 올바른 코드를 교차 제출해도 검증되지 않는다. Minecraft policy는

@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,6 +37,7 @@ from evelyn_core.memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus
 from evelyn_core.self_model import EvelynSelfState
 from tests.continuity_test_support import (
     durable_continuity_status,
@@ -470,7 +472,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         kinds = [kind for kind, _payload in self.events]
         self.assertEqual(
             kinds,
-            ["send", "history", "memory", "session", "commit", "self_state"],
+            ["send", "history", "session", "commit", "memory", "self_state"],
         )
         history_payload = next(
             payload
@@ -493,6 +495,126 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             commit_payload,
             ("runtime:11", "autonomy-turn:runtime:11"),
         )
+
+    async def test_delivered_followup_is_not_retried_after_optional_finalize_failure(
+        self,
+    ) -> None:
+        private = "PRIVATE_AUTONOMY_MEMORY_PATH"
+        observer_private = "PRIVATE_AUTONOMY_OBSERVER_PATH"
+        log_private = "PRIVATE_AUTONOMY_LOG_PATH"
+        logs: list[str] = []
+        runtime_status = DiscordRuntimeStatus(
+            gateway_ready=lambda: True,
+            bot_guilds=lambda: [],
+            voice_client_type=object,
+            status_path=Path(self.temp_dir.name) / "discord-status.json",
+        )
+        self.history = [
+            {"role": "user", "content": "SEARCH_PENDING?"},
+        ]
+        self.followup_targets["runtime:11"] = {"channel_id": 10}
+
+        def fail_memory_update(*args: Any, **kwargs: Any) -> None:
+            self.events.append(("memory", (args, kwargs)))
+            raise OSError(private)
+
+        def authorize(_guild_id: int, action: str, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "allowed": action
+                in {"assistant:send_followup", "assistant:idle"},
+                "code": "authorized",
+                "grantId": "grant-1",
+            }
+
+        def record_then_fail(code: str, exc: BaseException) -> None:
+            runtime_status.record_error(code, exc)
+            raise OSError(observer_private)
+
+        def log_then_fail(message: str) -> None:
+            logs.append(message)
+            raise RuntimeError(log_private)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "answer_promises_search": (
+                    lambda text: text == "SEARCH_PENDING?"
+                ),
+                "get_active_session_count": lambda: 0,
+                "get_inflight_llm_requests": lambda: 0,
+                "monotonic": time.monotonic,
+                "schedule_memory_update": fail_memory_update,
+                "authorize_action": authorize,
+                "record_runtime_error": record_then_fail,
+                "record_action_outcome": (
+                    lambda *_args, **_kwargs: {
+                        "recorded": True,
+                        "authorizationCurrent": True,
+                        "verified": True,
+                    }
+                ),
+                "log": log_then_fail,
+            }
+        )
+        engine = self.create_engine()
+        engine.persist_state = lambda: None
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = [
+            "assistant:send_followup",
+            "assistant:idle",
+        ]
+
+        first = await engine.run_cycle()
+        second = await engine.run_cycle()
+
+        sent_texts = [
+            payload[1]
+            for kind, payload in self.events
+            if kind == "send"
+        ]
+        self.assertEqual(
+            sent_texts.count(
+                "아까 이어서 실제로 찾아본 결과를 정리해볼게."
+            ),
+            1,
+        )
+        self.assertFalse(
+            any(text.startswith("[자율봇] 오류") for text in sent_texts)
+        )
+        self.assertEqual(first.step_result["status"], "ok")
+        self.assertEqual(first.step_result["reason"], "sent_followup")
+        self.assertTrue(first.step_result["continuityDurable"])
+        self.assertEqual(first.planned.cursor, 1)
+        self.assertEqual(second.selected_goal.kind, "idle")
+        self.assertEqual(
+            [
+                kind
+                for kind, _payload in self.events
+                if kind in {"history", "session", "commit", "memory"}
+            ],
+            ["history", "session", "commit", "memory"],
+        )
+        error_snapshot = runtime_status.runtime_errors.snapshot()
+        self.assertEqual(error_snapshot["errorCount"], 1)
+        self.assertEqual(
+            error_snapshot["lastErrorCode"],
+            "autonomy_followup_finalize_failed",
+        )
+        self.assertEqual(error_snapshot["lastErrorType"], "OSError")
+        self.assertEqual(len(logs), 1)
+        self.assertIn("errorType=OSError", logs[0])
+        combined = str(
+            {
+                "first": first,
+                "second": second,
+                "errors": error_snapshot,
+                "logs": logs,
+            }
+        )
+        self.assertNotIn(private, combined)
+        self.assertNotIn(observer_private, combined)
+        self.assertNotIn(log_private, combined)
 
     async def test_send_followup_rejects_partial_commit_status(
         self,

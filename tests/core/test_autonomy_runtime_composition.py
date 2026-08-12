@@ -36,6 +36,10 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("get_or_create_autonomy_engine_from_runtime", source)
+        self.assertIn(
+            "record_runtime_error=lambda code, exc: discord_runtime_status.record_error(code, exc)",
+            source,
+        )
 
     def test_composition_keeps_public_builder_and_engine_signatures(self) -> None:
         module = ast.parse(
@@ -69,6 +73,10 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
         self.assertNotIn("globals()", source)
         self.assertNotIn("import main", source)
         self.assertIn("AutonomyRuntimeFactoryDeps(", source)
+        self.assertIn(
+            "record_runtime_error=deps.record_runtime_error",
+            source,
+        )
 
     def test_minecraft_route_composition_requires_a_router(self) -> None:
         create_engine = Mock()

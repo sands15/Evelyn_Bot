@@ -64,6 +64,9 @@ class AutonomyRuntimeCompositionDeps:
     commit_session_continuity: Callable[..., Any]
     log: Callable[..., Any]
     build_minecraft_executor: Callable[[int], Any] | None = None
+    record_runtime_error: (
+        Callable[[str, BaseException], Any] | None
+    ) = None
 
 
 class AutonomyRuntimeComposition:
@@ -123,6 +126,7 @@ class AutonomyRuntimeComposition:
             commit_session_continuity=deps.commit_session_continuity,
             log=deps.log,
             build_minecraft_executor=deps.build_minecraft_executor,
+            record_runtime_error=deps.record_runtime_error,
         )
 
     def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:

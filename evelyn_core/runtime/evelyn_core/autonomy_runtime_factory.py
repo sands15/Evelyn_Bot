@@ -26,6 +26,9 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .memory_deletion_journal import (
+    MemoryDeletionJournalIntegrityError,
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,9 @@ class AutonomyRuntimeFactoryDeps:
     commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     log: Callable[..., Any]
     build_minecraft_executor: Callable[[int], Any] | None = None
+    record_runtime_error: (
+        Callable[[str, BaseException], Any] | None
+    ) = None
 
 
 def get_or_create_autonomy_engine_from_runtime(
@@ -232,43 +238,38 @@ def get_or_create_autonomy_engine_from_runtime(
         channel = await find_followup_channel()
         if channel is None:
             return {"status": "blocked", "reason": "no_followup_channel"}
-        await deps.send_discord_text(channel, text)
         session_key = deps.runtime_session_key(guild_id=guild_id)
-        turn_id = deps.start_new_turn(session_key)
-        deps.append_history(
-            session_key,
-            user_text or "[autonomy]",
-            text,
-            guild_id=guild_id,
-            memory_receipt=memory_receipt_ref_from_exposure(
-                current_memory_exposure_position()
-            ),
+        stored_user_text = user_text or "[autonomy]"
+        memory_receipt = memory_receipt_ref_from_exposure(
+            current_memory_exposure_position()
         )
-        deps.schedule_memory_update(
-            guild_id,
-            user_text or "[autonomy]",
-            text,
-            source="autonomy",
-            assistant_speaker="Evelyn-Autonomy",
-            session_key=session_key,
-            runtime_mode="batch",
-        )
-        deps.mark_session_active(
-            session_key,
-            ttl_sec=(
-                deps.active_conversation_text_question_sec
-                if awaiting_user_reply
-                else deps.active_conversation_text_sec
-            ),
-            speaker="assistant",
-            awaiting_user_reply=awaiting_user_reply,
-            topic_id=deps.build_topic_id("autonomy", text),
-            answer_text=text,
-            user_text=user_text or "[autonomy]",
-        )
+        topic_id = deps.build_topic_id("autonomy", text)
+        await deps.send_discord_text(channel, text)
+        deps.last_autonomy_ping_at[guild_id] = deps.monotonic()
         continuity_durable = False
         continuity_generation = 0
         try:
+            turn_id = deps.start_new_turn(session_key)
+            deps.append_history(
+                session_key,
+                stored_user_text,
+                text,
+                guild_id=guild_id,
+                memory_receipt=memory_receipt,
+            )
+            deps.mark_session_active(
+                session_key,
+                ttl_sec=(
+                    deps.active_conversation_text_question_sec
+                    if awaiting_user_reply
+                    else deps.active_conversation_text_sec
+                ),
+                speaker="assistant",
+                awaiting_user_reply=awaiting_user_reply,
+                topic_id=topic_id,
+                answer_text=text,
+                user_text=stored_user_text,
+            )
             continuity_status = await deps.commit_session_continuity(
                 session_key,
                 turn_id,
@@ -282,13 +283,36 @@ def get_or_create_autonomy_engine_from_runtime(
             continuity_generation = int(
                 continuity_receipt["generation"]
             )
-        except Exception as exc:
-            deps.log(
-                "[AUTONOMY] followup_continuity_commit_failed "
-                f"guild={guild_id} errorType={type(exc).__name__}"
+            deps.schedule_memory_update(
+                guild_id,
+                stored_user_text,
+                text,
+                source="autonomy",
+                assistant_speaker="Evelyn-Autonomy",
+                session_key=session_key,
+                runtime_mode="batch",
             )
-        deps.last_autonomy_ping_at[guild_id] = deps.monotonic()
-        deps.mark_self_state_assistant_output(proactive=True)
+            deps.mark_self_state_assistant_output(proactive=True)
+        except asyncio.CancelledError:
+            raise
+        except MemoryDeletionJournalIntegrityError:
+            raise
+        except Exception as exc:
+            if deps.record_runtime_error is not None:
+                try:
+                    deps.record_runtime_error(
+                        "autonomy_followup_finalize_failed",
+                        exc,
+                    )
+                except Exception:
+                    pass
+            try:
+                deps.log(
+                    "[AUTONOMY] followup_finalize_failed "
+                    f"guild={guild_id} errorType={type(exc).__name__}"
+                )
+            except Exception:
+                pass
         return {
             "status": "ok",
             "reason": "sent_followup",

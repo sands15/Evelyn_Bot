@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-08-09 KST
+Last reviewed: 2026-08-12 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -270,6 +270,14 @@ text는 실제 전송 뒤 완료 상태와 checkpoint를 먼저 durable commit�
 Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 사용한다.
 commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
+
+자율 후속은 Discord send await의 정상 반환을 terminal delivery boundary로 삼아
+900초 ping fence를 먼저 세우고, history·active session·continuity를 선택적 memory보다
+앞서 시도한다. post-send 일반 예외는 `autonomy_followup_finalize_failed`와 type만 남기며
+verified send와 plan cursor를 되돌리지 않는다. 따라서 같은 프로세스의 stale
+search-pending/unresolved 관찰이 4초 poll마다 같은 답변을 다시 보내는 창은 source-level
+회귀로 닫혔다. 실제 Discord timeout·취소의 원격 전달 모호성, process crash와 live
+heartbeat 투영은 여전히 검증되지 않았으며 exactly-once나 durable outbox는 아니다.
 
 음성 재생 완료 경로는 exact assistant history, active follow-up과 process-local room owner
 반영, completion continuity commit 시도를 같은 memory-exposure guard 안에서 먼저 처리한 뒤
