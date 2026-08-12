@@ -45,6 +45,16 @@ Local Bridge의 `failed|partial|cancelled` software-playback ACK에 다음 경�
   exact completed pair의 재호출은 history를 다시 쓰지 않고, 전달 실패나 취소는
   존재하지 않는 assistant를 만들지 않은 채 user-only tail을 유지한다. 취소 신호는
   일반 오류로 삼키지 않고 그대로 전파한다.
+- Discord voice의 shared ingress worker는 STT·reply gate와 durable user-only checkpoint,
+  room owner·TurnScope 등록까지 한 발화씩 직렬화한다. exact process task가 새 scope에
+  attach된 뒤에만 delivery ownership을 넘겨 다음 발화를 dequeue한다. 다음 accepted turn은
+  `owner_followup`을 포함해 같은 room의 이전 scope를 항상 취소하므로, 새 수락이 이전
+  LLM/TTS/playback task를 registry 밖 orphan으로 남기지 않는다. 같은 task의 중첩
+  attach/detach는 registration depth를 보존해 inner helper 종료가 outer delivery ownership을
+  지우지 않는다. queue `task_done`은 drop/reject item의 처리 반환 또는 accepted item의
+  handoff 완료를 뜻하며 audio playback·assistant continuity 완료 증거가 아니다. handoff 전
+  worker shutdown은 child를 취소·회수하고, handoff 뒤 delivery는 TurnScope가 소유하며 종료
+  예외는 원문 없이 exception type만 관측한다.
 - durable receipt 반환 직후 process가 종료돼도 새 process는 exact user-only 문맥만
   복구한다. 복구 자체가 LLM·TTS·playback을 자동 재실행하거나 assistant를 합성하지
   않는다. receipt 이전 입력에 대한 hard-exit 보장은 하지 않는다.

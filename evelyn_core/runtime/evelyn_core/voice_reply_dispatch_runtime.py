@@ -39,6 +39,7 @@ async def dispatch_voice_reply_from_runtime(
     person_key: str | None,
     session_memory_key: str | None,
     voice_listener_binding: Any = None,
+    release_ingress_worker: Callable[[], Any] | None = None,
     reply_deps: VoiceTranscriptReplyDeps,
     deps: VoiceReplyDispatchDeps,
 ) -> None:
@@ -81,6 +82,7 @@ async def dispatch_voice_reply_from_runtime(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        release_ingress_worker=release_ingress_worker,
     )
     if not voice_listener_binding_is_current(member, voice_listener_binding):
         return

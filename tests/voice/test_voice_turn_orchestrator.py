@@ -21,12 +21,15 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
     accept_voice_reply_execution,
+    begin_voice_reply_execution,
+    build_voice_reply_lifecycle,
     prepare_and_execute_accepted_voice_reply,
     prepare_voice_reply_delivery_runtime,
     prepare_voice_reply_for_delivery,
     run_locked_voice_reply_delivery,
 )
 from evelyn_core.tts_playback import play_audio_source  # noqa: E402
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry  # noqa: E402
 from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
 from evelyn_core.session_continuity import (  # noqa: E402
     SessionContinuityCheckpoint,
@@ -142,6 +145,51 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, ["checkpoint", "owner", "scope"])
         self.assertEqual(accepted.accepted_turn_id, "turn-1")
+
+    async def test_accepted_owner_followup_replaces_inflight_delivery_scope(self) -> None:
+        lifecycle = build_voice_reply_lifecycle(
+            accepted_turn_id="turn-2",
+            gate_mode="owner_followup",
+            reply_in_progress=True,
+            active_conversation_awaiting_reply_sec=120.0,
+            active_conversation_voice_sec=30.0,
+            topic_id="topic-1",
+            history_user_text="계속해 줘",
+        )
+        registry = TurnScopeRegistry()
+        prior_scope = TurnScope("turn-1")
+        prior_started = asyncio.Event()
+
+        async def prior_delivery() -> None:
+            prior_started.set()
+            await asyncio.Event().wait()
+
+        prior_task = asyncio.create_task(prior_delivery())
+        prior_scope.register_task(prior_task)
+        registry.replace_room_scope("room-1", prior_scope)
+        await prior_started.wait()
+
+        execution = begin_voice_reply_execution(
+            room_session_key="room-1",
+            accepted_turn_id="turn-2",
+            should_cancel_old_scope=lifecycle.should_cancel_old_scope,
+            owner_user_id=42,
+            make_turn_scope=TurnScope,
+            replace_room_turn_scope=registry.replace_room_scope,
+            attach_current_task=registry.attach_current_task,
+            set_room_reply_in_progress=lambda *_args, **_kwargs: None,
+        )
+        await asyncio.wait_for(
+            asyncio.gather(prior_task, return_exceptions=True),
+            timeout=1.0,
+        )
+
+        self.assertTrue(lifecycle.should_cancel_old_scope)
+        self.assertTrue(prior_task.cancelled())
+        self.assertEqual(prior_scope.cancel_reason, "replaced_by_new_turn")
+        self.assertIs(registry.get_room_scope("room-1"), execution.turn_scope)
+        registry.detach_task(execution.turn_scope, execution.turn_task)
+        registry.clear_room_scope("room-1", execution.turn_scope)
 
     def test_accepted_voice_checkpoint_failure_starts_no_reply_state(self) -> None:
         reply, segment, transcript = self.accepted_voice_fixture()
@@ -315,7 +363,9 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 owner_user_id=42,
                 make_turn_scope=make_scope,
                 replace_room_turn_scope=lambda *_args, **_kwargs: None,
-                attach_current_task=lambda _scope: asyncio.current_task(),
+                attach_current_task=lambda _scope: (
+                    events.append("attach") or asyncio.current_task()
+                ),
                 set_room_reply_in_progress=(
                     lambda _room, active, **_kwargs: reply_states.append(active)
                 ),
@@ -351,9 +401,13 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 clear_room_turn_scope=lambda *_args, **_kwargs: events.append(
                     "clear"
                 ),
+                release_ingress_worker=lambda: events.append("release"),
             )
 
-        self.assertEqual(events[:3], ["checkpoint", "owner", "llm"])
+        self.assertEqual(
+            events[:5],
+            ["checkpoint", "owner", "attach", "release", "llm"],
+        )
         self.assertEqual(events[-2:], ["detach", "clear"])
         self.assertEqual(reply_states, [True, False])
         restored_store = SessionStateStore.create_empty()

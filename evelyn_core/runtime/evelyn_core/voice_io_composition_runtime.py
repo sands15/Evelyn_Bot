@@ -578,6 +578,7 @@ class VoiceIoComposition:
         ingress_during_reply: bool = False,
         owner_user_id_on_ingress: int | None = None,
         voice_listener_binding: Any = None,
+        release_ingress_worker: Callable[[], Any] | None = None,
     ) -> None:
         await process_member_audio_pipeline_from_runtime(
             member,
@@ -593,5 +594,6 @@ class VoiceIoComposition:
             ingress_during_reply=ingress_during_reply,
             owner_user_id_on_ingress=owner_user_id_on_ingress,
             voice_listener_binding=voice_listener_binding,
+            release_ingress_worker=release_ingress_worker,
             deps=self.deps.member_audio_pipeline(),
         )

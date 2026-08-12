@@ -17,6 +17,22 @@ from .voice_validation import validation_attempt_binding_is_current
 _VOICE_TRANSITION_GUILD_IDS: set[int] = set()
 
 
+def _observe_handed_off_voice_task(
+    task: asyncio.Task,
+    *,
+    log: Callable[..., Any],
+) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        try:
+            log(f"[VOICE WORKER] 실패: errorType={type(exc).__name__}")
+        except Exception:
+            pass
+
+
 def set_voice_transition_pending(guild_id: int, pending: bool) -> None:
     if pending:
         _VOICE_TRANSITION_GUILD_IDS.add(int(guild_id))
@@ -245,17 +261,45 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
                 continue
             process_item = dict(item)
             process_item.pop("enqueued_at", None)
+            handoff_event = asyncio.Event()
+            process_item["release_ingress_worker"] = handoff_event.set
             process_task = deps.create_task(
                 deps.process_member_audio(**process_item)
             )
+            handoff_task = deps.create_task(handoff_event.wait())
+            handed_off = False
             try:
-                await asyncio.shield(process_task)
+                done, _pending = await asyncio.wait(
+                    (process_task, handoff_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if process_task in done:
+                    await process_task
+                else:
+                    handed_off = True
+                    process_task.add_done_callback(
+                        lambda done_task: _observe_handed_off_voice_task(
+                            done_task,
+                            log=deps.log,
+                        )
+                    )
             except asyncio.CancelledError:
                 worker_task = asyncio.current_task()
                 if worker_task is not None and worker_task.cancelling():
-                    process_task.cancel()
-                    await asyncio.gather(process_task, return_exceptions=True)
+                    if not handed_off and not handoff_event.is_set():
+                        process_task.cancel()
+                        await asyncio.gather(process_task, return_exceptions=True)
+                    elif not handed_off:
+                        process_task.add_done_callback(
+                            lambda done_task: _observe_handed_off_voice_task(
+                                done_task,
+                                log=deps.log,
+                            )
+                        )
                     raise
+            finally:
+                handoff_task.cancel()
+                await asyncio.gather(handoff_task, return_exceptions=True)
         except Exception as exc:
             deps.log(f"[VOICE WORKER] 실패: errorType={type(exc).__name__}")
         finally:

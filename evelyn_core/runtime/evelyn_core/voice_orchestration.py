@@ -163,6 +163,7 @@ class VoiceTranscriptReplyContext:
     room_key: str | None
     person_key: str | None
     session_memory_key: str | None
+    release_ingress_worker: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -436,7 +437,7 @@ def build_voice_reply_lifecycle(
         if gate_mode == "owner_followup"
         else active_conversation_voice_sec
     )
-    should_cancel_old_scope = not (gate_mode == "owner_followup" and reply_in_progress)
+    should_cancel_old_scope = True
     return VoiceReplyLifecycle(
         accepted_turn_id=accepted_turn_id,
         should_cancel_old_scope=should_cancel_old_scope,
@@ -1328,6 +1329,7 @@ async def prepare_and_execute_accepted_voice_reply(
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
+    release_ingress_worker: Callable[[], Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     delivery_runtime = prepare_accepted_voice_reply_delivery_runtime(
         session_key=session_key,
@@ -1362,6 +1364,8 @@ async def prepare_and_execute_accepted_voice_reply(
         visible_text=visible_text,
         print_fn=print_fn,
     )
+    if release_ingress_worker is not None:
+        release_ingress_worker()
     return await execute_accepted_voice_reply(
         delivery_runtime=delivery_runtime,
         room_session_key=room_session_key,
@@ -1444,6 +1448,7 @@ async def handle_prepared_voice_reply(
     clear_room_turn_scope: Callable[[str | None, Any], None],
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
+    release_ingress_worker: Callable[[], Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     gate_mode = reply_prep.gate_mode
     if not reply_prep.accepted or gate_mode is None or reply_prep.voice_reply is None:
@@ -1505,6 +1510,7 @@ async def handle_prepared_voice_reply(
         clear_room_turn_scope=clear_room_turn_scope,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         record_runtime_error=record_runtime_error,
+        release_ingress_worker=release_ingress_worker,
     )
 
 
@@ -1574,6 +1580,7 @@ async def process_voice_reply_from_transcript(
     clear_room_turn_scope: Callable[[str | None, Any], None],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
+    release_ingress_worker: Callable[[], Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     active_speaker_user_id = update_active_speaker_for_voice_reply(
         room_session_key=room_session_key,
@@ -1658,6 +1665,7 @@ async def process_voice_reply_from_transcript(
         clear_room_turn_scope=clear_room_turn_scope,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         record_runtime_error=record_runtime_error,
+        release_ingress_worker=release_ingress_worker,
     )
 
 
@@ -1733,6 +1741,7 @@ async def process_voice_reply_from_transcript_context(
         detach_task=deps.detach_task,
         clear_room_turn_scope=deps.clear_room_turn_scope,
         record_runtime_error=deps.record_runtime_error,
+        release_ingress_worker=context.release_ingress_worker,
     )
 
 

@@ -34,6 +34,12 @@ class TurnScope:
     turn_id: str
     cancelled: bool = False
     tasks: set[asyncio.Task] = field(default_factory=set)
+    _task_registration_counts: dict[asyncio.Task, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     state: TurnState = TurnState.CREATED
     transition_log: list[TurnTransition] = field(default_factory=list)
     cancel_reason: str | None = None
@@ -75,13 +81,19 @@ class TurnScope:
             if self.cancelled:
                 task.cancel()
             else:
+                self._task_registration_counts[task] = self._task_registration_counts.get(task, 0) + 1
                 self.tasks.add(task)
         return task
 
     def unregister_task(self, task: asyncio.Task | None = None) -> None:
         task = task or asyncio.current_task()
         if task is not None:
-            self.tasks.discard(task)
+            count = self._task_registration_counts.get(task, 0)
+            if count > 1:
+                self._task_registration_counts[task] = count - 1
+            else:
+                self._task_registration_counts.pop(task, None)
+                self.tasks.discard(task)
 
     def snapshot(self) -> dict[str, Any]:
         return {

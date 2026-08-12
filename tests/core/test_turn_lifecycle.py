@@ -89,6 +89,38 @@ class TurnLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         self.assertNotIn(task, scope.tasks)
 
+    async def test_nested_registration_keeps_outer_task_owned_until_final_detach(self) -> None:
+        registry = TurnScopeRegistry()
+        old_scope = TurnScope("old")
+        registry.replace_room_scope("room-1", old_scope)
+        nested_detached = asyncio.Event()
+
+        async def delivery() -> None:
+            task = registry.attach_current_task(old_scope)
+            registry.attach_current_task(old_scope)
+            registry.detach_task(old_scope, task)
+            nested_detached.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                registry.detach_task(old_scope, task)
+
+        task = asyncio.create_task(delivery())
+        await nested_detached.wait()
+        self.assertIn(task, old_scope.tasks)
+        self.assertEqual(old_scope.snapshot()["task_count"], 1)
+
+        registry.replace_room_scope("room-1", TurnScope("new"))
+        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        if task not in done:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self.assertIn(task, done)
+        self.assertTrue(task.cancelled())
+        self.assertEqual(old_scope.cancel_reason, "replaced_by_new_turn")
+        self.assertNotIn(task, old_scope.tasks)
+
     async def test_cancelled_scope_rejects_late_tasks_before_they_run(self) -> None:
         registry = TurnScopeRegistry()
         scope = TurnScope("cancelled")

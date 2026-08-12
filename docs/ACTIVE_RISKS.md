@@ -434,6 +434,11 @@ cleanup 중 더 최신 이동이 생긴 stale event는 이전 channel로 client�
 Discord receive와 Discord-target local mic의 internal
 client/generation/channel binding은 assembly·dequeue·STT 뒤·dispatch에서 재검증되며,
 TurnScope 취소는 per-item child에만 적용되어 shared ingress worker를 종료하지 않는다.
+수락 전 STT·gate·durable checkpoint는 worker에서 직렬로 유지하되, accepted process task가
+scope에 attach된 뒤 delivery를 handoff해 다음 발화가 interrupt/acceptance까지 진행할 수 있다.
+중첩 delivery helper의 detach도 outer scope ownership을 지우지 않는다. 다음 accepted turn은
+mode와 무관하게 이전 room scope를 취소한다. queue completion은 drop/reject item의 처리 반환
+또는 accepted item의 delivery handoff까지만 뜻하며 playback 완료 증거가 아니다.
 connect·move 동안 pending ingress fence를 유지한다. 비치명 warmup은 lifecycle lock 밖에서
 실행해 새 channel event의 turn/TTS cleanup을 지연하지 않는다. event는 관측한 exact
 client/channel에만 cleanup을 적용한다. `move_to` 반환 뒤 실제 target channel ID가 아니면

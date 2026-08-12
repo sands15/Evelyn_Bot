@@ -193,10 +193,11 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(private_detail, repr(harness.logs))
 
-    async def test_turn_cancellation_does_not_stop_shared_ingress_worker(self) -> None:
+    async def test_accepted_turn_handoff_allows_next_ingress_to_cancel_delivery(self) -> None:
         harness = IngressHarness()
         registry = TurnScopeRegistry()
         started = asyncio.Event()
+        cancelled: list[str] = []
         processed: list[str] = []
         for session_key in ("guild-a", "guild-b"):
             await harness.queue.put(
@@ -207,13 +208,27 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async def process_member_audio(**item: Any) -> None:
-            if item["session_key"] == "guild-a":
-                scope = TurnScope("turn-a")
-                registry.replace_room_scope("guild:1:voice:9", scope)
-                scope.register_task()
-                started.set()
-                await asyncio.Event().wait()
-            processed.append(item["session_key"])
+            session_key = item["session_key"]
+            release_ingress_worker = item.get(
+                "release_ingress_worker",
+                lambda: None,
+            )
+            scope = TurnScope(f"turn-{session_key}")
+            registry.replace_room_scope("guild:1:voice:9", scope)
+            task = scope.register_task()
+            try:
+                if session_key == "guild-a":
+                    started.set()
+                    release_ingress_worker()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.append(session_key)
+                        raise
+                processed.append(session_key)
+                release_ingress_worker()
+            finally:
+                scope.unregister_task(task)
 
         worker = asyncio.create_task(
             voice_ingress_worker_from_runtime(
@@ -224,11 +239,12 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        self.assertEqual(registry.cancel_matching_prefix("guild:1:voice:"), 1)
         await asyncio.wait_for(harness.queue.join(), timeout=1.0)
 
         self.assertFalse(worker.done())
         self.assertEqual(processed, ["guild-b"])
+        self.assertEqual(cancelled, ["guild-a"])
+        self.assertEqual(registry.cancelled_stale_turn_count, 1)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
 

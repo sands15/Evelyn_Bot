@@ -41,6 +41,7 @@ async def process_member_audio_pipeline_from_runtime(
     ingress_during_reply: bool = False,
     owner_user_id_on_ingress: int | None = None,
     voice_listener_binding: Any = None,
+    release_ingress_worker: Callable[[], Any] | None = None,
     deps: VoiceMemberAudioPipelineDeps,
 ) -> None:
     def source_is_current() -> bool:
@@ -233,6 +234,7 @@ async def process_member_audio_pipeline_from_runtime(
         person_key=person_key,
         session_memory_key=session_memory_key,
         voice_listener_binding=voice_listener_binding,
+        release_ingress_worker=release_ingress_worker,
         reply_deps=deps.build_transcript_reply_deps(guild),
         deps=deps.build_reply_dispatch_deps(),
     )

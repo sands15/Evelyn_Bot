@@ -2362,6 +2362,28 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   모두 관측한 exact client/channel에만 같은 idempotent cleanup을 재적용한다.
 - 실제 Discord 두 채널 live E2E와 gateway/audio 장치 전이는 실행하지 않았다.
 
+## 2026-08-12 Discord voice accepted-delivery handoff
+
+- 기존 shared ingress worker가 한 발화의 STT·gate뿐 아니라 LLM/TTS/playback 종료까지
+  기다려, 재생 중 들어온 다음 발화가 TTS interrupt와 새 TurnScope acceptance에 도달하지
+  못하고 기본 queue age를 넘길 수 있던 경계를 같은-room 두 item으로 재현했다. 기존 회귀는
+  두 번째 발화가 아니라 테스트 본문이 첫 scope를 외부 취소해 이 순환을 가렸다.
+- worker는 STT·gate, durable user-only checkpoint, owner 갱신과 새 scope/current process-task
+  attach까지 계속 직렬화한다. 그 직후 per-item handoff를 알리고 기존 process task를 새
+  background task로 복제하지 않은 채 TurnScope delivery owner로 남긴다. worker는 다음 item을
+  dequeue하며, 다음 accepted turn이 이전 scope task를 취소한다. overlap 모델에서 orphan을
+  만들던 `owner_followup && reply_in_progress` 예외도 제거해 모든 새 accepted turn이 같은 room의
+  이전 scope를 교체한다. TurnScope의 per-task registration depth는 inner voice helper의 detach 뒤에도
+  outer handoff ownership을 유지한다. handed-off 일반 예외는 원문 없이 type만 회수한다.
+- queue completion은 drop/reject item의 처리 반환 또는 accepted item의 handoff까지의 ingress
+  accounting이고 playback/assistant completion receipt가 아니다. worker shutdown은 handoff 전
+  child만 취소하고, handoff 뒤 task는 existing scope cleanup이 소유한다. 검증은 offline fake
+  queue/task/scope이며 실제 Discord audio, speaker barge-in latency와 8초 stale-drop 개선은 live로
+  확인하지 않았다.
+- 변경 직결 64개, voice 전체 670개(skip 5), core 전체 798개(skip 1), CI-equivalent 전체
+  3,333개(skip 22), Python 구문·diff check가 통과했다. 실제 Discord·마이크·스피커·LLM·TTS는
+  기동하지 않았다.
+
 ## 2026-08-12 Discord voice 수락 턴의 pre-delivery continuity
 
 - final STT와 reply gate가 수락한 Discord voice turn은 exact current turn ID와 정규화된

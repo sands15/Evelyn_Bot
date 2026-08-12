@@ -108,6 +108,7 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_member_audio_adapter_preserves_ingress_metadata(self) -> None:
         runtime = AsyncMock(return_value=None)
+        release_ingress_worker = object()
         with patch(
             "evelyn_core.voice_io_composition_runtime.process_member_audio_pipeline_from_runtime",
             runtime,
@@ -126,6 +127,7 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ingress_during_reply=True,
                 owner_user_id_on_ingress=42,
                 voice_listener_binding="listener-binding",
+                release_ingress_worker=release_ingress_worker,
             )
 
         runtime.assert_awaited_once_with(
@@ -142,6 +144,7 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ingress_during_reply=True,
             owner_user_id_on_ingress=42,
             voice_listener_binding="listener-binding",
+            release_ingress_worker=release_ingress_worker,
             deps=self.tokens["member_audio_pipeline"],
         )
 

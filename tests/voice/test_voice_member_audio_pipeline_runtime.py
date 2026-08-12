@@ -116,6 +116,7 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         debug_meta: dict[str, Any] | None = None,
         member: Any | None = None,
         voice_listener_binding: Any = None,
+        release_ingress_worker: Any = None,
     ) -> None:
         await process_member_audio_pipeline_from_runtime(
             member or SimpleNamespace(id=7, display_name="정훈"),
@@ -131,6 +132,7 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ingress_during_reply=True,
             owner_user_id_on_ingress=7,
             voice_listener_binding=voice_listener_binding,
+            release_ingress_worker=release_ingress_worker,
             deps=deps or self.deps,
         )
 
@@ -237,7 +239,8 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_wake_and_stt_results_are_forwarded_to_later_stages(self) -> None:
-        await self.run_pipeline()
+        release_ingress_worker = object()
+        await self.run_pipeline(release_ingress_worker=release_ingress_worker)
 
         interrupt = next(payload for name, payload in self.events if name == "interrupt")
         stt = next(payload for name, payload in self.events if name == "stt")
@@ -250,6 +253,7 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(session["transcript_result"], self.finalization.transcript_result)
         self.assertEqual(dispatch["reply_deps"], ("reply-deps", self.guild))
         self.assertEqual(dispatch["deps"], "dispatch-deps")
+        self.assertIs(dispatch["release_ingress_worker"], release_ingress_worker)
 
     def test_main_process_impl_is_a_thin_pipeline_wrapper(self) -> None:
         source = (
@@ -259,6 +263,7 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         function_source = source[start:]
 
         self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
+        self.assertIn("release_ingress_worker=release_ingress_worker", function_source)
         self.assertNotIn("prepare_voice_audio_ingress_from_runtime(", function_source)
         self.assertNotIn("run_voice_wake_probe_from_runtime(", function_source)
         self.assertNotIn("dispatch_voice_reply_from_runtime(", function_source)

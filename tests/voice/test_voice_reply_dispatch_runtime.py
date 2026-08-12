@@ -45,6 +45,7 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         reply_deps: Any | None = None,
         voice_listener_binding: Any = None,
         deps: VoiceReplyDispatchDeps | None = None,
+        release_ingress_worker: Any = None,
     ) -> Any:
         metrics = metrics if metrics is not None else {"meta": {}}
         await dispatch_voice_reply_from_runtime(
@@ -66,13 +67,17 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             person_key="person-memory",
             session_memory_key="session-memory",
             voice_listener_binding=voice_listener_binding,
+            release_ingress_worker=release_ingress_worker,
             reply_deps=reply_deps or self.reply_deps,
             deps=deps or self.deps,
         )
         return self.calls[-1][0] if self.calls else None
 
     async def test_dispatch_builds_context_and_preserves_reply_dependencies(self) -> None:
-        context = await self.dispatch()
+        release_ingress_worker = object()
+        context = await self.dispatch(
+            release_ingress_worker=release_ingress_worker,
+        )
 
         self.assertIs(self.calls[0][1], self.reply_deps)
         self.assertEqual(context.guild_id, 11)
@@ -83,6 +88,7 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.raw_seconds, 1.5)
         self.assertEqual(context.rms, 0.08)
         self.assertTrue(context.wake_detected)
+        self.assertIs(context.release_ingress_worker, release_ingress_worker)
 
     async def test_dispatch_derives_room_topic_and_timing_state(self) -> None:
         context = await self.dispatch()
