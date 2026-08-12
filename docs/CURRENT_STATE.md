@@ -2557,3 +2557,16 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   않는 회귀를 포함해 command/text 28개, Discord I/O 137개, continuity 인접 62개,
   CI-equivalent 전체 3,315개(skip 22), Python 구문·diff
   check가 통과했다. 검증은 offline fake Discord channel/event이며 실제 Discord·LLM·TTS는 기동하지 않았다.
+
+## 2026-08-12 Discord normal-text Runtime Error ownership
+
+- normal Discord text generation을 private canary가 든 `RuntimeError`로 실패시키면 고정
+  `text_turn_failed` 응답과 continuity는 완료되지만 shared `DiscordRuntimeStatus`가
+  `errorCount=0`, 빈 `lastErrorCode/Type`으로 남는 false-clear를 actual status 객체로 재현했다.
+- text handler outer failure boundary에 기존 shared recorder를 dependency composition으로
+  전달해 `discord_text_turn_failed`, exception type과 process-lifetime count만 best-effort로
+  기록한다. recorder 자체 실패는 고정 응답·continuity를 막지 않고, `CancelledError`는 이
+  `Exception` 경계에 들어오지 않는다. 새 status owner·queue·schema는 만들지 않았다.
+- 변경 직결 41개, Discord I/O 138개, continuity 인접 62개, Runtime Errors/Health/UI
+  40개와 CI-equivalent 전체 3,316개(skip 22), Python 구문·diff check가 통과했다. 검증은 offline fake Discord와 actual
+  `DiscordRuntimeStatus`이며 실제 gateway·heartbeat·Control Page 표시는 기동하지 않았다.

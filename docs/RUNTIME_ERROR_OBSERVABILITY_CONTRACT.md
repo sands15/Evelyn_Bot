@@ -65,9 +65,13 @@ memory 또는 self-state 후처리에서 발생한 일반 예외는
 진행을 바꾸지 않는다. 취소와 memory deletion integrity 신호는 이 일반 오류 경계에서
 삼키지 않는다.
 
-Discord text 생성 실패의 type-only logger와 turn-summary observer도 best-effort다.
-이 observer들의 일반 예외는 고정 `text_turn_failed` 응답·continuity를 막지 않으며,
-진행 중 text turn의 취소 신호를 다른 예외로 바꾸지 않는다.
+Discord text의 기존 outer failure boundary에 도달한 일반 예외는 shared
+`DiscordRuntimeStatus`에 고정 `discord_text_turn_failed`, exception type과
+process-lifetime count 기록을 시도한다. 다음 status heartbeat에서 기존 Discord Runtime
+Errors source로 보일 수 있으며, 예외 메시지·답변·사용자 입력은 기록하지 않는다.
+type-only logger, status recorder와 turn-summary observer는 모두 best-effort다. 이
+observer들의 일반 예외는 고정 `text_turn_failed` 응답·continuity를 막지 않으며,
+진행 중 text turn의 취소 신호를 기록하거나 다른 예외로 바꾸지 않는다.
 
 Fast Control continuity status는 주기 heartbeat가 아니라 restore·commit·오류 시 갱신되는
 event snapshot이므로 최근 오류 창과 같은 1시간 freshness를 사용한다.

@@ -28,6 +28,7 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     unattributed_memory_receipt_ref,
 )
 from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
 from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
@@ -180,6 +181,7 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         ),
         commit_session_continuity=commit_session_continuity,
         log_voice_bottleneck_summary=lambda metrics, **kwargs: calls.append(("summary", kwargs["event_name"])),
+        record_runtime_error=lambda *_args, **_kwargs: None,
         format_display_text=lambda text, **kwargs: text,
         log=lambda *args: calls.append(("log", args)),
     )
@@ -237,6 +239,7 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
                 stream_text_reply=held_stream,
                 log=fail_observer,
                 log_voice_bottleneck_summary=fail_observer,
+                record_runtime_error=fail_observer,
             )
             guild = SimpleNamespace(id=1, name="Guild")
             normal = asyncio.create_task(
@@ -616,6 +619,12 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
     def test_pre_delivery_failure_returns_fixed_public_message(self) -> None:
         calls: list[tuple[str, object]] = []
         summaries: list[dict] = []
+        runtime_status = DiscordRuntimeStatus(
+            gateway_ready=lambda: True,
+            bot_guilds=lambda: [],
+            voice_client_type=object,
+            now=lambda: 123.0,
+        )
 
         async def fail_stream(*args, **kwargs):
             raise RuntimeError(
@@ -633,6 +642,7 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         deps = make_deps(
             calls,
             stream_text_reply=fail_stream,
+            record_runtime_error=runtime_status.record_error,
             log_voice_bottleneck_summary=(
                 lambda metrics, **_kwargs: summaries.append(
                     dict(metrics)
@@ -691,6 +701,11 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             summaries[0]["meta"]["continuity_commit"],
             "durable",
         )
+        status = runtime_status.snapshot()
+        self.assertEqual(status["lastErrorCode"], "discord_text_turn_failed")
+        self.assertEqual(status["lastErrorType"], "RuntimeError")
+        self.assertEqual(status["errorCount"], 1)
+        self.assertNotIn("discord-secret", str(status))
 
     def test_failed_fallback_delivery_does_not_mutate_continuity(
         self,

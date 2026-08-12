@@ -607,7 +607,9 @@ ready가 되지 않는다. cooperative cancellation과 bounded 반환 회귀가 
 
 Discord와 Minecraft/Codex는 의도적으로 deferred라 public health 전체는 optional
 degraded다. 다음 조치는 사용자가 각 surface를 승인해 기동할 때도 같은 공개 projection과
-exact source identity가 유지되는지 확인하는 것이다.
+exact source identity가 유지되는지 확인하는 것이다. Discord normal text failure는 source에서
+shared status에 fixed `discord_text_turn_failed`/type/count를 기록하지만, 실제 gateway 실패와
+다음 heartbeat의 Runtime Errors 표시까지 잇는 live 검증은 아직 수행하지 않았다.
 
 ## P0 source 완료 — Control Page capture owner 배포·live 경합 미검증
 

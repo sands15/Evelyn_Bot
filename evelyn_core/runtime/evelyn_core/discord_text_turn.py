@@ -76,6 +76,7 @@ class DiscordTextMessageHandlerDeps:
     finish_assistant_text_turn: Any
     commit_session_continuity: Any
     log_voice_bottleneck_summary: Any
+    record_runtime_error: Any
     format_display_text: Any
     log: Any
 
@@ -776,6 +777,10 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         text_turn_summary_logged = True
 
     except Exception as exc:
+        try:
+            deps.record_runtime_error("discord_text_turn_failed", exc)
+        except Exception:
+            pass
         try:
             deps.log("전체 오류 type=", type(exc).__name__)
         except Exception:

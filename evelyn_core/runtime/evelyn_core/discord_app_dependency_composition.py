@@ -47,6 +47,7 @@ class DiscordAppDependencyCompositionDeps:
     commit_session_continuity: Callable[..., Any]
     commit_session_continuity_sync: Callable[..., Any]
     log_voice_bottleneck_summary: Callable[..., Any]
+    record_runtime_error: Callable[..., Any]
     format_display_text: Callable[..., str]
     resolve_text_thread_id: Callable[..., int | None]
     make_text_session_key: Callable[..., str]
@@ -132,6 +133,7 @@ class DiscordAppDependencyComposition:
                 deps.commit_session_continuity
             ),
             log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,
+            record_runtime_error=deps.record_runtime_error,
             format_display_text=deps.format_display_text,
             log=deps.log,
         )
