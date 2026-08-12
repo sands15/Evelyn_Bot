@@ -40,8 +40,8 @@ PUBLIC_FAILURE_MESSAGES = MappingProxyType(
             "승인은 폐기했으니 상태를 다시 확인해줘."
         ),
         "minecraft_connect_failed": (
-            "❌ 마인크래프트에 연결하지 못했어. 현재 준비 상태를 "
-            "다시 확인해줘."
+            "❌ 마인크래프트 자율 모드 시작을 완료하지 못했어. "
+            "연결과 자율 경로 상태를 다시 확인해줘."
         ),
         "minecraft_disconnect_failed": (
             "❌ 마인크래프트 연결을 종료하지 못했어. 현재 상태를 "

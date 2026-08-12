@@ -58,6 +58,14 @@ Discord `자율정지`는 grant를 먼저 회수하고, engine cleanup의 일반
 성공 응답 전송 실패는 정지 실패로 기록하거나 두 번째 실패 응답을 보내지 않고 그대로
 전파한다. cleanup 취소도 오류로 기록하거나 응답하지 않고 같은 취소 신호를 재전파한다.
 
+Discord `마크접속`은 물리 연결 확인 뒤 Minecraft autonomy route 활성화 await가 literal
+`True`를 반환해야만 성공으로 응답한다. 물리 연결 또는 route 활성화의 일반 예외와 route의
+`False` 결과는 고정 `minecraft_connect_failed`, exception type과 process-lifetime count로
+같은 Discord owner counter에 기록을 시도하고 고정 실패 응답으로 닫는다. 이미 성립한 물리
+연결은 자동 rollback하지 않는다. observer 자체의 일반 예외는 실패 응답을 막지 않는다.
+두 effect가 성공한 뒤 Discord 응답 전송이 실패하면 연결 실패로 기록하거나 재응답하지 않고
+원래 예외를 전파한다. effect await의 취소도 오류로 기록하거나 응답하지 않고 재전파한다.
+
 자율 후속의 Discord 전송이 정상 반환한 뒤 history, active session, continuity,
 memory 또는 self-state 후처리에서 발생한 일반 예외는
 `autonomy_followup_finalize_failed`와 exception type만 같은 Discord owner counter에

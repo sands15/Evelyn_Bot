@@ -222,7 +222,11 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 
 현재 production `RoutedAutonomyExecutor`에는 typed Minecraft executor가
 등록되어 있다. 다만 접속만으로 action 권한이 생기지는 않는다. Discord
-`마크접속`이 실제 연결을 확인한 뒤 guild의 route를 활성화하고, `자율시작`이
+`마크접속`은 실제 연결을 확인하고 guild route 활성화 await가 literal `True`를
+반환한 경우에만 성공한다. route가 `False`를 반환하거나 일반 예외를 내면 고정
+실패 응답으로 닫지만, 이미 성립한 물리 연결을 자동 rollback하거나 재시도하지는
+않는다. 두 effect가 성공한 뒤의 Discord 응답 전송 실패도 연결 실패로 재분류하거나
+두 번째 응답을 보내지 않는다. `자율시작`이
 그 route를 다시 연결·검증한 경우에만 새 grant scope에
 `minecraft:find_food_source`를 추가한다. `마크종료`는 route도 비활성화한다.
 저장된 route 상태, 이전 grant 또는 terminal gateway 상태는 새 승인을 대신하지

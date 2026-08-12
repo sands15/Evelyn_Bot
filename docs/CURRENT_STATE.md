@@ -1999,7 +1999,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     Minecraft의 `goal_verified`와 readiness만으로는 world effect를 인정하지 않고
     trusted explicit postcondition 증거를 별도로 요구한다.
   - 현재 production `RoutedAutonomyExecutor`에는 guild별 typed Minecraft executor가
-    등록된다. Discord `마크접속`이 실제 연결을 확인한 뒤 route를 활성화하고,
+    등록된다. Discord `마크접속`은 실제 연결 확인과 route 활성화의 literal `True`를
+    모두 요구한 뒤에만 성공으로 응답하고,
     `자율시작`이 route를 다시 검증한 경우에만 exact allowlist
     `minecraft:find_food_source`를 grant에 추가한다. route가 없거나 재검증에
     실패하면 assistant scope만 발급한다.
@@ -2638,3 +2639,16 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
 - 검색 후속·memory exposure·composition·voice side-effect 직결/인접 65개와
   CI-equivalent 전체 3,340개(skip 22), main 2,500줄/158자 구조 예산과 diff check가 통과했다.
   검증은 offline이며 실제 Discord·검색 서비스·음성·Docker는 기동하지 않았다.
+
+## 2026-08-12 Minecraft connect command route completion boundary
+
+- 실제 composition과 `DiscordRuntimeStatus`에서 물리 연결은 검증됐지만 route가 `False` 또는
+  private 예외를 낸 경우에도 기존 명령이 성공 문구를 보내고 Runtime Errors를 비워 두는
+  false-success를 offline으로 재현했다.
+- `마크접속`은 물리 연결 확인과 route 활성화의 literal `True`를 모두 성공 조건으로 삼는다.
+  route 실패는 fixed `minecraft_connect_failed`와 exception type/count만 남기고 고정 실패
+  응답으로 닫는다. 이미 성립한 물리 연결은 자동 rollback·재시도하지 않는다.
+- effect 성공 뒤 Discord 응답 전송 실패는 연결 실패로 기록하거나 두 번째 응답을 보내지 않고
+  원래 예외를 재전파한다. 집중 61개와 CI-equivalent 전체 3,342개(skip 22), Python 구문·
+  diff check가 통과했다. 검증은 offline이며 실제 Discord·Minecraft·heartbeat·Control Page를
+  기동하지 않았다.

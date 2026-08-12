@@ -475,6 +475,7 @@ async def handle_minecraft_connect_command(
     enable_minecraft_autonomy_route: Any,
     build_reply: Any,
     guild_only_message: Any,
+    record_runtime_error: Any = None,
     log: Any = print,
 ) -> None:
     if ctx.guild is None:
@@ -495,21 +496,22 @@ async def handle_minecraft_connect_command(
             == MINECRAFT_CONNECTED_OUTCOME
             and minecraft_connection_confirmed(observed)
         ):
-            try:
-                await enable_minecraft_autonomy_route(ctx.guild.id)
-            except Exception as exc:
-                log(
-                    "마인크래프트 자율 경로 활성화 보류 type=",
-                    type(exc).__name__,
+            route_enabled = await enable_minecraft_autonomy_route(
+                ctx.guild.id
+            )
+            if route_enabled is not True:
+                raise RuntimeError(
+                    "minecraft_autonomy_route_enable_failed"
                 )
         reply_text = build_reply(observed)
-        await ctx.send(reply_text)
     except Exception as exc:
+        if record_runtime_error is not None:
+            record_runtime_error("minecraft_connect_failed", exc)
         log("마인크래프트 접속 오류 type=", type(exc).__name__)
         reply_text = public_failure_message(
             "minecraft_connect_failed"
         )
-        await ctx.send(reply_text)
+    await ctx.send(reply_text)
 
 
 async def handle_minecraft_disconnect_command(

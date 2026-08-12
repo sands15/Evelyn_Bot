@@ -36,7 +36,10 @@ Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조하고, 밀
 2026-08-08 source 재감사에서 2026-08-01에 확인했던 production 연결 공백은
 `8cf3581` 이후 닫힌 상태임을 확인했다. `main.py`는 guild별 typed Minecraft
 executor builder를 production `RoutedAutonomyExecutor`에 전달한다. Discord
-`마크접속`이 실제 연결을 확인한 뒤 route를 활성화하고, `자율시작`이 그 route를
+`마크접속`은 실제 연결을 확인하고 route 활성화가 literal `True`를 반환한 경우에만
+성공으로 응답한다. route의 `False`/일반 예외는 고정 실패와 type-only Runtime Error로
+남기지만, 이미 성립한 물리 연결을 자동 rollback하지 않으므로 사용자가 상태를 다시
+확인해야 한다. `자율시작`이 그 route를
 다시 연결·검증한 경우에만 exact production allowlist인
 `MINECRAFT_ROUTE_ACTIONS`를 grant에 추가한다. 현재 허용되는 Minecraft scope는
 `minecraft:find_food_source` 하나이며, route 검증 실패 시에는 기존처럼

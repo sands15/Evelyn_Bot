@@ -376,6 +376,111 @@ class DiscordAppCompositionTests(unittest.TestCase):
             ctx.send.await_args.args[0],
         )
 
+    def test_minecraft_connect_requires_verified_autonomy_route(self) -> None:
+        private_error = "PRIVATE_MINECRAFT_ROUTE C:\\private\\token"
+
+        for route_result, error_type in (
+            (False, "RuntimeError"),
+            (OSError(private_error), "OSError"),
+        ):
+            with self.subTest(error_type=error_type):
+                runtime_status = DiscordRuntimeStatus(
+                    gateway_ready=lambda: False,
+                    bot_guilds=lambda: [],
+                    voice_client_type=object,
+                    now=lambda: 123.0,
+                )
+                route = (
+                    AsyncMock(side_effect=route_result)
+                    if isinstance(route_result, BaseException)
+                    else AsyncMock(return_value=route_result)
+                )
+                build_reply = Mock(return_value="✅ SUCCESS_CANARY")
+                commands_deps = make_command_deps(
+                    enable_minecraft_mode=AsyncMock(
+                        return_value={
+                            "connected": True,
+                            "outcome_verified": True,
+                            "outcome_code": "minecraft_connected",
+                        }
+                    ),
+                    enable_minecraft_autonomy_route=route,
+                    build_minecraft_connect_reply=build_reply,
+                )
+                composition = make_composition(
+                    events=make_event_deps(runtime_status=runtime_status),
+                    commands_deps=commands_deps,
+                )
+                composition.mark_text_session_from_command = Mock()
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=7),
+                    author=SimpleNamespace(id=3),
+                    channel=SimpleNamespace(id=2),
+                    message=SimpleNamespace(id=4, content="!마크접속"),
+                    send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                )
+
+                asyncio.run(composition.minecraft_connect_command(ctx))
+
+                snapshot = runtime_status.snapshot()
+                self.assertEqual(snapshot["errorCount"], 1)
+                self.assertEqual(
+                    snapshot["lastErrorCode"],
+                    "minecraft_connect_failed",
+                )
+                self.assertEqual(snapshot["lastErrorType"], error_type)
+                self.assertNotIn(private_error, repr(snapshot))
+                self.assertNotIn(private_error, repr(commands_deps.log.call_args_list))
+                route.assert_awaited_once_with(7)
+                build_reply.assert_not_called()
+                ctx.send.assert_awaited_once()
+                reply = ctx.send.await_args.args[0]
+                self.assertIn("minecraft_connect_failed", reply)
+                self.assertNotIn("SUCCESS_CANARY", reply)
+                self.assertNotIn(private_error, reply)
+
+    def test_minecraft_connect_reply_failure_is_not_effect_failure(self) -> None:
+        private_error = "PRIVATE_MINECRAFT_SEND C:\\private\\token"
+        runtime_status = DiscordRuntimeStatus(
+            gateway_ready=lambda: False,
+            bot_guilds=lambda: [],
+            voice_client_type=object,
+            now=lambda: 123.0,
+        )
+        send_error = OSError(private_error)
+        composition = make_composition(
+            events=make_event_deps(runtime_status=runtime_status),
+            commands_deps=make_command_deps(
+                enable_minecraft_mode=AsyncMock(
+                    return_value={
+                        "connected": True,
+                        "outcome_verified": True,
+                        "outcome_code": "minecraft_connected",
+                    }
+                ),
+                enable_minecraft_autonomy_route=AsyncMock(return_value=True),
+                build_minecraft_connect_reply=Mock(
+                    return_value="✅ minecraft ready"
+                ),
+            ),
+        )
+        composition.mark_text_session_from_command = Mock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7),
+            author=SimpleNamespace(id=3),
+            channel=SimpleNamespace(id=2),
+            message=SimpleNamespace(id=4, content="!마크접속"),
+            send=AsyncMock(side_effect=send_error),
+        )
+
+        with self.assertRaises(OSError) as raised:
+            asyncio.run(composition.minecraft_connect_command(ctx))
+
+        self.assertIs(raised.exception, send_error)
+        ctx.send.assert_awaited_once_with("✅ minecraft ready")
+        self.assertEqual(runtime_status.snapshot()["errorCount"], 0)
+        composition.mark_text_session_from_command.assert_not_called()
+
     def test_on_ready_recovers_promised_search_followups(self) -> None:
         recover = AsyncMock(
             return_value={

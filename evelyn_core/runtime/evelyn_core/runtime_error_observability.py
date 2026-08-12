@@ -61,6 +61,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "mindcraft_start_failed",
         "mindcraft_stop_failed",
         "mindcraft_world_lease_guard_failed",
+        "minecraft_connect_failed",
         "minecraft_lazy_start_failed",
         "output_device_probe_failed",
         "restart_start_failed",

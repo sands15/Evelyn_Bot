@@ -482,6 +482,7 @@ class DiscordAppComposition:
             ),
             build_reply=deps.build_minecraft_connect_reply,
             guild_only_message=deps.guild_only_message,
+            record_runtime_error=self._record_runtime_error,
             log=deps.log,
         )
 
