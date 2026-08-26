@@ -935,3 +935,23 @@ type: decision-log
   [[worklog/2026-08-27]].
 - 영향: submodule 새 commit이나 pointer 변경은 없다. clean checkout, Docker build와 hygiene test가
   같은 parent-owned overlay 계약을 검증하며 generated auth cache는 Git stage 대상이 아니다.
+
+## 2026-08-27 — STT vLLM engine capacity는 30초 단일 audio 경계로 고정
+
+- 상태: source·image health·old/new diagnostic overlap 2+20 검증 완료;
+  private corpus·cancel/successor·cold restart·production 승격 대기
+- 결정: revised STT의 vLLM engine는 `max_model_len=8192`,
+  `gpu_memory_utilization=0.35`, `max_num_seqs=1`, `limit_mm_per_prompt.audio=1`,
+  `maxAudioSec=30`으로 고정한다. startup은 engine의 actual applied config를 다시 읽어
+  이 exact contract와 다르면 ready를 거부하고 health에는 실제 값만 공개한다.
+- 이유: 첫 vLLM image는 model의 `65,536` context를 상속해 KV cache에 약 `7.0GiB`를
+  요구했지만 memory fraction `0.35`의 실제 budget에는 약 `0.89GiB`만 남아 startup이
+  fail-close했다. 추정 한계 `8,336`보다 작은 `8,192`는 KV 크기를 bounded하고, service의
+  30초 input cap과 단일 physical worker에 sequence/audio concurrency `1`을 함께 고정한다.
+- 근거: `evelyn_core/runtime/evelyn_core/stt_service.py`,
+  `tests/voice/test_stt_service_contract.py`, `tests/voice/test_stt_stream_service.py`,
+  `tools/gpu1_latency_benchmark.py`, `plan.md` P0-4.
+- 영향: STT endpoint, `Qwen/Qwen3-ASR-1.7B`, memory fraction `0.35`, public transcription schema/API,
+  launcher/admission은 변경하지 않는다. old/new 2+20 diagnostic PASS는 image-ready 근거이지
+  promotion 자격 자체가 아니며, private corpus·cancel·restart·cleanup이 닫힐 때까지 새 STT
+  image 승격과 P0-5 Qwen3.8 시작을 모두 차단한다.

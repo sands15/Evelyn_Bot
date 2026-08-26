@@ -19,8 +19,8 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 ## 현재 초점
 
 - 승인 순서는 P0-1 Main finalist → P0-2 queue/timeout → P0-3 recovery checkpoint →
-  P0-4 revised STT headless GPU1 → P0-5 Qwen3.8이다. P0-1~3은 검증 완료했고 P0-4 source/offline
-  계약과 제한된 Docker/GPU live 검증을 진행 중이다.
+  P0-4 revised STT headless GPU1 → P0-5 Qwen3.8이다. P0-1~3은 검증 완료했고 P0-4 source와
+  old/new STT image의 제한된 Docker/GPU 2+20 overlap은 검증했다.
 - P0-4는 microphone, speaker, Discord, Minecraft 없이 현행 Qwen3-14B와 old/new STT image를
   분리 비교한다. overlap 2+20, private positive 40/negative 10 batch+stream, cancel/successor,
   cold restart 3회와 exact cleanup이 모두 필요하다.
@@ -39,13 +39,15 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   `evelyn-recovery-2026-08-26`, bundle SHA-256
   `dd8e4bc54397eb289cc20d6c8fdfca2ecd107cab13bed81d812416d47f188dcb`를 clean clone에서
   canonical 4,573개(+subtests 1,391)로 검증했다. root/submodule은 checkpoint에서 clean이다.
-- P0-4 source에는 v2 overlap receipt, private corpus runner, hub-only read-only/offline STT mount,
-  최소 build context, digest-pinned two-stage STT recipe와 package-set hash가 구현됐다.
-  P0-4 focused는 `75 passed, 29 subtests`, voice 전체는 `816 passed, 5 skipped, 98 subtests`,
-  canonical은 `4601 passed, 22 skipped, 1409 subtests`로 통과했다. Docker/GPU live는 아직
-  workload를 실행하지 않았다. 첫 preflight에서 stopped production container 이름 충돌을 발견해
-  아무것도 삭제하지 않고 Docker OFF로 복구했으며 diagnostic 이름을 분리한 뒤 canonical을 같은
-  `4601/22/1409`로 다시 통과했다. [[GPU1_CONCURRENCY_BENCHMARK]]
+- P0-4 source `d95ea89`의 old/new 2+20은 모두 오류 0으로 통과했다. old report SHA-256
+  `5309ba0e...2d5e`의 STT/Main/Qwen p95는 `728.5/18.6/2270.3ms`, GPU1 min free는
+  `10,294MiB`였다. 새 image `sha256:afece0d2...29c5`는 actual vLLM engine
+  `8192/0.35/1/audio1`, max audio 30초와 package-set `c7518d52...e519`를 결박했다.
+  새 report SHA-256 `cb72eb22...14b1`의 STT/Main/Qwen p95는 `158.2/24.9/2030.3ms`,
+  min free `6,144MiB`였고 독립 비교와 환경 안정성이 통과했다. exact cleanup은 container/network/volume
+  `0/0/0`, GPU1 `0MiB×3`, production·Docker Desktop OFF였다. 최종 canonical은
+  `4605 passed, 22 skipped, 1425 subtests`다. 이는 full promotion 증거가 아니다.
+  [[GPU1_CONCURRENCY_BENCHMARK]]
 - 2026-08-16 historical GPU1 v1 live는 1+5에서 Fast Main/Qwen/STT p95
   `422.6/2233.2/626.1ms`, min free `10,284MiB`, error 0이었다. 현재 v2 승격 증거는 아니다.
 - Main graph-on/SWA1/ubatch2048와 OmniVoice CUDA 12.9/FlashInfer 0.6.15는 source/live 근거가
@@ -55,10 +57,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 
 ## 다음 행동
 
-1. P0-4 identity/privacy receipt 회귀, 관련 suite와 canonical을 통과시키고 clean commit을 만든다.
-2. clean source에서만 기존 image/host preflight, old baseline, revised STT build/health를 실행한다.
-3. private 50-item gate가 없으면 안전 복구·evidence 보존 뒤 P0-4를 blocked로 보고한다.
-4. P0-4가 전부 통과한 뒤에만 P0-5 Qwen3.8 artifact/build/A/B를 시작한다.
+1. 실제 private 50-item 입력이 준비되면 positive 40/negative 10 batch+stream, cancel/successor와
+   cold restart 3회를 실행한다.
+2. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
 
 ## 작업 원칙
 

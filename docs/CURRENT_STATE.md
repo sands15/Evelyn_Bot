@@ -3269,10 +3269,14 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
   별도 private positive 40/negative 10 batch+stream runner는 aggregate와 고정 실패 코드만 남기고
   기본적으로 bound manifest/audio 51개를 원자적 quarantine 뒤 삭제한다.
 - 진단 Compose는 Main/Qwen을 loopback 9820/9823에만 열고 STT cache의 `hub/`만 read-only/offline으로
-  mount하며 log는 attempt-owned named volume을 쓴다. STT 전용 build context, digest-pinned CUDA base,
-  two-stage runtime와 direct Python pin/package-set hash는 source에 구현됐지만 새 image build/load와 GPU
-  live는 아직 실행하지 않았다. private corpus directory도 absent(`0/50`)이므로 v2 promotion은 아직
-  통과하지 않았다.
+  mount하며 log는 attempt-owned named volume을 쓴다. source `d95ea896...5c6c3`에서 old/new 2+20을
+  오류 0으로 실행했다. old report SHA-256 `5309ba0e...2d5e`의 STT/Main/Qwen p95는
+  `728.5/18.6/2270.3ms`, min free는 `10,294MiB`였다. 새 image `sha256:afece0d2...29c5`와
+  package-set `c7518d52...e519`를 결박한 report SHA-256 `cb72eb22...14b1`의 같은 p95는
+  `158.2/24.9/2030.3ms`, min free는 `6,144MiB`였다. 독립 비교와 pre/post 환경 안정성이 통과했다.
+- exact cleanup 뒤 owned container/network/volume은 `0/0/0`, GPU1은 `0MiB` 연속 3회, production은
+  OFF였다. private corpus는 absent(`0/50`)이므로 corpus, cancel/successor, cold restart, promotion과
+  P0-5는 차단돼 있다. 이 2+20은 full P0-4 promotion 증거가 아니다.
 - benchmark report는 production admission, Windows launcher, Discord와 Local Voice가 읽지 않는다.
   historical v1 결과는 revised image A/B·corpus·restart 증거로 재사용하지 않는다. 실행 계약은
   [[GPU1_CONCURRENCY_BENCHMARK]]가 소유한다.
@@ -3559,6 +3563,7 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
 - ordinary STT/wake/final 관측은 transcript 대신 chars, latency, 고정 reason/error type만 남긴다.
   `STT_FULL_RESCORING_ENABLED` 기본값은 false이며 Local streaming과 Discord single-final 재사용은
   각각 `LOCAL_BRIDGE_STT_STREAMING_ENABLED=false`, `STT_STREAMING_ENABLED=false`로 rollback할 수 있다.
-- Docker source는 `vllm==0.14.0`, Torch/Torchaudio 2.9.1+cu128과 0.35 GPU memory budget으로 옮겼다.
-  이는 source·offline test 상태이며 STT image build/model load, 실제 GPU, Discord gateway와 마이크는
-  시작하거나 검증하지 않았다.
+- Docker source는 `vllm==0.14.0`, Torch/Torchaudio 2.9.1+cu128을 사용한다. live-loaded revised image의
+  actual engine은 max model length `8192`, GPU memory utilization `0.35`, max sequence `1`, audio per
+  prompt `1`이고 입력 상한은 `30초`였다. mismatch는 startup을 fail-close한다. headless GPU1 2+20은
+  검증했지만 private corpus, Discord gateway와 마이크는 시작하거나 검증하지 않았다.

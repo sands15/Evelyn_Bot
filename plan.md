@@ -431,12 +431,13 @@ repository와 pinned submodule이 clean하며, capsule·commit·tag·bundle의 �
 
 ### P0-4. revised STT image를 GPU1에서 headless 검증·승격
 
-상태: **[~] 2026-08-27 headless benchmark·진단·image recipe source 구현 및 canonical green,
-제한된 GPU1/Docker live preflight 대기**.
+상태: **[~] 2026-08-27 old/new STT image diagnostic overlap warmup 2+measured 20 PASS;
+private corpus·cancel/successor·cold restart·promotion 대기**.
 P0-1 terminal 복구, P0-2 canonical green, P0-3 checkpoint/tag/bundle 선행 gate는 모두 닫혔다. 이 단계는
 microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B와 revised STT image의
-기준선을 먼저 고정한다. 통과 뒤에만 P0-5 Qwen3.8 교체로 간다. 고정 private corpus directory는
-현재 absent(`0/50`)이므로 합성 자료로 대체하지 않고 외부 입력 gate로 유지한다.
+기준선을 먼저 고정한다. image-ready 단계의 diagnostic A/B는 통과했지만 이 결과만으로는
+production 승격 자격이 없다. 고정 private corpus directory가 현재 absent(`0/50`)이므로 합성
+자료로 대체하지 않고 외부 입력 gate로 유지하며 P0-5 Qwen3.8은 계속 차단한다.
 
 #### 목표·범위·비범위
 
@@ -455,22 +456,29 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
 1. P0-3 tag/clean tree, Docker original desired state, 기존 STT image ID, streaming flags,
    `Qwen/Qwen3-ASR-1.7B`, physical GPU1 UUID와 GPU1 baseline을 기록한다. 운영 rollback image의
    exact 기준은 legacy `backend=transformers`, health backend field 없음, vLLM module 없음,
-   memory utilization N/A다. revised image의 exact 목표만 `backend=vllm`, memory utilization
-   `0.35`다. 어느 phase identity든 다르면 시작하지 않는다.
+   memory utilization N/A다. revised image의 exact 목표는 `backend=vllm`,
+   `max_model_len=8192`, `gpu_memory_utilization=0.35`, `max_num_seqs=1`,
+   `limit_mm_per_prompt.audio=1`, `maxAudioSec=30`이다. 어느 phase identity든 다르면
+   시작하지 않는다.
 2. 기존 image에서 현행 Qwen3-14B+STT overlap을 warmup 2+measured 20으로 먼저 측정한다.
    phase 사이에는 exact containers를 내리고 GPU1 memory가 baseline ±256MiB로 연속 3회 복귀해야 한다.
 3. `docker-compose.fast-control.yml`의 `stt` service만 build한다. 이전 image ID에 rollback tag를
    붙이고 새 image ID/source hash/dependency/model cache identity를 다시 읽은 뒤 `stt`만 시작한다.
-   health는 ready이고 model/GPU와 revised `backend=vllm`, memory `0.35`가 exact일 때만 통과한다.
+   health는 ready이고 model/GPU와 revised backend·engine capacity·30초 audio 경계가 actual applied
+   config와 exact일 때만 통과한다. `image_ready`에서 old/new 2+20 diagnostic overlap을
+   실행해 capacity·latency·VRAM 근거를 먼저 남길 수 있지만 그 상태를 promotion으로 오인하지 않는다.
 4. 기존 P1-1 계약의 `tools/voice_asr_benchmark.py`와 test만 먼저 구현해 private positive 40개,
    negative 10개를 batch/streaming으로 replay한다. raw PCM/transcript는 report/docs에 쓰지 않고
    사용자가 별도 보존을 요구하지 않으면 run 종료 시 삭제한다.
-5. cancel 중 물리 worker drain, timeout 뒤 successor, batch fallback을 headless API로 검증한 뒤
-   새 image+현행 Qwen3-14B overlap warmup 2+measured 20과 cold restart 3회를 실행한다.
+5. private corpus 통과 뒤 cancel 중 물리 worker drain, timeout 뒤 successor, batch fallback을
+   headless API로 검증하고 cold restart 3회를 실행한다. 이미 통과한 diagnostic overlap은
+   exact source/image/model/GPU/baseline binding이 유지될 때만 해당 수치 gate의 근거로 보존한다.
 6. 모든 gate가 통과하면 새 STT image ID를 production 기준선으로 기록한다. 실패하면 old image ID로
    되돌려 health와 fixed smoke를 확인하고 새 failed image/report는 증거로 보존한다.
-- 상태는 `preflight → old_baseline → image_built → image_ready → corpus_passed → overlap_passed →
-  restart_passed → promoted → restored` 단방향이며 atomic content-free report만 재시작 기준이다.
+- 상태는 `preflight → old_baseline → image_built → image_ready → diagnostic_overlap_passed`까지를
+  promotion 전 진단으로 인정한다. 승격은 그 영수증과 `corpus_passed → cancel_passed →
+  restart_passed → cleanup_passed`가 모두 같은 binding에서 닫힌 뒤에만 `promoted → restored`로
+  진행하며 atomic content-free report만 재시작 기준이다.
 
 #### 수치형 완료 gate
 
@@ -486,9 +494,10 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
   0개를 확인한다. source test만으로 live 완료를 주장하지 않는다.
 - 실제 source diff는 GPU overlap tool/test, private ASR corpus tool/test, diagnostic Compose와 계약 test,
   STT Dockerfile-specific context, two-stage recipe, direct dependency pins와 dependency hygiene test,
-  current-state/dependency/benchmark/NOW/decision/worklog/plan 문서다. production ASR Python source,
-  endpoint/model/memory fraction, schema/API, launcher/admission 동작 diff는 0이다. image recipe와
-  diagnostic override는 새 image가 live gate를 통과하기 전 production 기준선을 바꾸지 않는다.
+  `stt_service.py`의 vLLM engine capacity·actual-config fail-close, current-state/dependency/benchmark/
+  NOW/decision/worklog/plan 문서다. production STT endpoint, ASR model, memory fraction `0.35`,
+  public transcription schema/API, launcher/admission 동작 diff는 0이다. image recipe와 diagnostic override는
+  private corpus·cancel·restart·cleanup gate를 통과하기 전 production 기준선을 바꾸지 않는다.
   **미해결 설계 질문은 0개다.**
 
 완료 조건: revised STT image가 headless corpus, Qwen3-14B overlap, restart와 cleanup gate를 모두
@@ -496,14 +505,15 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
 
 ### P0-5. GPU1 Qwen을 Qwen3.8-27B Q4_K_M으로 교체
 
-상태: **[!] 2026-08-26 전체 구현·제한된 live 검증 승인됨, 선행 gate 대기**. P0-1의 terminal
+상태: **[!] 2026-08-27 전체 구현·제한된 live 검증 승인됨, P0-4 promotion gate로 차단**. P0-1의 terminal
 복구, P0-2 전체 suite 녹색, P0-3 checkpoint/tag/bundle과 P0-4 revised STT 기준선 완료가
 선행 gate다. 승인 범위에는
 아래에 고정한 외부 model 다운로드, side-by-side llama.cpp build, Docker GPU1/STT A/B와
 승격·복구만 포함한다. Minecraft server/bot, Discord, microphone, speaker는 기동하지 않는다.
 P0-1 Attempt 7 terminal/host proof, P0-2 회귀와 canonical, P0-3 annotated tag/bundle은 모두
-검증됐다. P0-5는 P0-4 revised STT 기준선의 corpus·overlap·restart·cleanup gate가 닫힐 때까지
-model/build/source/Docker 변경을 시작하지 않는다.
+검증됐다. P0-5는 P0-4 old/new diagnostic overlap PASS만으로 시작하지 않으며
+private corpus·cancel/successor·restart·cleanup·promotion gate가 닫힐 때까지 model/build/source/
+Docker 변경을 시작하지 않는다.
 
 #### 문제·검증된 원인·영향
 
@@ -708,9 +718,10 @@ GPU1 overlap, 3회 restart, cleanup gate를 모두 통과해 default로 승격�
 
 ### P1-1. 음성 대화를 대표 실환경 E2E로 완성
 
-상태: **[R] headless STT image/GPU phase는 P0-4로 승격·승인됨; 실제 음성 E2E는 승인 대기**.
-P0-4의 verified image/corpus report를 `image_ready/corpus_passed` 입력으로 재사용한다. 남은 endpoint
-계측, microphone, speaker, Discord 연결과 실제 장치 청취는 별도 구현/live 승인 전 시작하지 않는다.
+상태: **[R] P0-4 headless STT는 `image_ready` diagnostic 2+20만 검증됨;
+private corpus·승격과 실제 음성 E2E는 대기**. 현재 diagnostic image report는 재사용하되
+`corpus_passed`는 아직 없다. P0-4가 이를 닫은 뒤 남은 endpoint 계측, microphone, speaker,
+Discord 연결과 실제 장치 청취는 별도 구현/live 승인 전 시작하지 않는다.
 
 #### 문제·검증된 원인·영향
 
