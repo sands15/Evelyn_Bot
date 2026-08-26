@@ -256,9 +256,18 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertEqual(source.count("  main_llm:\n"), 1)
         self.assertIn("container_name: evelyn-p04-main-llm", source)
         self.assertIn('"127.0.0.1:9820:9820"', source)
+        self.assertIn(
+            "networks: !override\n      - default\n      - main_llm_internal",
+            source.split("  main_llm:\n", 1)[1].split("\n\n  minecraft_llm:", 1)[0],
+        )
         self.assertEqual(source.count("  minecraft_llm:\n"), 1)
         self.assertIn("container_name: evelyn-p04-qwen-llm", source)
         self.assertIn('"127.0.0.1:9823:9823"', source)
+        self.assertIn(
+            "networks: !override\n      - default\n      - qwen_admission",
+            source.split("  minecraft_llm:\n", 1)[1].split("\n\n  stt:", 1)[0],
+        )
+        self.assertEqual(source.count("networks: !override"), 2)
         self.assertIn(':/llama:ro', source)
         self.assertEqual(source.count("gpus: !override"), 3)
         self.assertEqual(source.count('device_ids: ["0"]'), 1)

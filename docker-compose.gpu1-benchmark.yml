@@ -1,6 +1,9 @@
 services:
   main_llm:
     container_name: evelyn-p04-main-llm
+    networks: !override
+      - default
+      - main_llm_internal
     gpus: !override
       - driver: nvidia
         device_ids: ["0"]
@@ -10,6 +13,9 @@ services:
 
   minecraft_llm:
     container_name: evelyn-p04-qwen-llm
+    networks: !override
+      - default
+      - qwen_admission
     gpus: !override
       - driver: nvidia
         device_ids: ["1"]
