@@ -155,8 +155,17 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             },
             "stt": {
                 "model": benchmark.P0_4_STT_MODEL,
-                "backend": benchmark.P0_4_STT_BACKEND,
-                "memoryUtilization": benchmark.P0_4_STT_MEMORY_UTILIZATION,
+                "backend": (
+                    benchmark.P0_4_OLD_STT_BACKEND
+                    if args.phase == "old-stt"
+                    else benchmark.P0_4_STT_BACKEND
+                ),
+                "memoryUtilization": (
+                    None
+                    if args.phase == "old-stt"
+                    else benchmark.P0_4_STT_MEMORY_UTILIZATION
+                ),
+                "backendProof": benchmark._expected_stt_backend_proof(args.phase),
                 "modelCacheRevision": args.model_cache_revision,
                 "modelContentSha256": "d" * 64,
                 "cacheSourceSha256": hashlib.sha256(
@@ -357,6 +366,12 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             if command[:2] == ["docker", "exec"] and command[3] == "bash":
                 return ("9" * 64 if command[2] == "a" * 64 else "c" * 64) + "\n"
             if command[:2] == ["docker", "exec"] and command[3] == "python":
+                if command[4:] == ["-c", benchmark._STT_BACKEND_PROBE]:
+                    return (
+                        "INFO ignored\n"
+                        + benchmark._STT_BACKEND_PROOF_PREFIX
+                        + json.dumps(benchmark._expected_stt_backend_proof(args.phase))
+                    )
                 if command[4:] == ["-m", "pip", "freeze", "--all"]:
                     return "qwen-asr==0.0.4\npip==25.0\n"
                 if len(command) > 6 and "/snapshots/" in command[6]:
@@ -410,8 +425,15 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
 
         args = self.p0_4_args("old-stt")
         self.assertEqual(args.iterations, 20)
-        self.assertEqual(args.stt_memory_utilization, 0.35)
+        self.assertEqual(args.stt_backend, benchmark.P0_4_OLD_STT_BACKEND)
+        self.assertIsNone(args.stt_memory_utilization)
         self.assertEqual(args.compose_project, "evelyn-p04-test")
+        candidate = self.p0_4_args("new-stt")
+        self.assertEqual(candidate.stt_backend, benchmark.P0_4_STT_BACKEND)
+        self.assertEqual(
+            candidate.stt_memory_utilization,
+            benchmark.P0_4_STT_MEMORY_UTILIZATION,
+        )
 
     def test_p0_4_mode_rejects_nonfinite_or_changed_fixed_contract(self) -> None:
         base = self._p0_values("old-stt")
@@ -422,9 +444,22 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             ("--qwen-timeout-ms", "6001"),
             ("--stt-timeout-sec", "16"),
             ("--gpu-sample-interval-ms", "51"),
+            ("--stt-backend", benchmark.P0_4_STT_BACKEND),
+            ("--stt-memory-utilization", "0.35"),
         ):
             with self.subTest(changed=changed), self.assertRaises(SystemExit):
                 benchmark.parse_args([*base, *changed])
+
+        candidate = self._p0_values("new-stt")
+        candidate.extend(
+            ("--baseline-report", "old.json", "--baseline-sha256", "7" * 64)
+        )
+        for changed in (
+            ("--stt-backend", benchmark.P0_4_OLD_STT_BACKEND),
+            ("--stt-memory-utilization", "0.34"),
+        ):
+            with self.subTest(changed=changed), self.assertRaises(SystemExit):
+                benchmark.parse_args([*candidate, *changed])
 
     def test_p0_4_observation_binds_live_git_images_gpus_health_and_cache(self) -> None:
         args = self.p0_4_args("old-stt")
@@ -432,7 +467,6 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             "ok": True,
             "ready": True,
             "model": benchmark.P0_4_STT_MODEL,
-            "backend": benchmark.P0_4_STT_BACKEND,
             "loadOnStart": True,
             "gpu": {"cuda": True, "name": "NVIDIA GeForce RTX 3090"},
         }
@@ -454,6 +488,12 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             observed["qwen"]["modelSha256"], benchmark.P0_4_QWEN_MODEL_SHA256
         )
         self.assertEqual(observed["stt"]["modelContentSha256"], "d" * 64)
+        self.assertEqual(observed["stt"]["backend"], benchmark.P0_4_OLD_STT_BACKEND)
+        self.assertIsNone(observed["stt"]["memoryUtilization"])
+        self.assertEqual(
+            observed["stt"]["backendProof"],
+            benchmark._expected_stt_backend_proof("old-stt"),
+        )
         self.assertEqual(
             observed["stt"]["packageSetSha256"],
             hashlib.sha256(b"pip==25.0\nqwen-asr==0.0.4\n").hexdigest(),
@@ -462,6 +502,74 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             benchmark._validation_binding(args, observed)["images"]["stt"],
             args.stt_image_id,
         )
+
+    def test_phase_backend_contract_fails_before_large_identity_hashes(self) -> None:
+        common = {
+            "ok": True,
+            "ready": True,
+            "model": benchmark.P0_4_STT_MODEL,
+            "loadOnStart": True,
+            "gpu": {"cuda": True, "name": "NVIDIA GeForce RTX 3090"},
+        }
+        old_health = dict(common)
+        new_health = {
+            **common,
+            "backend": benchmark.P0_4_STT_BACKEND,
+        }
+        old_proof = benchmark._expected_stt_backend_proof("old-stt")
+        new_proof = benchmark._expected_stt_backend_proof("new-stt")
+        cases = (
+            ("old-stt", {**old_health, "backend": "vllm"}, old_proof),
+            ("old-stt", old_health, {**old_proof, "vllm": True}),
+            (
+                "old-stt",
+                old_health,
+                {**old_proof, "serviceFactories": ["LLM"]},
+            ),
+            ("old-stt", old_health, {**old_proof, "apiLLM": False}),
+            ("new-stt", new_health, {**new_proof, "transformers": False}),
+            ("new-stt", new_health, {**new_proof, "vllm": False}),
+            (
+                "new-stt",
+                new_health,
+                {**new_proof, "serviceFactories": ["from_pretrained"]},
+            ),
+            ("new-stt", new_health, {**new_proof, "apiFromPretrained": False}),
+            (
+                "new-stt",
+                {key: value for key, value in new_health.items() if key != "backend"},
+                new_proof,
+            ),
+        )
+        for phase, health, backend_proof in cases:
+            args = self.p0_4_args(phase)
+            normal = self.probe_side_effect(args)
+
+            def run(command, *, timeout_sec=15.0):
+                if (
+                    command[:2] == ["docker", "exec"]
+                    and command[3:] == [
+                        "python",
+                        "-c",
+                        benchmark._STT_BACKEND_PROBE,
+                    ]
+                ):
+                    return benchmark._STT_BACKEND_PROOF_PREFIX + json.dumps(
+                        backend_proof
+                    )
+                return normal(command, timeout_sec=timeout_sec)
+
+            with (
+                self.subTest(phase=phase, health=health, proof=backend_proof),
+                patch.object(benchmark, "_run_text", side_effect=run),
+                patch.object(benchmark, "_get_json", return_value=health),
+                patch.object(benchmark, "_container_file_sha256") as large_hash,
+                self.assertRaises(benchmark._ValidationFailure) as raised,
+            ):
+                benchmark._observe_p0_4_environment(args)
+
+            self.assertEqual(raised.exception.code, "validation_preflight_failed")
+            large_hash.assert_not_called()
 
     def test_p0_4_observation_rejects_observed_identity_mismatches(self) -> None:
         args = self.p0_4_args("new-stt")
@@ -607,7 +715,10 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
         new = self.p0_report("new-stt", stt_ms=1_101.0)
 
         self.assertEqual(old["binding"]["phase"], "old-stt")
-        self.assertEqual(old["binding"]["stt"]["backend"], "vllm")
+        self.assertEqual(old["binding"]["stt"]["backend"], "transformers")
+        self.assertIsNone(old["binding"]["stt"]["memoryUtilization"])
+        self.assertEqual(new["binding"]["stt"]["backend"], "vllm")
+        self.assertEqual(new["binding"]["stt"]["memoryUtilization"], 0.35)
         comparison = benchmark.compare_stt_baseline(
             old,
             new,
@@ -644,6 +755,41 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                 new,
                 baseline_sha256="8" * 64,
             )["violations"],
+        )
+
+        for phase, field, value in (
+            ("old-stt", "backend", benchmark.P0_4_STT_BACKEND),
+            ("old-stt", "memoryUtilization", 0.35),
+            ("new-stt", "backend", benchmark.P0_4_OLD_STT_BACKEND),
+            ("new-stt", "memoryUtilization", None),
+        ):
+            changed_old = copy.deepcopy(old)
+            changed_new = copy.deepcopy(new)
+            changed = changed_old if phase == "old-stt" else changed_new
+            changed["binding"]["stt"][field] = value
+            result = benchmark.compare_stt_baseline(
+                changed_old,
+                changed_new,
+                baseline_sha256=changed_new["baselineReportSha256"],
+            )
+            self.assertIn(
+                "stt_operational_baseline_transition_mismatch",
+                result["violations"],
+            )
+
+        changed = copy.deepcopy(new)
+        changed["binding"]["stt"]["backendProof"]["serviceFactories"] = [
+            "from_pretrained"
+        ]
+        result = benchmark.compare_stt_baseline(
+            old,
+            changed,
+            baseline_sha256=changed["baselineReportSha256"],
+        )
+        self.assertIn("new-stt_binding_invalid", result["violations"])
+        self.assertIn(
+            "stt_operational_baseline_transition_mismatch",
+            result["violations"],
         )
 
         for section, field, violation in (

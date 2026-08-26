@@ -23,22 +23,27 @@ publishes a compatible release. Its official vLLM extra also pins
 `vllm==0.14.0`, whose CUDA requirements pin Torch/Torchaudio 2.9.1. The STT
 image is therefore isolated on that combination for the new in-process Qwen
 streaming API, while Vision remains isolated and can use 5.14.1. Source and
-resolver contracts are updated, but the revised STT image has not yet been
-built, loaded, or GPU-smoke-tested.
+resolver contracts are updated. A synthetic revised-image startup reached Triton's
+runtime JIT and verifiably failed first when Triton invoked `gcc`, then because
+`Python.h` was absent. This diagnostic is dependency evidence only; the revised
+candidate build/load and live GPU smoke remain pending.
 
 The 2026-08-27 revised STT recipe pins the CUDA 12.8 amd64 runtime base by digest,
 pip 26.2.1, the Torch/Torchaudio 2.9.1 and Torchvision 0.24.1 cu128 family, plus
 every direct requirement. `numpy==2.2.6` preserves vLLM's Numba `<2.3` boundary.
 A builder stage runs `pip check` and emits a sorted `pip freeze --all` manifest and
-SHA-256; the runtime stage copies only that venv, manifest and Evelyn runtime package,
-without compiler, Git or Curl. A Dockerfile-specific allowlist context excludes docs,
-runtime artifacts, raw assets and Python bytecode. Diagnostic Compose mounts only the
-host Hugging Face `hub/` directory read-only, disables online/token discovery and uses a
-named log volume. These controls make a built image and package set auditable; transitive
-wheels and Ubuntu repository snapshots are not fully hash-locked, so the image is not
-described as bit-reproducible. Candidate image labels bind the clean source revision, raw
-Dockerfile and requirements SHA-256, and fixed CUDA base digest; the live receipt must still
-verify BuildKit metadata/provenance before promotion. Build/load and live model smoke remain
+SHA-256; the runtime stage copies only that venv, manifest and Evelyn runtime package and
+keeps the minimum JIT prerequisites `gcc` and `python3-dev`. It excludes
+`build-essential`, Git and Curl. These two packages may be removed only after a verified,
+fully precompiled Triton cache path cold-starts and passes the same startup, restart and GPU
+gates without runtime compilation. A Dockerfile-specific allowlist context excludes docs,
+runtime artifacts, raw assets and Python bytecode. Diagnostic Compose mounts only the host
+Hugging Face `hub/` directory read-only, disables online/token discovery and uses a named log
+volume. These controls make a built image and package set auditable; transitive wheels and
+Ubuntu repository snapshots are not fully hash-locked, so the image is not described as
+bit-reproducible. Candidate image labels bind the clean source revision, raw Dockerfile and
+requirements SHA-256, and fixed CUDA base digest; the live receipt must still verify BuildKit
+metadata/provenance before promotion. Candidate build/load and live model smoke remain
 pending.
 
 Root/CPU runtimes use Torch 2.13. Vision remains on its matched CUDA 12.8

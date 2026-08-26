@@ -453,13 +453,15 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
 #### 고정 실행·상태·rollback
 
 1. P0-3 tag/clean tree, Docker original desired state, 기존 STT image ID, streaming flags,
-   `Qwen/Qwen3-ASR-1.7B`, `backend=vllm`, physical GPU1 UUID, memory utilization `0.35`, GPU1
-   baseline을 기록한다. 어느 identity든 다르면 시작하지 않는다.
+   `Qwen/Qwen3-ASR-1.7B`, physical GPU1 UUID와 GPU1 baseline을 기록한다. 운영 rollback image의
+   exact 기준은 legacy `backend=transformers`, health backend field 없음, vLLM module 없음,
+   memory utilization N/A다. revised image의 exact 목표만 `backend=vllm`, memory utilization
+   `0.35`다. 어느 phase identity든 다르면 시작하지 않는다.
 2. 기존 image에서 현행 Qwen3-14B+STT overlap을 warmup 2+measured 20으로 먼저 측정한다.
    phase 사이에는 exact containers를 내리고 GPU1 memory가 baseline ±256MiB로 연속 3회 복귀해야 한다.
 3. `docker-compose.fast-control.yml`의 `stt` service만 build한다. 이전 image ID에 rollback tag를
    붙이고 새 image ID/source hash/dependency/model cache identity를 다시 읽은 뒤 `stt`만 시작한다.
-   health는 ready, model/backend/GPU/memory가 위 exact 값일 때만 통과한다.
+   health는 ready이고 model/GPU와 revised `backend=vllm`, memory `0.35`가 exact일 때만 통과한다.
 4. 기존 P1-1 계약의 `tools/voice_asr_benchmark.py`와 test만 먼저 구현해 private positive 40개,
    negative 10개를 batch/streaming으로 replay한다. raw PCM/transcript는 report/docs에 쓰지 않고
    사용자가 별도 보존을 요구하지 않으면 run 종료 시 삭제한다.

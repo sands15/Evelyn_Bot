@@ -185,21 +185,34 @@ class DependencySecurityPolicyTests(unittest.TestCase):
             "EVELYN_STT_REQUIREMENTS_SHA256",
         ):
             self.assertIn(f"ARG {build_arg}=unversioned", stt)
+        pinned_digest = (
+            "05de765c12d993316f770e8e4396b9516afe38b7c52189bce2d5b64ef812db58"
+        )
+        pinned_cuda = (
+            "nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04@sha256:"
+            f"{pinned_digest}"
+        )
         for label in (
-            "org.opencontainers.image.revision",
-            "org.opencontainers.image.base.digest",
-            "io.evelyn.stt.dockerfile-sha256",
-            "io.evelyn.stt.requirements-sha256",
+            'org.opencontainers.image.revision="${EVELYN_SOURCE_REVISION}"',
+            f'org.opencontainers.image.base.digest="sha256:{pinned_digest}"',
+            'io.evelyn.stt.dockerfile.sha256="${EVELYN_STT_DOCKERFILE_SHA256}"',
+            'io.evelyn.stt.requirements.sha256="${EVELYN_STT_REQUIREMENTS_SHA256}"',
         ):
             self.assertIn(label, stt)
         runtime_stage = stt.split("\nFROM nvidia/cuda:", 2)[-1]
         self.assertNotIn("build-essential", runtime_stage)
         self.assertNotIn(" git ", runtime_stage)
         self.assertNotIn(" curl ", runtime_stage)
-        self.assertIn(
-            "nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04@sha256:"
-            "05de765c12d993316f770e8e4396b9516afe38b7c52189bce2d5b64ef812db58",
-            stt,
+        self.assertIn("    gcc \\\n", runtime_stage)
+        self.assertIn("    python3-dev \\\n", runtime_stage)
+        self.assertEqual(stt.count(pinned_cuda), 2)
+        self.assertEqual(
+            [
+                line
+                for line in stt.splitlines()
+                if line.startswith("FROM nvidia/cuda:")
+            ],
+            [f"FROM {pinned_cuda} AS stt-builder", f"FROM {pinned_cuda}"],
         )
         self.assertIn("vllm==0.14.0", stt_requirements)
         self.assertIn("torchaudio==2.9.1+cu128", stt)

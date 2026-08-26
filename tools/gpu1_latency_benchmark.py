@@ -65,6 +65,7 @@ P0_4_QWEN_URL = "http://127.0.0.1:9823/v1/chat/completions"
 P0_4_QWEN_MODEL = "Qwen3-14B-Q4_K_M.gguf"
 P0_4_STT_URL = "http://127.0.0.1:8892/v1/stt/transcribe"
 P0_4_STT_MODEL = "Qwen/Qwen3-ASR-1.7B"
+P0_4_OLD_STT_BACKEND = "transformers"
 P0_4_STT_BACKEND = "vllm"
 P0_4_GPU_SAMPLE_INTERVAL_MS = 50.0
 P0_4_MAIN_TIMEOUT_SEC = 15.0
@@ -330,6 +331,68 @@ def _container_llama_runtime_sha256(container_id: str) -> str:
     return value
 
 
+_STT_BACKEND_PROOF_PREFIX = "EVELYN_STT_BACKEND_PROOF="
+_STT_BACKEND_PROBE = """
+import ast
+import importlib.util
+import json
+from pathlib import Path
+import qwen_asr
+
+tree = ast.parse(
+    Path('/app/evelyn_core/runtime/evelyn_core/stt_service.py').read_text(
+        encoding='utf-8'
+    )
+)
+factories = [
+    node.func.attr
+    for node in sorted(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'Qwen3ASRModel'
+        ),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+]
+api = qwen_asr.Qwen3ASRModel
+print('EVELYN_STT_BACKEND_PROOF=' + json.dumps({
+    'transformers': importlib.util.find_spec('transformers') is not None,
+    'vllm': importlib.util.find_spec('vllm') is not None,
+    'serviceFactories': factories,
+    'apiFromPretrained': callable(getattr(api, 'from_pretrained', None)),
+    'apiLLM': callable(getattr(api, 'LLM', None)),
+}, sort_keys=True, separators=(',', ':')))
+""".strip()
+
+
+def _container_stt_backend_proof(container_id: str) -> dict[str, Any]:
+    lines = [
+        line.strip()
+        for line in _run_text(
+            ["docker", "exec", container_id, "python", "-c", _STT_BACKEND_PROBE]
+        ).splitlines()
+        if line.strip().startswith(_STT_BACKEND_PROOF_PREFIX)
+    ]
+    _required(len(lines) == 1)
+    value = json.loads(lines[0].removeprefix(_STT_BACKEND_PROOF_PREFIX))
+    _required(isinstance(value, dict))
+    return value
+
+
+def _expected_stt_backend_proof(phase: str) -> dict[str, Any]:
+    return {
+        "transformers": True,
+        "vllm": phase == "new-stt",
+        "serviceFactories": ["LLM" if phase == "new-stt" else "from_pretrained"],
+        "apiFromPretrained": True,
+        "apiLLM": True,
+    }
+
+
 def _get_json(url: str) -> dict[str, Any]:
     with request.urlopen(url, timeout=5.0) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -590,6 +653,32 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
             and log_mounts[0].get("Type") == "volume"
         )
 
+        stt_id = containers["stt"]["id"]
+        health = _get_json("http://127.0.0.1:8892/health")
+        health_gpu = health.get("gpu")
+        _required(
+            health.get("ok") is True
+            and health.get("ready") is True
+            and health.get("model") == P0_4_STT_MODEL
+            and health.get("loadOnStart") is True
+            and isinstance(health_gpu, dict)
+            and health_gpu.get("cuda") is True
+            and isinstance(health_gpu.get("name"), str)
+            and bool(health_gpu["name"])
+        )
+        backend_proof = _container_stt_backend_proof(stt_id)
+        _required(backend_proof == _expected_stt_backend_proof(args.phase))
+        if args.phase == "old-stt":
+            _required("backend" not in health)
+            observed_stt_backend = P0_4_OLD_STT_BACKEND
+            observed_stt_memory_utilization = None
+        else:
+            _required(health.get("backend") == P0_4_STT_BACKEND)
+            observed_stt_backend = P0_4_STT_BACKEND
+            observed_stt_memory_utilization = float(
+                stt_environment["STT_VLLM_GPU_MEMORY_UTILIZATION"]
+            )
+
         main_id = containers["main"]["id"]
         main_epoch_identities = [
             line.strip()
@@ -640,19 +729,6 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
             ).hexdigest(),
         }
 
-        health = _get_json("http://127.0.0.1:8892/health")
-        health_gpu = health.get("gpu")
-        _required(
-            health.get("ok") is True
-            and health.get("ready") is True
-            and health.get("model") == P0_4_STT_MODEL
-            and health.get("backend") == P0_4_STT_BACKEND
-            and health.get("loadOnStart") is True
-            and isinstance(health_gpu, dict)
-            and health_gpu.get("cuda") is True
-            and isinstance(health_gpu.get("name"), str)
-            and bool(health_gpu["name"])
-        )
         cache_probe = (
             f"from pathlib import Path; p=Path('{P0_4_STT_CACHE_ROOT}'); "
             "r=(p/'refs/main').read_text().strip(); "
@@ -729,10 +805,9 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
             "qwen": qwen_identity,
             "stt": {
                 "model": health["model"],
-                "backend": health["backend"],
-                "memoryUtilization": float(
-                    stt_environment["STT_VLLM_GPU_MEMORY_UTILIZATION"]
-                ),
+                "backend": observed_stt_backend,
+                "memoryUtilization": observed_stt_memory_utilization,
+                "backendProof": backend_proof,
                 "modelCacheRevision": cache_revision,
                 "modelContentSha256": snapshot_sha256,
                 "cacheSourceSha256": hashlib.sha256(
@@ -1347,11 +1422,24 @@ def _p0_report_violations(
         "runtimeSourceTreeSha256",
         "checkoutSourceTreeSha256",
     )
+    expected_stt_backend = (
+        P0_4_OLD_STT_BACKEND
+        if expected_phase == "old-stt"
+        else P0_4_STT_BACKEND
+    )
+    expected_stt_memory_utilization = (
+        None
+        if expected_phase == "old-stt"
+        else P0_4_STT_MEMORY_UTILIZATION
+    )
     stt_identity_valid = (
         isinstance(stt_identity, dict)
         and stt_identity.get("model") == P0_4_STT_MODEL
-        and stt_identity.get("backend") == P0_4_STT_BACKEND
-        and stt_identity.get("memoryUtilization") == P0_4_STT_MEMORY_UTILIZATION
+        and stt_identity.get("backend") == expected_stt_backend
+        and stt_identity.get("memoryUtilization")
+        == expected_stt_memory_utilization
+        and stt_identity.get("backendProof")
+        == _expected_stt_backend_proof(expected_phase)
         and _COMMIT.fullmatch(str(stt_identity.get("modelCacheRevision") or ""))
         is not None
         and stt_identity.get("cuda") is True
@@ -1465,10 +1553,19 @@ def _binding_comparison_violations(
         violations.append("main_runtime_identity_mismatch")
     if old_binding.get("qwen") != new_binding.get("qwen"):
         violations.append("qwen_runtime_identity_mismatch")
+    old_stt = old_binding.get("stt") or {}
+    new_stt = new_binding.get("stt") or {}
+    if not (
+        old_stt.get("backend") == P0_4_OLD_STT_BACKEND
+        and old_stt.get("memoryUtilization") is None
+        and old_stt.get("backendProof") == _expected_stt_backend_proof("old-stt")
+        and new_stt.get("backend") == P0_4_STT_BACKEND
+        and new_stt.get("memoryUtilization") == P0_4_STT_MEMORY_UTILIZATION
+        and new_stt.get("backendProof") == _expected_stt_backend_proof("new-stt")
+    ):
+        violations.append("stt_operational_baseline_transition_mismatch")
     stable_stt_keys = (
         "model",
-        "backend",
-        "memoryUtilization",
         "modelCacheRevision",
         "modelContentSha256",
         "cacheSourceSha256",
@@ -1479,8 +1576,7 @@ def _binding_comparison_violations(
         "offline",
     )
     if any(
-        (old_binding.get("stt") or {}).get(key)
-        != (new_binding.get("stt") or {}).get(key)
+        old_stt.get(key) != new_stt.get(key)
         for key in stable_stt_keys
     ):
         violations.append("stt_runtime_identity_mismatch")
@@ -1667,11 +1763,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gpu-uuid", default="")
     parser.add_argument("--model-cache-revision", default="")
     parser.add_argument("--stt-model", default="Qwen/Qwen3-ASR-1.7B")
-    parser.add_argument("--stt-backend", default="vllm")
-    parser.add_argument("--stt-memory-utilization", type=float, default=0.35)
+    parser.add_argument("--stt-backend")
+    parser.add_argument("--stt-memory-utilization", type=float)
     parser.add_argument("--baseline-report", type=Path)
     parser.add_argument("--baseline-sha256", default="")
     args = parser.parse_args(argv)
+    if args.stt_backend is None:
+        args.stt_backend = (
+            P0_4_OLD_STT_BACKEND
+            if args.phase == "old-stt"
+            else P0_4_STT_BACKEND
+        )
+    if args.stt_memory_utilization is None and args.phase != "old-stt":
+        args.stt_memory_utilization = P0_4_STT_MEMORY_UTILIZATION
     if args.iterations < 1 or args.warmup_iterations < 0:
         parser.error("iterations must be positive and warmup-iterations nonnegative")
     numeric_values = (
@@ -1682,12 +1786,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.qwen_timeout_ms,
         args.stt_final_budget_ms,
         args.gpu_min_free_mb,
-        args.stt_memory_utilization,
+    )
+    stt_memory_valid = (
+        args.stt_memory_utilization is None
+        if args.phase == "old-stt"
+        else _finite_number(args.stt_memory_utilization)
+        and 0.0 < float(args.stt_memory_utilization) <= 1.0
     )
     if (
         args.gpu_index != 1
         or not all(_finite_number(value) and float(value) > 0.0 for value in numeric_values)
-        or float(args.stt_memory_utilization) > 1.0
+        or not stt_memory_valid
     ):
         parser.error("gpu-index must be 1 and sample interval positive")
     if args.phase != "diagnostic":
@@ -1705,6 +1814,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("P0-4 phases require exact attempt/source/image/GPU/model identities")
         if args.warmup_iterations != 2 or args.iterations != 20:
             parser.error("P0-4 phases require warmup 2 and measured 20")
+        expected_stt_backend = (
+            P0_4_OLD_STT_BACKEND
+            if args.phase == "old-stt"
+            else P0_4_STT_BACKEND
+        )
+        expected_stt_memory_utilization = (
+            None
+            if args.phase == "old-stt"
+            else P0_4_STT_MEMORY_UTILIZATION
+        )
         if (
             args.main_url != P0_4_MAIN_URL
             or args.main_model != P0_4_MAIN_MODEL
@@ -1720,8 +1839,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             or args.stt_final_budget_ms != P0_4_STT_FINAL_BUDGET_MS
             or args.gpu_min_free_mb != P0_4_GPU_MIN_FREE_MB
             or args.stt_model != P0_4_STT_MODEL
-            or args.stt_backend != P0_4_STT_BACKEND
-            or args.stt_memory_utilization != P0_4_STT_MEMORY_UTILIZATION
+            or args.stt_backend != expected_stt_backend
+            or args.stt_memory_utilization != expected_stt_memory_utilization
         ):
             parser.error("P0-4 fixed endpoint/model/budget contract changed")
         baseline_present = args.baseline_report is not None
