@@ -68,11 +68,11 @@ class MinecraftAutonomyExecutorDeps:
     get_world_lease_status: Callable[[], dict[str, Any]]
     get_runtime_status: Callable[[], Awaitable[dict[str, Any]]]
     execute_action: Callable[
-        [int, dict[str, Any]],
+        [int, dict[str, Any], str],
         Awaitable[dict[str, Any]],
     ]
-    cancel_action: Callable[[int, str], Awaitable[Any]] | None = None
-    force_disconnect: Callable[[int], Awaitable[Any]] | None = None
+    cancel_action: Callable[[int, str, str], Awaitable[Any]] | None = None
+    force_disconnect: Callable[[int, str], Awaitable[Any]] | None = None
     now: Callable[[], float] = time.time
 
 
@@ -180,6 +180,10 @@ class MinecraftAutonomyExecutor:
 
     async def connect(self) -> None:
         async with self._lifecycle_lock:
+            if not self._connected and self._inflight_action_run_id:
+                raise RuntimeError(
+                    "minecraft_action_cancel_unverified"
+                )
             lease, lease_error = self._lease()
             if lease is None:
                 raise RuntimeError(lease_error)
@@ -206,6 +210,7 @@ class MinecraftAutonomyExecutor:
                     self.deps.cancel_action(
                         self.guild_id,
                         action_run_id,
+                        str(lease.get("leaseId") or ""),
                     )
                 )
                 while not cleanup.done():
@@ -251,7 +256,10 @@ class MinecraftAutonomyExecutor:
                 "minecraft_action_cancel_unverified"
             )
         fallback = asyncio.create_task(
-            self.deps.force_disconnect(self.guild_id)
+            self.deps.force_disconnect(
+                self.guild_id,
+                str(lease.get("leaseId") or ""),
+            )
         )
         while not fallback.done():
             try:
@@ -287,6 +295,24 @@ class MinecraftAutonomyExecutor:
         self._inflight_action_run_id = ""
         self._inflight_action_request = None
         self._inflight_lease = None
+
+    async def _retire_current_inflight(
+        self,
+        *,
+        action_run_id: str,
+        request: dict[str, Any],
+        lease: dict[str, Any],
+    ) -> bool:
+        async with self._lifecycle_lock:
+            if not (
+                self._connected
+                and self._inflight_action_run_id == action_run_id
+                and self._inflight_action_request == request
+                and self._inflight_lease == lease
+            ):
+                return False
+            self._clear_inflight()
+            return True
 
     async def disconnect(self) -> None:
         async with self._lifecycle_lock:
@@ -383,6 +409,7 @@ class MinecraftAutonomyExecutor:
                 result = await self.deps.execute_action(
                     self.guild_id,
                     request,
+                    before_lease["leaseId"],
                 )
             except asyncio.CancelledError:
                 await self._cancel_inflight_verified(
@@ -393,39 +420,52 @@ class MinecraftAutonomyExecutor:
             except Exception as exc:
                 if str(exc) == "minecraft_action_cancel_unverified":
                     raise
-                self._clear_inflight()
+                if not await self._retire_current_inflight(
+                    action_run_id=context.action_run_id,
+                    request=request,
+                    lease=before_lease,
+                ):
+                    return _blocked("minecraft_action_result_stale")
                 return _blocked("minecraft_action_execution_failed")
-            else:
-                self._clear_inflight()
 
             after_lease, after_error = self._lease()
             if after_lease is None:
-                return _blocked(after_error)
-            if after_lease != before_lease:
-                return _blocked("minecraft_world_lease_changed")
-            if (
+                failure_reason = after_error
+            elif after_lease != before_lease:
+                failure_reason = "minecraft_world_lease_changed"
+            elif (
                 not isinstance(result, dict)
                 or result.get("schema")
                 != MINECRAFT_ACTION_RESULT_SCHEMA
             ):
-                return _blocked("minecraft_action_result_invalid")
-            try:
-                expected = bind_minecraft_action_request(
-                    request,
-                    goal_run_id=str(
-                        result.get("goalRunId") or ""
-                    ),
-                    lease_id=before_lease["leaseId"],
-                    lease_process_nonce=before_lease[
-                        "leaseProcessNonce"
-                    ],
-                )
-                verified = validate_minecraft_action_result(
-                    result,
-                    expected_request=expected,
-                )
-            except MinecraftActionContractError as exc:
-                return _blocked(exc.code)
+                failure_reason = "minecraft_action_result_invalid"
+            else:
+                try:
+                    expected = bind_minecraft_action_request(
+                        request,
+                        goal_run_id=str(
+                            result.get("goalRunId") or ""
+                        ),
+                        lease_id=before_lease["leaseId"],
+                        lease_process_nonce=before_lease[
+                            "leaseProcessNonce"
+                        ],
+                    )
+                    verified = validate_minecraft_action_result(
+                        result,
+                        expected_request=expected,
+                    )
+                    failure_reason = ""
+                except MinecraftActionContractError as exc:
+                    failure_reason = exc.code
+            if not await self._retire_current_inflight(
+                action_run_id=context.action_run_id,
+                request=request,
+                lease=before_lease,
+            ):
+                return _blocked("minecraft_action_result_stale")
+            if failure_reason:
+                return _blocked(failure_reason)
             return {
                 "status": "ok",
                 "reason": "explicit_postcondition_verified",
@@ -456,25 +496,28 @@ def build_minecraft_autonomy_executor_from_runtime(
             ),
             get_runtime_status=lambda: get_client().status(),
             execute_action=(
-                lambda target_guild_id, request: (
+                lambda target_guild_id, request, lease_id: (
                     get_world_lease_owner().execute_action(
                         target_guild_id,
                         request,
+                        expected_lease_id=lease_id,
                     )
                 )
             ),
             cancel_action=(
-                lambda target_guild_id, action_run_id: (
+                lambda target_guild_id, action_run_id, lease_id: (
                     get_world_lease_owner().cancel_action(
                         target_guild_id,
                         action_run_id,
+                        expected_lease_id=lease_id,
                     )
                 )
             ),
             force_disconnect=(
-                lambda target_guild_id: (
+                lambda target_guild_id, expected_lease_id: (
                     get_world_lease_owner().disconnect(
-                        target_guild_id
+                        target_guild_id,
+                        expected_lease_id=expected_lease_id,
                     )
                 )
             ),

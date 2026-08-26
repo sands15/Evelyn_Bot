@@ -18,7 +18,10 @@ CONTROL_PAGE_SEARCH_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn
 FAST_PATH_POLICY_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_path_policy.py"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
-sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
+    sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
 
 from evelyn_core.skills import delivery, main_synthesis, search  # noqa: E402
 from evelyn_core.skills.registry import skill_registry  # noqa: E402
@@ -53,11 +56,10 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("needs_main_llm=False", self.route_execution_py)
         self.assertIn("needs_search=True", self.route_execution_py)
 
-    def test_search_answers_do_not_prompt_or_fallback_with_sources(self) -> None:
-        self.assertIn("strip_search_answer_sources", self.search_answer_runtime_py)
-        self.assertIn("출처, 링크, URL, 참고자료 목록, 괄호 citation은 절대 출력하지 마라.", self.search_answer_runtime_py)
-        self.assertNotIn("출처 1~2개를 괄호로 덧붙여라", self.search_answer_runtime_py)
-        self.assertNotIn("({first.get('url', '')})", self.search_answer_runtime_py)
+    def test_search_answers_use_deterministic_external_cards(self) -> None:
+        self.assertIn("render_search_results_for_user", self.search_answer_runtime_py)
+        self.assertNotIn("memory_exposure_request", self.search_answer_runtime_py)
+        self.assertNotIn("session.post(", self.search_answer_runtime_py)
 
     def test_search_result_recurses_through_main_synthesis(self) -> None:
         search_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "search" / "__init__.py").read_text(encoding="utf-8")
@@ -89,6 +91,8 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("messages=[]", self.main_llm_runtime_py)
         self.assertIn("def tool_synthesis_answer_drifted", self.main_llm_runtime_py)
         self.assertIn("main_synthesis_drift_guard", self.main_llm_runtime_py)
+        self.assertIn('clean_text(tool_name).lower() == "search"', self.main_llm_runtime_py)
+        self.assertIn("deterministic_external_cards", self.main_llm_runtime_py)
 
     def test_control_page_chat_does_not_use_broad_fast_path(self) -> None:
         self.assertIn("if is_control_page_source_from_runtime(source, deps=deps):\n        return None", self.fast_path_policy_py)

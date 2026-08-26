@@ -24,6 +24,7 @@ from evelyn_core.discord_app_composition_runtime import (  # noqa: E402
     DiscordEventCompositionDeps,
     build_discord_intents,
 )
+from evelyn_core.autonomy import AutonomyEngine  # noqa: E402
 from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
 
 
@@ -46,6 +47,8 @@ def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
         is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
         command_session=lambda: object(),
         is_control_command_authorized=lambda _ctx: True,
+        guild_is_open=lambda _guild_id: True,
+        guild_epoch=lambda _guild_id: 0,
     )
     values.update(overrides)
     return DiscordCommandCompositionDeps(**values)
@@ -93,6 +96,362 @@ def make_composition(*, events=None, commands_deps=None) -> DiscordAppCompositio
 
 
 class DiscordAppCompositionTests(unittest.TestCase):
+    def test_autonomy_start_same_guild_reset_during_route_fences_stale_start(
+        self,
+    ) -> None:
+        async def scenario() -> tuple[AsyncMock, Mock, SimpleNamespace]:
+            epochs = {7: 0}
+            open_guilds = {7}
+            route_started = asyncio.Event()
+            route_release = asyncio.Event()
+            engine = SimpleNamespace(
+                stop=AsyncMock(),
+                start=AsyncMock(),
+            )
+            grant = Mock(return_value={"ok": True})
+
+            def guild_epoch(guild_id: int) -> int:
+                if guild_id not in open_guilds:
+                    raise RuntimeError("guild_reset_in_progress")
+                return epochs.get(guild_id, 0)
+
+            def reset_guild(guild_id: int) -> None:
+                open_guilds.discard(guild_id)
+                epochs[guild_id] = epochs.get(guild_id, 0) + 1
+                open_guilds.add(guild_id)
+
+            async def enable_route(_guild_id: int) -> bool:
+                route_started.set()
+                await route_release.wait()
+                return True
+
+            deps = make_command_deps(
+                guild_is_open=lambda guild_id: guild_id in open_guilds,
+                guild_epoch=guild_epoch,
+                get_or_create_autonomy_engine=lambda _guild_id: engine,
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=enable_route,
+                grant_autonomy_authorization=grant,
+                revoke_autonomy_authorization=Mock(),
+                reset_guild_runtime_state=reset_guild,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reset_guild_memory_reply=lambda **_kwargs: "reset-ok",
+            )
+            composition = make_composition(commands_deps=deps)
+            composition.mark_text_session_from_command = Mock()
+
+            def context(content: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    guild=SimpleNamespace(id=7, name="Guild"),
+                    author=SimpleNamespace(id=3),
+                    channel=SimpleNamespace(id=2),
+                    message=SimpleNamespace(id=4, content=content),
+                    send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                )
+
+            start_ctx = context("!자율시작")
+            start_task = asyncio.create_task(
+                composition.autonomy_start_command(start_ctx)
+            )
+            await asyncio.wait_for(route_started.wait(), timeout=1.0)
+            reset_ctx = context("!초기화")
+            await composition.reset_guild_memory(reset_ctx)
+            route_release.set()
+            await asyncio.wait_for(start_task, timeout=1.0)
+            reset_ctx.send.assert_awaited_once_with("reset-ok")
+            return engine.start, grant, start_ctx
+
+        start, grant, start_ctx = asyncio.run(scenario())
+
+        grant.assert_not_called()
+        start.assert_not_awaited()
+        start_ctx.send.assert_awaited_once_with(
+            "길드 상태가 초기화되어 자율 행동 시작을 취소했어. 다시 요청해줘."
+        )
+
+    def test_autonomy_start_reset_during_executor_connect_fences_commit(
+        self,
+    ) -> None:
+        async def scenario() -> tuple[
+            AutonomyEngine,
+            SimpleNamespace,
+            Mock,
+            Mock,
+        ]:
+            class BlockingExecutor:
+                def __init__(inner_self) -> None:
+                    inner_self.connect_started = asyncio.Event()
+                    inner_self.connect_release = asyncio.Event()
+                    inner_self.connected = False
+                    inner_self.disconnect_count = 0
+
+                async def connect(inner_self) -> None:
+                    inner_self.connect_started.set()
+                    await inner_self.connect_release.wait()
+                    inner_self.connected = True
+
+                async def disconnect(inner_self) -> None:
+                    inner_self.disconnect_count += 1
+                    inner_self.connected = False
+
+                async def observe(inner_self) -> dict:
+                    return {}
+
+                async def execute_step(
+                    inner_self,
+                    _step: dict,
+                    *,
+                    context=None,
+                ) -> dict:
+                    del context
+                    return {}
+
+            epochs = {7: 0}
+            open_guilds = {7}
+            authorized_actions: list[str] = []
+            executor = BlockingExecutor()
+            engine = AutonomyEngine(
+                guild_id=7,
+                executor=executor,
+                get_authorized_actions=lambda _guild_id: list(
+                    authorized_actions
+                ),
+            )
+            engine.load_persisted_state = lambda: None
+            engine.persist_state = lambda: None
+
+            def grant(_guild_id: int, _issuer: str, *, scopes) -> dict:
+                authorized_actions[:] = scopes
+                return {"ok": True}
+
+            grant_mock = Mock(side_effect=grant)
+
+            def revoke(_guild_id: int, *, reason_code: str) -> dict:
+                authorized_actions.clear()
+                return {"ok": True, "reason": reason_code}
+
+            revoke_mock = Mock(side_effect=revoke)
+
+            def guild_epoch(guild_id: int) -> int:
+                if guild_id not in open_guilds:
+                    raise RuntimeError("guild_reset_in_progress")
+                return epochs.get(guild_id, 0)
+
+            def reset_guild(guild_id: int) -> None:
+                self.assertIsNone(engine._task)
+                self.assertFalse(engine.state.enabled)
+                self.assertEqual(engine.state.status, "idle")
+                open_guilds.discard(guild_id)
+                epochs[guild_id] = epochs.get(guild_id, 0) + 1
+                engine.state.enabled = False
+                engine.state.status = "idle"
+                engine.state.safety_mode = "constrained"
+                engine.state.allowed_actions = []
+                open_guilds.add(guild_id)
+
+            deps = make_command_deps(
+                guild_is_open=lambda guild_id: guild_id in open_guilds,
+                guild_epoch=guild_epoch,
+                get_or_create_autonomy_engine=lambda _guild_id: engine,
+                grant_autonomy_authorization=grant_mock,
+                revoke_autonomy_authorization=revoke_mock,
+                reset_guild_runtime_state=reset_guild,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reset_guild_memory_reply=lambda **_kwargs: "reset-ok",
+            )
+            composition = make_composition(commands_deps=deps)
+            composition.mark_text_session_from_command = Mock()
+
+            def command_context(content: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    guild=SimpleNamespace(id=7, name="Guild"),
+                    author=SimpleNamespace(id=3),
+                    channel=SimpleNamespace(id=2),
+                    message=SimpleNamespace(id=4, content=content),
+                    send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                )
+
+            start_ctx = command_context("!자율시작")
+            start_task = asyncio.create_task(
+                composition.autonomy_start_command(start_ctx)
+            )
+            await asyncio.wait_for(
+                executor.connect_started.wait(),
+                timeout=1.0,
+            )
+            reset_ctx = command_context("!초기화")
+            await composition.reset_guild_memory(reset_ctx)
+            reset_ctx.send.assert_awaited_once_with("reset-ok")
+            executor.connect_release.set()
+            await asyncio.wait_for(start_task, timeout=1.0)
+            return engine, start_ctx, grant_mock, revoke_mock
+
+        engine, start_ctx, grant, revoke = asyncio.run(scenario())
+
+        grant.assert_called_once()
+        revoke.assert_called_once_with(7, reason_code="start_failed")
+        self.assertFalse(engine.executor.connected)
+        self.assertEqual(engine.executor.disconnect_count, 1)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "idle")
+        self.assertEqual(engine.state.safety_mode, "constrained")
+        self.assertIsNone(engine._task)
+        start_ctx.send.assert_awaited_once_with(
+            "길드 상태가 초기화되어 자율 행동 시작을 취소했어. 다시 요청해줘."
+        )
+
+    def test_autonomy_start_other_guild_reset_does_not_stale_command(
+        self,
+    ) -> None:
+        async def scenario() -> tuple[SimpleNamespace, Mock, SimpleNamespace]:
+            epochs = {7: 0, 8: 0}
+            open_guilds = {7, 8}
+            route_started = asyncio.Event()
+            route_release = asyncio.Event()
+            engine = SimpleNamespace(
+                stop=AsyncMock(),
+                start=AsyncMock(return_value=True),
+            )
+            grant = Mock(return_value={"ok": True})
+
+            def guild_epoch(guild_id: int) -> int:
+                if guild_id not in open_guilds:
+                    raise RuntimeError("guild_reset_in_progress")
+                return epochs[guild_id]
+
+            def reset_guild(guild_id: int) -> None:
+                open_guilds.discard(guild_id)
+                epochs[guild_id] += 1
+                open_guilds.add(guild_id)
+
+            async def enable_route(_guild_id: int) -> bool:
+                route_started.set()
+                await route_release.wait()
+                return True
+
+            deps = make_command_deps(
+                guild_is_open=lambda guild_id: guild_id in open_guilds,
+                guild_epoch=guild_epoch,
+                get_or_create_autonomy_engine=lambda _guild_id: engine,
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=enable_route,
+                grant_autonomy_authorization=grant,
+                revoke_autonomy_authorization=Mock(),
+                reset_guild_runtime_state=reset_guild,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reset_guild_memory_reply=lambda **_kwargs: "reset-ok",
+            )
+            composition = make_composition(commands_deps=deps)
+            composition.mark_text_session_from_command = Mock()
+
+            def context(guild_id: int, content: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    guild=SimpleNamespace(id=guild_id, name="Guild"),
+                    author=SimpleNamespace(id=3),
+                    channel=SimpleNamespace(id=2),
+                    message=SimpleNamespace(id=4, content=content),
+                    send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                )
+
+            start_ctx = context(7, "!자율시작")
+            start_task = asyncio.create_task(
+                composition.autonomy_start_command(start_ctx)
+            )
+            await asyncio.wait_for(route_started.wait(), timeout=1.0)
+            await composition.reset_guild_memory(context(8, "!초기화"))
+            route_release.set()
+            await asyncio.wait_for(start_task, timeout=1.0)
+            return engine, grant, start_ctx
+
+        engine, grant, start_ctx = asyncio.run(scenario())
+
+        grant.assert_called_once()
+        engine.start.assert_awaited_once()
+        self.assertTrue(engine.start.await_args.kwargs["is_current"]())
+        start_ctx.send.assert_awaited_once_with(
+            "🤖 자율 행동 루프를 시작했어."
+        )
+
+    def test_guild_reset_block_fences_effects_but_allows_recovery(self) -> None:
+        engine_factory = Mock()
+        grant = Mock()
+        revoke = Mock(return_value={"ok": True})
+        enable_mode = AsyncMock(
+            return_value={
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
+        )
+        enable_route = AsyncMock(return_value=True)
+        set_goal = AsyncMock()
+        ensure_voice = AsyncMock()
+        save_prefix = Mock()
+        reset = Mock()
+        deps = make_command_deps(
+            guild_is_open=lambda guild_id: guild_id == 8,
+            get_or_create_autonomy_engine=engine_factory,
+            grant_autonomy_authorization=grant,
+            revoke_autonomy_authorization=revoke,
+            enable_minecraft_mode=enable_mode,
+            enable_minecraft_autonomy_route=enable_route,
+            set_minecraft_goal=set_goal,
+            ensure_listening_voice_client=ensure_voice,
+            save_guild_command_prefix=save_prefix,
+            reset_guild_runtime_state=reset,
+            get_guild_command_prefix=lambda _guild_id: "!",
+            build_reset_guild_memory_reply=lambda **_kwargs: "reset-ok",
+            build_minecraft_connect_reply=lambda _observed: "connect-ok",
+        )
+        composition = make_composition(commands_deps=deps)
+        composition.mark_text_session_from_command = Mock()
+
+        def context(guild_id: int, content: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                guild=SimpleNamespace(id=guild_id, name="Guild"),
+                author=SimpleNamespace(id=3),
+                channel=SimpleNamespace(id=2),
+                message=SimpleNamespace(id=4, content=content),
+                send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                typing=Mock(return_value=AsyncMock()),
+            )
+
+        asyncio.run(composition.autonomy_start_command(context(7, "!자율시작")))
+        blocked_voice = context(7, "!들어와")
+        blocked_voice.author.voice = SimpleNamespace(
+            channel=SimpleNamespace(id=9, name="Voice")
+        )
+        asyncio.run(composition.join_voice(blocked_voice))
+        asyncio.run(composition.rejoin_voice(blocked_voice))
+        asyncio.run(composition.minecraft_connect_command(context(7, "!마크접속")))
+        asyncio.run(
+            composition.minecraft_goal_command(
+                context(7, "!마크목표 diamond"),
+                goal="diamond",
+            )
+        )
+        asyncio.run(composition.set_guild_prefix(context(7, "!접두사 ?"), "?"))
+
+        engine_factory.assert_not_called()
+        grant.assert_not_called()
+        ensure_voice.assert_not_awaited()
+        enable_mode.assert_not_awaited()
+        enable_route.assert_not_awaited()
+        set_goal.assert_not_awaited()
+        save_prefix.assert_not_called()
+
+        asyncio.run(composition.reset_guild_memory(context(7, "!초기화")))
+        reset.assert_called_once_with(7)
+        asyncio.run(composition.autonomy_stop_command(context(7, "!자율정지")))
+        revoke.assert_called_once_with(
+            7,
+            reason_code="explicit_autonomy_stop",
+        )
+
+        asyncio.run(composition.minecraft_connect_command(context(8, "!마크접속")))
+        enable_mode.assert_awaited_once()
+        enable_route.assert_awaited_once_with(8)
+
     def test_register_preserves_command_names_aliases_checks_and_errors(self) -> None:
         checker = lambda _ctx: True
         composition = make_composition(
@@ -130,6 +489,8 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertIs(bot.get_command("exit"), bindings.shutdown_bot_command)
         self.assertIs(bot.get_command("landing"), bindings.evelyn_page_command)
         self.assertIs(bot.get_command("minecraft-goal"), bindings.minecraft_goal_command)
+        for name in ("마크접속", "마크종료", "마크상태"):
+            self.assertFalse(bot.get_command(name).ignore_extra)
 
         protected = {
             "재시작",
@@ -156,6 +517,7 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertEqual(list(bot.get_command("관찰채널").clean_params), ["action", "channel"])
         self.assertIs(bot.on_ready.__self__, composition)
         self.assertIs(bot.on_message.__self__, composition)
+        self.assertIs(bot.on_command_error.__self__, composition)
 
     def test_command_replies_use_one_post_delivery_continuity_owner(
         self,
@@ -166,7 +528,7 @@ class DiscordAppCompositionTests(unittest.TestCase):
                 lambda **_kwargs: "help reply"
             ),
             build_minecraft_goal_missing_reply=(
-                lambda: "missing goal"
+                lambda _prefix: "missing goal"
             ),
         )
         composition = make_composition(commands_deps=command_deps)
@@ -248,6 +610,109 @@ class DiscordAppCompositionTests(unittest.TestCase):
         events.log.assert_any_call(
             "[AUTONOMY] guild=7 available approval_required=true"
         )
+
+    def test_on_ready_retries_transient_saved_channel_restore(self) -> None:
+        class VoiceClient:
+            pass
+
+        guild = SimpleNamespace(id=7, voice_client=None)
+        restore = AsyncMock(
+            side_effect=[
+                (False, "voice_rearm_failed"),
+                (True, "General"),
+            ]
+        )
+        events = make_event_deps(
+            bot_guilds=lambda: [guild],
+            voice_client_type=VoiceClient,
+            voice_rejoin_on_ready=True,
+            restore_last_voice_channel=restore,
+        )
+
+        with patch(
+            "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            asyncio.run(make_composition(events=events).on_ready())
+
+        self.assertEqual(restore.await_count, 2)
+        self.assertEqual(
+            restore.await_args_list,
+            [call(guild), call(guild)],
+        )
+        sleep.assert_awaited_once_with(0.5)
+        events.log.assert_any_call(
+            "[VOICE READY REJOIN] guild=7 channel=General"
+        )
+
+    def test_on_ready_does_not_retry_permanent_saved_channel_failure(self) -> None:
+        class VoiceClient:
+            pass
+
+        guild = SimpleNamespace(id=7, voice_client=None)
+        restore = AsyncMock(
+            return_value=(False, "saved_channel_not_available")
+        )
+        events = make_event_deps(
+            bot_guilds=lambda: [guild],
+            voice_client_type=VoiceClient,
+            voice_rejoin_on_ready=True,
+            restore_last_voice_channel=restore,
+        )
+
+        with patch(
+            "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            asyncio.run(make_composition(events=events).on_ready())
+
+        restore.assert_awaited_once_with(guild)
+        sleep.assert_not_awaited()
+
+    def test_on_ready_stale_generation_aborts_saved_channel_retry(self) -> None:
+        async def scenario() -> tuple[AsyncMock, AsyncMock]:
+            class VoiceClient:
+                pass
+
+            guild = SimpleNamespace(id=7, voice_client=None)
+            restore = AsyncMock(
+                side_effect=[
+                    (False, "voice_rearm_failed"),
+                    (True, "General"),
+                    AssertionError("stale ready generation retried"),
+                ]
+            )
+            events = make_event_deps(
+                bot_guilds=lambda: [guild],
+                voice_client_type=VoiceClient,
+                voice_rejoin_on_ready=True,
+                restore_last_voice_channel=restore,
+            )
+            composition = make_composition(events=events)
+            retry_waiting = asyncio.Event()
+            release_retry = asyncio.Event()
+
+            async def controlled_sleep(delay: float) -> None:
+                self.assertEqual(delay, 0.5)
+                retry_waiting.set()
+                await release_retry.wait()
+
+            with patch(
+                "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+                side_effect=controlled_sleep,
+            ) as sleep:
+                stale_ready = asyncio.create_task(composition.on_ready())
+                await asyncio.wait_for(retry_waiting.wait(), timeout=1.0)
+                current_ready = asyncio.create_task(composition.on_ready())
+                await asyncio.wait_for(current_ready, timeout=1.0)
+                release_retry.set()
+                await asyncio.wait_for(stale_ready, timeout=1.0)
+            return restore, sleep
+
+        restore, sleep = asyncio.run(scenario())
+
+        self.assertEqual(restore.await_count, 2)
+        sleep.assert_awaited_once_with(0.5)
 
     def test_on_ready_records_fixed_error_code_in_runtime_status(self) -> None:
         runtime_status = Mock()
@@ -418,6 +883,7 @@ class DiscordAppCompositionTests(unittest.TestCase):
                     channel=SimpleNamespace(id=2),
                     message=SimpleNamespace(id=4, content="!마크접속"),
                     send=AsyncMock(return_value=SimpleNamespace(id=5)),
+                    typing=Mock(return_value=AsyncMock()),
                 )
 
                 asyncio.run(composition.minecraft_connect_command(ctx))
@@ -433,7 +899,8 @@ class DiscordAppCompositionTests(unittest.TestCase):
                 self.assertNotIn(private_error, repr(commands_deps.log.call_args_list))
                 route.assert_awaited_once_with(7)
                 build_reply.assert_not_called()
-                ctx.send.assert_awaited_once()
+                ctx.typing.assert_called_once_with()
+                self.assertEqual(ctx.send.await_count, 1)
                 reply = ctx.send.await_args.args[0]
                 self.assertIn("minecraft_connect_failed", reply)
                 self.assertNotIn("SUCCESS_CANARY", reply)
@@ -471,13 +938,19 @@ class DiscordAppCompositionTests(unittest.TestCase):
             channel=SimpleNamespace(id=2),
             message=SimpleNamespace(id=4, content="!마크접속"),
             send=AsyncMock(side_effect=send_error),
+            typing=Mock(return_value=AsyncMock()),
         )
 
         with self.assertRaises(OSError) as raised:
             asyncio.run(composition.minecraft_connect_command(ctx))
 
         self.assertIs(raised.exception, send_error)
-        ctx.send.assert_awaited_once_with("✅ minecraft ready")
+        ctx.typing.assert_called_once_with()
+        self.assertEqual(ctx.send.await_count, 1)
+        self.assertEqual(
+            ctx.send.await_args.args[0],
+            "✅ minecraft ready",
+        )
         self.assertEqual(runtime_status.snapshot()["errorCount"], 0)
         composition.mark_text_session_from_command.assert_not_called()
 
@@ -505,7 +978,140 @@ class DiscordAppCompositionTests(unittest.TestCase):
             )
         )
 
-    def test_voice_state_recovery_runs_only_after_connected_rearm(self) -> None:
+    def test_search_recovery_blocks_text_ingress_until_initial_run_completes(
+        self,
+    ) -> None:
+        async def scenario() -> tuple[AsyncMock, AsyncMock]:
+            recovery_started = asyncio.Event()
+            release_recovery = asyncio.Event()
+
+            async def recover() -> dict[str, int]:
+                recovery_started.set()
+                await release_recovery.wait()
+                return {"pending": 0}
+
+            events = make_event_deps(recover_search_followups=AsyncMock(side_effect=recover))
+            composition = make_composition(events=events)
+            handler = AsyncMock()
+
+            with patch(
+                "evelyn_core.discord_app_composition_runtime.handle_discord_text_message",
+                new=handler,
+            ):
+                await composition.on_message(object())
+                handler.assert_not_awaited()
+
+                ready_task = asyncio.create_task(composition.on_ready())
+                await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+                message_task = asyncio.create_task(composition.on_message(object()))
+                await asyncio.sleep(0)
+                self.assertFalse(message_task.done())
+                handler.assert_not_awaited()
+
+                release_recovery.set()
+                await asyncio.wait_for(
+                    asyncio.gather(ready_task, message_task),
+                    timeout=1.0,
+                )
+
+            return events.recover_search_followups, handler
+
+        recover, handler = asyncio.run(scenario())
+
+        recover.assert_awaited_once_with()
+        handler.assert_awaited_once()
+
+    def test_search_recovery_runs_once_across_ready_and_voice_rearm(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def is_listening() -> bool:
+                return True
+
+        async def scenario() -> tuple[AsyncMock, AsyncMock]:
+            recover = AsyncMock(return_value={"pending": 0})
+            channel = SimpleNamespace(id=9, name="General")
+            client = VoiceClient(channel)
+            guild = SimpleNamespace(id=7, voice_client=client)
+            ensure = AsyncMock(return_value=client)
+            events = make_event_deps(
+                voice_client_type=VoiceClient,
+                ensure_listening_voice_client=ensure,
+                recover_search_followups=recover,
+            )
+            composition = make_composition(events=events)
+
+            await composition.on_ready()
+            await composition.on_ready()
+            await composition.on_voice_state_update(
+                SimpleNamespace(id=99, guild=guild),
+                SimpleNamespace(channel=SimpleNamespace(id=8, name="Old")),
+                SimpleNamespace(channel=channel),
+            )
+            return recover, ensure
+
+        recover, ensure = asyncio.run(scenario())
+
+        recover.assert_awaited_once_with()
+        self.assertGreaterEqual(ensure.await_count, 1)
+
+    def test_search_recovery_failure_is_permanent_and_fails_closed(self) -> None:
+        class VoiceClient:
+            channel = SimpleNamespace(id=9, name="General")
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+        async def scenario() -> tuple[AsyncMock, AsyncMock, AsyncMock, Mock]:
+            failure = OSError("private recovery failure")
+            recover = AsyncMock(side_effect=failure)
+            ensure = AsyncMock(return_value=VoiceClient())
+            runtime_status = Mock()
+            events = make_event_deps(
+                runtime_status=runtime_status,
+                voice_client_type=VoiceClient,
+                ensure_listening_voice_client=ensure,
+                recover_search_followups=recover,
+            )
+            composition = make_composition(events=events)
+            handler = AsyncMock()
+
+            with patch(
+                "evelyn_core.discord_app_composition_runtime.handle_discord_text_message",
+                new=handler,
+            ):
+                await composition.on_ready()
+                await composition.on_ready()
+                await composition.on_message(object())
+                await composition.on_voice_state_update(
+                    SimpleNamespace(
+                        id=99,
+                        guild=SimpleNamespace(id=7, voice_client=VoiceClient()),
+                    ),
+                    SimpleNamespace(channel=SimpleNamespace(id=8)),
+                    SimpleNamespace(channel=VoiceClient.channel),
+                )
+
+            runtime_status.record_error.assert_called_once_with(
+                "search_followup_recovery_failed",
+                failure,
+            )
+            return recover, handler, ensure, runtime_status
+
+        recover, handler, ensure, _runtime_status = asyncio.run(scenario())
+
+        recover.assert_awaited_once_with()
+        handler.assert_not_awaited()
+        ensure.assert_not_awaited()
+
+    def test_voice_state_rearm_never_triggers_search_recovery(self) -> None:
         class VoiceClient:
             def __init__(self, *, connected: bool) -> None:
                 self.channel = SimpleNamespace(name="General")
@@ -531,8 +1137,10 @@ class DiscordAppCompositionTests(unittest.TestCase):
                 ensure_listening_voice_client=ensure,
                 recover_search_followups=recover,
             )
-
-            await make_composition(events=events).on_voice_state_update(
+            composition = make_composition(events=events)
+            await composition.on_ready()
+            recover.reset_mock()
+            await composition.on_voice_state_update(
                 member,
                 SimpleNamespace(channel=None),
                 SimpleNamespace(channel=guild.voice_client.channel),
@@ -549,11 +1157,9 @@ class DiscordAppCompositionTests(unittest.TestCase):
         ensure.assert_awaited_once()
         recover.assert_not_awaited()
 
-        ensure, recover = asyncio.run(
-            run_case(VoiceClient(connected=True))
-        )
+        ensure, recover = asyncio.run(run_case(VoiceClient(connected=True)))
         ensure.assert_awaited_once()
-        recover.assert_awaited_once_with()
+        recover.assert_not_awaited()
 
     def test_voice_channel_event_forces_cleanup_when_after_differs(self) -> None:
         class VoiceClient:
@@ -605,6 +1211,150 @@ class DiscordAppCompositionTests(unittest.TestCase):
                 ensure.await_args.args[0].voice_client,
             )
 
+    def test_voice_channel_event_retries_transient_failure_after_listener_stop(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+                self.connected = True
+                self.listening = True
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def is_listening(self) -> bool:
+                return self.listening
+
+        async def scenario() -> tuple[VoiceClient, AsyncMock, AsyncMock]:
+            old_channel = SimpleNamespace(id=8, name="Old")
+            target_channel = SimpleNamespace(id=9, name="New")
+            client = VoiceClient(target_channel)
+            guild = SimpleNamespace(id=7, voice_client=client)
+            member = SimpleNamespace(id=99, guild=guild)
+
+            async def rearm(*_args, **_kwargs):
+                client.listening = False
+                if ensure.await_count == 1:
+                    raise RuntimeError("private transient rearm failure")
+                client.listening = True
+                return client
+
+            ensure = AsyncMock(side_effect=rearm)
+            events = make_event_deps(
+                voice_client_type=VoiceClient,
+                ensure_listening_voice_client=ensure,
+            )
+            composition = make_composition(events=events)
+            with patch(
+                "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleep:
+                await composition.on_voice_state_update(
+                    member,
+                    SimpleNamespace(channel=old_channel),
+                    SimpleNamespace(channel=target_channel),
+                )
+            return client, ensure, sleep
+
+        client, ensure, sleep = asyncio.run(scenario())
+
+        self.assertEqual(ensure.await_count, 2)
+        self.assertTrue(client.is_listening())
+        sleep.assert_awaited_once_with(0.5)
+
+    def test_voice_channel_event_rearm_retry_is_bounded_and_type_only(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def is_listening() -> bool:
+                return False
+
+        channel = SimpleNamespace(id=9, name="New")
+        client = VoiceClient(channel)
+        guild = SimpleNamespace(id=7, voice_client=client)
+        member = SimpleNamespace(id=99, guild=guild)
+        failures = [
+            RuntimeError(f"private failure {index}")
+            for index in range(1, 4)
+        ]
+        ensure = AsyncMock(
+            side_effect=[*failures, AssertionError("unbounded rearm")]
+        )
+        runtime_status = Mock()
+        events = make_event_deps(
+            voice_client_type=VoiceClient,
+            ensure_listening_voice_client=ensure,
+            runtime_status=runtime_status,
+        )
+
+        with patch(
+            "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            asyncio.run(
+                make_composition(events=events).on_voice_state_update(
+                    member,
+                    SimpleNamespace(channel=SimpleNamespace(id=8)),
+                    SimpleNamespace(channel=channel),
+                )
+            )
+
+        self.assertEqual(ensure.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        runtime_status.record_error.assert_called_once_with(
+            "voice_state_rearm_failed",
+            failures[-1],
+        )
+        events.log.assert_any_call(
+            "[VOICE STATE REARM FAIL] guild=7 errorType=RuntimeError"
+        )
+        self.assertNotIn("private failure", str(events.log.call_args_list))
+
+    def test_voice_channel_event_rearm_retry_stops_after_newer_move(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+        async def scenario() -> AsyncMock:
+            target_channel = SimpleNamespace(id=9, name="New")
+            client = VoiceClient(target_channel)
+            guild = SimpleNamespace(id=7, voice_client=client)
+            member = SimpleNamespace(id=99, guild=guild)
+            ensure = AsyncMock(
+                side_effect=RuntimeError("superseded rearm")
+            )
+            events = make_event_deps(
+                voice_client_type=VoiceClient,
+                ensure_listening_voice_client=ensure,
+            )
+
+            async def move_again(_delay: float) -> None:
+                client.channel = SimpleNamespace(id=10, name="Newest")
+
+            with patch(
+                "evelyn_core.discord_app_composition_runtime.asyncio.sleep",
+                side_effect=move_again,
+            ):
+                await make_composition(events=events).on_voice_state_update(
+                    member,
+                    SimpleNamespace(channel=SimpleNamespace(id=8)),
+                    SimpleNamespace(channel=target_channel),
+                )
+            return ensure
+
+        ensure = asyncio.run(scenario())
+
+        ensure.assert_awaited_once()
+
     def test_on_message_resolves_fresh_handler_dependencies(self) -> None:
         handler_deps = object()
         events = make_event_deps(text_message_handler=Mock(return_value=handler_deps))
@@ -629,6 +1379,11 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertIn("discord_app_bindings = discord_app_composition.register(bot)", main_source)
         self.assertIn("on_ready = discord_app_bindings.on_ready", main_source)
         self.assertIn("reset_guild_memory = discord_app_bindings.reset_guild_memory", main_source)
+        self.assertIn("admit_search_followup_recovery=(", main_source)
+        self.assertIn(
+            "discord_app_composition.admit_search_followup_ingress()",
+            main_source,
+        )
         self.assertNotIn("@bot.event", main_source)
         self.assertNotIn("@bot.command", main_source)
         self.assertNotIn("globals()", runtime_source)

@@ -172,14 +172,23 @@ async def update_cognitive_state_from_runtime(
                         raise
                     except Exception as e2:
                         e = e2
-                        deps.log(f"[COGNITIVE] compact retry 실패: {e2}")
+                        deps.log(
+                            "[COGNITIVE] compact_retry_failed "
+                            f"errorType={type(e2).__name__}"
+                        )
                     else:
                         deps.log("[COGNITIVE] compact retry 성공")
                 if "result" not in locals() or not isinstance(result, dict):
-                    deps.log(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
+                    deps.log(
+                        "[COGNITIVE] update_failed "
+                        f"errorType={type(e).__name__}"
+                    )
                     elapsed_ms = (time.monotonic() - started_at) * 1000.0
                     if deps.should_log_voice_timing(elapsed_ms):
-                        deps.log(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
+                        deps.log(
+                            f"[COGNITIVE LATENCY] guild={guild_id} "
+                            f"scope={scope_type} failed_after_ms={elapsed_ms:.0f}"
+                        )
                     with memory_deletion_journal_guard(
                         deletion_index_dir,
                         expected_position=memory_deletion_position,
@@ -207,15 +216,23 @@ async def update_cognitive_state_from_runtime(
                 deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             if deps.should_log_voice_timing(elapsed_ms):
-                deps.log(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")
+                deps.log(
+                    f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type} "
+                    f"action={state.get('action')} ms={elapsed_ms:.0f}"
+                )
 
             if state.get("action") == "ask" and state.get("question_for_user"):
                 deps.log(
-                    f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
+                    f"[COGNITIVE ASK] guild={guild_id} scope={scope_type} "
+                    f"questionChars={len(str(state['question_for_user']))} "
+                    f"reasonChars={len(str(state.get('reason_brief', '') or ''))} "
+                    f"confidence={state.get('confidence', 0.0):.2f}"
                 )
             elif state.get("action") == "search_then_answer":
                 deps.log(
-                    f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type}:{scope_key or 'default'} intent={state.get('user_intent', '')!r} reason={state.get('reason_brief', '')!r}"
+                    f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type} "
+                    f"intentChars={len(str(state.get('user_intent', '') or ''))} "
+                    f"reasonChars={len(str(state.get('reason_brief', '') or ''))}"
                 )
 
             return state

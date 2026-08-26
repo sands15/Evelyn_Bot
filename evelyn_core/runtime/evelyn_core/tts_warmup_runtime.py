@@ -42,18 +42,22 @@ async def warmup_tts_server_from_runtime(*, deps: TtsWarmupRuntimeDeps) -> None:
     if deps.omnivoice_language:
         payload["language"] = deps.omnivoice_language
 
-    async with session.post(
-        f"{deps.omnivoice_server_url}/v1/audio/speech",
-        json=payload,
-        timeout=deps.client_timeout(total=20),
-    ) as resp:
-        if resp.status != 200:
-            deps.mark_startup_component("tts_warmup", "failed", "tts_warmup_failed")
-            raise RuntimeError("OmniVoice warmup failed")
-        async for chunk in resp.content.iter_chunked(4096):
-            if chunk:
-                deps.mark_startup_component("tts_warmup", "done", "")
-                deps.log("OmniVoice TTS 워밍업 완료")
-                break
-        if not deps.startup_component_done("tts_warmup"):
-            deps.mark_startup_component("tts_warmup", "done", "no audio chunk returned")
+    try:
+        async with session.post(
+            f"{deps.omnivoice_server_url}/v1/audio/speech",
+            json=payload,
+            timeout=deps.client_timeout(total=20),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError("tts_warmup_failed")
+            audio_bytes = 0
+            async for chunk in resp.content.iter_chunked(4096):
+                audio_bytes += len(chunk)
+            if audio_bytes == 0:
+                raise RuntimeError("tts_warmup_failed")
+    except Exception:
+        deps.mark_startup_component("tts_warmup", "failed", "tts_warmup_failed")
+        raise RuntimeError("OmniVoice warmup failed") from None
+
+    deps.mark_startup_component("tts_warmup", "done", "")
+    deps.log("OmniVoice TTS 워밍업 완료")

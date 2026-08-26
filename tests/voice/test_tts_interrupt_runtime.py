@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,13 +26,26 @@ from evelyn_core.tts_interrupt_runtime import (  # noqa: E402
 
 
 class FakeSpeakerResult:
-    def __init__(self, matched: bool | None, *, threshold: float = 0.7, detail: str = "") -> None:
+    def __init__(
+        self,
+        matched: bool | None,
+        *,
+        status: str = "verified",
+        threshold: float = 0.7,
+        detail: str = "",
+    ) -> None:
         self.matched = matched
+        self.status = status
         self.threshold = threshold
         self.detail = detail
 
     def to_dict(self) -> dict[str, Any]:
-        return {"matched": self.matched, "threshold": self.threshold, "detail": self.detail}
+        return {
+            "status": self.status,
+            "matched": self.matched,
+            "threshold": self.threshold,
+            "detail": self.detail,
+        }
 
 
 class FakePlaybackManager:
@@ -83,8 +98,9 @@ class TtsInterruptRuntimeTests(unittest.IsolatedAsyncioTestCase):
             tts_playback_manager=FakePlaybackManager(stopped),
             log_turn_event=lambda event, **payload: events.append((event, payload)),
             speaker_verification_applies=lambda **_kwargs: applies,
-            speaker_verification_result_factory=lambda _status, **kwargs: FakeSpeakerResult(
+            speaker_verification_result_factory=lambda status, **kwargs: FakeSpeakerResult(
                 None,
+                status=status,
                 threshold=kwargs["threshold"],
                 detail=kwargs["detail"],
             ),
@@ -157,10 +173,21 @@ class TtsInterruptRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.matched)
         self.assertEqual(result.detail, "verified:b'audio'")
 
-    def test_speaker_verification_allows_unless_explicit_false(self) -> None:
+    def test_speaker_verification_requires_match_unless_policy_was_skipped(self) -> None:
         self.assertTrue(speaker_verification_allows_tts_interrupt_from_runtime(FakeSpeakerResult(True)))
-        self.assertTrue(speaker_verification_allows_tts_interrupt_from_runtime(FakeSpeakerResult(None)))
+        self.assertTrue(
+            speaker_verification_allows_tts_interrupt_from_runtime(
+                FakeSpeakerResult(None, status="skipped")
+            )
+        )
         self.assertFalse(speaker_verification_allows_tts_interrupt_from_runtime(FakeSpeakerResult(False)))
+        for status in ("too_short", "not_enrolled", "unavailable", "error"):
+            with self.subTest(status=status):
+                self.assertFalse(
+                    speaker_verification_allows_tts_interrupt_from_runtime(
+                        FakeSpeakerResult(None, status=status)
+                    )
+                )
 
 
 class FakeGateLocalPlaybackManager:
@@ -233,7 +260,9 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
             local_tts_playback_manager=self.local_manager,
             tts_playback_manager=self.playback_manager,
             verify_speaker_for_tts_interrupt=verify,
-            speaker_verification_allows_tts_interrupt=lambda result: result.matched is not False,
+            speaker_verification_allows_tts_interrupt=(
+                speaker_verification_allows_tts_interrupt_from_runtime
+            ),
             stop_active_tts_playback=stop_discord,
             register_drop_reason=lambda _metrics, reason, **kwargs: self.events.append(("drop", (reason, kwargs))),
             log_voice_stage=lambda _metrics, label, **kwargs: self.events.append(("stage", (label, kwargs))),
@@ -248,7 +277,12 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
             voice_waveform_body_rms_min=0.05,
         )
 
-    async def run_gate(self, *, deps: VoiceTtsInterruptGateDeps | None = None):
+    async def run_gate(
+        self,
+        *,
+        deps: VoiceTtsInterruptGateDeps | None = None,
+        source_is_current: Any = None,
+    ):
         return await run_voice_tts_interrupt_gate_from_runtime(
             member=SimpleNamespace(id=7, display_name="정훈"),
             guild_id=11,
@@ -265,6 +299,7 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
             stt_sampling_rate=16000,
             metrics=getattr(self, "metrics", {"meta": {"ingress_source": "local_mic"}}),
             deps=deps or self.deps,
+            source_is_current=source_is_current,
         )
 
     def drop_reasons(self) -> list[str]:
@@ -311,6 +346,36 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interrupt_event[1]["validation_step_id"], "07-local-barge-source")
         self.assertEqual(interrupt_event[1]["validation_attempt_id"], "attempt-local-1")
 
+    async def test_reset_during_speaker_verification_cannot_stop_tts(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        current = True
+        self.qualified = True
+        self.local_manager.active = True
+        self.metrics = {"meta": {"ingress_source": "local_mic"}}
+
+        async def blocked_verify(_audio: Any, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return self.verification
+
+        gate = asyncio.create_task(
+            self.run_gate(
+                deps=replace(
+                    self.deps,
+                    verify_speaker_for_tts_interrupt=blocked_verify,
+                ),
+                source_is_current=lambda: current,
+            )
+        )
+        await started.wait()
+        current = False
+        release.set()
+
+        self.assertIsNone(await gate)
+        self.assertEqual(self.local_manager.stop_reasons, [])
+        self.assertNotIn("local_tts_interrupted_by_user_audio", self.metrics["meta"])
+
     async def test_qualified_local_stop_failure_emits_no_interrupt_evidence(self) -> None:
         self.qualified = True
         self.local_manager.active = True
@@ -341,6 +406,33 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(self.drop_reasons(), ["speaker_verification_rejected"])
         self.assertEqual(self.local_manager.stop_reasons, [])
+
+    async def test_required_unverified_speaker_cannot_stop_local_tts(self) -> None:
+        for status in ("too_short", "not_enrolled", "unavailable", "error"):
+            with self.subTest(status=status):
+                self.events.clear()
+                self.qualified = True
+                self.local_manager = FakeGateLocalPlaybackManager(active=True)
+                self.playback_manager = FakeGatePlaybackManager()
+                self.verification = SimpleNamespace(
+                    status=status,
+                    matched=None,
+                    score=None,
+                    to_dict=lambda status=status: {
+                        "status": status,
+                        "matched": None,
+                    },
+                )
+                self.deps = self.build_gate_deps()
+
+                result = await self.run_gate()
+
+                self.assertIsNone(result)
+                self.assertEqual(
+                    self.drop_reasons(),
+                    ["speaker_verification_rejected"],
+                )
+                self.assertEqual(self.local_manager.stop_reasons, [])
 
     async def test_qualified_discord_input_debounces_and_stops_playback(self) -> None:
         self.qualified = True

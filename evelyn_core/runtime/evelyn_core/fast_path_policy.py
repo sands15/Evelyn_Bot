@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .task_loop_runtime import is_task_request
+
 
 @dataclass(frozen=True)
 class FastPathPolicyRuntimeDeps:
@@ -106,6 +108,12 @@ def fast_path_policy_from_runtime(
     cleaned = deps.clean_text(text)
     if not cleaned:
         return {"route": "main_direct", "action": "wait", "reason_brief": "empty_input"}
+    if is_task_request(cleaned):
+        return {
+            "route": "task_executor",
+            "action": "execute_task",
+            "reason_brief": "explicit_task",
+        }
     if is_control_page_source_from_runtime(source, deps=deps):
         return None
     if is_obvious_continue_from_runtime(cleaned, source, room_state=room_state, deps=deps):
@@ -128,9 +136,10 @@ def context_policy_for_fast_path_policy_from_runtime(
     action = deps.clean_text(str((policy or {}).get("action") or "answer"))
     route = deps.clean_text(str((policy or {}).get("route") or "main_direct"))
     needs_search = action == "search_then_answer" or route == "search_executor"
+    needs_task = action == "execute_task" or route == "task_executor"
     return {
-        "intent": "question" if needs_search else "chat",
-        "needs_main_llm": action == "answer",
+        "intent": "control" if needs_task else ("question" if needs_search else "chat"),
+        "needs_main_llm": action == "answer" or needs_task,
         "needs_memory": False,
         "needs_runtime_state": False,
         "needs_minecraft_state": False,
@@ -139,7 +148,7 @@ def context_policy_for_fast_path_policy_from_runtime(
         "needs_long_context": False,
         "needs_search": needs_search,
         "needs_tts": True,
-        "priority": "accuracy" if needs_search else "latency",
+        "priority": "action" if needs_task else ("accuracy" if needs_search else "latency"),
         "context_focus": [],
         "response_mode": "short" if source == "voice" else "normal",
     }

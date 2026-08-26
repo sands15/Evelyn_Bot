@@ -11,7 +11,10 @@ from .config import (
 )
 from .memory import merge_memory_rows, normalize_cognitive_state, select_relevant_memory_rows
 from .memory_content_free_ids import memory_content_free_id
-from .memory_confirmation_contract import memory_owner_scope
+from .memory_confirmation_contract import (
+    memory_owner_scope,
+    memory_owner_scope_is_canonical,
+)
 from .memory_deletion_journal import (
     MemoryDeletionJournalBusyError,
     MemoryDeletionPosition,
@@ -300,6 +303,7 @@ def _build_memory_context_at_position(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    owner_scope: str | None = None,
     receipt: dict[str, Any] | None = None,
     read_only_fallback: bool = False,
 ) -> str:
@@ -342,8 +346,11 @@ def _build_memory_context_at_position(
         )
     active_session_state = dict(session_state or {})
     vault_receipt: dict[str, Any] = {}
-    vault_owner_scope = None
-    if person_key:
+    vault_owner_scope = clean_text(owner_scope)
+    if owner_scope is not None:
+        if not memory_owner_scope_is_canonical(vault_owner_scope):
+            raise ValueError("memory_owner_scope_invalid")
+    elif person_key:
         try:
             vault_owner_scope = memory_owner_scope(
                 guild_id=guild_id,
@@ -602,6 +609,7 @@ def build_memory_context(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    owner_scope: str | None = None,
     receipt: dict[str, Any] | None = None,
 ) -> str:
     """Build all legacy and vault memory at one verified deletion position."""
@@ -622,6 +630,7 @@ def build_memory_context(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            owner_scope=owner_scope,
             receipt=receipt,
             read_only_fallback=read_only_fallback,
         )

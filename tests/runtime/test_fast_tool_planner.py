@@ -17,10 +17,12 @@ from evelyn_core import fast_tool_planner  # noqa: E402
 from evelyn_core.fast_tool_planner import (  # noqa: E402
     FAST_TOOL_CAPABILITY_BY_NAME,
     FastToolPlan,
+    RegisteredToolCapabilityIncrementalFilter,
     answer_fast_tool_capability_question,
     bind_fast_tool_plan_memory_exposure,
     default_router_provider,
     enforce_registered_tool_capability_truth,
+    fast_tool_plan_context_policy,
     normalize_stt_tool_text,
     plan_fast_tool_request,
     render_fast_tool_registry_context,
@@ -89,15 +91,30 @@ class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_stt_tool_text("Vox CPM"), "VoxCPM")
 
     async def test_model_research_request_becomes_background_action(self) -> None:
+        router_calls: list[tuple] = []
+
+        async def fake_router(text, recent_messages):
+            router_calls.append((text, recent_messages))
+            return {
+                "intent": "research",
+                "tool": "research_compare",
+                "query": text,
+                "confidence": 0.94,
+                "reason": "external model comparison is intended",
+            }
+
         plan = await plan_fast_tool_request(
             "S T T 모델들 좀 알아봐줘",
             recent_messages=[],
+            router_provider=fake_router,
         )
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.tool_name, "research_compare")
         self.assertEqual(plan.mode, "background")
         self.assertIn("STT", plan.query)
+        self.assertEqual(plan.source, "router_llm")
+        self.assertEqual(len(router_calls), 1)
 
     async def test_short_correction_keeps_previous_research_topic(self) -> None:
         recent = [
@@ -105,15 +122,49 @@ class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "현재 모델 상태는 확인할 수 있어."},
         ]
 
+        async def fake_router(text, _recent_messages):
+            return {
+                "intent": "research",
+                "tool": "research_compare",
+                "query": f"로컬 STT 모델 {text}",
+                "confidence": 0.9,
+                "reason": "follow-up resolves to the prior model topic",
+            }
+
         plan = await plan_fast_tool_request(
             "아니, 그거 찾아보라고",
             recent_messages=recent,
+            router_provider=fake_router,
         )
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.tool_name, "research_compare")
         self.assertIn("로컬 STT 모델", plan.query)
         self.assertIn("찾아보라고", plan.query)
+
+    async def test_ambiguous_find_request_lets_router_choose_memory_not_web(self) -> None:
+        calls: list[str] = []
+
+        async def fake_router(text, _recent_messages):
+            calls.append(text)
+            return {
+                "intent": "memory_lookup",
+                "tool": "memory_recall",
+                "query": "지난 GPU 배치 이야기",
+                "confidence": 0.93,
+                "reason": "the user explicitly refers to remembered conversation",
+            }
+
+        plan = await plan_fast_tool_request(
+            "기억에서 지난 GPU 배치 이야기 찾아줘",
+            recent_messages=[],
+            router_provider=fake_router,
+        )
+
+        self.assertEqual(calls, ["기억에서 지난 GPU 배치 이야기 찾아줘"])
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.tool_name, "memory_recall")
+        self.assertEqual(plan.source, "router_llm")
 
     async def test_contextual_external_search_stt_misrecognition_keeps_topic(self) -> None:
         recent = [{"role": "user", "content": "로컬 STT 모델 교체 후보를 알아봐줘"}]
@@ -202,6 +253,28 @@ class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(public, sort_keys=True)
         for forbidden in ("memoryVersion", "noteIds", "position", "path"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_fast_plan_adapts_to_authoritative_shared_context_policy(self) -> None:
+        plan = FastToolPlan(
+            intent="memory_lookup",
+            tool_name="memory_recall",
+            mode="inline",
+            query="previous design",
+            confidence=0.9,
+            source="router_llm",
+        )
+
+        policy = fast_tool_plan_context_policy(plan)
+
+        self.assertIsNotNone(policy)
+        assert policy is not None
+        self.assertTrue(policy.tool_plan_authoritative)
+        self.assertTrue(policy.needs_memory)
+        self.assertFalse(policy.needs_search)
+        self.assertEqual(
+            [item.tool_name for item in policy.tool_requests],
+            ["memory_recall"],
+        )
 
     def test_memory_exposure_binding_rejects_invalid_position(self) -> None:
         with self.assertRaises(MemoryDeletionJournalIntegrityError):
@@ -353,6 +426,69 @@ class FastToolPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("웹 검색 도구는 연결돼 있어", reply)
         self.assertNotIn("지원되지", reply)
+
+    def test_capability_projection_preserves_safe_prefix_and_holds_split_claim(
+        self,
+    ) -> None:
+        policy = RegisteredToolCapabilityIncrementalFilter()
+
+        self.assertEqual(policy.push("먼저 확인한 내용이야."), [])
+        self.assertEqual(
+            policy.push(" 인터넷 검색은 사용할 수 "),
+            ["먼저 확인한 내용이야. "],
+        )
+        self.assertEqual(policy.push("없어."), [])
+        correction = "".join(policy.finish())
+        projected = enforce_registered_tool_capability_truth(
+            "먼저 확인한 내용이야. 인터넷 검색은 사용할 수 없어."
+        )
+
+        self.assertIn("웹 검색 도구는 연결돼 있어", correction)
+        self.assertNotIn("사용할 수 없어", correction)
+        self.assertTrue(projected.startswith("먼저 확인한 내용이야."))
+        self.assertEqual(
+            projected,
+            f"먼저 확인한 내용이야. {correction.strip()}",
+        )
+
+    def test_incremental_capability_projection_matches_multi_false_final(self) -> None:
+        policy = RegisteredToolCapabilityIncrementalFilter()
+        fragments = (
+            "안전한 시작이야. ",
+            "인터넷 검색은 사용할 수 없어. ",
+            "웹 검색도 지원되지 않아. ",
+            "안전한 끝이야.",
+        )
+
+        incremental = "".join(
+            projected
+            for fragment in fragments
+            for projected in policy.push(fragment)
+        ) + "".join(policy.finish())
+        final = enforce_registered_tool_capability_truth("".join(fragments))
+
+        self.assertEqual(" ".join(incremental.split()), final)
+        self.assertEqual(final.count("웹 검색 도구는 연결돼 있어"), 1)
+        self.assertTrue(final.startswith("안전한 시작이야."))
+        self.assertTrue(final.endswith("안전한 끝이야."))
+
+    def test_capability_projection_does_not_split_decimal_or_no_space_suffix(
+        self,
+    ) -> None:
+        raw = "버전은 3.14야.인터넷 검색은 사용할 수 없어."
+        policy = RegisteredToolCapabilityIncrementalFilter()
+
+        incremental = "".join(policy.push(raw)) + "".join(policy.finish())
+
+        self.assertEqual(
+            incremental,
+            enforce_registered_tool_capability_truth(raw),
+        )
+        self.assertEqual(
+            incremental,
+            "웹 검색 도구는 연결돼 있어. 방금 요청이 검색으로 "
+            "인식되지 않았거나 검색 실행 결과가 전달되지 않은 거야.",
+        )
 
     def test_web_capability_question_is_answered_from_registry(self) -> None:
         reply = answer_fast_tool_capability_question("웹검색 권한 없어?")

@@ -36,6 +36,7 @@ from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E40
 from evelyn_core import memory_vault  # noqa: E402
 from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
+    append_turn_rows_to_memory_vault,
     build_memory_recall_receipt,
     build_memory_vault_context,
     delete_memory_vault_user_note,
@@ -1102,14 +1103,22 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
             root = Path(tmp)
             day = "2026-08-01"
             secret = "semantic outbound deletion canary"
-            source_path = write_memory_vault_note(
-                note_type="daily",
-                title="Semantic deletion boundary",
-                body=(secret + " ") * 12,
-                storage_key=day,
-                source="conversation-turn-log",
-                root=root,
-            )
+            with patch.object(
+                memory_vault.time,
+                "strftime",
+                return_value=day,
+            ):
+                source_path = append_turn_rows_to_memory_vault(
+                    1,
+                    [
+                        {
+                            "role": "user",
+                            "text": (secret + " ") * 12,
+                        }
+                    ],
+                    root=root,
+                )
+            assert source_path is not None
             source_bytes = source_path.read_bytes()
             source_note = parse_memory_note(source_path)
             preview = preview_memory_vault_user_note_deletion(
@@ -1212,14 +1221,24 @@ class MemoryDeletionIntegrityRestartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             day = "2026-08-02"
-            source_path = write_memory_vault_note(
-                note_type="daily",
-                title="Semantic handoff source",
-                body="semantic handoff source body " * 12,
-                storage_key=day,
-                source="conversation-turn-log",
-                root=root,
-            )
+            with patch.object(
+                memory_vault.time,
+                "strftime",
+                return_value=day,
+            ):
+                source_path = append_turn_rows_to_memory_vault(
+                    1,
+                    [
+                        {
+                            "role": "user",
+                            "text": (
+                                "semantic handoff source body " * 12
+                            ),
+                        }
+                    ],
+                    root=root,
+                )
+            assert source_path is not None
             source_note = parse_memory_note(source_path)
             preview = preview_memory_vault_user_note_deletion(
                 source_note.note_id,

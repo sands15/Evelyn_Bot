@@ -228,6 +228,8 @@ class MinecraftWorldLease:
     source: str
     issued_at: float
     expires_at: float
+    issued_monotonic: float
+    expires_monotonic: float
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -705,7 +707,8 @@ class MinecraftWorldLeaseOwner:
         lease = self._lease
         active_lease = (
             lease.public_dict()
-            if lease is not None and lease.expires_at > timestamp
+            if lease is not None
+            and self._lease_is_active(lease, now=timestamp)
             else None
         )
         self._prune_stop_attempts()
@@ -946,16 +949,28 @@ class MinecraftWorldLeaseOwner:
                 or MINECRAFT_WORLD_LEASE_OWNER_CONFLICT
             )
 
-    def _write_secret(self) -> None:
+    def _write_secret(
+        self,
+        *,
+        lease: MinecraftWorldLease | None = None,
+    ) -> None:
         self._require_owner_claim()
+        payload = {
+            "schema": MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
+            "processNonce": self.process_nonce,
+            "authorizationToken": self.authorization_token,
+            "issuedAt": self.now(),
+        }
+        if lease is not None:
+            payload.update(
+                {
+                    "leaseId": lease.lease_id,
+                    "expiresMonotonic": lease.expires_monotonic,
+                }
+            )
         atomic_json_write(
             self.secret_path,
-            {
-                "schema": MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
-                "processNonce": self.process_nonce,
-                "authorizationToken": self.authorization_token,
-                "issuedAt": self.now(),
-            },
+            payload,
         )
         self._require_owner_claim()
         self._secret_ready = True
@@ -1116,6 +1131,23 @@ class MinecraftWorldLeaseOwner:
                 self._owner_claim_matches()
             return self._status_payload()
 
+    def _lease_is_active(
+        self,
+        lease: MinecraftWorldLease,
+        *,
+        now: float | None = None,
+        monotonic_now: float | None = None,
+    ) -> bool:
+        return (
+            lease.expires_at > (self.now() if now is None else now)
+            and lease.expires_monotonic
+            > (
+                self.monotonic()
+                if monotonic_now is None
+                else monotonic_now
+            )
+        )
+
     def delegation_token(self) -> str:
         with self._data_lock:
             if not self._owner_claim_matches():
@@ -1162,6 +1194,7 @@ class MinecraftWorldLeaseOwner:
             min(self.max_ttl_sec, requested_ttl),
         )
         issued_at = self.now()
+        issued_monotonic = self.monotonic()
         lease = MinecraftWorldLease(
             lease_id=f"lease-{secrets.token_urlsafe(18)}",
             guild_id=resolved_guild_id,
@@ -1169,6 +1202,8 @@ class MinecraftWorldLeaseOwner:
             source=resolved_source,
             issued_at=issued_at,
             expires_at=issued_at + effective_ttl,
+            issued_monotonic=issued_monotonic,
+            expires_monotonic=issued_monotonic + effective_ttl,
         )
         previous = self._lease
         if previous is not None:
@@ -1194,6 +1229,17 @@ class MinecraftWorldLeaseOwner:
         self._lease = lease
         self._state = "authorized"
         self._last_error_code = ""
+        try:
+            self._write_secret(lease=lease)
+        except OSError:
+            self._withhold_delegation_capability()
+            if self._last_error_code not in _OWNER_AUTHORITY_ERROR_CODES:
+                self._state = "manual_intervention_required"
+                self._last_error_code = (
+                    "minecraft_world_lease_secret_unavailable"
+                )
+            self._write_status()
+            raise RuntimeError(self._boundary_error_code()) from None
         if not self._write_status():
             raise RuntimeError(self._boundary_error_code())
         return lease
@@ -1385,7 +1431,7 @@ class MinecraftWorldLeaseOwner:
     ) -> dict[str, Any]:
         async with self._operation_lock:
             lease = self._lease
-            if lease is not None and lease.expires_at <= self.now():
+            if lease is not None and not self._lease_is_active(lease):
                 guild_id = lease.guild_id
                 self._revoke_lease(reason="lease_expired")
                 stopped = await self._shielded_stop_runtime(
@@ -1501,7 +1547,7 @@ class MinecraftWorldLeaseOwner:
                     if (
                         not owner_refresh_failed
                         and lease is not None
-                        and lease.expires_at > self.now()
+                        and self._lease_is_active(lease)
                         and self._audit_ready
                     ):
                         self._state = "authorized"
@@ -1547,6 +1593,48 @@ class MinecraftWorldLeaseOwner:
                     "code=minecraft_watchdog_failed"
                 )
 
+    async def _reject_expired_connect_lease(
+        self,
+        *,
+        guild_id: int,
+        lease: MinecraftWorldLease,
+        requested_goal: str,
+    ) -> None:
+        goal_failure_audited = bool(
+            not requested_goal
+            or self._append_required_event(
+                "goal_failed",
+                lease=lease,
+                reason="explicit_goal",
+                outcome="minecraft_goal_failed",
+                verified=False,
+            )
+        )
+        revoke_audited = self._revoke_lease(reason="lease_expired")
+        stopped = await self._shielded_stop_runtime(
+            guild_id=guild_id,
+            reason=(
+                self._boundary_stop_reason()
+                if self._boundary_error_code()
+                else "lease_expired"
+            ),
+            force=True,
+            lease=lease,
+        )
+        boundary_error = self._boundary_error_code()
+        if (
+            not goal_failure_audited
+            or not revoke_audited
+            or boundary_error
+        ):
+            raise RuntimeError(
+                boundary_error
+                or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
+            )
+        if not stopped:
+            raise RuntimeError("minecraft_stop_unverified")
+        raise RuntimeError("minecraft_world_authorization_required")
+
     async def connect(
         self,
         guild_id: int,
@@ -1575,7 +1663,7 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(boundary_error)
             requested_goal = str(goal or "").strip()
             current = self._lease
-            if current is not None and current.expires_at <= self.now():
+            if current is not None and not self._lease_is_active(current):
                 expired_guild_id = current.guild_id
                 self._revoke_lease(reason="lease_expired")
                 if not await self._shielded_stop_runtime(
@@ -1624,6 +1712,7 @@ class MinecraftWorldLeaseOwner:
                 if str(exc) in {
                     MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE,
                     MINECRAFT_WORLD_LEASE_STATUS_WRITE_FAILED,
+                    "minecraft_world_lease_secret_unavailable",
                 }:
                     await self._shielded_stop_runtime(
                         guild_id=cleanup_guild_id,
@@ -1698,6 +1787,12 @@ class MinecraftWorldLeaseOwner:
                         or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
                     ) from None
                 raise
+            if not self._lease_is_active(lease):
+                await self._reject_expired_connect_lease(
+                    guild_id=guild_id,
+                    lease=lease,
+                    requested_goal=requested_goal,
+                )
             verified = bool(
                 isinstance(observed, dict)
                 and observed.get("outcome_verified") is True
@@ -1819,15 +1914,37 @@ class MinecraftWorldLeaseOwner:
                     lease=lease,
                 )
                 raise RuntimeError(self._boundary_error_code())
+            if not self._lease_is_active(lease):
+                await self._reject_expired_connect_lease(
+                    guild_id=guild_id,
+                    lease=lease,
+                    requested_goal=requested_goal,
+                )
             return result
 
-    async def disconnect(self, guild_id: int) -> dict[str, Any]:
+    async def disconnect(
+        self,
+        guild_id: int,
+        *,
+        expected_lease_id: str | None = None,
+    ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
             lease = self._lease
             if (
+                expected_lease_id is not None
+                and (
+                    not expected_lease_id
+                    or lease is None
+                    or lease.lease_id != expected_lease_id
+                )
+            ):
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
+            if (
                 lease is not None
-                and lease.expires_at > self.now()
+                and self._lease_is_active(lease)
                 and lease.guild_id != int(guild_id)
             ):
                 raise RuntimeError(
@@ -1876,11 +1993,25 @@ class MinecraftWorldLeaseOwner:
         self,
         guild_id: int,
         goal: str,
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
             if self._shutting_down:
                 raise RuntimeError("minecraft_world_owner_shutting_down")
+            lease = self._lease
+            if (
+                expected_lease_id is not None
+                and (
+                    not expected_lease_id
+                    or lease is None
+                    or lease.lease_id != expected_lease_id
+                )
+            ):
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
             if self._inflight_actions:
                 raise RuntimeError("minecraft_world_action_busy")
             boundary_error = self._boundary_error_code()
@@ -1892,10 +2023,9 @@ class MinecraftWorldLeaseOwner:
                     lease=self._lease,
                 )
                 raise RuntimeError(boundary_error)
-            lease = self._lease
             if (
                 lease is None
-                or lease.expires_at <= self.now()
+                or not self._lease_is_active(lease)
                 or lease.guild_id != int(guild_id)
             ):
                 raise RuntimeError(
@@ -2062,7 +2192,7 @@ class MinecraftWorldLeaseOwner:
         lease = self._lease
         if (
             lease is None
-            or lease.expires_at <= self.now()
+            or not self._lease_is_active(lease)
             or lease.guild_id != int(guild_id)
             or (
                 expected_lease_id
@@ -2220,6 +2350,8 @@ class MinecraftWorldLeaseOwner:
         self,
         guild_id: int,
         request: dict[str, Any],
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         await self.ensure_started()
         normalized = validate_minecraft_action_request(
@@ -2232,7 +2364,14 @@ class MinecraftWorldLeaseOwner:
             if self._shutting_down:
                 raise RuntimeError("minecraft_world_owner_shutting_down")
             self._require_action_transport()
-            lease, proof = self._authorized_action_lease(guild_id)
+            if expected_lease_id is not None and not expected_lease_id:
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
+            lease, proof = self._authorized_action_lease(
+                guild_id,
+                expected_lease_id=expected_lease_id or "",
+            )
             if self._inflight_actions:
                 raise RuntimeError("minecraft_world_action_busy")
             bound = bind_minecraft_action_request(
@@ -2421,6 +2560,8 @@ class MinecraftWorldLeaseOwner:
         self,
         guild_id: int,
         action_run_id: str,
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
@@ -2428,19 +2569,34 @@ class MinecraftWorldLeaseOwner:
                 guild_id=guild_id,
                 action_run_id=action_run_id,
             )
+            request = validate_minecraft_action_request(
+                record["request"],
+                bound=True,
+            )
+            if (
+                expected_lease_id is not None
+                and request["leaseId"] != expected_lease_id
+            ):
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
             return await self._cancel_bound_action_locked(record)
 
     async def execute_action(
         self,
         guild_id: int,
         request: dict[str, Any],
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         async with self._action_execution_lock:
             dispatch = await self.dispatch_action(
                 guild_id,
                 request,
+                expected_lease_id=expected_lease_id,
             )
             action_run_id = dispatch["actionRunId"]
+            action_lease_id = dispatch["leaseId"]
             deadline = self.monotonic() + self.action_timeout_sec
             try:
                 while self.monotonic() < deadline:
@@ -2458,11 +2614,19 @@ class MinecraftWorldLeaseOwner:
                     if status.get("status") == "cancelled":
                         raise RuntimeError("minecraft_action_cancelled")
                     await self.sleep(self.action_poll_interval_sec)
-                await self.cancel_action(guild_id, action_run_id)
+                await self.cancel_action(
+                    guild_id,
+                    action_run_id,
+                    expected_lease_id=action_lease_id,
+                )
                 raise RuntimeError("minecraft_action_timeout")
             except asyncio.CancelledError:
                 try:
-                    await self.cancel_action(guild_id, action_run_id)
+                    await self.cancel_action(
+                        guild_id,
+                        action_run_id,
+                        expected_lease_id=action_lease_id,
+                    )
                 except Exception:
                     pass
                 raise
@@ -2472,6 +2636,7 @@ class MinecraftWorldLeaseOwner:
                         await self.cancel_action(
                             guild_id,
                             action_run_id,
+                            expected_lease_id=action_lease_id,
                         )
                     except Exception as cancel_exc:
                         raise RuntimeError(

@@ -38,6 +38,14 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "needs_memory": True,
                 "response_mode": "normal",
             },
+            "specialist": "deep_reasoning",
+            "tools": [
+                {
+                    "tool": "memory_recall",
+                    "query": "previous design",
+                    "required_before_answer": True,
+                }
+            ],
         }
         self.router_calls: list[tuple[list[dict], dict]] = []
         self.question_calls: list[tuple[dict, str]] = []
@@ -115,11 +123,32 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.load_calls, [])
         self.assertEqual(self.router_calls, [])
 
-    async def test_voice_without_context_marker_uses_fallback(self) -> None:
-        route, meta = await classify_llm_route_from_runtime("안녕", deps=self.build_deps(), source="voice")
+    async def test_semantic_voice_without_fast_path_uses_router(self) -> None:
+        route, meta = await classify_llm_route_from_runtime(
+            "여러 선택지를 깊게 비교해서 최선의 결론을 내려줘",
+            deps=self.build_deps(),
+            source="voice",
+        )
+
+        self.assertEqual(route, "sub_hint")
+        self.assertEqual(meta["source"], "router")
+        self.assertEqual(len(self.router_calls), 1)
+
+    async def test_simple_voice_fast_path_skips_router(self) -> None:
+        self.fast_policy_result = {
+            "route": "main_direct",
+            "action": "answer",
+            "reason_brief": "simple voice",
+        }
+
+        route, meta = await classify_llm_route_from_runtime(
+            "안녕",
+            deps=self.build_deps(),
+            source="voice",
+        )
 
         self.assertEqual(route, "main_direct")
-        self.assertEqual(meta["source"], "fallback")
+        self.assertEqual(meta["source"], "fast_path")
         self.assertEqual(self.router_calls, [])
 
     async def test_disabled_router_uses_fallback_for_text(self) -> None:
@@ -149,6 +178,9 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["max_question_count"], 1)
         self.assertEqual(meta["context_policy"]["intent"], "question")
         self.assertTrue(meta["context_policy"]["needs_memory"])
+        self.assertTrue(meta["context_policy"]["tool_plan_authoritative"])
+        self.assertEqual(meta["context_policy"]["specialist"], "deep_reasoning")
+        self.assertEqual(meta["context_policy"]["tools"][0]["tool_name"], "memory_recall")
         self.assertEqual(self.load_calls, [])
         messages, kwargs = self.router_calls[0]
         self.assertNotIn("summary text", messages[1]["content"])
@@ -164,6 +196,22 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["memory_boundary_required"])
         self.assertEqual(kwargs["memory_deletion_index_dir"], index_dir)
         self.assertEqual(self.question_calls[0][1], "router")
+
+    async def test_top_level_plan_survives_missing_context_policy(self) -> None:
+        self.router_result.pop("context_policy")
+
+        _route, meta = await classify_llm_route_from_runtime(
+            "깊게 분석해줘",
+            deps=self.build_deps(),
+        )
+
+        policy = meta["context_policy"]
+        self.assertTrue(policy["tool_plan_authoritative"])
+        self.assertEqual(policy["specialist"], "deep_reasoning")
+        self.assertEqual(policy["tools"][0]["tool_name"], "memory_recall")
+        self.assertTrue(policy["needs_memory"])
+        self.assertFalse(policy["needs_runtime_state"])
+        self.assertFalse(policy["needs_search"])
 
     async def test_memory_deletion_integrity_error_is_not_downgraded_to_route_fallback(self) -> None:
         self.router_result = MemoryDeletionJournalIntegrityError()

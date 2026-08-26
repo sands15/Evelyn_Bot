@@ -2035,6 +2035,29 @@ class VoiceValidationTests(unittest.TestCase):
         self.assertEqual(snapshot["currentStep"]["status"], "failed")
         self.assertEqual(snapshot["lastFailureCode"], "orphan_or_incomplete_playback")
 
+    def test_reply_without_playback_start_becomes_retryable(self) -> None:
+        session = self.start()
+        step = session["currentStep"]
+        self.record("stt_final", transcript=step["prompt"])
+        self.record("turn_accepted")
+        self.record("reply_started")
+        self.record("reply_final")
+
+        self.clock.advance(29)
+        self.assertEqual(self.manager.snapshot()["currentStep"]["status"], "pending")
+
+        self.clock.advance(2)
+        snapshot = self.manager.snapshot()
+        self.assertEqual(snapshot["currentStep"]["status"], "failed")
+        self.assertEqual(snapshot["lastFailureCode"], "playback_start_timeout")
+        retry = self.manager.retry(
+            session_id=snapshot["sessionId"],
+            step_id=snapshot["currentStep"]["id"],
+            attempt=snapshot["currentStep"]["attempt"],
+        )
+        self.assertTrue(retry["ok"], retry)
+        self.assertEqual(retry["session"]["currentStep"]["status"], "pending")
+
     def test_terminal_grace_requires_stt_but_not_heard_confirmation(self) -> None:
         self.start()
         self.record("turn_accepted")

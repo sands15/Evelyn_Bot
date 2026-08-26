@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -18,17 +19,15 @@ from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime  # n
 class FakeAsyncLock:
     def __init__(self, *, locked: bool = False) -> None:
         self._locked = locked
-        self.entered = False
 
     def locked(self) -> bool:
         return self._locked
 
-    async def __aenter__(self) -> "FakeAsyncLock":
-        self.entered = True
-        return self
+    async def acquire(self) -> None:
+        self._locked = True
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        self.entered = False
+    def release(self) -> None:
+        self._locked = False
 
 
 class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -37,7 +36,10 @@ class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_wait_for(value: Any, *, timeout: float) -> Any:
             self.assertEqual(timeout, 0.5)
-            return value
+            return await value
+
+        async def fake_to_thread(func: Any) -> Any:
+            return func()
 
         result = await run_blocking_stt_task_from_runtime(
             lambda: "ok",
@@ -51,7 +53,7 @@ class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
             increment_voice_pipeline_counter=lambda _name: None,
             record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
             wait_for=fake_wait_for,
-            to_thread=lambda func: func(),
+            to_thread=fake_to_thread,
         )
 
         self.assertEqual(result, "ok")
@@ -102,6 +104,9 @@ class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def fake_wait_for(_value: Any, *, timeout: float) -> Any:
             raise asyncio.TimeoutError()
 
+        async def fake_to_thread(func: Any) -> Any:
+            return func()
+
         with self.assertRaises(asyncio.TimeoutError):
             await run_blocking_stt_task_from_runtime(
                 lambda: "unused",
@@ -116,7 +121,7 @@ class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 increment_voice_pipeline_counter=lambda name: counters.append(name),
                 record_voice_pipeline_failure=lambda *args, **kwargs: failures.append((args, kwargs)),
                 wait_for=fake_wait_for,
-                to_thread=lambda func: func(),
+                to_thread=fake_to_thread,
             )
 
         self.assertEqual(cooldowns, [12.0])
@@ -124,6 +129,96 @@ class SttTaskRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failures[0][0][0], "stt_timeout")
         self.assertIn("full timed out after 1.2s", failures[0][0][1])
         self.assertEqual(failures[0][1]["stage"], "full")
+
+    async def test_timeout_keeps_inference_busy_until_thread_exits(self) -> None:
+        lock = asyncio.Lock()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_inference() -> str:
+            started.set()
+            release.wait(timeout=2.0)
+            return "late"
+
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await run_blocking_stt_task_from_runtime(
+                    blocked_inference,
+                    stage="full",
+                    timeout_sec=0.01,
+                    get_stt_cooldown_until=lambda: 0.0,
+                    set_stt_cooldown_until=lambda _value: None,
+                    stt_cooldown_after_timeout_sec=0.0,
+                    monotonic=lambda: 10.0,
+                    get_stt_inference_lock=lambda: lock,
+                    increment_voice_pipeline_counter=lambda _name: None,
+                    record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
+                )
+            self.assertTrue(started.is_set())
+            self.assertTrue(lock.locked())
+            with self.assertRaisesRegex(RuntimeError, "stt_busy:wake"):
+                await run_blocking_stt_task_from_runtime(
+                    lambda: "must-not-run",
+                    stage="wake",
+                    timeout_sec=0.01,
+                    get_stt_cooldown_until=lambda: 0.0,
+                    set_stt_cooldown_until=lambda _value: None,
+                    stt_cooldown_after_timeout_sec=0.0,
+                    monotonic=lambda: 10.0,
+                    get_stt_inference_lock=lambda: lock,
+                    increment_voice_pipeline_counter=lambda _name: None,
+                    record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
+                )
+        finally:
+            release.set()
+            for _ in range(100):
+                if not lock.locked():
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertFalse(lock.locked())
+
+    async def test_cancel_keeps_inference_busy_until_thread_exits(self) -> None:
+        lock = asyncio.Lock()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_inference() -> str:
+            started.set()
+            release.wait(timeout=2.0)
+            return "late"
+
+        task = asyncio.create_task(
+            run_blocking_stt_task_from_runtime(
+                blocked_inference,
+                stage="full",
+                timeout_sec=5.0,
+                get_stt_cooldown_until=lambda: 0.0,
+                set_stt_cooldown_until=lambda _value: None,
+                stt_cooldown_after_timeout_sec=0.0,
+                monotonic=lambda: 10.0,
+                get_stt_inference_lock=lambda: lock,
+                increment_voice_pipeline_counter=lambda _name: None,
+                record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
+            )
+        )
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 1.0))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(lock.locked())
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            for _ in range(100):
+                if not lock.locked():
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertFalse(lock.locked())
 
 
 if __name__ == "__main__":

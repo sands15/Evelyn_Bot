@@ -23,6 +23,9 @@
 !evelyn_voice/
 !evelyn_voice/**
 
+!tests/
+!tests/**
+
 !tools/
 !tools/provision_falcon_ocr_snapshot.py
 
@@ -32,3 +35,25 @@
 !external/mindcraft_evelyn/
 !external/mindcraft_evelyn/**
 external/mindcraft/.git
+external/mindcraft/keys.json
+external/mindcraft/_tmp_ms_profiles/
+external/mindcraft/bots/
+external/mindcraft/code_records/
+external/mindcraft/experiments/
+external/mindcraft/node_modules*/
+external/mindcraft/results/
+external/mindcraft/server_data*/
+external/mindcraft/services/viaproxy/jars/
+external/mindcraft/services/viaproxy/logs/
+external/mindcraft/services/viaproxy/plugins/
+external/mindcraft/services/viaproxy/ViaLoader/
+external/mindcraft/services/viaproxy/saves.json
+external/mindcraft/services/viaproxy/viaproxy.yml
+external/mindcraft/wandb/
+external/mindcraft/andy_*.json
+external/mindcraft/jill_*.json
+external/mindcraft/temp_*
+external/mindcraft_evelyn/tmp-ms-profile-*/
+external/mindcraft_evelyn/node_modules/
+external/mindcraft_evelyn/*-ms-code.mjs
+tmp-ms-profile-*/

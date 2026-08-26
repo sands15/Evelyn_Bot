@@ -27,10 +27,12 @@ class VoiceTurnEntryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.attached: list[object] = []
         self.detached: list[tuple[object, object]] = []
         self.main_requests: list[tuple[object, object, object]] = []
+        self.prepare_kwargs: list[dict] = []
         self.failures: list[tuple[tuple, dict]] = []
         self.route_error: Exception | None = None
 
-    async def prepare_route_context(self, *_args, **_kwargs):
+    async def prepare_route_context(self, *_args, **kwargs):
+        self.prepare_kwargs.append(kwargs)
         if self.route_error is not None:
             raise self.route_error
         route = SimpleNamespace(
@@ -74,6 +76,7 @@ class VoiceTurnEntryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_builds_request_runs_orchestrator_and_detaches(self) -> None:
         scope = FakeScope()
         metrics = {"meta": {}}
+        memory_owner_scope = "memory-owner-" + ("a" * 64)
 
         result = await ask_llm_streaming_from_runtime(
             "질문",
@@ -83,6 +86,7 @@ class VoiceTurnEntryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             room_key="room-1",
             person_key="person-1",
             session_memory_key="memory-1",
+            memory_owner_scope=memory_owner_scope,
             source="voice",
             debug_text="debug",
             metrics=metrics,
@@ -94,8 +98,18 @@ class VoiceTurnEntryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.user_text, "질문")
         self.assertEqual(request.guild_id, 77)
         self.assertEqual(request.session_key, "session-1")
+        self.assertEqual(
+            request.memory_owner_scope,
+            memory_owner_scope,
+        )
+        self.assertEqual(
+            self.prepare_kwargs[0]["memory_owner_scope"],
+            memory_owner_scope,
+        )
+        self.assertNotIn(memory_owner_scope, repr(request))
         self.assertEqual(request.source, "voice")
         self.assertIs(request.metrics, metrics)
+        self.assertNotIn(memory_owner_scope, repr(metrics))
         self.assertEqual(self.detached, [(scope, ("task", scope))])
 
     async def test_failure_is_recorded_and_task_is_detached(self) -> None:

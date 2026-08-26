@@ -16,6 +16,9 @@ def durable_continuity_status(
         "checkpointHeadState": "current",
         "checkpointGeneration": generation,
         "persistedSessionCount": persisted_session_count,
+        "restoredSessionCount": 0,
+        "keyedAuthenticity": False,
+        "externalAnchorConfigured": False,
         "completedTurnCommit": {
             "schema": (
                 "conversation_continuity.commit-metrics.v1"

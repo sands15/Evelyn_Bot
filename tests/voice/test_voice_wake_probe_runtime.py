@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from dataclasses import replace
@@ -69,6 +70,7 @@ class VoiceWakeProbeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             should_require_confirm_exact_for_wake=lambda _meta: False,
             apply_strict_wake_confirm_policy=apply_strict_wake_confirm_policy,
             apply_fuzzy_wake_near_miss=apply_fuzzy_wake_near_miss,
+            extract_leading_wake_alias=lambda text: "이블린" if text.startswith("이블린") else None,
             fuzzy_leading_wake_alias=lambda _text: None,
             register_drop_reason=register_drop,
             log_voice_bottleneck_summary=log_bottleneck,
@@ -90,6 +92,7 @@ class VoiceWakeProbeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         deps: VoiceWakeProbeDeps | None = None,
         raw_seconds: float = 4.0,
         debug_meta: dict[str, Any] | None = None,
+        source_is_current: Any = None,
     ):
         return await run_voice_wake_probe_from_runtime(
             member=self.member,
@@ -107,6 +110,64 @@ class VoiceWakeProbeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             duration_sec=1.25,
             metrics={"meta": {}, "marks": {}},
             deps=deps or self.deps,
+            source_is_current=source_is_current,
+        )
+
+    async def test_precomputed_batch_final_replaces_duplicate_wake_asr(self) -> None:
+        result = await run_voice_wake_probe_from_runtime(
+            member=self.member,
+            pcm_bytes=b"pcm",
+            debug_meta={"source": "discord_voice"},
+            session_key="voice:11:7",
+            room_session_key="room:11",
+            owner_user_id=7,
+            guild_id=11,
+            speaker_name="정훈",
+            audio16k=self.audio,
+            audio_for_wake=self.audio,
+            wake_sampling_rate=16000,
+            raw_seconds=2.0,
+            duration_sec=1.25,
+            metrics={"meta": {}, "marks": {}},
+            stream_result=SimpleNamespace(final_text="이블린 오늘 날씨"),
+            deps=self.deps,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.wake_detected)
+        self.assertEqual(result.wake_match_mode, "exact")
+        self.assertFalse(any(kind == "blocking" for kind, _payload in self.events))
+
+    async def test_damaged_transport_keeps_independent_wake_confirmation(self) -> None:
+        deps = replace(
+            self.deps,
+            should_require_confirm_exact_for_wake=lambda _meta: True,
+        )
+
+        result = await run_voice_wake_probe_from_runtime(
+            member=self.member,
+            pcm_bytes=b"pcm",
+            debug_meta={"opus_fail": 1},
+            session_key="voice:11:7",
+            room_session_key="room:11",
+            owner_user_id=7,
+            guild_id=11,
+            speaker_name="정훈",
+            audio16k=self.audio,
+            audio_for_wake=self.audio,
+            wake_sampling_rate=16000,
+            raw_seconds=2.0,
+            duration_sec=1.25,
+            metrics={"meta": {}, "marks": {}},
+            stream_result=SimpleNamespace(final_text="이블린 오늘 날씨"),
+            deps=deps,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.wake_detected)
+        self.assertEqual(
+            len([payload for kind, payload in self.events if kind == "blocking"]),
+            1,
         )
 
     def drop_reasons(self) -> list[str]:
@@ -202,6 +263,48 @@ class VoiceWakeProbeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.drop_reasons(), ["env_ignore"])
         debug_payload = next(payload for kind, payload in self.events if kind == "debug")
         self.assertEqual(debug_payload[1]["final_text"], "[ENV IGNORE]")
+
+    async def test_reset_during_blocking_probe_cannot_save_stale_audio_or_bad_state(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        current = True
+        bad_audio: dict[str, int] = {}
+        self.wake_result = {
+            "wake_detected": False,
+            "wake_probe_text": "바람",
+            "wake_reject_reason": "wake_ignore",
+        }
+
+        async def blocked_probe(task, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return task()
+
+        def increment_bad_audio(session_key: str) -> int:
+            bad_audio[session_key] = bad_audio.get(session_key, 0) + 1
+            return bad_audio[session_key]
+
+        deps = replace(
+            self.deps,
+            run_blocking_stt_task=blocked_probe,
+            is_likely_environment_noise=lambda _audio, **_kwargs: True,
+            increment_session_bad_audio=increment_bad_audio,
+        )
+        probe = asyncio.create_task(
+            self.run_probe(
+                deps=deps,
+                raw_seconds=2.0,
+                source_is_current=lambda: current,
+            )
+        )
+        await started.wait()
+        current = False
+        bad_audio.clear()
+        release.set()
+
+        self.assertIsNone(await probe)
+        self.assertEqual(bad_audio, {})
+        self.assertFalse(any(kind == "debug" for kind, _payload in self.events))
 
     async def test_short_filler_stops(self) -> None:
         self.wake_result = {

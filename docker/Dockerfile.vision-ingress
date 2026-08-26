@@ -7,6 +7,9 @@ WORKDIR /app
 
 COPY evelyn_core/runtime/evelyn_core/vision_ingress_proxy.py /app/vision_ingress_proxy.py
 
+ARG EVELYN_SOURCE_REVISION=unversioned
+ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}
+
 USER 65534:65534
 
 EXPOSE 8891

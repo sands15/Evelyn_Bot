@@ -13,14 +13,18 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-if "aiohttp" not in sys.modules:
+try:
+    import aiohttp as _aiohttp  # noqa: F401
+except ImportError:
     class _DummyClientTimeout:
         def __init__(self, **_kwargs: object) -> None:
             self.params = _kwargs
 
     sys.modules["aiohttp"] = types.SimpleNamespace(ClientTimeout=_DummyClientTimeout)
 
-if "numpy" not in sys.modules:
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
     class _DummyNdArray:
         pass
 

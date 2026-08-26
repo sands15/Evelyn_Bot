@@ -18,7 +18,7 @@ from .memory_exposure import (
     memory_exposure_guard,
     read_memory_version,
 )
-from .route_fallback_policy import normalize_route_name, should_force_voice_context_route
+from .route_fallback_policy import normalize_route_name
 from .turn_budget import build_turn_execution_budget
 
 
@@ -82,8 +82,7 @@ async def classify_llm_route_from_runtime(
             "fallback": fallback_route,
             "execution_budget": fast_budget.to_dict(),
         }
-    force_voice_context = source == "voice" and should_force_voice_context_route(user_text)
-    if (source == "voice" and not force_voice_context) or not deps.router_llm_enabled:
+    if not deps.router_llm_enabled:
         return fallback_route, {
             "selected": fallback_route,
             "source": "fallback",
@@ -129,13 +128,19 @@ async def classify_llm_route_from_runtime(
                         '"intent":"chat|question|minecraft_task|vision_question|memory_update|control",'
                         '"needs_main_llm":true,"needs_memory":true,"needs_runtime_state":true,'
                         '"needs_minecraft_state":false,"needs_vision":false,"needs_skill_graph":false,'
-                        '"needs_long_context":false,"priority":"latency|accuracy|action",'
+                        '"needs_long_context":false,"needs_search":false,"priority":"latency|accuracy|action",'
                         '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"},'
+                        '"specialist":"none|deep_reasoning|minecraft_planning",'
+                        '"tools":[{"tool":"memory_recall|runtime_status|vision_capture_or_watch|vision_ocr|web_current_info|local_file_or_log_read",'
+                        '"query":"tool input","required_before_answer":true}],'
                         '"ask_mode":"none|clarify|soft_followup|preference_probe|topic_continue|idle_checkin",'
                         '"max_question_count":0,"question_reason":"short reason","question_hint":"direction only","question_source":"router"}. '
                         "Use main_direct for ordinary direct replies, voice_context when recent state/memory is important, "
                         "and sub_wait when search/wait/search_then_answer style reasoning is needed. "
                         "Set minecraft/vision/skill flags only when the current turn needs them. "
+                        "Select tools by meaning, not by matching particular words. Use tools=[] when none are needed. "
+                        "Use specialist=deep_reasoning only for genuinely hard multi-step reasoning and "
+                        "specialist=minecraft_planning only for Minecraft planning. "
                         "Question rules: do not add a router call just for questions; if a direct answer/task/fix is requested, "
                         "use ask_mode=none and max_question_count=0. If a light follow-up is useful, allow at most one question. "
                         "question_hint is only a direction, not a final sentence."
@@ -237,6 +242,32 @@ async def classify_llm_route_from_runtime(
     )
     meta.update(question_policy)
     raw_context_policy = result.get("context_policy")
-    if isinstance(raw_context_policy, dict):
-        meta["context_policy"] = ContextPolicy.from_mapping(raw_context_policy).to_dict()
+    canonical_policy = {
+        "needs_main_llm": True,
+        "needs_memory": False,
+        "needs_runtime_state": False,
+        "needs_minecraft_state": False,
+        "needs_vision": False,
+        "needs_skill_graph": False,
+        "needs_long_context": False,
+        "needs_search": False,
+        "needs_tts": True,
+        **(
+            dict(raw_context_policy)
+            if isinstance(raw_context_policy, dict)
+            else {}
+        ),
+    }
+    canonical_policy["specialist"] = result.get(
+        "specialist",
+        canonical_policy.get("specialist", "none"),
+    )
+    canonical_policy["tools"] = result.get(
+        "tools",
+        canonical_policy.get("tools", []),
+    )
+    canonical_policy["tool_plan_authoritative"] = True
+    meta["context_policy"] = ContextPolicy.from_mapping(
+        canonical_policy
+    ).to_dict()
     return selected, meta

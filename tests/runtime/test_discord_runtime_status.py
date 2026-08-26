@@ -78,6 +78,7 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
                 voice_client_type=FakeVoiceClient,
                 status_path=path,
                 now=lambda: 1234.5,
+                instance_id="f" * 32,
                 search_followup_recovery_status=lambda: {
                     "state": "ready",
                     "pendingCount": 1,
@@ -92,6 +93,7 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
         self.assertTrue(payload["guildConnected"])
         self.assertTrue(payload["voiceConnected"])
         self.assertTrue(payload["listening"])
+        self.assertEqual(payload["instanceId"], "f" * 32)
         self.assertTrue(payload["sourceReady"])
         self.assertEqual(payload["sourceIdentity"]["state"], "development")
         self.assertEqual(persisted["heartbeatAt"], 1234.5)

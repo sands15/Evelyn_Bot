@@ -274,9 +274,13 @@ class ConversationSessionCompositionTests(unittest.TestCase):
 
         mismatches = []
         additive_keyword_defaults = {
-            "begin_user_text_turn": (("turn_id", "None"),),
+            "begin_user_text_turn": (
+                ("turn_id", "None"),
+                ("precommit_user_only", "False"),
+            ),
             "finish_assistant_text_turn": (
                 ("memory_receipt", "None"),
+                ("complete_turn_id", "None"),
             ),
             "append_history": (
                 ("memory_receipt", "None"),

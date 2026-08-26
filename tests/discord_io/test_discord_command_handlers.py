@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -14,6 +16,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_control_command_error,
+    handle_discord_command_error,
     handle_autonomy_start_command,
     handle_autonomy_status_command,
     handle_autonomy_stop_command,
@@ -36,6 +39,9 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
 from evelyn_core.autonomy_authorization import (  # noqa: E402
     ASSISTANT_AUTONOMY_ACTIONS,
 )
+from evelyn_core.discord_command_session_runtime import (  # noqa: E402
+    ContinuityRecordingCommandContext,
+)
 from evelyn_core.minecraft_action_contract import (  # noqa: E402
     MINECRAFT_ROUTE_ACTIONS,
 )
@@ -47,9 +53,22 @@ class FakeContext:
         self.guild = guild
         self.author = SimpleNamespace(id=3, voice=SimpleNamespace(channel=voice_channel) if voice_channel else None)
         self.message = SimpleNamespace(content=content)
+        self.typing_entries = 0
 
     async def send(self, text: str) -> None:
         self.sent.append(text)
+
+    def typing(self):
+        context = self
+
+        class TypingContext:
+            async def __aenter__(self):
+                context.typing_entries += 1
+
+            async def __aexit__(self, *_args):
+                return None
+
+        return TypingContext()
 
 
 class FakeVoiceClient:
@@ -86,11 +105,55 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         asyncio.run(handle_control_command_error(ctx, handlers.commands.CheckFailure("no")))
         self.assertEqual(ctx.sent, ["이 명령은 허용된 Discord ID이거나 서버 관리자 권한이 있어야 쓸 수 있어."])
 
+        ctx.prefix = "?"
+        ctx.command = SimpleNamespace(name="마크접속")
+        asyncio.run(
+            handle_control_command_error(
+                ctx,
+                handlers.commands.TooManyArguments("extra"),
+            )
+        )
+        self.assertEqual(
+            ctx.sent[-1],
+            "명령 형식이 맞지 않아. 사용법: `?마크접속`",
+        )
+
         class _Error(Exception):
             pass
 
         with self.assertRaises(_Error):
             asyncio.run(handle_control_command_error(ctx, _Error("boom")))
+        with self.assertRaises(_Error):
+            asyncio.run(handle_discord_command_error(ctx, _Error("boom")))
+
+    def test_minecraft_like_unknown_command_shows_prefix_usage(self) -> None:
+        import evelyn_core.discord_command_handlers as handlers
+
+        ctx = FakeContext(content="?minecraft connect")
+        ctx.prefix = "?"
+        ctx.invoked_with = "minecraft"
+        asyncio.run(
+            handle_discord_command_error(
+                ctx,
+                handlers.commands.CommandNotFound("minecraft"),
+            )
+        )
+        self.assertEqual(
+            ctx.sent,
+            [
+                "Minecraft 접속 명령은 띄어쓰지 않고 입력해줘. "
+                "사용법: `?minecraft-connect` 또는 `?마크접속`"
+            ],
+        )
+
+        ctx.invoked_with = "unknown"
+        asyncio.run(
+            handle_discord_command_error(
+                ctx,
+                handlers.commands.CommandNotFound("unknown"),
+            )
+        )
+        self.assertEqual(len(ctx.sent), 1)
 
     def test_join_voice_command_connects_or_reports_missing_channel(self) -> None:
         channel = SimpleNamespace(name="General")
@@ -173,8 +236,30 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(ctx.sent, ["connect:True"])
+        self.assertEqual(
+            ctx.sent,
+            ["connect:True"],
+        )
+        self.assertEqual(ctx.typing_entries, 1)
         self.assertEqual(route_enabled, [1])
+
+    def test_minecraft_connect_ignores_typing_indicator_failure(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=1))
+        ctx.typing = lambda: object()
+
+        asyncio.run(
+            handle_minecraft_connect_command(
+                ctx,
+                enable_minecraft_mode=AsyncMock(
+                    return_value={"connected": False}
+                ),
+                enable_minecraft_autonomy_route=AsyncMock(),
+                build_reply=lambda _observed: "not connected",
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(ctx.sent, ["not connected"])
 
     def test_minecraft_disconnect_requires_verified_stop(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -250,6 +335,7 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(route_calls, [])
         self.assertEqual(ctx.sent, ["observed"])
+        self.assertEqual(ctx.typing_entries, 1)
 
     def test_minecraft_status_command_sends_failure_reply(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -288,14 +374,14 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         kwargs = dict(
             set_minecraft_goal=set_goal,
-            build_missing_reply=lambda: "missing goal",
+            build_missing_reply=lambda prefix: f"missing goal:{prefix}",
             build_updated_reply=lambda goal, status: f"goal:{goal}:{status['stage']}",
             guild_only_message=lambda: "guild only",
         )
         asyncio.run(handle_minecraft_goal_command(missing_ctx, goal="", **kwargs))
         asyncio.run(handle_minecraft_goal_command(goal_ctx, goal=" diamond ", **kwargs))
 
-        self.assertEqual(missing_ctx.sent, ["missing goal"])
+        self.assertEqual(missing_ctx.sent, ["missing goal:!"])
         self.assertEqual(goal_ctx.sent, ["goal:diamond:diamond"])
 
     def test_prefix_command_reads_resets_and_saves_prefix(self) -> None:
@@ -983,10 +1069,123 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(ctx.sent, ["🔄 봇을 재시작할게. 잠깐만 기다려줘."])
-        self.assertEqual(shutdown_ctx.sent, ["Full-stack shutdown helper failed, so only the bot process is stopping."])
+        self.assertEqual(
+            shutdown_ctx.sent,
+            [
+                "Evelyn shutdown requested. Supervisors, bot, LLM, TTS, Voyager, "
+                "and Evelyn-owned WSL services will stop if the full-stack helper "
+                "starts; otherwise this bot process will stop instead."
+            ],
+        )
         self.assertEqual(len(tasks), 2)
         for task in tasks:
             task.close()
+
+    def test_restart_arms_after_delivery_before_continuity_record_returns(
+        self,
+    ) -> None:
+        record_entered = threading.Event()
+        release_record = threading.Event()
+        terminal_armed = threading.Event()
+        worker_errors: list[BaseException] = []
+        tasks: list[object] = []
+
+        original = FakeContext(guild=SimpleNamespace(id=1))
+
+        def stalled_record(*_args: object) -> None:
+            record_entered.set()
+            release_record.wait()
+
+        wrapped = ContinuityRecordingCommandContext(
+            original,
+            record_reply=stalled_record,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        async def completed_work() -> None:
+            return None
+
+        def restart_process() -> object:
+            terminal_armed.set()
+            return completed_work()
+
+        def run_handler() -> None:
+            try:
+                asyncio.run(
+                    handle_restart_bot_command(
+                        wrapped,
+                        create_task=tasks.append,
+                        restart_bot_process=restart_process,
+                    )
+                )
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=run_handler, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(record_entered.wait(timeout=1.0))
+            armed_before_record_release = terminal_armed.wait(timeout=1.0)
+        finally:
+            release_record.set()
+            worker.join(timeout=1.0)
+            for task in tasks:
+                task.close()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertTrue(armed_before_record_release)
+        self.assertEqual(
+            original.sent,
+            ["🔄 봇을 재시작할게. 잠깐만 기다려줘."],
+        )
+
+    def test_shutdown_schedules_only_after_confirmation_delivery(self) -> None:
+        async def scenario() -> tuple[bool, list[str]]:
+            delivery_entered = asyncio.Event()
+            release_delivery = asyncio.Event()
+            scheduled = False
+
+            class Context:
+                sent: list[str] = []
+
+                async def send(self, message: str) -> None:
+                    self.sent.append(message)
+                    delivery_entered.set()
+                    await release_delivery.wait()
+
+            ctx = Context()
+
+            def schedule_stack_shutdown() -> bool:
+                nonlocal scheduled
+                scheduled = True
+                return True
+
+            task = asyncio.create_task(
+                handle_shutdown_bot_command(
+                    ctx,
+                    schedule_stack_shutdown=schedule_stack_shutdown,
+                    create_task=asyncio.create_task,
+                    shutdown_bot_process=AsyncMock(),
+                )
+            )
+            await delivery_entered.wait()
+            scheduled_before_delivery = scheduled
+            release_delivery.set()
+            await task
+            return scheduled_before_delivery, ctx.sent
+
+        scheduled_before_delivery, sent = asyncio.run(scenario())
+
+        self.assertFalse(scheduled_before_delivery)
+        self.assertEqual(
+            sent,
+            [
+                "Evelyn shutdown requested. Supervisors, bot, LLM, TTS, Voyager, "
+                "and Evelyn-owned WSL services will stop if the full-stack helper "
+                "starts; otherwise this bot process will stop instead."
+            ],
+        )
 
     def test_status_and_page_commands_send_runtime_summaries(self) -> None:
         channel = SimpleNamespace(name="General")
@@ -1013,32 +1212,15 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(ctx.sent, ["status:General:True:True"])
         self.assertEqual(page_ctx.sent, ["이블린 페이지: https://example.test/evelyn"])
 
-    def test_reset_guild_memory_command_resets_runtime_and_removes_existing_dir(self) -> None:
-        class FakeMemoryDir:
-            def __init__(self, path: str) -> None:
-                self.path = path
-
-            def exists(self) -> bool:
-                return True
-
-            def __repr__(self) -> str:
-                return self.path
-
-        class FakeMemoryRoot:
-            def __truediv__(self, child: str) -> FakeMemoryDir:
-                return FakeMemoryDir(child)
-
+    def test_reset_guild_memory_command_replies_after_durable_reset(self) -> None:
         guild = SimpleNamespace(id=7, name="Home")
         ctx = FakeContext(guild=guild)
         reset: list[int] = []
-        removed: list[str] = []
 
         asyncio.run(
             handle_reset_guild_memory_command(
                 ctx,
-                memory_root=FakeMemoryRoot(),
                 reset_guild_runtime_state=reset.append,
-                remove_tree=lambda path: removed.append(repr(path)),
                 get_guild_command_prefix=lambda guild_id: "!",
                 build_reply=lambda **kwargs: f"reset:{kwargs['guild_name']}:{kwargs['current_prefix']}",
                 guild_only_message=lambda: "guild only",
@@ -1046,58 +1228,164 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(reset, [7])
-        self.assertEqual(removed, ["guild_7"])
         self.assertEqual(ctx.sent, ["reset:Home:!"])
 
-    def test_reset_guild_memory_reports_live_autonomy_refresh(self) -> None:
-        ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
-        removed: list[object] = []
+    def test_reset_confirmation_explicitly_refreshes_command_epoch(self) -> None:
+        events: list[object] = []
 
-        def blocked_reset(_guild_id: int) -> None:
-            raise RuntimeError("autonomy_cognitive_refresh_inflight")
+        class Context(FakeContext):
+            def refresh_ingress_epoch(self) -> None:
+                events.append("refresh_epoch")
+
+            async def send(self, text: str) -> None:
+                events.append(("send", text))
+
+        ctx = Context(guild=SimpleNamespace(id=7, name="Home"))
 
         asyncio.run(
             handle_reset_guild_memory_command(
                 ctx,
-                memory_root=Path("unused"),
-                reset_guild_runtime_state=blocked_reset,
-                remove_tree=removed.append,
+                reset_guild_runtime_state=(
+                    lambda guild_id: events.append(("reset", guild_id))
+                ),
                 get_guild_command_prefix=lambda _guild_id: "!",
-                build_reply=lambda **_kwargs: "reset",
+                build_reply=lambda **_kwargs: "reset confirmed",
                 guild_only_message=lambda: "guild only",
             )
         )
 
-        self.assertEqual(removed, [])
         self.assertEqual(
-            ctx.sent,
-            ["기억 정리 작업이 끝나는 중이야. 잠깐 뒤에 다시 시도해줘."],
+            events,
+            [("reset", 7), "refresh_epoch", ("send", "reset confirmed")],
         )
+
+    def test_reset_guild_memory_reports_live_memory_work(self) -> None:
+        for error_code in (
+            "autonomy_cognitive_refresh_inflight",
+            "memory_background_work_inflight",
+            "search_background_work_inflight",
+        ):
+            with self.subTest(error_code=error_code):
+                ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
+                def blocked_reset(_guild_id: int) -> None:
+                    raise RuntimeError(error_code)
+
+                asyncio.run(
+                    handle_reset_guild_memory_command(
+                        ctx,
+                        reset_guild_runtime_state=blocked_reset,
+                        get_guild_command_prefix=lambda _guild_id: "!",
+                        build_reply=lambda **_kwargs: "reset",
+                        guild_only_message=lambda: "guild only",
+                    )
+                )
+
+                self.assertEqual(
+                    ctx.sent,
+                    ["기억 정리 작업이 끝나는 중이야. 잠깐 뒤에 다시 시도해줘."],
+                )
 
     def test_reset_guild_memory_requires_autonomy_stop(self) -> None:
         ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
-        removed: list[object] = []
-
         def blocked_reset(_guild_id: int) -> None:
             raise RuntimeError("autonomy_runtime_active")
 
         asyncio.run(
             handle_reset_guild_memory_command(
                 ctx,
-                memory_root=Path("unused"),
                 reset_guild_runtime_state=blocked_reset,
-                remove_tree=removed.append,
                 get_guild_command_prefix=lambda _guild_id: "!",
                 build_reply=lambda **_kwargs: "reset",
                 guild_only_message=lambda: "guild only",
             )
         )
 
-        self.assertEqual(removed, [])
         self.assertEqual(
             ctx.sent,
             ["자율 행동을 먼저 끈 뒤 다시 시도해줘."],
         )
+
+    def test_reset_guild_memory_reports_safe_persistent_reset_failure(
+        self,
+    ) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
+
+        def blocked_reset(_guild_id: int) -> None:
+            raise RuntimeError(
+                "memory_guild_reset_legacy_scope_missing"
+            )
+
+        asyncio.run(
+            handle_reset_guild_memory_command(
+                ctx,
+                reset_guild_runtime_state=blocked_reset,
+                get_guild_command_prefix=lambda _guild_id: "!",
+                build_reply=lambda **_kwargs: "reset",
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(
+            ctx.sent,
+            [
+                "기억을 안전하게 초기화하지 못했어. 잠시 뒤 다시 시도해줘. "
+                "계속되면 기억 관리에서 예전 확인 기억을 직접 삭제한 뒤 다시 시도해줘."
+            ],
+        )
+
+    def test_reset_guild_memory_hides_durable_reset_failure_detail(
+        self,
+    ) -> None:
+        for error_code in (
+            "search_followup_guild_reset_failed",
+            "memory_guild_reset_durability_failed",
+        ):
+            with self.subTest(error_code=error_code):
+                ctx = FakeContext(
+                    guild=SimpleNamespace(id=7, name="Home")
+                )
+                private_canary = r"PRIVATE C:\secret\search-token"
+
+                def blocked_reset(_guild_id: int) -> None:
+                    try:
+                        raise OSError(private_canary)
+                    except OSError as exc:
+                        raise RuntimeError(error_code) from exc
+
+                asyncio.run(
+                    handle_reset_guild_memory_command(
+                        ctx,
+                        reset_guild_runtime_state=blocked_reset,
+                        get_guild_command_prefix=lambda _guild_id: "!",
+                        build_reply=lambda **_kwargs: "reset",
+                        guild_only_message=lambda: "guild only",
+                    )
+                )
+
+                rendered = " ".join(ctx.sent)
+                self.assertIn("다시 시도해줘", rendered)
+                self.assertNotIn(private_canary, rendered)
+                self.assertNotIn("search-token", rendered)
+
+    def test_reset_guild_memory_reraises_unknown_failure(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7, name="Home"))
+
+        with self.assertRaisesRegex(RuntimeError, "^unknown_reset_failure$"):
+            asyncio.run(
+                handle_reset_guild_memory_command(
+                    ctx,
+                    reset_guild_runtime_state=(
+                        lambda _guild_id: (_ for _ in ()).throw(
+                            RuntimeError("unknown_reset_failure")
+                        )
+                    ),
+                    get_guild_command_prefix=lambda _guild_id: "!",
+                    build_reply=lambda **_kwargs: "reset",
+                    guild_only_message=lambda: "guild only",
+                )
+            )
+
+        self.assertEqual(ctx.sent, [])
 
 
 if __name__ == "__main__":

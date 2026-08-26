@@ -16,6 +16,8 @@ from evelyn_core.guild_runtime_reset import (  # noqa: E402
     AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
     AUTONOMY_RUNTIME_ACTIVE,
     GuildRuntimeResetDeps,
+    MEMORY_BACKGROUND_WORK_INFLIGHT,
+    SEARCH_BACKGROUND_WORK_INFLIGHT,
     build_guild_runtime_reset_deps,
     reset_guild_runtime_state_from_runtime,
 )
@@ -45,7 +47,7 @@ class GuildRuntimeResetTests(unittest.TestCase):
     def build_deps(self) -> tuple[GuildRuntimeResetDeps, dict[str, Any]]:
         guild_key = "guild:7:voice:42"
         other_key = "guild:8:voice:42"
-        search_task = FakeTask()
+        search_task = FakeTask(done=True)
         done_search_task = FakeTask(done=True)
         cognitive_task = FakeTask()
         refresh_task = FakeTask(done=True)
@@ -70,11 +72,20 @@ class GuildRuntimeResetTests(unittest.TestCase):
             },
             "session_partial_stt_text": {guild_key: "partial"},
             "session_committed_stt_text": {guild_key: "committed"},
+            "partial_stt_cache": {
+                guild_key: {"partial_text": "private"},
+                other_key: {"partial_text": "other"},
+            },
+            "session_speculative_policies": {
+                guild_key: {"private": "policy"},
+                other_key: {"other": "policy"},
+            },
             "session_bad_audio_counts": {guild_key: 2},
             "room_owner_user_ids": {guild_key: 7, other_key: 8},
             "room_owner_until": {guild_key: 1.0},
             "room_reply_in_progress": {guild_key: True},
             "room_last_voice_reply_at": {guild_key: 1.0},
+            "voice_ingress_epochs": {7: 3, 8: 9},
             "session_locks": {guild_key: object(), other_key: object()},
             "background_search_tasks": {
                 guild_key: search_task,
@@ -82,6 +93,14 @@ class GuildRuntimeResetTests(unittest.TestCase):
                 other_key: FakeTask(),
             },
             "memory_locks": {7: object(), 8: object()},
+            "background_memory_tasks": {
+                f"{guild_key}:memory:done": FakeTask(done=True),
+                other_key: FakeTask(),
+            },
+            "background_memory_vault_tasks": {
+                7: FakeTask(done=True),
+                8: FakeTask(done=True),
+            },
             "cognitive_locks": {7: object(), 8: object()},
             "background_cognitive_tasks": {guild_key: cognitive_task, other_key: FakeTask()},
             "autonomy_last_cognitive_refresh_at": {7: 1.0, 8: 2.0},
@@ -112,17 +131,22 @@ class GuildRuntimeResetTests(unittest.TestCase):
             room_last_voice_utterance_for_merge=state["room_last_voice_utterance_for_merge"],
             session_partial_stt_text=state["session_partial_stt_text"],
             session_committed_stt_text=state["session_committed_stt_text"],
+            partial_stt_cache=state["partial_stt_cache"],
+            session_speculative_policies=state["session_speculative_policies"],
             session_bad_audio_counts=state["session_bad_audio_counts"],
             room_owner_user_ids=state["room_owner_user_ids"],
             room_owner_until=state["room_owner_until"],
             room_reply_in_progress=state["room_reply_in_progress"],
             room_last_voice_reply_at=state["room_last_voice_reply_at"],
+            voice_ingress_epochs=state["voice_ingress_epochs"],
             turn_scope_registry=registry,
             session_locks=state["session_locks"],
             background_search_tasks=state["background_search_tasks"],
             clear_tts_playback_tracking=lambda *, tracker, guild_id: cleared_tts.append(guild_id),
             tts_playback_tracker=object(),
             memory_locks=state["memory_locks"],
+            background_memory_tasks=state["background_memory_tasks"],
+            background_memory_vault_tasks=state["background_memory_vault_tasks"],
             cognitive_locks=state["cognitive_locks"],
             background_cognitive_tasks=state["background_cognitive_tasks"],
             autonomy_last_cognitive_refresh_at=state["autonomy_last_cognitive_refresh_at"],
@@ -140,14 +164,31 @@ class GuildRuntimeResetTests(unittest.TestCase):
         self.assertEqual(state["session_followup_targets"], {"guild:8:voice:42": "target"})
         self.assertEqual(state["active_session_until"], {"guild:8:voice:42": 2.0})
         self.assertEqual(state["room_owner_user_ids"], {"guild:8:voice:42": 8})
+        self.assertEqual(state["voice_ingress_epochs"], {7: 4, 8: 9})
+        self.assertEqual(
+            state["partial_stt_cache"],
+            {"guild:8:voice:42": {"partial_text": "other"}},
+        )
+        self.assertEqual(
+            state["session_speculative_policies"],
+            {"guild:8:voice:42": {"other": "policy"}},
+        )
         self.assertEqual(state["session_locks"], {"guild:8:voice:42": next(iter(state["session_locks"].values()))})
         self.assertEqual(list(state["room_last_voice_utterance_for_merge"].keys()), ["room-b"])
         self.assertEqual(state["memory_locks"], {8: state["memory_locks"][8]})
+        self.assertEqual(
+            state["background_memory_tasks"],
+            {"guild:8:voice:42": state["background_memory_tasks"]["guild:8:voice:42"]},
+        )
+        self.assertEqual(
+            state["background_memory_vault_tasks"],
+            {8: state["background_memory_vault_tasks"][8]},
+        )
         self.assertEqual(state["cognitive_locks"], {8: state["cognitive_locks"][8]})
         self.assertEqual(state["autonomy_last_cognitive_refresh_at"], {8: 2.0})
         self.assertEqual(state["registry"].cancelled_prefixes, ["guild:7:"])
         self.assertEqual(state["cleared_tts"], [7])
-        self.assertTrue(state["tasks"]["search"].cancelled)
+        self.assertFalse(state["tasks"]["search"].cancelled)
         self.assertFalse(state["tasks"]["done_search"].cancelled)
         self.assertTrue(state["tasks"]["cognitive"].cancelled)
         self.assertFalse(state["tasks"]["refresh"].cancelled)
@@ -201,6 +242,71 @@ class GuildRuntimeResetTests(unittest.TestCase):
         self.assertEqual(state["cleared_tts"], [])
         self.assertFalse(autonomy_task.cancelled)
 
+    def test_live_search_delivery_blocks_reset_before_mutation_and_retry_succeeds(
+        self,
+    ) -> None:
+        deps, state = self.build_deps()
+        search_task = state["tasks"]["search"]
+        search_task._done = False
+        snapshots = {
+            key: dict(value)
+            for key, value in state.items()
+            if isinstance(value, dict)
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{SEARCH_BACKGROUND_WORK_INFLIGHT}$",
+        ):
+            reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+        for key, snapshot in snapshots.items():
+            self.assertEqual(state[key], snapshot, key)
+        self.assertFalse(search_task.cancelled)
+
+        search_task._done = True
+        reset_guild_runtime_state_from_runtime(7, deps=deps)
+        self.assertFalse(
+            any(
+                isinstance(key, str) and key.startswith("guild:7:")
+                for key in state["background_search_tasks"]
+            )
+        )
+        self.assertFalse(search_task.cancelled)
+
+    def test_live_memory_background_work_blocks_reset_before_any_mutation(
+        self,
+    ) -> None:
+        for work_kind in ("writebehind", "vault", "other_guild_vault"):
+            with self.subTest(work_kind=work_kind):
+                deps, state = self.build_deps()
+                task = FakeTask()
+                if work_kind == "writebehind":
+                    state["background_memory_tasks"][
+                        "guild:7:memory-writebehind:normal:1"
+                    ] = task
+                elif work_kind == "vault":
+                    state["background_memory_vault_tasks"][7] = task
+                else:
+                    state["background_memory_vault_tasks"][8] = task
+                snapshots = {
+                    key: dict(value)
+                    for key, value in state.items()
+                    if isinstance(value, dict)
+                }
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"^{MEMORY_BACKGROUND_WORK_INFLIGHT}$",
+                ):
+                    reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+                for key, snapshot in snapshots.items():
+                    self.assertEqual(state[key], snapshot, key)
+                self.assertEqual(state["registry"].cancelled_prefixes, [])
+                self.assertEqual(state["cleared_tts"], [])
+                self.assertFalse(task.cancelled)
+
     def test_reset_removes_orphaned_state_without_active_or_owner_anchor(self) -> None:
         deps, state = self.build_deps()
         guild_key = "guild:7:voice:42"
@@ -224,6 +330,8 @@ class GuildRuntimeResetTests(unittest.TestCase):
             state["session_last_stt_text"],
             state["session_partial_stt_text"],
             state["session_committed_stt_text"],
+            state["partial_stt_cache"],
+            state["session_speculative_policies"],
             state["session_bad_audio_counts"],
             state["room_owner_user_ids"],
             state["room_owner_until"],
@@ -231,6 +339,7 @@ class GuildRuntimeResetTests(unittest.TestCase):
             state["room_last_voice_reply_at"],
             state["session_locks"],
             state["background_search_tasks"],
+            state["background_memory_tasks"],
             state["background_cognitive_tasks"],
         )
         for mapping in prefixed_mappings:
@@ -306,17 +415,22 @@ def test_build_guild_runtime_reset_deps_identity() -> None:
         room_last_voice_utterance_for_merge={},
         session_partial_stt_text={},
         session_committed_stt_text={},
+        partial_stt_cache={},
+        session_speculative_policies={},
         session_bad_audio_counts={},
         room_owner_user_ids={},
         room_owner_until={},
         room_reply_in_progress={},
         room_last_voice_reply_at={},
+        voice_ingress_epochs={},
         turn_scope_registry=FakeTurnScopeRegistry(),
         session_locks={},
         background_search_tasks={},
         clear_tts_playback_tracking=lambda *, tracker, guild_id: None,
         tts_playback_tracker=object(),
         memory_locks={},
+        background_memory_tasks={},
+        background_memory_vault_tasks={},
         cognitive_locks={},
         background_cognitive_tasks={},
         autonomy_last_cognitive_refresh_at={},

@@ -104,47 +104,7 @@ _UNBACKED_PROGRESS_PATTERNS = tuple(
 )
 
 _SENTENCE_PATTERN = re.compile(r".+?(?:[.!?。！？]+(?=\s|$)|$)", re.DOTALL)
-_STREAM_TOKEN_END_PATTERN = re.compile(r"[\s.!?。！？]+$")
-_STREAM_SUSPICIOUS_LAST_WORDS = {
-    "확인",
-    "확인해",
-    "점검",
-    "점검해",
-    "검사",
-    "검사해",
-    "테스트",
-    "테스트해",
-    "살펴",
-    "알아",
-    "찾아",
-    "고쳐",
-    "수정",
-    "수정해",
-    "바꿔",
-    "변경",
-    "변경해",
-    "옮겨",
-    "처리",
-    "처리해",
-    "진행",
-    "진행해",
-    "작업",
-    "작업해",
-    "시도",
-    "시도해",
-    "시작",
-    "착수",
-    "알려",
-    "말해",
-    "잠시",
-    "조금",
-    "기다려",
-    "i",
-    "i'll",
-    "let",
-    "give",
-    "please",
-}
+_INCREMENTAL_SENTENCE_END_PATTERN = re.compile(r"[.!?。！？]+(?=\s)")
 
 
 def has_unbacked_progress_claim(text: str) -> bool:
@@ -153,65 +113,44 @@ def has_unbacked_progress_claim(text: str) -> bool:
 
 
 class SafeIncrementalSpeechFilter:
-    """Release ordinary words quickly while holding/dropping future-work claims."""
+    """Release only complete sentences that pass the final progress policy."""
 
     def __init__(self) -> None:
-        self._token = ""
-        self._held = ""
-        self._blocked_until_sentence_end = False
+        self._pending = ""
+        self._emitted_safe = False
+        self._saw_unsafe = False
 
-    @staticmethod
-    def _is_sentence_end(value: str) -> bool:
-        return bool(re.search(r"[.!?。！？]", value))
-
-    @staticmethod
-    def _looks_suspicious(value: str) -> bool:
-        normalized = clean_text(value).lower()
+    def _project_sentence(self, sentence: str) -> list[str]:
+        normalized = clean_text(sentence)
         if not normalized:
-            return False
-        last_word = re.sub(r"[.!?。！？]+$", "", normalized.split()[-1])
-        return last_word in _STREAM_SUSPICIOUS_LAST_WORDS
-
-    def _commit_token(self, token: str) -> list[str]:
-        sentence_end = self._is_sentence_end(token)
-        if self._blocked_until_sentence_end:
-            if sentence_end:
-                self._blocked_until_sentence_end = False
             return []
-        if not clean_text(self._held + token):
+        if has_unbacked_progress_claim(normalized):
+            self._saw_unsafe = True
             return []
-
-        candidate = self._held + token
-        if has_unbacked_progress_claim(candidate):
-            self._held = ""
-            self._blocked_until_sentence_end = not sentence_end
-            return []
-        if self._looks_suspicious(candidate) and not sentence_end:
-            self._held = candidate
-            return []
-
-        self._held = ""
-        return [candidate]
+        separator = " " if self._emitted_safe else ""
+        self._emitted_safe = True
+        return [f"{separator}{normalized}"]
 
     def push(self, fragment: str) -> list[str]:
+        self._pending += str(fragment or "")
         output: list[str] = []
-        for char in str(fragment or ""):
-            self._token += char
-            if _STREAM_TOKEN_END_PATTERN.search(self._token):
-                output.extend(self._commit_token(self._token))
-                self._token = ""
+        while match := _INCREMENTAL_SENTENCE_END_PATTERN.search(
+            self._pending
+        ):
+            boundary = match.end()
+            sentence = self._pending[:boundary]
+            self._pending = self._pending[boundary:]
+            output.extend(self._project_sentence(sentence))
         return output
 
     def finish(self) -> list[str]:
         output: list[str] = []
-        if self._token:
-            output.extend(self._commit_token(self._token))
-            self._token = ""
-        if self._held:
-            if not has_unbacked_progress_claim(self._held):
-                output.append(self._held)
-            self._held = ""
-        self._blocked_until_sentence_end = False
+        if self._pending:
+            output.extend(self._project_sentence(self._pending))
+            self._pending = ""
+        if not self._emitted_safe and self._saw_unsafe:
+            output.append(UNBACKED_PROGRESS_FALLBACK)
+            self._emitted_safe = True
         return output
 
 
@@ -451,7 +390,7 @@ def detect_minecraft_runtime_command(text: str) -> str | None:
     if not normalized:
         return None
     if re.match(
-        r"^/(?:minecraft|mc)\s+goal(?:\s+.+)?$",
+        r"^/(?:minecraft|mc)\s+goal\s+.+$",
         normalized,
         flags=re.IGNORECASE,
     ):
@@ -599,6 +538,10 @@ class FastActionExecutionError(RuntimeError):
         self.reply = clean_text(reply) or "작업 실행 중 오류가 나서 완료하지 못했어."
 
 
+class FastActionCancelledError(FastActionExecutionError):
+    pass
+
+
 class FastActionCoordinator:
     def __init__(
         self,
@@ -667,6 +610,7 @@ class FastActionCoordinator:
             reply=task.final_reply,
             memory_receipt=task.memory_receipt_ref,
         )
+        self._trim_tasks()
         return task
 
     def fail(
@@ -697,6 +641,33 @@ class FastActionCoordinator:
             error=task.error,
             memory_receipt=task.memory_receipt_ref,
         )
+        self._trim_tasks()
+        return task
+
+    def cancel(
+        self,
+        task_id: str,
+        reply: str,
+        *,
+        memory_receipt: Any = None,
+    ) -> FastActionTask:
+        task = self._require_task(task_id)
+        task.status = "cancelled"
+        task.finished_at = self.time_fn()
+        task.final_reply = clean_text(reply)
+        task.error = ""
+        task.memory_receipt_ref = (
+            unattributed_memory_receipt_ref()
+            if memory_receipt is None
+            else memory_receipt_ref_from_receipt(memory_receipt)
+        )
+        self._append_event(
+            task,
+            event_type="cancelled",
+            reply=task.final_reply,
+            memory_receipt=task.memory_receipt_ref,
+        )
+        self._trim_tasks()
         return task
 
     def get(self, task_id: str) -> FastActionTask | None:
@@ -775,7 +746,7 @@ class FastActionCoordinator:
             "error": clean_text(error),
             "at": self.time_fn(),
         }
-        if event_type in {"completed", "failed"}:
+        if event_type in {"completed", "failed", "cancelled"}:
             event["_memoryReceiptRef"] = (
                 unattributed_memory_receipt_ref()
                 if memory_receipt is None
@@ -798,7 +769,16 @@ class FastActionCoordinator:
 
     def _trim_tasks(self) -> None:
         while len(self._tasks) > self.history_limit:
-            oldest_task_id = next(iter(self._tasks))
+            oldest_task_id = next(
+                (
+                    task_id
+                    for task_id, task in self._tasks.items()
+                    if task.status != "running"
+                ),
+                "",
+            )
+            if not oldest_task_id:
+                return
             del self._tasks[oldest_task_id]
 
     def _require_task(self, task_id: str) -> FastActionTask:

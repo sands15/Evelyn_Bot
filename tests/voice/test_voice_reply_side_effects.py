@@ -18,7 +18,9 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-if "numpy" not in sys.modules:
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
     class _DummyNdArray:
         pass
 
@@ -45,6 +47,10 @@ from evelyn_core.memory_exposure import (  # noqa: E402
     MemoryExposurePosition,
     capture_memory_exposure_position,
     reset_memory_exposure_position,
+)
+from evelyn_core.observability_metrics import (  # noqa: E402
+    VOICE_LATENCY_TRACE_METRICS_KEY,
+    VoiceLatencyTrace,
 )
 from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
     MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
@@ -98,7 +104,10 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                     or durable_continuity_status(7)
                 ),
             )
-            metrics: dict[str, Any] = {"meta": {}}
+            metrics: dict[str, Any] = {
+                "meta": {},
+                VOICE_LATENCY_TRACE_METRICS_KEY: VoiceLatencyTrace(),
+            }
 
             for _ in range(2):
                 checkpoint_accepted_voice_turn_from_runtime(
@@ -119,6 +128,11 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         )
         self.assertEqual(metrics["meta"]["continuity_generation"], 7)
         self.assertTrue(metrics["meta"]["accepted_voice_turn_precommitted"])
+        markers = metrics[VOICE_LATENCY_TRACE_METRICS_KEY].public_summary()[
+            "markers_ms"
+        ]
+        self.assertIn("turn_accepted", markers)
+        self.assertIn("ingress_committed", markers)
 
     def test_accepted_voice_turn_commit_failure_is_fixed_and_content_free(
         self,
@@ -214,7 +228,8 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                 "meta": {
                     "accepted_voice_turn_precommitted": True,
                     "unanswered_voice_turn_recorded": True,
-                }
+                },
+                VOICE_LATENCY_TRACE_METRICS_KEY: VoiceLatencyTrace(),
             }
             for _ in range(2):
                 finalize_voice_reply_side_effects_from_runtime(
@@ -243,6 +258,12 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             ["system", "user", "assistant"],
         )
         self.assertFalse(metrics["meta"]["unanswered_voice_turn_recorded"])
+        self.assertIn(
+            "turn_completed",
+            metrics[VOICE_LATENCY_TRACE_METRICS_KEY].public_summary()[
+                "markers_ms"
+            ],
+        )
 
     def test_optional_memory_failure_keeps_delivered_turn_durable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

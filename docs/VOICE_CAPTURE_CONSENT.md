@@ -47,6 +47,9 @@ ON 상태를 알린다. Bot API 재시작 뒤에도 panel command generation을 
   세션 시작, 다른/누락 session, bound session의 preflight·unknown·terminal 상태는
   모두 revoke한다. confirm/retry/abort가 상태 변경 뒤 I/O 예외를 내도 같은 lock에서
   즉시 recovery→OFF를 수행하고 고정된 content-free 503만 반환한다.
+- TTS interrupt에 speaker verification이 required인 source는 exact boolean
+  `matched=True`만 positive다. `too_short|not_enrolled|unavailable|error`와
+  `matched=None`은 fail-closed하며, 정책 자체가 적용되지 않은 `status=skipped`만 예외다.
 
 ## API
 
@@ -59,6 +62,34 @@ preview/apply의 허용 scope는 `voice_validation_local` 하나뿐이다. Contr
 음성 capability는 활성 동의가 없을 때 `local_mic_consent_required` blocker와
 확인형 동의 action을 제공한다. 이미 생성된 preflight 세션은 동의 적용 후 다른
 blocker가 없으면 같은 세션으로 `running` 전환된다.
+
+## Local/Discord capture owner lease
+
+Bot API의 별도 content-free input lease는 Local Mic과 Discord listener 중 한
+capture owner만 허용한다. Discord의 첫 acquire가 server commit 뒤 취소되거나
+응답이 불명확하면 요청 task를 shield/drain해 exact lease를 회수하고, caller
+cancellation을 재전파하기 전에 동일 instance의 release를 끝낸다. transport 또는
+invalid-response ambiguity의 release가 다시 끊기면 기존 단일 retry owner가
+idempotent reacquire→release로 수거한다. 이미 listener token이 있는 중복 acquire의
+cancellation은 현재 lease를 끊지 않는다.
+
+마지막 Discord token release도 RPC cancellation에서 server commit 전·후를
+구분해 단일 retry가 exact source/instance/lease를 끝까지 해제한다. conflict,
+unauthorized, unconfigured처럼 server가 고정 `VoiceInputLeaseError`로 거부한 요청은
+효과 없음이 확정됐으므로 추측성 cleanup을 만들지 않는다. retry 완료 전에는 Local
+Mic이 새 owner가 되지 않으며, state·로그에는 원문이나 credential을 남기지 않는다.
+
+Local mic OFF도 physical `applied + captureStopped` ACK와 현재 local owner의 durable
+lease release receipt가 모두 맞아야 성공이다. physical stop 뒤 persistence 실패나
+invalid release receipt는 raw 오류를 내보내지 않고 고정 503
+`voice_input_lease_unavailable`로 닫는다. 애초 local lease가 없는 idempotent OFF는 유지한다.
+
+Discord voice connect의 caller가 취소되면 아직 진행 중인 exact inherited base-connect
+task를 cancel·drain한 뒤 custom gateway/UDP/input-lease cleanup을 제한 시간 안에서
+수거한다. inherited base connect가 이미 성공하고 custom setup을 기다리던 단계라면
+`discord.VoiceClient.disconnect(force=True)`도 별도 task로 끝까지 drain한다. cleanup은
+registry의 current owner가 exact self일 때만 inherited key를 지우므로 그 사이 등록된
+replacement client를 보존하며, 최초 caller `CancelledError`를 일반 실패로 바꾸지 않는다.
 
 ## 저장 계약
 
@@ -108,6 +139,8 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 - 제어 요청과 ACK는 같은 `revision`, `actionId`, `bridgeInstanceDigest`, `enabled`를
   가져야 한다. waiter가 기다리는 동안 global current request가 바뀌거나 Bridge가
   더 높은 revision을 보고하면 `mic_control_superseded`로 즉시 실패한다.
+- OFF ACK 뒤에도 Bot API가 exact local input lease를 durable하게 해제하지 못하면 전체
+  제어 요청은 성공이 아니다. 다른 input source는 안전하게 blocked 상태를 유지한다.
 - 새 Bridge instance는 기존 instance보다 큰 `startedAt`으로만 교체할 수 있다.
   같은 instance의 `statusSeq`는 항상 증가해야 하며 거부된 보고는 `updatedAt`을
   갱신하지 않는다.
@@ -137,16 +170,28 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 - Control Page는 startup과 상태 전환 때, 캡처가 가능할 때는 1초마다
   `owner_heartbeat.json`을 갱신한다. 파일은 state, owner/lease의 SHA-256 digest,
   만료·heartbeat 시각과 HMAC만 가진 content-free projection이며 최대 4 KiB다.
+  `enabling -> active` commit과 validation session bind 직후에는 다음 heartbeat를
+  기다리지 않고 갱신해 durable state·host lease·Bridge fence가 같은 generation을 본다.
 - Local Bridge는 각 status tick과 마이크 ON 전·후에 strict schema, 목적 제한 HMAC,
   4초 freshness, 원래 owner/lease digest binding을 검사한다. 누락·손상·symlink·
   stale·expired·replacement는 모두 캡처 권한 부재다.
 - Bot API에는 캡처 HMAC 키를 전달하지 않는다. bearer-authenticated Bridge status가
   보고한 content-free fence digest를 `owner_heartbeat.json`의 projection과 durable
   consent state에 3자 일치시키고, current Bridge/mic/watchdog 상태와 함께 local
-  admission 발급·claim을 판정한다. 공개 status에서는 fence digest를 제거한다.
+  admission 발급·claim을 판정한다. VAD의 `captureActive`는 한 발화 수집 중에만 true인
+  순간 상태이므로 admission fence에는 쓰지 않고, mic ON·`captureReady`·not-stopped와
+  current consent/watchdog를 요구한다. 공개 status에서는 fence digest를 제거한다.
 - 권한을 잃으면 Bridge는 새 입력을 받지 않고 admission 상태를 폐기한 뒤 exact mic
   stop을 수행한다. stop 자체가 실패하면 종료 코드 76으로 Bridge 프로세스를 즉시
-  끝내 OS가 캡처 handle을 회수하게 한다.
+  끝내 OS가 캡처 handle을 회수하게 한다. watchdog이 물리 OFF를 확인한 뒤에는 같은
+  lease heartbeat만 돌아왔다고 `authorized`로 복구하지 않는다. 새 명시적 ON 적용이
+  capture-ready/not-stopped와 lease binding을 끝까지 재검증한 경우에만 stop latch를
+  해제한다. fresh validation GET이 active consent와 지속된 물리 OFF를 함께 확인하면
+  기존 OFF/revoke 경계로 정리해 사용자가 새 동의를 선택할 수 있게 한다.
+- 명시적 mic ON의 start worker는 cancellation에도 끝까지 수거한다. start 실패·취소는
+  같은 service의 stop과 physical `captureStopped` 검증을 마친 뒤에만 failed 응답을
+  확정하며, stop/검증 실패는 기존 fail-safe exit를 사용한다. 따라서 늦게 끝난 start가
+  Bridge의 OFF projection 뒤 캡처를 다시 켤 수 없다.
 - Supervisor는 현재 자식 PID와 시작 시각, 서명된 전체 Bridge status, 고정된
   `bridgeInstanceId`, 관측한 `statusSeq` high-water, watchdog 시각과 nested/top-level
   physical OFF를 모두 확인한 경우에만 stop을 `verified`로 게시한다. status 입력은
@@ -177,6 +222,9 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
   manager가 재시작하거나 동의가 A→B로 교체돼도 A token은 B proof로 claim할 수
   없고, OFF/restart/shutdown은 process-local 목록에 없는 `reserved` row도 scope
   단위로 purge한다.
+- Bridge는 segment status 게시 await 뒤 batch STT를 시작하기 직전에도 캡처한 admission
+  epoch와 validation binding을 다시 확인한다. restart/shutdown/mic invalidation이 끼면
+  stale PCM을 폐기하고 STT·admission·chat을 호출하지 않는다.
 
 이 경계의 합성 테스트와 공개 브라우저 source-spoof 차단은 구현됐지만 실제
 마이크·스피커 10턴과 silence의 live E2E는 아직 사용자 청취 확인과 함께
@@ -185,8 +233,9 @@ owner는 비활성의 증거가 아니다. 이 경우 메모리와 durable 상�
 
 ## 아직 남은 검증·강화 경계
 
-- apply는 mic 활성 뒤 runtime health 수집을 기다리는 동안 consent lock을 잡는다.
-  수집 전체 deadline 부재는 드문 lock starvation 위험이다.
+- apply는 mic 활성 뒤 runtime health 수집을 기다리는 동안 consent lock을 잡지만 전체
+  대기는 10초로 제한한다. timeout/예외는 activation failure로 닫고 physical OFF를
+  재확인한다. source stall 회귀는 통과했으며 실제 probe 정지·장치 OFF ACK는 live 대기다.
 - Supervisor가 게시하는 signed stop evidence는 아직 별도 downstream verifier가
   없으며 진단 계약으로만 쓰인다. startup ambiguity의 freshness probe도 HMAC을
   검증하지 않아 공유 폴더 writer가 시작을 거부시키는 availability 공격은 가능하지만

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import Any
 
@@ -10,8 +11,17 @@ except Exception:  # pragma: no cover
     class _FallbackCheckFailure(Exception):
         """discord.py이 없는 환경에서 체크 실패 예외 대체."""
 
+    class _FallbackUserInputError(Exception):
+        """discord.py이 없는 환경에서 입력 실패 예외 대체."""
+
+    class _FallbackCommandNotFound(Exception):
+        """discord.py이 없는 환경에서 미등록 명령 예외 대체."""
+
     class _FallbackCommands:
         CheckFailure = _FallbackCheckFailure
+        UserInputError = _FallbackUserInputError
+        TooManyArguments = _FallbackUserInputError
+        CommandNotFound = _FallbackCommandNotFound
 
     commands = _FallbackCommands()
 
@@ -24,6 +34,8 @@ from .discord_commands import (
 from .guild_runtime_reset import (
     AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
     AUTONOMY_RUNTIME_ACTIVE,
+    MEMORY_BACKGROUND_WORK_INFLIGHT,
+    SEARCH_BACKGROUND_WORK_INFLIGHT,
 )
 from .minecraft_action_contract import MINECRAFT_ROUTE_ACTIONS
 from .minecraft_mode_composition import (
@@ -33,6 +45,26 @@ from .minecraft_mode_composition import (
     minecraft_stop_confirmed,
 )
 from .public_error_contract import public_failure_message
+
+
+AUTONOMY_START_STALE_REPLY = (
+    "길드 상태가 초기화되어 자율 행동 시작을 취소했어. 다시 요청해줘."
+)
+_MEMORY_GUILD_RESET_FAILURE_CODES = frozenset(
+    {
+        "memory_deletion_journal_busy",
+        "memory_deletion_journal_integrity_failed",
+        "memory_guild_reset_delete_failed",
+        "memory_guild_reset_directory_delete_failed",
+        "memory_guild_reset_durability_failed",
+        "memory_guild_reset_legacy_scope_missing",
+        "memory_guild_reset_scan_failed",
+        "memory_guild_reset_scope_invalid",
+        "memory_guild_reset_target_invalid",
+        "memory_guild_reset_verification_failed",
+        "search_followup_guild_reset_failed",
+    }
+)
 
 
 async def handle_join_voice_command(
@@ -160,6 +192,7 @@ async def handle_autonomy_start_command(
     grant_autonomy_authorization: Any,
     revoke_autonomy_authorization: Any,
     guild_only_message: Any,
+    guild_mutation_is_current: Any = None,
     record_runtime_error: Any = None,
 ) -> None:
     if ctx.guild is None:
@@ -215,6 +248,17 @@ async def handle_autonomy_start_command(
         except Exception:
             minecraft_route_enabled = False
 
+    try:
+        start_is_current = (
+            guild_mutation_is_current is None
+            or bool(guild_mutation_is_current())
+        )
+    except Exception:
+        start_is_current = False
+    if not start_is_current:
+        await ctx.send(AUTONOMY_START_STALE_REPLY)
+        return
+
     scopes = list(ASSISTANT_AUTONOMY_ACTIONS)
     if minecraft_route_enabled:
         scopes.extend(MINECRAFT_ROUTE_ACTIONS)
@@ -227,7 +271,12 @@ async def handle_autonomy_start_command(
         await ctx.send("❌ 자율 행동 승인을 발급하지 못했어.")
         return
     try:
-        await engine.start()
+        if guild_mutation_is_current is None:
+            started = await engine.start()
+        else:
+            started = await engine.start(
+                is_current=guild_mutation_is_current
+            )
     except asyncio.CancelledError:
         revoke_autonomy_authorization(
             ctx.guild.id,
@@ -242,6 +291,13 @@ async def handle_autonomy_start_command(
             reason_code="start_failed",
         )
         await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
+        return
+    if started is False:
+        revoke_autonomy_authorization(
+            ctx.guild.id,
+            reason_code="start_failed",
+        )
+        await ctx.send(AUTONOMY_START_STALE_REPLY)
         return
     await ctx.send("🤖 자율 행동 루프를 시작했어.")
 
@@ -357,8 +413,21 @@ async def handle_restart_bot_command(
     create_task: Any,
     restart_bot_process: Any,
 ) -> None:
-    await ctx.send("🔄 봇을 재시작할게. 잠깐만 기다려줘.")
-    create_task(restart_bot_process())
+    message = "🔄 봇을 재시작할게. 잠깐만 기다려줘."
+    start_restart = lambda: create_task(restart_bot_process())
+    send_with_hook = getattr(
+        ctx,
+        "send_with_post_delivery_hook",
+        None,
+    )
+    if callable(send_with_hook):
+        await send_with_hook(
+            message,
+            after_delivery=start_restart,
+        )
+        return
+    await ctx.send(message)
+    start_restart()
 
 
 async def handle_shutdown_bot_command(
@@ -368,11 +437,29 @@ async def handle_shutdown_bot_command(
     create_task: Any,
     shutdown_bot_process: Any,
 ) -> None:
-    if schedule_stack_shutdown():
-        await ctx.send("Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and Evelyn-owned WSL services will stop.")
+    message = (
+        "Evelyn shutdown requested. Supervisors, bot, LLM, TTS, Voyager, "
+        "and Evelyn-owned WSL services will stop if the full-stack helper "
+        "starts; otherwise this bot process will stop instead."
+    )
+
+    def start_shutdown() -> None:
+        if not schedule_stack_shutdown():
+            create_task(shutdown_bot_process())
+
+    send_with_hook = getattr(
+        ctx,
+        "send_with_post_delivery_hook",
+        None,
+    )
+    if callable(send_with_hook):
+        await send_with_hook(
+            message,
+            after_delivery=start_shutdown,
+        )
         return
-    await ctx.send("Full-stack shutdown helper failed, so only the bot process is stopping.")
-    create_task(shutdown_bot_process())
+    await ctx.send(message)
+    start_shutdown()
 
 
 def resolve_opus_runtime_value() -> Any:
@@ -432,9 +519,7 @@ async def handle_evelyn_page_command(
 async def handle_reset_guild_memory_command(
     ctx: Any,
     *,
-    memory_root: Any,
     reset_guild_runtime_state: Any,
-    remove_tree: Any,
     get_guild_command_prefix: Any,
     build_reply: Any,
     guild_only_message: Any,
@@ -444,16 +529,23 @@ async def handle_reset_guild_memory_command(
         return
 
     guild_id = ctx.guild.id
-    memory_dir = memory_root / f"guild_{guild_id}"
     current_prefix = get_guild_command_prefix(guild_id)
 
     try:
         reset_guild_runtime_state(guild_id)
     except RuntimeError as exc:
         error_code = str(exc)
+        if error_code in _MEMORY_GUILD_RESET_FAILURE_CODES:
+            await ctx.send(
+                "기억을 안전하게 초기화하지 못했어. 잠시 뒤 다시 시도해줘. "
+                "계속되면 기억 관리에서 예전 확인 기억을 직접 삭제한 뒤 다시 시도해줘."
+            )
+            return
         if error_code not in {
             AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
             AUTONOMY_RUNTIME_ACTIVE,
+            MEMORY_BACKGROUND_WORK_INFLIGHT,
+            SEARCH_BACKGROUND_WORK_INFLIGHT,
         }:
             raise
         await ctx.send(
@@ -462,9 +554,9 @@ async def handle_reset_guild_memory_command(
             else "기억 정리 작업이 끝나는 중이야. 잠깐 뒤에 다시 시도해줘."
         )
         return
-    if memory_dir.exists():
-        remove_tree(memory_dir)
-
+    refresh_epoch = getattr(ctx, "refresh_ingress_epoch", None)
+    if callable(refresh_epoch):
+        refresh_epoch()
     await ctx.send(build_reply(guild_name=ctx.guild.name, current_prefix=current_prefix))
 
 
@@ -481,36 +573,43 @@ async def handle_minecraft_connect_command(
     if ctx.guild is None:
         await ctx.send(guild_only_message())
         return
+    typing_stack = contextlib.AsyncExitStack()
+    with contextlib.suppress(Exception):
+        await typing_stack.enter_async_context(ctx.typing())
     try:
-        observed = await enable_minecraft_mode(
-            ctx.guild.id,
-            issuer_ref=(
-                f"discord_user:{getattr(ctx.author, 'id', '')}"
-            ),
-            source="discord_command",
-        )
-        if (
-            isinstance(observed, dict)
-            and observed.get("outcome_verified") is True
-            and observed.get("outcome_code")
-            == MINECRAFT_CONNECTED_OUTCOME
-            and minecraft_connection_confirmed(observed)
-        ):
-            route_enabled = await enable_minecraft_autonomy_route(
-                ctx.guild.id
+        try:
+            observed = await enable_minecraft_mode(
+                ctx.guild.id,
+                issuer_ref=(
+                    f"discord_user:{getattr(ctx.author, 'id', '')}"
+                ),
+                source="discord_command",
             )
-            if route_enabled is not True:
-                raise RuntimeError(
-                    "minecraft_autonomy_route_enable_failed"
+            if (
+                isinstance(observed, dict)
+                and observed.get("outcome_verified") is True
+                and observed.get("outcome_code")
+                == MINECRAFT_CONNECTED_OUTCOME
+                and minecraft_connection_confirmed(observed)
+            ):
+                route_enabled = await enable_minecraft_autonomy_route(
+                    ctx.guild.id
                 )
-        reply_text = build_reply(observed)
-    except Exception as exc:
-        if record_runtime_error is not None:
-            record_runtime_error("minecraft_connect_failed", exc)
-        log("마인크래프트 접속 오류 type=", type(exc).__name__)
-        reply_text = public_failure_message(
-            "minecraft_connect_failed"
-        )
+                if route_enabled is not True:
+                    raise RuntimeError(
+                        "minecraft_autonomy_route_enable_failed"
+                    )
+            reply_text = build_reply(observed)
+        except Exception as exc:
+            if record_runtime_error is not None:
+                record_runtime_error("minecraft_connect_failed", exc)
+            log("마인크래프트 접속 오류 type=", type(exc).__name__)
+            reply_text = public_failure_message(
+                "minecraft_connect_failed"
+            )
+    finally:
+        with contextlib.suppress(Exception):
+            await typing_stack.aclose()
     await ctx.send(reply_text)
 
 
@@ -595,7 +694,9 @@ async def handle_minecraft_goal_command(
         return
     goal_text = clean_text(str(goal or ""))
     if not goal_text:
-        reply_text = build_missing_reply()
+        reply_text = build_missing_reply(
+            str(getattr(ctx, "prefix", None) or "!")
+        )
         await ctx.send(reply_text)
         return
     try:
@@ -631,7 +732,39 @@ async def handle_control_command_error(ctx: Any, error: BaseException) -> None:
     if isinstance(error, commands.CheckFailure):
         await ctx.send(control_command_check_failure_message())
         return
+    if isinstance(error, commands.UserInputError):
+        prefix = str(getattr(ctx, "prefix", None) or "!")
+        command = getattr(ctx, "command", None)
+        name = str(getattr(command, "name", None) or "도움말")
+        await ctx.send(
+            f"명령 형식이 맞지 않아. 사용법: `{prefix}{name}`"
+        )
+        return
     raise error
+
+
+async def handle_discord_command_error(
+    ctx: Any,
+    error: BaseException,
+) -> None:
+    if not isinstance(error, commands.CommandNotFound):
+        raise error
+    invoked_with = clean_text(
+        str(getattr(ctx, "invoked_with", None) or "")
+    ).lower()
+    if invoked_with not in {
+        "minecraft",
+        "mc",
+        "마인크래프트",
+        "마크",
+    }:
+        return
+    prefix = str(getattr(ctx, "prefix", None) or "!")
+    await ctx.send(
+        "Minecraft 접속 명령은 띄어쓰지 않고 입력해줘. "
+        f"사용법: `{prefix}minecraft-connect` 또는 "
+        f"`{prefix}마크접속`"
+    )
 
 
 __all__ = [
@@ -649,6 +782,7 @@ __all__ = [
     "handle_prefix_command",
     "handle_rejoin_voice_command",
     "handle_control_command_error",
+    "handle_discord_command_error",
     "handle_reset_guild_memory_command",
     "handle_restart_bot_command",
     "handle_shutdown_bot_command",

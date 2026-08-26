@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import re
+import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, MutableMapping
 
-from .autonomy import AutonomyEngine
+from .autonomy import AutonomyEngine, AutonomyExecutionContext
 from .autonomy_observation_state import (
     build_autonomy_recent_context_payload,
     build_autonomy_status_payload,
@@ -23,6 +25,7 @@ from .discord_ingress import (
     DiscordTextIngressContext,
     build_text_ingress_context,
 )
+from .discord_delivery import is_definitive_discord_send_failure
 from .conversation_memory_exposure import (
     capture_combined_memory_exposure,
     filter_conversation_history_for_memory_exposure,
@@ -97,12 +100,25 @@ class AutonomyRuntimeFactoryDeps:
     record_runtime_error: (
         Callable[[str, BaseException], Any] | None
     ) = None
+    conversation_ingress: Any | None = None
 
 
 _TEXT_FOLLOWUP_SESSION = re.compile(
     r"^guild:(?P<guild>\d+):text:(?P<channel>\d+)"
     r"(?::thread:(?P<thread>\d+))?:user:(?P<user>\d+)$"
 )
+
+
+async def _drain_child_under_cancellation(
+    task: asyncio.Task,
+) -> tuple[Any, bool]:
+    cancellation_seen = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancellation_seen = True
+    return task.result(), cancellation_seen
 
 
 def _text_followup_ingress(
@@ -337,13 +353,140 @@ def get_or_create_autonomy_engine_from_runtime(
         target = select_followup_target()
         return target[2] if target is not None else None
 
-    async def notify(text: str) -> None:
+    def current_action_authorization(
+        action_key: str,
+        action_run_id: str,
+        *,
+        expected_grant_id: str | None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        if not action_key or not action_run_id:
+            return None, "authorization_required"
+        try:
+            try:
+                inspect.signature(deps.authorize_action).bind(
+                    guild_id,
+                    action_key,
+                    action_run_id=action_run_id,
+                )
+            except (TypeError, ValueError):
+                decision = deps.authorize_action(
+                    guild_id,
+                    action_key,
+                )
+            else:
+                decision = deps.authorize_action(
+                    guild_id,
+                    action_key,
+                    action_run_id=action_run_id,
+                )
+        except Exception:
+            return None, "authorization_audit_unavailable"
+        if not isinstance(decision, dict):
+            return None, "authorization_audit_unavailable"
+        if decision.get("allowed") is not True:
+            code = str(decision.get("code") or "")
+            if code not in {
+                "authorization_action_unsupported",
+                "authorization_audit_unavailable",
+                "authorization_required",
+                "authorization_scope_denied",
+            }:
+                code = "authorization_required"
+            return None, code
+        grant_id = str(decision.get("grantId") or "")
+        if expected_grant_id is not None and (
+            not expected_grant_id or grant_id != expected_grant_id
+        ):
+            return None, "authorization_changed_during_action"
+        returned_run_id = str(decision.get("actionRunId") or "")
+        if returned_run_id and returned_run_id != action_run_id:
+            return None, "authorization_changed_during_action"
+        return decision, ""
+
+    def blocked_authorization_result(reason: str) -> dict[str, Any]:
+        return {
+            "status": "blocked",
+            "reason": reason,
+            "verified": False,
+        }
+
+    async def notify(
+        text: str,
+        *,
+        action_run_id: str = "",
+    ) -> None:
         text = deps.clean_text(text)
         if not text:
             return
-        channel = await find_followup_channel()
-        if channel is not None:
-            await deps.send_discord_text(channel, text)
+        resolved_action_run_id = (
+            action_run_id or secrets.token_hex(12)
+        )
+        target = bound_followup_target()
+        if target is None:
+            return
+        reply_lock, _reason = await claim_followup_reply_slot(target)
+        if reply_lock is None:
+            return
+        try:
+            authorization, authorization_error = (
+                current_action_authorization(
+                    "assistant:send_followup",
+                    resolved_action_run_id,
+                    expected_grant_id=None,
+                )
+            )
+        except BaseException:
+            reply_lock.release()
+            raise
+        if authorization_error or authorization is None:
+            reply_lock.release()
+            return
+        result = await send_claimed_followup(
+            target,
+            reply_lock,
+            text,
+            user_text="[autonomy:error]",
+            delivery_kind="notify",
+            action_run_id=resolved_action_run_id,
+            authorization_action_key="assistant:send_followup",
+            expected_authorization_grant_id=str(
+                authorization.get("grantId") or ""
+            ),
+        )
+        audit_result = {
+            **result,
+            "_authorization_grant_id": str(
+                authorization.get("grantId") or ""
+            ),
+            "_action_run_id": resolved_action_run_id,
+        }
+        recorded = deps.record_action_outcome(
+            guild_id,
+            "assistant:send_followup",
+            audit_result,
+        )
+        if not (
+            recorded is True
+            or (
+                isinstance(recorded, dict)
+                and recorded.get("recorded") is True
+            )
+        ):
+            raise RuntimeError("authorization_audit_unavailable")
+        if isinstance(recorded, dict):
+            if recorded.get("verified") is not True:
+                raise RuntimeError("outcome_unverified")
+            if (
+                authorization.get("grantId")
+                and recorded.get("authorizationCurrent") is not True
+            ):
+                raise RuntimeError(
+                    "authorization_changed_during_action"
+                )
+        if result.get("_post_effect_integrity_failure") is True:
+            raise MemoryDeletionJournalIntegrityError()
+        if result.get("_post_effect_cancellation") is True:
+            raise asyncio.CancelledError()
 
     def has_queued_proactive_question(
         target: tuple[str, DiscordTextIngressContext, Any, float],
@@ -479,24 +622,193 @@ def get_or_create_autonomy_engine_from_runtime(
         *,
         awaiting_user_reply: bool = False,
         user_text: str = "[autonomy]",
+        delivery_kind: str,
+        action_run_id: str,
+        authorization_action_key: str = "",
+        expected_authorization_grant_id: str | None = None,
     ) -> dict[str, Any]:
         session_key, ingress, channel, _last_active = target
         continuity_durable = False
         continuity_generation = 0
         finalize_error: Exception | None = None
+        post_effect_cancellation = False
+        post_effect_integrity_failure = False
+        ingress_owner = deps.conversation_ingress
+        expected_guild_epoch: int | None = None
+        entry_id = ""
+        turn_id = ""
+        assistant_hash = ""
+        source_delivery_id = (
+            f"autonomy:{delivery_kind}:{action_run_id}"
+        )
         try:
             stored_user_text = user_text or "[autonomy]"
             memory_receipt = memory_receipt_ref_from_exposure(
                 current_memory_exposure_position()
             )
             topic_id = deps.build_topic_id("autonomy", text)
+            if ingress_owner is not None:
+                expected_guild_epoch = ingress_owner.guild_epoch(
+                    guild_id
+                )
+                claim = ingress_owner.claim_discord_autonomy(
+                    guild_id=guild_id,
+                    expected_guild_epoch=expected_guild_epoch,
+                    scope=session_key,
+                    source_delivery_id=source_delivery_id,
+                    accepted_text=stored_user_text,
+                )
+                if claim.get("shouldProcess") is not True:
+                    phase = str(claim.get("phase") or "")
+                    if phase == "completed":
+                        return {
+                            "status": "ok",
+                            "reason": "sent_followup",
+                            "verified": True,
+                            "evidence_code": "discord_send_completed",
+                            "continuityDurable": True,
+                            "continuityGeneration": int(
+                                claim.get("continuityGeneration") or 0
+                            ),
+                        }
+                    if phase in {
+                        "delivery_succeeded",
+                        "terminal_committing",
+                    }:
+                        return {
+                            "status": "ok",
+                            "reason": "sent_but_continuity_pending",
+                            "verified": True,
+                            "evidence_code": "discord_send_completed",
+                            "continuityDurable": False,
+                            "continuityGeneration": 0,
+                        }
+                    raise RuntimeError(
+                        "autonomy_delivery_not_replayable"
+                    )
+                if claim.get("guildEpoch") != expected_guild_epoch:
+                    raise RuntimeError(
+                        "conversation_ingress_epoch_not_current"
+                    )
+                entry_id = str(claim["entryId"])
+                turn_id = str(claim["turnId"])
+                binding = ingress_owner.bind_response(
+                    entry_id,
+                    guild_id=guild_id,
+                    expected_guild_epoch=expected_guild_epoch,
+                    assistant_text=text,
+                    memory_receipt_ref=memory_receipt,
+                )
+                assistant_hash = str(
+                    binding.get("assistantHash") or ""
+                )
+                ingress_owner.mark_delivery_inflight(
+                    entry_id,
+                    guild_id=guild_id,
+                    expected_guild_epoch=expected_guild_epoch,
+                    delivery_ref=source_delivery_id,
+                )
+
+            if expected_authorization_grant_id is not None:
+                _, authorization_error = current_action_authorization(
+                    authorization_action_key,
+                    action_run_id,
+                    expected_grant_id=(
+                        expected_authorization_grant_id
+                    ),
+                )
+                if authorization_error:
+                    if ingress_owner is not None:
+                        error_code = (
+                            "conversation_ingress_delivery_failed"
+                        )
+                        ingress_owner.mark_delivery_ambiguous(
+                            entry_id,
+                            guild_id=guild_id,
+                            expected_guild_epoch=(
+                                expected_guild_epoch
+                            ),
+                            error_code=error_code,
+                        )
+                        ingress_owner.discard_ambiguous(
+                            entry_id,
+                            guild_id=guild_id,
+                            expected_guild_epoch=(
+                                expected_guild_epoch
+                            ),
+                            assistant_hash=assistant_hash,
+                            delivery_ref=source_delivery_id,
+                            error_code=error_code,
+                        )
+                    return blocked_authorization_result(
+                        authorization_error
+                    )
+
+            delivery_task = asyncio.create_task(
+                deps.send_discord_text(channel, text),
+                name=f"autonomy-discord-send:{guild_id}",
+            )
             try:
-                await deps.send_discord_text(channel, text)
+                _, cancelled_during_send = (
+                    await _drain_child_under_cancellation(
+                        delivery_task
+                    )
+                )
+                post_effect_cancellation = (
+                    post_effect_cancellation
+                    or cancelled_during_send
+                )
             except asyncio.CancelledError:
+                if ingress_owner is not None:
+                    try:
+                        ingress_owner.mark_delivery_ambiguous(
+                            entry_id,
+                            guild_id=guild_id,
+                            expected_guild_epoch=(
+                                expected_guild_epoch
+                            ),
+                        )
+                    except Exception:
+                        pass
                 raise
             except MemoryDeletionJournalIntegrityError:
                 raise
             except Exception as exc:
+                definitive = is_definitive_discord_send_failure(
+                    exc
+                )
+                if ingress_owner is not None:
+                    error_code = (
+                        "conversation_ingress_delivery_failed"
+                        if definitive
+                        else (
+                            "conversation_ingress_delivery_ambiguous"
+                        )
+                    )
+                    try:
+                        binding = ingress_owner.mark_delivery_ambiguous(
+                            entry_id,
+                            guild_id=guild_id,
+                            expected_guild_epoch=(
+                                expected_guild_epoch
+                            ),
+                            error_code=error_code,
+                        )
+                        if definitive:
+                            ingress_owner.discard_ambiguous(
+                                entry_id,
+                                guild_id=guild_id,
+                                expected_guild_epoch=(
+                                    expected_guild_epoch
+                                ),
+                                assistant_hash=str(
+                                    binding.get("assistantHash") or ""
+                                ),
+                                delivery_ref=source_delivery_id,
+                                error_code=error_code,
+                            )
+                    except Exception:
+                        pass
                 if deps.record_runtime_error is not None:
                     try:
                         deps.record_runtime_error(
@@ -506,60 +818,145 @@ def get_or_create_autonomy_engine_from_runtime(
                     except Exception:
                         pass
                 raise
+            delivery_receipt_error: Exception | None = None
+            if ingress_owner is not None:
+                try:
+                    ingress_owner.mark_delivery_succeeded(
+                        entry_id,
+                        guild_id=guild_id,
+                        expected_guild_epoch=expected_guild_epoch,
+                        delivery_ref=source_delivery_id,
+                    )
+                except Exception as exc:
+                    delivery_receipt_error = exc
             deps.last_autonomy_ping_at[guild_id] = deps.monotonic()
             state_lock = deps.session_locks.setdefault(
                 session_key,
                 asyncio.Lock(),
             )
-            try:
-                async with state_lock:
-                    turn_id = deps.start_new_turn(session_key)
-                    deps.append_history(
-                        session_key,
-                        stored_user_text,
-                        text,
-                        guild_id=guild_id,
-                        memory_receipt=memory_receipt,
-                    )
-                    deps.mark_session_active(
-                        session_key,
-                        user_id=ingress.user_id,
-                        ttl_sec=(
-                            deps.active_conversation_text_question_sec
-                            if awaiting_user_reply
-                            else deps.active_conversation_text_sec
-                        ),
-                        speaker="assistant",
-                        awaiting_user_reply=awaiting_user_reply,
-                        topic_id=topic_id,
-                        answer_text=text,
-                        user_text=stored_user_text,
-                    )
-                    continuity_status = (
-                        await deps.commit_session_continuity(
+
+            async def finalize_delivered_followup() -> Exception | None:
+                nonlocal continuity_durable, continuity_generation
+                if delivery_receipt_error is not None:
+                    return delivery_receipt_error
+                try:
+                    async with state_lock:
+                        if ingress_owner is None:
+                            active_turn_id = deps.start_new_turn(
+                                session_key
+                            )
+                        else:
+                            active_turn_id = deps.start_new_turn(
+                                session_key,
+                                turn_id=turn_id,
+                            )
+                            if active_turn_id != turn_id:
+                                raise RuntimeError(
+                                    "conversation_ingress_turn_binding_mismatch"
+                                )
+                        deps.append_history(
                             session_key,
-                            turn_id,
+                            stored_user_text,
+                            text,
+                            guild_id=guild_id,
+                            memory_receipt=memory_receipt,
                         )
-                    )
-                    continuity_receipt = (
-                        require_durable_continuity_receipt(
-                            continuity_status
+                        deps.mark_session_active(
+                            session_key,
+                            user_id=ingress.user_id,
+                            ttl_sec=(
+                                deps.active_conversation_text_question_sec
+                                if awaiting_user_reply
+                                else deps.active_conversation_text_sec
+                            ),
+                            speaker="assistant",
+                            awaiting_user_reply=awaiting_user_reply,
+                            topic_id=topic_id,
+                            answer_text=text,
+                            user_text=stored_user_text,
                         )
-                    )
-                    continuity_durable = True
-                    continuity_generation = int(
-                        continuity_receipt["generation"]
-                    )
+                        if ingress_owner is None:
+                            continuity_status = (
+                                await deps.commit_session_continuity(
+                                    session_key,
+                                    active_turn_id,
+                                )
+                            )
+                        else:
+                            continuity_status = (
+                                await deps.commit_session_continuity(
+                                    session_key,
+                                    active_turn_id,
+                                    before_commit=lambda generation: (
+                                        ingress_owner.begin_terminal_commit(
+                                            entry_id,
+                                            guild_id=guild_id,
+                                            expected_guild_epoch=(
+                                                expected_guild_epoch
+                                            ),
+                                            continuity_generation=(
+                                                generation
+                                            ),
+                                            assistant_text=text,
+                                            memory_receipt_ref=(
+                                                memory_receipt
+                                            ),
+                                        )
+                                    ),
+                                )
+                            )
+                        continuity_receipt = (
+                            require_durable_continuity_receipt(
+                                continuity_status
+                            )
+                        )
+                        generation = int(
+                            continuity_receipt["generation"]
+                        )
+                        if ingress_owner is not None:
+                            ingress_owner.complete(
+                                entry_id,
+                                guild_id=guild_id,
+                                expected_guild_epoch=(
+                                    expected_guild_epoch
+                                ),
+                                continuity_generation=generation,
+                                assistant_text=text,
+                                memory_receipt_ref=memory_receipt,
+                            )
+                        continuity_durable = True
+                        continuity_generation = generation
+                except MemoryDeletionJournalIntegrityError:
+                    raise
+                except Exception as exc:
+                    return exc
+                return None
+
+            finalize_task = asyncio.create_task(
+                finalize_delivered_followup(),
+                name=f"autonomy-followup-finalize:{guild_id}",
+            )
+            try:
+                (
+                    finalize_error,
+                    cancelled_during_finalize,
+                ) = await _drain_child_under_cancellation(
+                    finalize_task
+                )
+                post_effect_cancellation = (
+                    post_effect_cancellation
+                    or cancelled_during_finalize
+                )
             except asyncio.CancelledError:
-                raise
-            except MemoryDeletionJournalIntegrityError:
-                raise
-            except Exception as exc:
-                finalize_error = exc
+                post_effect_cancellation = True
+                finalize_error = RuntimeError(
+                    "autonomy_followup_finalize_cancelled"
+                )
         finally:
             if reply_lock.locked():
                 reply_lock.release()
 
+        post_effect_error: Exception | None = None
         if finalize_error is None:
             try:
                 deps.schedule_memory_update(
@@ -578,41 +975,56 @@ def get_or_create_autonomy_engine_from_runtime(
             except asyncio.CancelledError:
                 raise
             except MemoryDeletionJournalIntegrityError:
-                raise
+                post_effect_integrity_failure = True
             except Exception as exc:
-                finalize_error = exc
+                post_effect_error = exc
 
-        if finalize_error is not None:
+        reported_error = finalize_error or post_effect_error
+        if reported_error is not None:
+            error_event = (
+                "sent_but_continuity_pending"
+                if finalize_error is not None
+                else "followup_finalize_failed"
+            )
             if deps.record_runtime_error is not None:
                 try:
                     deps.record_runtime_error(
                         "autonomy_followup_finalize_failed",
-                        finalize_error,
+                        reported_error,
                     )
                 except Exception:
                     pass
             try:
                 deps.log(
-                    "[AUTONOMY] followup_finalize_failed "
-                    f"guild={guild_id} "
-                    f"errorType={type(finalize_error).__name__}"
+                    f"[AUTONOMY] {error_event} guild={guild_id} "
+                    f"errorType={type(reported_error).__name__}"
                 )
             except Exception:
                 pass
-        return {
+        result = {
             "status": "ok",
-            "reason": "sent_followup",
+            "reason": (
+                "sent_followup"
+                if finalize_error is None
+                else "sent_but_continuity_pending"
+            ),
             "verified": True,
             "evidence_code": "discord_send_completed",
             "continuityDurable": continuity_durable,
             "continuityGeneration": continuity_generation,
         }
+        if post_effect_cancellation:
+            result["_post_effect_cancellation"] = True
+        if post_effect_integrity_failure:
+            result["_post_effect_integrity_failure"] = True
+        return result
 
     async def default_send_followup(
         text: str,
         *,
         awaiting_user_reply: bool = False,
         user_text: str = "[autonomy]",
+        context: AutonomyExecutionContext | None = None,
     ) -> dict[str, Any]:
         target = bound_followup_target()
         if target is None:
@@ -620,12 +1032,52 @@ def get_or_create_autonomy_engine_from_runtime(
         reply_lock, reason = await claim_followup_reply_slot(target)
         if reply_lock is None:
             return {"status": "blocked", "reason": reason}
+        action_run_id = (
+            context.action_run_id
+            if context is not None and context.action_run_id
+            else secrets.token_hex(12)
+        )
+        if context is not None:
+            if context.action_key != "assistant:send_followup":
+                reply_lock.release()
+                return blocked_authorization_result(
+                    "authorization_scope_denied"
+                )
+            try:
+                authorization, authorization_error = (
+                    current_action_authorization(
+                        context.action_key,
+                        action_run_id,
+                        expected_grant_id=(
+                            context.authorization_grant_id
+                        ),
+                    )
+                )
+            except BaseException:
+                reply_lock.release()
+                raise
+            if authorization_error or authorization is None:
+                reply_lock.release()
+                return blocked_authorization_result(
+                    authorization_error
+                    or "authorization_audit_unavailable"
+                )
         return await send_claimed_followup(
             target,
             reply_lock,
             text,
             awaiting_user_reply=awaiting_user_reply,
             user_text=user_text,
+            delivery_kind="followup",
+            action_run_id=action_run_id,
+            authorization_action_key=(
+                context.action_key if context is not None else ""
+            ),
+            expected_authorization_grant_id=(
+                context.authorization_grant_id
+                if context is not None
+                else None
+            ),
         )
 
     async def default_summarize() -> dict[str, Any]:
@@ -667,7 +1119,11 @@ def get_or_create_autonomy_engine_from_runtime(
             result["evidence_code"] = "recent_context_payload_built"
             return result
 
-    async def default_maybe_ping_user(text: str) -> dict[str, Any]:
+    async def default_maybe_ping_user(
+        text: str,
+        *,
+        context: AutonomyExecutionContext | None = None,
+    ) -> dict[str, Any]:
         last_ping_at = float(deps.last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
         if last_ping_at > 0 and (deps.monotonic() - last_ping_at) < 900:
             return {"status": "blocked", "reason": "ping_cooldown"}
@@ -680,6 +1136,36 @@ def get_or_create_autonomy_engine_from_runtime(
             reply_lock, reason = await claim_followup_reply_slot(target)
             if reply_lock is None:
                 return {"status": "blocked", "reason": reason}
+            action_run_id = (
+                context.action_run_id
+                if context is not None and context.action_run_id
+                else secrets.token_hex(12)
+            )
+            if context is not None:
+                if context.action_key != "assistant:maybe_ping_user":
+                    reply_lock.release()
+                    return blocked_authorization_result(
+                        "authorization_scope_denied"
+                    )
+                try:
+                    authorization, authorization_error = (
+                        current_action_authorization(
+                            context.action_key,
+                            action_run_id,
+                            expected_grant_id=(
+                                context.authorization_grant_id
+                            ),
+                        )
+                    )
+                except BaseException:
+                    reply_lock.release()
+                    raise
+                if authorization_error or authorization is None:
+                    reply_lock.release()
+                    return blocked_authorization_result(
+                        authorization_error
+                        or "authorization_audit_unavailable"
+                    )
             try:
                 marked = deps.select_and_mark_proactive_question(
                     guild_id=guild_id,
@@ -714,7 +1200,17 @@ def get_or_create_autonomy_engine_from_runtime(
                 reply_lock,
                 ask_text,
                 awaiting_user_reply=True,
-                user_text=latest_user_text or "[autonomy]",
+                user_text="[autonomy]",
+                delivery_kind="ping",
+                action_run_id=action_run_id,
+                authorization_action_key=(
+                    context.action_key if context is not None else ""
+                ),
+                expected_authorization_grant_id=(
+                    context.authorization_grant_id
+                    if context is not None
+                    else None
+                ),
             )
 
     async def default_refresh_cognitive_state() -> dict[str, Any]:

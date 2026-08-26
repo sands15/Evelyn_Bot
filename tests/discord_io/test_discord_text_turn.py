@@ -7,7 +7,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -21,7 +21,11 @@ from evelyn_core.conversation_ingress_composition import (  # noqa: E402
     ConversationIngressCompositionDeps,
 )
 from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
+    ConversationIngressRecoveryError,
     ConversationIngressRecoveryJournal,
+)
+from evelyn_core.conversation_ingress_context import (  # noqa: E402
+    render_conversation_ingress_recovery_context,
 )
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
@@ -29,8 +33,12 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
 )
 from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
 from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
-from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
+from evelyn_core.memory_confirmation_contract import (  # noqa: E402
+    memory_owner_scope,
+    memory_reset_scope,
+)
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
+from evelyn_core.turn_lifecycle import TurnScopeRegistry  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -121,12 +129,16 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         log_turn_event=lambda *args, **kwargs: calls.append(("log_turn", kwargs.get("reason"))),
         current_turn_id=lambda session_key: f"current:{session_key}",
         resolve_pending_proactive_question_for_turn=lambda *args, **kwargs: {"resolved": False},
-        claim_conversation_ingress=lambda ingress, _text: {
+        claim_conversation_ingress=lambda ingress, _text, **_kwargs: {
             "entryId": f"entry:{ingress.message_id}",
             "turnId": f"turn:{ingress.session_key}",
             "phase": "accepted",
             "shouldProcess": True,
         },
+        conversation_ingress_guild_epoch=lambda _guild_id: 0,
+        activate_conversation_ingress_guild_turn=(
+            lambda _guild_id, _epoch, activation: activation()
+        ),
         conversation_ingress_recovery_context=lambda scope, **_kwargs: {
             "schema": "conversation.ingress-recovery-context.v1",
             "surface": "discord_text",
@@ -356,6 +368,73 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_cancelled_commit_holds_reply_and_session_locks_until_drain(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            calls: list[tuple[str, object]] = []
+            commit_started = threading.Event()
+            release_commit = threading.Event()
+
+            async def commit(*_args, **kwargs):
+                kwargs["before_commit"](5)
+                commit_started.set()
+                if not await asyncio.to_thread(
+                    release_commit.wait,
+                    2.0,
+                ):
+                    raise TimeoutError("test_commit_release_timed_out")
+                return durable_continuity_status(5)
+
+            deps = make_deps(
+                calls,
+                commit_session_continuity=commit,
+            )
+            message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild"),
+            )
+            answer_task = asyncio.create_task(
+                handle_discord_text_message(message, deps)
+            )
+            successor_acquired = asyncio.Event()
+            successor_task: asyncio.Task[None] | None = None
+            reply_key = "guild:1:reply:text:2"
+            session_key = "guild:1:text:2:user:3"
+            try:
+                self.assertTrue(
+                    await asyncio.to_thread(
+                        commit_started.wait,
+                        1.0,
+                    )
+                )
+                answer_task.cancel()
+
+                async def acquire_successor() -> None:
+                    async with deps.reply_slot_locks[reply_key]:
+                        async with deps.session_locks[session_key]:
+                            successor_acquired.set()
+
+                successor_task = asyncio.create_task(acquire_successor())
+                await asyncio.sleep(0)
+                self.assertFalse(answer_task.done())
+                self.assertTrue(deps.reply_slot_locks[reply_key].locked())
+                self.assertTrue(deps.session_locks[session_key].locked())
+                self.assertFalse(successor_acquired.is_set())
+
+                release_commit.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(answer_task, timeout=2.0)
+                await asyncio.wait_for(successor_task, timeout=1.0)
+            finally:
+                release_commit.set()
+                answer_task.cancel()
+                pending = [answer_task]
+                if successor_task is not None:
+                    pending.append(successor_task)
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        asyncio.run(scenario())
+
     def test_handler_runs_full_text_turn_and_records_side_effects(self) -> None:
         calls: list[tuple[str, object]] = []
         deps = make_deps(calls)
@@ -540,6 +619,7 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
                 guild_id=1,
                 person_key="user:3",
             ),
+            reset_scope=memory_reset_scope(1),
         )
 
     def test_delivered_text_turn_is_committed_when_optional_voice_fails(self) -> None:
@@ -850,7 +930,14 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
         *,
         reconcile=None,
         verify=None,
+        revoked_guild_ids=(),
+        reset_persistent=None,
+        reset_recovery=None,
     ) -> ConversationIngressComposition:
+        def reset_session_continuity_guild(_guild_id, callback):
+            callback()
+            return {"state": "ready"}
+
         owner = ConversationIngressComposition(
             ConversationIngressCompositionDeps(
                 journal_factory=lambda: ConversationIngressRecoveryJournal(
@@ -858,6 +945,15 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
                     head_path=root / "main.head.json",
                 ),
                 log=lambda *_args: None,
+                active_guild_revocation_ids=(
+                    lambda: tuple(revoked_guild_ids)
+                ),
+                reset_session_continuity_guild=reset_session_continuity_guild,
+                reset_guild_persistent_memory=(
+                    reset_persistent
+                    or (lambda _guild_id: None)
+                ),
+                reset_guild_recovery_metadata=reset_recovery,
                 reconcile_delivery_succeeded=reconcile,
                 verify_terminal_commit=verify,
             )
@@ -869,6 +965,10 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
     def ingress_overrides(owner: ConversationIngressComposition):
         return {
             "claim_conversation_ingress": owner.claim_discord_text,
+            "conversation_ingress_guild_epoch": owner.guild_epoch,
+            "activate_conversation_ingress_guild_turn": (
+                owner.activate_guild_turn
+            ),
             "conversation_ingress_recovery_context": (
                 owner.recovery_context_for_scope
             ),
@@ -879,6 +979,633 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
             "begin_ingress_terminal_commit": owner.begin_terminal_commit,
             "complete_ingress": owner.complete,
         }
+
+    def test_guild_reset_purges_prompt_context_and_rejects_old_claim_epoch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            old_ingress = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=98,
+            )
+            blocked_ingress = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=99,
+            )
+            old_epoch = owner.guild_epoch(1)
+            owner.claim_discord_text(old_ingress, "old accepted canary")
+
+            owner.reset_guild(1)
+            owner.complete_guild_reset(1)
+            rendered = render_conversation_ingress_recovery_context(
+                owner.recovery_context_for_scope(old_ingress.session_key)
+            )
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_epoch_not_current$",
+            ):
+                owner.claim_discord_text(
+                    blocked_ingress,
+                    "blocked claim canary",
+                    expected_guild_epoch=old_epoch,
+                )
+
+        self.assertNotIn("old accepted canary", rendered)
+        self.assertEqual(owner.public_status()["entryCount"], 0)
+
+    def test_late_post_claim_mutation_cannot_cross_guild_reset_epoch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            ingress = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=98,
+            )
+            old_epoch = owner.guild_epoch(1)
+            old_claim = owner.claim_discord_text(
+                ingress,
+                "same accepted text",
+                expected_guild_epoch=old_epoch,
+            )
+
+            owner.reset_guild(1)
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_inflight$",
+            ):
+                owner.mark_response_ready(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    assistant_text="stale pre-reset answer",
+                    memory_receipt_ref=unattributed_memory_receipt_ref(),
+                )
+
+            owner.complete_guild_reset(1)
+            fresh_epoch = owner.guild_epoch(1)
+            fresh_claim = owner.claim_discord_text(
+                ingress,
+                "same accepted text",
+                expected_guild_epoch=fresh_epoch,
+            )
+            self.assertEqual(old_claim["entryId"], fresh_claim["entryId"])
+            stale_mutations = {
+                "response_ready": lambda: owner.mark_response_ready(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    assistant_text="stale pre-reset answer",
+                    memory_receipt_ref=unattributed_memory_receipt_ref(),
+                ),
+                "bind_response": lambda: owner.bind_response(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    assistant_text="stale pre-reset answer",
+                    memory_receipt_ref=unattributed_memory_receipt_ref(),
+                ),
+                "stream_inflight": (
+                    lambda: owner.mark_stream_delivery_inflight(
+                        old_claim["entryId"],
+                        guild_id=1,
+                        expected_guild_epoch=old_epoch,
+                        delivery_ref="stale-delivery",
+                    )
+                ),
+                "delivery_inflight": lambda: owner.mark_delivery_inflight(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    delivery_ref="stale-delivery",
+                ),
+                "delivery_succeeded": (
+                    lambda: owner.mark_delivery_succeeded(
+                        old_claim["entryId"],
+                        guild_id=1,
+                        expected_guild_epoch=old_epoch,
+                        delivery_ref="stale-delivery",
+                    )
+                ),
+                "delivery_ambiguous": (
+                    lambda: owner.mark_delivery_ambiguous(
+                        old_claim["entryId"],
+                        guild_id=1,
+                        expected_guild_epoch=old_epoch,
+                    )
+                ),
+                "terminal_commit": lambda: owner.begin_terminal_commit(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    continuity_generation=1,
+                    assistant_text="stale pre-reset answer",
+                    memory_receipt_ref=unattributed_memory_receipt_ref(),
+                ),
+                "complete": lambda: owner.complete(
+                    old_claim["entryId"],
+                    guild_id=1,
+                    expected_guild_epoch=old_epoch,
+                    continuity_generation=1,
+                    assistant_text="stale pre-reset answer",
+                    memory_receipt_ref=unattributed_memory_receipt_ref(),
+                ),
+            }
+            for mutation_name, mutation in stale_mutations.items():
+                with self.subTest(mutation=mutation_name):
+                    with self.assertRaisesRegex(
+                        ConversationIngressRecoveryError,
+                        "^conversation_ingress_epoch_not_current$",
+                    ):
+                        mutation()
+
+            restored = owner.record_for(fresh_claim["entryId"])
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["phase"], "accepted")
+        self.assertEqual(restored["assistantText"], "")
+
+    def test_restart_replays_active_guild_revocation_before_owner_ready(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_owner = self.owner(root)
+            target = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=98,
+            )
+            other = build_text_ingress_context(
+                guild_id=2,
+                channel_id=2,
+                user_id=3,
+                message_id=99,
+            )
+            target_receipt = first_owner.claim_discord_text(
+                target,
+                "revoked guild canary",
+            )
+            other_receipt = first_owner.claim_discord_text(
+                other,
+                "other guild canary",
+            )
+
+            persistent_resets: list[int] = []
+            recovery_entries = {1, 2}
+            restarted = self.owner(
+                root,
+                revoked_guild_ids=(1,),
+                reset_persistent=persistent_resets.append,
+                reset_recovery=recovery_entries.discard,
+            )
+
+        self.assertIsNone(restarted.record_for(target_receipt["entryId"]))
+        self.assertIsNotNone(restarted.record_for(other_receipt["entryId"]))
+        self.assertEqual(persistent_resets, [1])
+        self.assertEqual(recovery_entries, {2})
+        self.assertTrue(restarted.public_status()["ownerReady"])
+
+    def test_recovery_reset_failure_keeps_revocation_for_process_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts = 0
+            active_revocations: set[int] = set()
+            events: list[str] = []
+            runtime_calls: list[str] = []
+            private_canary = r"PRIVATE C:\secret\search-token"
+
+            def reset_recovery(guild_id: int) -> None:
+                nonlocal attempts
+                attempts += 1
+                events.append(f"search:{guild_id}")
+                if attempts == 1:
+                    raise OSError(private_canary)
+
+            owner = self.owner(
+                Path(tmp),
+                reset_recovery=reset_recovery,
+            )
+
+            def reset_continuity(guild_id: int) -> None:
+                active_revocations.add(guild_id)
+                events.append(f"revoke:{guild_id}")
+                owner.reset_guild(
+                    guild_id,
+                    lambda: runtime_calls.append("runtime"),
+                )
+                active_revocations.discard(guild_id)
+                events.append("finalized")
+                owner.complete_guild_reset(guild_id)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^search_followup_guild_reset_failed$",
+            ) as raised:
+                reset_continuity(1)
+
+            self.assertNotIn(private_canary, str(raised.exception))
+            self.assertEqual(active_revocations, {1})
+            self.assertEqual(runtime_calls, ["runtime"])
+            self.assertEqual(events, ["revoke:1", "search:1"])
+            blocked = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=100,
+            )
+            other = build_text_ingress_context(
+                guild_id=2,
+                channel_id=2,
+                user_id=3,
+                message_id=101,
+            )
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_inflight$",
+            ):
+                owner.claim_discord_text(blocked, "blocked")
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_inflight$",
+            ):
+                owner.activate_guild_turn(1, 1, lambda: None)
+            self.assertTrue(
+                owner.claim_discord_text(other, "allowed")["shouldProcess"]
+            )
+
+            reset_continuity(1)
+            self.assertTrue(
+                owner.claim_discord_text(blocked, "reopened")["shouldProcess"]
+            )
+
+        self.assertEqual(active_revocations, set())
+        self.assertEqual(runtime_calls, ["runtime", "runtime"])
+        self.assertEqual(
+            events,
+            [
+                "revoke:1",
+                "search:1",
+                "revoke:1",
+                "search:1",
+                "finalized",
+            ],
+        )
+
+    def test_recovery_reset_hides_exception_but_preserves_cancellation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            private_canary = r"PRIVATE C:\secret\runtime-token"
+
+            def fail_unknown(_guild_id: int) -> None:
+                raise RuntimeError(private_canary)
+
+            owner = self.owner(
+                Path(tmp),
+                reset_recovery=fail_unknown,
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^search_followup_guild_reset_failed$",
+            ) as raised:
+                owner.reset_guild(1)
+            self.assertNotIn(private_canary, str(raised.exception))
+
+            cancel_owner = self.owner(
+                Path(tmp) / "cancel",
+                reset_recovery=(
+                    lambda _guild_id: (_ for _ in ()).throw(
+                        asyncio.CancelledError()
+                    )
+                ),
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                cancel_owner.reset_guild(1)
+
+    def test_ingress_reset_hides_journal_failure_and_keeps_guild_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            assert owner._journal is not None
+            owner._journal.reset_guild = Mock(
+                side_effect=OSError(
+                    r"PRIVATE C:\secret\ingress-token"
+                )
+            )
+            runtime_calls: list[str] = []
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^conversation_ingress_guild_reset_failed$",
+            ) as raised:
+                owner.reset_guild(
+                    1,
+                    lambda: runtime_calls.append("runtime"),
+                )
+
+        self.assertNotIn("ingress-token", str(raised.exception))
+        self.assertEqual(runtime_calls, ["runtime"])
+        self.assertFalse(owner.guild_is_open(1))
+
+    def test_persistent_reset_failure_clears_runtime_and_keeps_block(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_calls: list[str] = []
+
+            def fail_persistent(_guild_id: int) -> None:
+                raise RuntimeError("memory_guild_reset_delete_failed")
+
+            owner = self.owner(
+                Path(tmp),
+                reset_persistent=fail_persistent,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^memory_guild_reset_delete_failed$",
+            ):
+                owner.reset_guild(
+                    1,
+                    lambda: runtime_calls.append("runtime"),
+                )
+
+        self.assertEqual(runtime_calls, ["runtime"])
+        self.assertFalse(owner.guild_is_open(1))
+
+    def test_restart_persistent_reset_failure_keeps_owner_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events: list[str] = []
+
+            def reset_continuity(_guild_id, callback):
+                events.append("revoked")
+                callback()
+                events.append("finalized")
+                return {"state": "ready"}
+
+            def fail_persistent(_guild_id: int) -> None:
+                events.append("persistent")
+                raise RuntimeError("memory_guild_reset_delete_failed")
+
+            owner = ConversationIngressComposition(
+                ConversationIngressCompositionDeps(
+                    journal_factory=lambda: ConversationIngressRecoveryJournal(
+                        path=root / "main.json",
+                        head_path=root / "main.head.json",
+                    ),
+                    log=lambda *_args: None,
+                    active_guild_revocation_ids=lambda: (1,),
+                    reset_session_continuity_guild=reset_continuity,
+                    reset_guild_persistent_memory=fail_persistent,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_recovery_failed$",
+            ):
+                owner.activate_after_continuity_restore()
+
+        self.assertEqual(events, ["revoked", "persistent"])
+        self.assertFalse(owner.public_status()["ownerReady"])
+
+    def test_reset_after_claim_blocks_text_turn_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            overrides = self.ingress_overrides(owner)
+
+            def reset_before_activation(scope, **kwargs):
+                owner.reset_guild(1)
+                return owner.recovery_context_for_scope(scope, **kwargs)
+
+            overrides["conversation_ingress_recovery_context"] = (
+                reset_before_activation
+            )
+            message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild")
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    message,
+                    make_deps(calls, **overrides),
+                )
+            )
+
+        self.assertFalse(any(call[0] == "stream" for call in calls))
+        self.assertFalse(any(call[0] == "finish" for call in calls))
+        self.assertEqual(owner.public_status()["entryCount"], 0)
+
+    def test_activation_barrier_orders_begin_before_concurrent_reset_clear(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            epoch = owner.guild_epoch(1)
+            activation_started = threading.Event()
+            release_activation = threading.Event()
+            reset_done = threading.Event()
+            history: list[str] = []
+
+            def activate() -> None:
+                activation_started.set()
+                if not release_activation.wait(1.0):
+                    raise TimeoutError("activation was not released")
+                history.append("started")
+
+            activation_thread = threading.Thread(
+                target=lambda: owner.activate_guild_turn(
+                    1,
+                    epoch,
+                    activate,
+                )
+            )
+
+            def reset() -> None:
+                owner.reset_guild(1, history.clear)
+                owner.complete_guild_reset(1)
+                reset_done.set()
+
+            activation_thread.start()
+            self.assertTrue(activation_started.wait(1.0))
+            reset_thread = threading.Thread(target=reset)
+            reset_thread.start()
+            self.assertFalse(reset_done.wait(0.05))
+            release_activation.set()
+            activation_thread.join(1.0)
+            reset_thread.join(1.0)
+
+        self.assertFalse(activation_thread.is_alive())
+        self.assertFalse(reset_thread.is_alive())
+        self.assertTrue(reset_done.is_set())
+        self.assertEqual(history, [])
+
+    def test_reset_after_activation_callback_cancels_registered_turn(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            histories: dict[str, str] = {}
+            followups: dict[str, object] = {}
+            registry = TurnScopeRegistry()
+            overrides = self.ingress_overrides(owner)
+
+            def begin(session_key, user_text, **kwargs):
+                histories[session_key] = user_text
+                return SimpleNamespace(
+                    topic_id="topic",
+                    turn_id=kwargs["turn_id"],
+                )
+
+            def remember(session_key, **kwargs):
+                followups[session_key] = kwargs
+
+            def reset_runtime() -> None:
+                histories.clear()
+                followups.clear()
+                registry.cancel_matching_prefix("guild:1:")
+
+            def activate_then_reset(guild_id, epoch, activation):
+                prepared = owner.activate_guild_turn(
+                    guild_id,
+                    epoch,
+                    activation,
+                )
+                owner.reset_guild(guild_id, reset_runtime)
+                owner.complete_guild_reset(guild_id)
+                return prepared
+
+            overrides[
+                "activate_conversation_ingress_guild_turn"
+            ] = activate_then_reset
+            deps = make_deps(
+                calls,
+                remember_session_followup_target=remember,
+                begin_user_text_turn=begin,
+                replace_room_turn_scope=registry.replace_room_scope,
+                attach_current_task=registry.attach_current_task,
+                detach_task=registry.detach_task,
+                clear_room_turn_scope=registry.clear_room_scope,
+                **overrides,
+            )
+
+            async def scenario() -> bool:
+                task = asyncio.create_task(
+                    handle_discord_text_message(
+                        make_message(
+                            guild=SimpleNamespace(id=1, name="Guild")
+                        ),
+                        deps,
+                    )
+                )
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    return True
+                return False
+
+            cancelled = asyncio.run(scenario())
+
+        self.assertTrue(cancelled)
+        self.assertEqual(histories, {})
+        self.assertEqual(followups, {})
+        self.assertEqual(registry.room_turn_scopes, {})
+        self.assertFalse(any(call[0] == "stream" for call in calls))
+
+    def test_restart_reset_finalize_failure_keeps_owner_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = ConversationIngressComposition(
+                ConversationIngressCompositionDeps(
+                    journal_factory=lambda: ConversationIngressRecoveryJournal(
+                        path=root / "main.json",
+                        head_path=root / "main.head.json",
+                    ),
+                    log=lambda *_args: None,
+                    active_guild_revocation_ids=lambda: (1,),
+                    reset_session_continuity_guild=lambda *_args: {
+                        "state": "error"
+                    },
+                    reset_guild_persistent_memory=lambda _guild_id: None,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_recovery_failed$",
+            ):
+                owner.activate_after_continuity_restore()
+
+        self.assertFalse(owner.public_status()["ownerReady"])
+
+    def test_disabled_owner_defers_restart_reset_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[str] = []
+            owner = ConversationIngressComposition(
+                ConversationIngressCompositionDeps(
+                    journal_factory=lambda: ConversationIngressRecoveryJournal(
+                        path=root / "main.json",
+                        head_path=root / "main.head.json",
+                        enabled=False,
+                    ),
+                    log=lambda *_args: None,
+                    active_guild_revocation_ids=lambda: (
+                        calls.append("ids") or (1,)
+                    ),
+                    reset_session_continuity_guild=lambda *_args: (
+                        calls.append("reset")
+                    ),
+                    reset_guild_persistent_memory=lambda _guild_id: None,
+                )
+            )
+
+            status = owner.activate_after_continuity_restore()
+
+        self.assertFalse(status["ownerReady"])
+        self.assertEqual(calls, [])
+
+    def test_corrupt_owner_with_restart_marker_aborts_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.json").write_text("not-json", encoding="utf-8")
+            owner = ConversationIngressComposition(
+                ConversationIngressCompositionDeps(
+                    journal_factory=lambda: ConversationIngressRecoveryJournal(
+                        path=root / "main.json",
+                        head_path=root / "main.head.json",
+                    ),
+                    log=lambda *_args: None,
+                    active_guild_revocation_ids=lambda: (1,),
+                    reset_session_continuity_guild=lambda *_args: {
+                        "state": "ready"
+                    },
+                    reset_guild_persistent_memory=lambda _guild_id: None,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "^conversation_ingress_guild_reset_recovery_failed$",
+            ):
+                owner.activate_after_continuity_restore()
+
+        self.assertFalse(owner.public_status()["ownerReady"])
 
     def test_completed_gateway_redelivery_runs_no_downstream_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1030,8 +1757,12 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
             channel = FakeChannel()
             claimed: dict[str, str] = {}
 
-            def claim(ingress, accepted_text):
-                receipt = owner.claim_discord_text(ingress, accepted_text)
+            def claim(ingress, accepted_text, **kwargs):
+                receipt = owner.claim_discord_text(
+                    ingress,
+                    accepted_text,
+                    **kwargs,
+                )
                 claimed["entry_id"] = receipt["entryId"]
                 return receipt
 
@@ -1252,7 +1983,7 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
             base_deps = make_deps(calls)
             original_begin = base_deps.begin_user_text_turn
 
-            def claim(ingress, accepted_text):
+            def claim(ingress, accepted_text, **kwargs):
                 nonlocal claim_count
                 with count_lock:
                     claim_count += 1
@@ -1262,7 +1993,11 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
                 elif current_count == 2:
                     second_claim_started.set()
                 release_claim.wait(timeout=2.0)
-                return owner.claim_discord_text(ingress, accepted_text)
+                return owner.claim_discord_text(
+                    ingress,
+                    accepted_text,
+                    **kwargs,
+                )
 
             def begin(*args, **kwargs):
                 nonlocal begin_count
@@ -1386,22 +2121,36 @@ class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
             memory_ref = unattributed_memory_receipt_ref()
             owner.mark_response_ready(
                 claim["entryId"],
+                guild_id=1,
+                expected_guild_epoch=claim["guildEpoch"],
                 assistant_text="answer",
                 memory_receipt_ref=memory_ref,
             )
             owner.mark_delivery_inflight(
                 claim["entryId"],
+                guild_id=1,
+                expected_guild_epoch=claim["guildEpoch"],
                 delivery_ref="delivery-1",
             )
             owner.mark_delivery_succeeded(
                 claim["entryId"],
+                guild_id=1,
+                expected_guild_epoch=claim["guildEpoch"],
                 delivery_ref="delivery-1",
             )
 
-            blocked_owner = self.owner(root, reconcile=lambda _record: None)
+            blocked_owner = self.owner(
+                root,
+                reconcile=lambda _record, **_kwargs: None,
+            )
             self.assertFalse(blocked_owner.public_status()["ownerReady"])
 
-            reconciled_owner = self.owner(root, reconcile=lambda _record: 7)
+            reconciled_owner = self.owner(
+                root,
+                reconcile=lambda _record, **kwargs: (
+                    kwargs["before_commit"](7) and 7
+                ),
+            )
             status = reconciled_owner.public_status()
 
         self.assertTrue(status["ownerReady"])

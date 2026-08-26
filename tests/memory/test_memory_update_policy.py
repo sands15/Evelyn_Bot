@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -23,7 +24,12 @@ from evelyn_core.memory_update_policy import (  # noqa: E402
     should_run_memory_update,
     write_memory_turn_records,
 )
+from evelyn_core.guild_runtime_reset import (  # noqa: E402
+    MEMORY_BACKGROUND_WORK_INFLIGHT,
+    require_guild_runtime_reset_ready,
+)
 from evelyn_core.memory_update_runtime import schedule_memory_update_from_runtime  # noqa: E402
+from evelyn_core.memory_writebehind import run_memory_writebehind_steps  # noqa: E402
 
 
 class MemoryUpdatePolicyTests(unittest.TestCase):
@@ -422,6 +428,188 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
         self.assertEqual(normal.action, "normal")
         self.assertEqual(normal.writebehind_mode, "normal")
         self.assertIsNone(normal.task_key)
+
+
+class MemoryUpdateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_replacement_keeps_cancelled_predecessor_visible_to_reset(self) -> None:
+        task_key = "guild:123:memory-writebehind:batch:session"
+        predecessor_started = asyncio.Event()
+        release_predecessor = asyncio.Event()
+
+        async def cancellation_resistant_predecessor() -> None:
+            predecessor_started.set()
+            try:
+                await release_predecessor.wait()
+            except asyncio.CancelledError:
+                await release_predecessor.wait()
+
+        predecessor = asyncio.create_task(cancellation_resistant_predecessor())
+        await predecessor_started.wait()
+        background_memory_tasks = {task_key: predecessor}
+
+        def create_task(coro, **_kwargs):
+            return asyncio.create_task(coro)
+
+        deps = SimpleNamespace(
+            write_memory_turn_records=lambda *_args, **_kwargs: SimpleNamespace(
+                memory_user_text="user",
+                memory_answer="answer",
+                vault_mirrored=True,
+                identity_record_decision={},
+            ),
+            vision_memory_write_enabled=False,
+            record_self_identity_turn=lambda *_args, **_kwargs: {},
+            append_raw_transcript_rows=lambda *_args, **_kwargs: None,
+            append_turn_rows_to_memory_vault=lambda *_args, **_kwargs: None,
+            schedule_memory_vault_maintenance=lambda *_args, **_kwargs: None,
+            memory_refresh_inputs_for_turn=lambda **_kwargs: SimpleNamespace(),
+            get_conversation_history=lambda **_kwargs: [],
+            session_last_active_at={},
+            needs_search_or_deep_routing=lambda *_args, **_kwargs: False,
+            build_memory_writer_decision_for_turn=lambda **_kwargs: SimpleNamespace(),
+            build_memory_writer_decision=lambda *_args, **_kwargs: None,
+            build_memory_writer_decision_payload=lambda *_args, **_kwargs: {},
+            plan_memory_writebehind_schedule=lambda *_args, **_kwargs: SimpleNamespace(
+                action="batch",
+                status="queued",
+                writebehind_mode="batch",
+                task_key=task_key,
+                replace_existing=True,
+            ),
+            runtime_session_key=lambda **_kwargs: "session",
+            memory_writebehind_task_key=lambda *_args, **_kwargs: task_key,
+            should_replace_existing_memory_task=lambda *_args, **_kwargs: True,
+            mark_memory_writer_status=lambda *_args, **_kwargs: None,
+            memory_writebehind_status_log=None,
+            background_memory_tasks=background_memory_tasks,
+            create_turn_scoped_task=create_task,
+            run_memory_writebehind_steps=run_memory_writebehind_steps,
+            update_long_term_memory=lambda *_args, **_kwargs: asyncio.sleep(0),
+            update_cognitive_state=lambda *_args, **_kwargs: asyncio.sleep(0),
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        try:
+            schedule_memory_update_from_runtime(
+                123,
+                "user",
+                "answer",
+                deps=deps,
+                session_key="session",
+                runtime_mode="batch",
+            )
+            replacement = background_memory_tasks[task_key]
+            self.assertIsNot(replacement, predecessor)
+            await asyncio.sleep(0)
+            self.assertFalse(predecessor.done())
+
+            replacement.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await replacement
+            await asyncio.sleep(0)
+
+            reset_deps = SimpleNamespace(
+                autonomy_engines={},
+                autonomy_cognitive_refresh_tasks={},
+                background_search_tasks={},
+                background_memory_tasks=background_memory_tasks,
+                background_memory_vault_tasks={},
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                f"^{MEMORY_BACKGROUND_WORK_INFLIGHT}$",
+            ):
+                require_guild_runtime_reset_ready(123, deps=reset_deps)
+        finally:
+            release_predecessor.set()
+            await predecessor
+
+        await asyncio.sleep(0)
+        self.assertEqual(background_memory_tasks, {})
+
+    async def test_normal_writebehind_keeps_one_post_turn_cognitive_refresh(self) -> None:
+        tasks = []
+        cognitive_calls = []
+        events = []
+        memory_started = asyncio.Event()
+        release_memory = asyncio.Event()
+
+        def create_task(coro, **_kwargs):
+            task = asyncio.create_task(coro)
+            tasks.append(task)
+            return task
+
+        async def update_cognitive(*args, **kwargs):
+            events.append("cognitive")
+            cognitive_calls.append((args, kwargs))
+
+        async def update_long_term_memory(*_args, **_kwargs):
+            memory_started.set()
+            await release_memory.wait()
+            events.append("long_term_memory")
+
+        deps = SimpleNamespace(
+            write_memory_turn_records=lambda *_args, **_kwargs: SimpleNamespace(
+                memory_user_text="user",
+                memory_answer="answer",
+                vault_mirrored=True,
+                identity_record_decision={},
+            ),
+            vision_memory_write_enabled=False,
+            record_self_identity_turn=lambda *_args, **_kwargs: {},
+            append_raw_transcript_rows=lambda *_args, **_kwargs: None,
+            append_turn_rows_to_memory_vault=lambda *_args, **_kwargs: None,
+            schedule_memory_vault_maintenance=lambda *_args, **_kwargs: None,
+            memory_refresh_inputs_for_turn=lambda **_kwargs: SimpleNamespace(),
+            get_conversation_history=lambda **_kwargs: [],
+            session_last_active_at={},
+            needs_search_or_deep_routing=lambda *_args, **_kwargs: False,
+            build_memory_writer_decision_for_turn=lambda **_kwargs: SimpleNamespace(),
+            build_memory_writer_decision=lambda *_args, **_kwargs: None,
+            build_memory_writer_decision_payload=lambda *_args, **_kwargs: {},
+            plan_memory_writebehind_schedule=lambda *_args, **_kwargs: SimpleNamespace(
+                action="normal",
+                status="queued",
+                writebehind_mode="normal",
+            ),
+            runtime_session_key=lambda **_kwargs: "session",
+            memory_writebehind_task_key=lambda *_args, **_kwargs: "session",
+            should_replace_existing_memory_task=lambda *_args, **_kwargs: False,
+            mark_memory_writer_status=lambda *_args, **_kwargs: None,
+            memory_writebehind_status_log=None,
+            background_memory_tasks={},
+            create_turn_scoped_task=create_task,
+            run_memory_writebehind_steps=run_memory_writebehind_steps,
+            update_long_term_memory=update_long_term_memory,
+            update_cognitive_state=update_cognitive,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        schedule_memory_update_from_runtime(
+            123,
+            "user",
+            "answer",
+            deps=deps,
+            session_key="session",
+            runtime_mode="normal",
+        )
+        await memory_started.wait()
+
+        self.assertEqual(len(deps.background_memory_tasks), 1)
+        self.assertTrue(
+            next(iter(deps.background_memory_tasks)).startswith(
+                "guild:123:memory-writebehind:normal:"
+            )
+        )
+
+        release_memory.set()
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(0)
+
+        self.assertEqual(events, ["long_term_memory", "cognitive"])
+        self.assertEqual(len(cognitive_calls), 1)
+        self.assertEqual(cognitive_calls[0][0], (123, "user"))
+        self.assertEqual(deps.background_memory_tasks, {})
 
 
 if __name__ == "__main__":

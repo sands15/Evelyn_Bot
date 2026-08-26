@@ -66,6 +66,8 @@ class MinecraftWorldLeaseRemote:
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         poll_interval_sec: float = 5.0,
         request_timeout_sec: float = 5.0,
+        connect_request_timeout_sec: float = 480.0,
+        mutation_request_timeout_sec: float = 30.0,
         action_poll_interval_sec: float = 0.25,
         action_timeout_sec: float = 120.0,
         monotonic: Callable[[], float] = time.monotonic,
@@ -84,6 +86,14 @@ class MinecraftWorldLeaseRemote:
         self.request_timeout_sec = max(
             0.5,
             float(request_timeout_sec),
+        )
+        self.connect_request_timeout_sec = max(
+            self.request_timeout_sec,
+            float(connect_request_timeout_sec),
+        )
+        self.mutation_request_timeout_sec = max(
+            self.request_timeout_sec,
+            float(mutation_request_timeout_sec),
         )
         self.action_poll_interval_sec = max(
             0.01,
@@ -245,7 +255,21 @@ class MinecraftWorldLeaseRemote:
             try:
                 with urllib_request.urlopen(
                     request,
-                    timeout=self.request_timeout_sec,
+                    timeout=(
+                        self.connect_request_timeout_sec
+                        if path
+                        == "/internal/minecraft-world-lease/connect"
+                        else (
+                            self.mutation_request_timeout_sec
+                            if path
+                            in {
+                                "/internal/minecraft-world-lease/connect_ack",
+                                "/internal/minecraft-world-lease/disconnect",
+                                "/internal/minecraft-world-lease/goal",
+                            }
+                            else self.request_timeout_sec
+                        )
+                    ),
                 ) as response:
                     raw = response.read()
             except urllib_error.HTTPError as exc:
@@ -306,11 +330,18 @@ class MinecraftWorldLeaseRemote:
                 headers[
                     MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER
                 ] = self._authorization_token()
-            response = await self.request(
+            request = self.request(
                 method,
                 path,
                 payload,
                 headers,
+            )
+            response = (
+                await self._await_mutation_request(request)
+                if mutation
+                and path
+                != "/internal/minecraft-world-lease/action_status"
+                else await request
             )
         except asyncio.CancelledError:
             self._clear_stale_authorization()
@@ -342,6 +373,26 @@ class MinecraftWorldLeaseRemote:
                 "minecraft_world_lease_response_invalid"
             )
         return response
+
+    async def _await_mutation_request(
+        self,
+        request: Awaitable[dict[str, Any]],
+    ) -> dict[str, Any]:
+        task = asyncio.ensure_future(request)
+        cancellation_requested = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+        if cancellation_requested:
+            if not task.cancelled():
+                try:
+                    task.result()
+                except BaseException:
+                    pass
+            raise asyncio.CancelledError()
+        return task.result()
 
     async def poll_once(self) -> dict[str, Any]:
         try:
@@ -389,6 +440,7 @@ class MinecraftWorldLeaseRemote:
         goal: str | None = None,
         ttl_sec: float | None = None,
     ) -> dict[str, Any]:
+        lease_id = ""
         payload: dict[str, Any] = {
             "guildId": int(guild_id),
             "issuerRef": str(issuer_ref),
@@ -398,26 +450,180 @@ class MinecraftWorldLeaseRemote:
             payload["goal"] = str(goal)
         if ttl_sec is not None:
             payload["ttlSec"] = float(ttl_sec)
-        response = await self._call(
-            "POST",
-            "/internal/minecraft-world-lease/connect",
-            payload=payload,
-            mutation=True,
-        )
-        result = response.get("result")
-        if not isinstance(result, dict):
-            self._clear_stale_authorization()
-            raise RuntimeError(
-                "minecraft_world_lease_response_invalid"
+        try:
+            response = await self._call(
+                "POST",
+                "/internal/minecraft-world-lease/connect",
+                payload=payload,
+                mutation=True,
             )
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "minecraft_world_lease_response_invalid"
+                )
+            world_lease = result.get("worldLease")
+            raw_lease_id = (
+                world_lease.get("leaseId")
+                if isinstance(world_lease, dict)
+                else None
+            )
+            if not isinstance(raw_lease_id, str) or not raw_lease_id:
+                raise RuntimeError(
+                    "minecraft_world_lease_response_invalid"
+                )
+            lease_id = raw_lease_id
+            ack_task = asyncio.create_task(
+                self._call(
+                    "POST",
+                    "/internal/minecraft-world-lease/connect_ack",
+                    payload={
+                        "guildId": int(guild_id),
+                        "leaseId": lease_id,
+                    },
+                    mutation=True,
+                )
+            )
+            caller_cancelled = False
+            while not ack_task.done():
+                try:
+                    await asyncio.shield(ack_task)
+                except asyncio.CancelledError:
+                    caller_cancelled = True
+                except Exception:
+                    break
+            try:
+                acknowledged = ack_task.result()
+            except Exception:
+                if not await self._connect_ack_committed(
+                    int(guild_id),
+                    lease_id=lease_id,
+                ):
+                    raise
+                acknowledged = {
+                    "result": {
+                        "acknowledged": True,
+                        "guildId": int(guild_id),
+                        "leaseId": lease_id,
+                    }
+                }
+            if caller_cancelled:
+                raise asyncio.CancelledError()
+            ack_result = acknowledged.get("result")
+            ack_status = self.status()
+            ack_lease = ack_status.get("lease")
+            if (
+                not isinstance(ack_result, dict)
+                or ack_result.get("acknowledged") is not True
+                or ack_result.get("guildId") != int(guild_id)
+                or ack_result.get("leaseId") != lease_id
+                or ack_status.get("active") is not True
+                or not isinstance(ack_lease, dict)
+                or ack_lease.get("guildId") != int(guild_id)
+                or ack_lease.get("leaseId") != lease_id
+            ):
+                raise RuntimeError(
+                    "minecraft_world_lease_response_invalid"
+                )
+        except asyncio.CancelledError:
+            try:
+                await self._await_shutdown_step(
+                    self._cleanup_uncertain_connect(
+                        int(guild_id),
+                        lease_id=lease_id,
+                    )
+                )
+            except BaseException:
+                self._clear_stale_authorization()
+            raise
+        except Exception:
+            try:
+                _, cancelled = await self._await_shutdown_step(
+                    self._cleanup_uncertain_connect(
+                        int(guild_id),
+                        lease_id=lease_id,
+                    )
+                )
+            except BaseException:
+                self._clear_stale_authorization()
+            else:
+                if cancelled:
+                    raise asyncio.CancelledError()
+            raise
         self._inflight_actions.clear()
         return dict(result)
 
-    async def disconnect(self, guild_id: int) -> dict[str, Any]:
+    async def _cleanup_uncertain_connect(
+        self,
+        guild_id: int,
+        *,
+        lease_id: str,
+    ) -> None:
+        if not lease_id:
+            self._clear_stale_authorization()
+            return
+        await self._disconnect_exact(guild_id, lease_id=lease_id)
+
+    async def _disconnect_exact(
+        self,
+        guild_id: int,
+        *,
+        lease_id: str,
+    ) -> None:
+        await self._call(
+            "POST",
+            "/internal/minecraft-world-lease/disconnect",
+            payload={
+                "guildId": guild_id,
+                "leaseId": lease_id,
+            },
+            mutation=True,
+        )
+
+    async def _connect_ack_committed(
+        self,
+        guild_id: int,
+        *,
+        lease_id: str,
+    ) -> bool:
+        try:
+            await self._call(
+                "GET",
+                "/internal/minecraft-world-lease",
+            )
+        except Exception:
+            return False
+        status = self.status()
+        lease = status.get("lease")
+        return bool(
+            status.get("active") is True
+            and status.get("delegatedConnectPending") is False
+            and isinstance(lease, dict)
+            and lease.get("guildId") == guild_id
+            and lease.get("leaseId") == lease_id
+        )
+
+    async def disconnect(
+        self,
+        guild_id: int,
+        *,
+        expected_lease_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"guildId": int(guild_id)}
+        if expected_lease_id is not None:
+            if (
+                not isinstance(expected_lease_id, str)
+                or not expected_lease_id
+                or expected_lease_id != expected_lease_id.strip()
+            ):
+                raise RuntimeError(
+                    "minecraft_world_disconnect_lease_invalid"
+                )
+            payload["leaseId"] = expected_lease_id
         response = await self._call(
             "POST",
             "/internal/minecraft-world-lease/disconnect",
-            payload={"guildId": int(guild_id)},
+            payload=payload,
             mutation=True,
         )
         result = response.get("result")
@@ -434,50 +640,121 @@ class MinecraftWorldLeaseRemote:
         guild_id: int,
         goal: str,
     ) -> dict[str, Any]:
-        response = await self._call(
-            "POST",
-            "/internal/minecraft-world-lease/goal",
-            payload={
-                "guildId": int(guild_id),
-                "goal": str(goal),
-            },
-            mutation=True,
+        status = self.status()
+        lease = status.get("lease")
+        lease_id = (
+            str(lease.get("leaseId") or "")
+            if status.get("active") is True
+            and isinstance(lease, dict)
+            and lease.get("guildId") == int(guild_id)
+            else ""
         )
-        result = response.get("result")
-        if not isinstance(result, dict):
-            self._clear_stale_authorization()
+        if not lease_id:
             raise RuntimeError(
-                "minecraft_world_lease_response_invalid"
+                "minecraft_world_authorization_required"
             )
+        try:
+            response = await self._call(
+                "POST",
+                "/internal/minecraft-world-lease/goal",
+                payload={
+                    "guildId": int(guild_id),
+                    "goal": str(goal),
+                    "leaseId": lease_id,
+                },
+                mutation=True,
+            )
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "minecraft_world_lease_response_invalid"
+                )
+        except asyncio.CancelledError:
+            try:
+                await self._await_shutdown_step(
+                    self._cleanup_uncertain_goal(
+                        int(guild_id),
+                        lease_id=lease_id,
+                    )
+                )
+            except BaseException:
+                self._clear_stale_authorization()
+            raise
+        except Exception:
+            try:
+                _, cancelled = await self._await_shutdown_step(
+                    self._cleanup_uncertain_goal(
+                        int(guild_id),
+                        lease_id=lease_id,
+                    )
+                )
+            except BaseException:
+                self._clear_stale_authorization()
+            else:
+                if cancelled:
+                    raise asyncio.CancelledError()
+            raise
         return dict(result)
 
-    def _bound_remote_action(
+    async def _cleanup_uncertain_goal(
         self,
-        request: dict[str, Any],
-        dispatch: dict[str, Any],
-    ) -> dict[str, Any]:
+        guild_id: int,
+        *,
+        lease_id: str,
+    ) -> None:
+        if not lease_id:
+            self._clear_stale_authorization()
+            return
+        await self.disconnect(
+            guild_id,
+            expected_lease_id=lease_id,
+        )
+
+    def _active_lease_binding(
+        self,
+        guild_id: int,
+    ) -> tuple[str, str]:
         status = self.status()
         lease = status.get("lease")
         if (
             status.get("active") is not True
             or not isinstance(lease, dict)
+            or lease.get("guildId") != int(guild_id)
         ):
-            raise RuntimeError(
-                "minecraft_world_authorization_required"
-            )
+            return "", ""
+        lease_id = lease.get("leaseId")
+        process_nonce = status.get("processNonce")
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or not isinstance(process_nonce, str)
+            or not process_nonce
+        ):
+            return "", ""
+        return lease_id, process_nonce
+
+    def _bound_remote_action(
+        self,
+        request: dict[str, Any],
+        dispatch: dict[str, Any],
+        *,
+        lease_id: str,
+        lease_process_nonce: str,
+    ) -> dict[str, Any]:
         return bind_minecraft_action_request(
             request,
             goal_run_id=str(dispatch.get("goalRunId") or ""),
-            lease_id=str(lease.get("leaseId") or ""),
-            lease_process_nonce=str(
-                status.get("processNonce") or ""
-            ),
+            lease_id=lease_id,
+            lease_process_nonce=lease_process_nonce,
         )
 
     async def _cancel_uncertain_dispatch(
         self,
         guild_id: int,
         request: dict[str, Any],
+        *,
+        lease_id: str,
+        lease_process_nonce: str,
     ) -> None:
         try:
             response = await self._call(
@@ -486,6 +763,7 @@ class MinecraftWorldLeaseRemote:
                 payload={
                     "guildId": int(guild_id),
                     "actionRunId": request["actionRunId"],
+                    "leaseId": lease_id,
                 },
                 mutation=True,
             )
@@ -494,7 +772,12 @@ class MinecraftWorldLeaseRemote:
                 raise RuntimeError(
                     "minecraft_action_cancel_unverified"
                 )
-            bound = self._bound_remote_action(request, result)
+            bound = self._bound_remote_action(
+                request,
+                result,
+                lease_id=lease_id,
+                lease_process_nonce=lease_process_nonce,
+            )
             cancelled = validate_minecraft_action_dispatch(
                 result,
                 expected_request=bound,
@@ -508,12 +791,15 @@ class MinecraftWorldLeaseRemote:
             raise
         except Exception:
             await self._verified_disconnect_after_uncertain_cancel(
-                guild_id
+                guild_id,
+                lease_id=lease_id,
             )
 
     async def _verified_disconnect_after_uncertain_cancel(
         self,
         guild_id: int,
+        *,
+        lease_id: str,
     ) -> dict[str, Any]:
         """Revoke the owner lease and verify the whole runtime stopped.
 
@@ -522,10 +808,16 @@ class MinecraftWorldLeaseRemote:
         because an authenticated response happened to contain a mapping.
         """
 
+        if not lease_id:
+            raise RuntimeError("minecraft_action_cancel_unverified")
+
         response = await self._call(
             "POST",
             "/internal/minecraft-world-lease/disconnect",
-            payload={"guildId": int(guild_id)},
+            payload={
+                "guildId": int(guild_id),
+                "leaseId": lease_id,
+            },
             mutation=True,
         )
         result = response.get("result")
@@ -560,9 +852,26 @@ class MinecraftWorldLeaseRemote:
         """
 
         cancellation_requested = False
+        record = self._inflight_actions.get(action_run_id)
+        request = (
+            record.get("request")
+            if isinstance(record, dict)
+            else None
+        )
+        lease_id = (
+            str(request.get("leaseId") or "")
+            if isinstance(request, dict)
+            else ""
+        )
+        if not lease_id:
+            raise RuntimeError("minecraft_action_cancel_unverified")
         try:
             _, cancelled = await self._await_shutdown_step(
-                self.cancel_action(guild_id, action_run_id)
+                self.cancel_action(
+                    guild_id,
+                    action_run_id,
+                    expected_lease_id=lease_id,
+                )
             )
             return cancelled
         except asyncio.CancelledError:
@@ -572,7 +881,8 @@ class MinecraftWorldLeaseRemote:
         try:
             _, cancelled = await self._await_shutdown_step(
                 self._verified_disconnect_after_uncertain_cancel(
-                    guild_id
+                    guild_id,
+                    lease_id=lease_id,
                 )
             )
             return cancellation_requested or cancelled
@@ -589,6 +899,8 @@ class MinecraftWorldLeaseRemote:
         self,
         guild_id: int,
         request: dict[str, Any],
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         if self._shutting_down:
             raise RuntimeError("minecraft_world_owner_shutting_down")
@@ -600,12 +912,30 @@ class MinecraftWorldLeaseRemote:
             raise RuntimeError("minecraft_action_correlation_mismatch")
         if self._inflight_actions:
             raise RuntimeError("minecraft_world_action_busy")
+        lease_id, lease_process_nonce = self._active_lease_binding(
+            guild_id
+        )
+        if (
+            not lease_id
+            or not lease_process_nonce
+            or (
+                expected_lease_id is not None
+                and (
+                    not expected_lease_id
+                    or expected_lease_id != lease_id
+                )
+            )
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
         try:
             response = await self._call(
                 "POST",
                 "/internal/minecraft-world-lease/action",
                 payload={
                     "guildId": int(guild_id),
+                    "leaseId": lease_id,
                     "request": normalized,
                 },
                 mutation=True,
@@ -615,7 +945,12 @@ class MinecraftWorldLeaseRemote:
                 raise RuntimeError(
                     "minecraft_world_lease_response_invalid"
                 )
-            bound = self._bound_remote_action(normalized, result)
+            bound = self._bound_remote_action(
+                normalized,
+                result,
+                lease_id=lease_id,
+                lease_process_nonce=lease_process_nonce,
+            )
             dispatch = validate_minecraft_action_dispatch(
                 result,
                 expected_request=bound,
@@ -629,6 +964,8 @@ class MinecraftWorldLeaseRemote:
                 self._cancel_uncertain_dispatch(
                     guild_id,
                     normalized,
+                    lease_id=lease_id,
+                    lease_process_nonce=lease_process_nonce,
                 )
             )
             _ = cancelled
@@ -638,6 +975,8 @@ class MinecraftWorldLeaseRemote:
                 self._cancel_uncertain_dispatch(
                     guild_id,
                     normalized,
+                    lease_id=lease_id,
+                    lease_process_nonce=lease_process_nonce,
                 )
             )
             if cancelled:
@@ -711,6 +1050,8 @@ class MinecraftWorldLeaseRemote:
         self,
         guild_id: int,
         action_run_id: str,
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         raw_run_id = str(action_run_id or "")
         run_id = raw_run_id.strip()
@@ -726,12 +1067,23 @@ class MinecraftWorldLeaseRemote:
             record["request"],
             bound=True,
         )
+        if (
+            expected_lease_id is not None
+            and (
+                not expected_lease_id
+                or request["leaseId"] != expected_lease_id
+            )
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
         response = await self._call(
             "POST",
             "/internal/minecraft-world-lease/cancel_action",
             payload={
                 "guildId": int(guild_id),
                 "actionRunId": request["actionRunId"],
+                "leaseId": request["leaseId"],
             },
             mutation=True,
         )
@@ -755,13 +1107,17 @@ class MinecraftWorldLeaseRemote:
         self,
         guild_id: int,
         request: dict[str, Any],
+        *,
+        expected_lease_id: str | None = None,
     ) -> dict[str, Any]:
         async with self._action_execution_lock:
             dispatch = await self.dispatch_action(
                 guild_id,
                 request,
+                expected_lease_id=expected_lease_id,
             )
             action_run_id = dispatch["actionRunId"]
+            action_lease_id = dispatch["leaseId"]
             deadline = self.monotonic() + self.action_timeout_sec
             try:
                 while self.monotonic() < deadline:
@@ -776,7 +1132,11 @@ class MinecraftWorldLeaseRemote:
                     if status.get("status") == "cancelled":
                         raise RuntimeError("minecraft_action_cancelled")
                     await self.sleep(self.action_poll_interval_sec)
-                await self.cancel_action(guild_id, action_run_id)
+                await self.cancel_action(
+                    guild_id,
+                    action_run_id,
+                    expected_lease_id=action_lease_id,
+                )
                 raise RuntimeError("minecraft_action_timeout")
             except asyncio.CancelledError:
                 await self._cancel_or_disconnect_inflight(
@@ -841,7 +1201,13 @@ class MinecraftWorldLeaseRemote:
             )
             try:
                 _, cancelled = await self._await_shutdown_step(
-                    self.cancel_action(guild_id, action_run_id)
+                    self.cancel_action(
+                        guild_id,
+                        action_run_id,
+                        expected_lease_id=str(
+                            request.get("leaseId") or ""
+                        ),
+                    )
                 )
                 cancellation_requested = (
                     cancellation_requested or cancelled
@@ -855,7 +1221,8 @@ class MinecraftWorldLeaseRemote:
             try:
                 _, cancelled = await self._await_shutdown_step(
                     self._verified_disconnect_after_uncertain_cancel(
-                        guild_id
+                        guild_id,
+                        lease_id=str(request.get("leaseId") or ""),
                     )
                 )
                 cancellation_requested = (

@@ -97,7 +97,10 @@ async def verify_speaker_for_tts_interrupt_from_runtime(
 
 
 def speaker_verification_allows_tts_interrupt_from_runtime(result: Any) -> bool:
-    return getattr(result, "matched", None) is not False
+    return (
+        getattr(result, "status", None) == "skipped"
+        or getattr(result, "matched", None) is True
+    )
 
 
 def _register_gate_drop(
@@ -154,9 +157,18 @@ async def run_voice_tts_interrupt_gate_from_runtime(
     stt_sampling_rate: int,
     metrics: dict[str, Any],
     deps: VoiceTtsInterruptGateDeps,
+    source_is_current: Callable[[], bool] | None = None,
 ) -> VoiceTtsInterruptGateResult | None:
+    def interrupt_source_is_current() -> bool:
+        if source_is_current is None:
+            return True
+        try:
+            return bool(source_is_current())
+        except Exception:
+            return False
+
     validation_meta = metrics.get("meta") if isinstance(metrics, dict) else None
-    if not validation_attempt_binding_is_current(
+    if not interrupt_source_is_current() or not validation_attempt_binding_is_current(
         validation_meta,
         surface="discord",
         reject_unbound_when_active=True,
@@ -187,7 +199,7 @@ async def run_voice_tts_interrupt_gate_from_runtime(
             source=str(metrics.setdefault("meta", {}).get("ingress_source") or "discord_voice"),
             metrics=metrics,
         )
-        if not validation_attempt_binding_is_current(
+        if not interrupt_source_is_current() or not validation_attempt_binding_is_current(
             validation_meta,
             surface="discord",
             reject_unbound_when_active=True,
@@ -219,6 +231,8 @@ async def run_voice_tts_interrupt_gate_from_runtime(
             stopped_context = await deps.local_tts_playback_manager.request_stop_and_wait(
                 reason="qualified_user_audio"
             )
+            if not interrupt_source_is_current():
+                return None
             local_tts_interrupted = bool(stopped_context)
             metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(
                 stopped_context
@@ -278,7 +292,7 @@ async def run_voice_tts_interrupt_gate_from_runtime(
     discord_tts_interrupted = False
     if tts_suppression == "bot_is_speaking" and qualified_tts_interrupt:
         await deps.sleep(deps.tts_interrupt_debounce_sec)
-        if not validation_attempt_binding_is_current(
+        if not interrupt_source_is_current() or not validation_attempt_binding_is_current(
             validation_meta,
             surface="discord",
             reject_unbound_when_active=True,
@@ -290,6 +304,8 @@ async def run_voice_tts_interrupt_gate_from_runtime(
         )
         if tts_suppression == "bot_is_speaking":
             stopped = await deps.stop_active_tts_playback(guild_id, reason="qualified_user_audio")
+            if not interrupt_source_is_current():
+                return None
             discord_tts_interrupted = bool(stopped)
             if stopped:
                 deps.start_voice_barge_in_continuity_probe(metrics, source="discord_voice")

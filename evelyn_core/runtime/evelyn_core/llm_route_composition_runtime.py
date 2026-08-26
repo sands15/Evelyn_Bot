@@ -18,7 +18,10 @@ from .fast_path_policy import (
 from .json_llm_request_runtime import ask_json_llm_from_runtime
 from .llm_context_assembly import prepare_llm_messages_from_runtime
 from .llm_route_runtime import classify_llm_route_from_runtime
-from .llm_warmup_runtime import warmup_llm_from_runtime
+from .llm_warmup_runtime import (
+    LlmWarmupEvidence,
+    warmup_llm_from_runtime,
+)
 from .main_llm_runtime import (
     ask_llm_once_from_runtime,
     execute_main_llm_once_from_runtime,
@@ -117,6 +120,7 @@ class LlmRouteComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        memory_owner_scope: str | None = None,
         source: str = "text",
         debug_text: str | None = None,
         metrics: dict | None = None,
@@ -130,6 +134,7 @@ class LlmRouteComposition:
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            memory_owner_scope=memory_owner_scope,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -385,8 +390,10 @@ class LlmRouteComposition:
             continuity_generation=continuity_generation,
         )
 
-    async def warmup_llm(self) -> None:
-        await warmup_llm_from_runtime(deps=self.deps.llm_warmup())
+    async def warmup_llm(self) -> LlmWarmupEvidence:
+        return await warmup_llm_from_runtime(
+            deps=self.deps.llm_warmup()
+        )
 
     async def execute_main_llm_once(self, *, payload: dict[str, Any], user_text: str) -> tuple[str, str]:
         return await execute_main_llm_once_from_runtime(
@@ -424,6 +431,7 @@ class LlmRouteComposition:
         user_text: str,
         tool_name: str,
         tool_result_text: str,
+        tool_result_metadata: dict[str, Any] | None = None,
         guild_id: int | None = None,
         session_key: str | None = None,
         source: str = "text",
@@ -437,6 +445,7 @@ class LlmRouteComposition:
             user_text=user_text,
             tool_name=tool_name,
             tool_result_text=tool_result_text,
+            tool_result_metadata=tool_result_metadata,
             guild_id=guild_id,
             session_key=session_key,
             source=source,
@@ -532,6 +541,7 @@ class LlmRouteComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        memory_owner_scope: str | None = None,
         source: str = "text",
         debug_text: str | None = None,
         metrics: dict | None = None,
@@ -545,6 +555,7 @@ class LlmRouteComposition:
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            memory_owner_scope=memory_owner_scope,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -603,6 +614,7 @@ class LlmRouteComposition:
         debug_text: str | None,
         metrics: dict | None,
         cognitive_state: dict | None,
+        turn_scope: Any | None = None,
         messages: list[dict[str, Any]] | None = None,
         allow_internal_routes: set[str] | None = None,
     ) -> str | None:
@@ -619,6 +631,7 @@ class LlmRouteComposition:
             debug_text=debug_text,
             metrics=metrics,
             cognitive_state=cognitive_state,
+            turn_scope=turn_scope,
             messages=messages,
             allow_internal_routes=allow_internal_routes,
         )
@@ -648,6 +661,7 @@ class LlmRouteComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        memory_owner_scope: str | None = None,
         source: str = "text",
         debug_text: str | None = None,
         metrics: dict | None = None,
@@ -663,6 +677,7 @@ class LlmRouteComposition:
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            memory_owner_scope=memory_owner_scope,
             source=source,
             debug_text=debug_text,
             metrics=metrics,

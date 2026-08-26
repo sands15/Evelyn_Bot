@@ -83,10 +83,25 @@ from .local_bridge_barge_in import (
     local_barge_source_binding_matches,
 )
 from .local_voice_admission import split_exact_leading_wake
+from .main_inference_contract import (
+    MainForegroundReservation,
+    main_capture_generation_from_wire,
+    main_foreground_reservation_from_wire,
+    main_foreground_reservation_to_wire,
+)
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
+from .stt_client import (
+    cancel_stt_stream_via_service,
+    finish_stt_stream_via_service,
+    push_stt_stream_chunk_via_service,
+    run_stt_client_operation_with_cancellation_drain,
+    start_stt_stream_via_service,
+    start_stt_stream_with_cleanup,
+)
 from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
+from .voice_asr_stream import AsrRevision, AsrStreamSession
 from .voice_validation import (
     active_validation_context,
     emit_silence_liveness_event,
@@ -125,10 +140,16 @@ OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880"
 LOCAL_TTS_OUTPUT_DEVICE = os.getenv("LOCAL_TTS_OUTPUT_DEVICE") or os.getenv("LOCAL_AUDIO_OUTPUT_DEVICE")
 LOCAL_BRIDGE_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_STREAMING_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_BRIDGE_STT_STREAMING_ENABLED = os.getenv(
+    "LOCAL_BRIDGE_STT_STREAMING_ENABLED",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_BRIDGE_ASR_STREAM_QUEUE_MAX = 256
 LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED = os.getenv(
     "LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",
     "false",
 ).strip().lower() in {"1", "true", "yes", "on"}
+
 LOCAL_BRIDGE_MIN_TEXT_CHARS = max(1, int(os.getenv("LOCAL_BRIDGE_MIN_TEXT_CHARS", "2")))
 LOCAL_BRIDGE_STATUS_INTERVAL_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_STATUS_INTERVAL_SEC", "0.25")))
 LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN = os.getenv("LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -160,7 +181,7 @@ MINECRAFT_SERVICE_BASE = os.getenv(
 ).rstrip("/")
 MINECRAFT_MODEL_HEALTH_URL = os.getenv(
     "LOCAL_BRIDGE_MINECRAFT_MODEL_HEALTH_URL",
-    "http://127.0.0.1:9823/health",
+    "http://127.0.0.1:8798/internal/mindcraft-llm/health",
 )
 MINECRAFT_GATEWAY_HEALTH_URL = os.getenv(
     "LOCAL_BRIDGE_MINECRAFT_GATEWAY_HEALTH_URL",
@@ -180,6 +201,13 @@ VOICE_CAPTURE_HOST_LEASE_PATH = (
     / "owner_heartbeat.json"
 )
 LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
+LOCAL_MAIN_FOREGROUND_FRESHNESS_MARGIN_SEC = 0.2
+LOCAL_VOICE_MAIN_FOREGROUND_SCHEMA = (
+    "local_voice.main-foreground-reservation.v1"
+)
+LOCAL_VOICE_MAIN_FOREGROUND_PATH = (
+    "/api/local-voice/main-foreground-reservation"
+)
 LOCAL_VOICE_BOT_CONNECT_MAX_RETRIES = 8
 LOCAL_VOICE_BOT_CONNECT_RETRY_DELAY_SEC = 0.5
 LOCAL_BRIDGE_DELIVERY_BINDING_SCHEMA = (
@@ -224,6 +252,22 @@ class LocalChatReply:
     text: str
     memory_handoff: LocalMemoryHandoff
     playback_ack: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _LocalAsrStreamEvent:
+    kind: str
+    key: tuple[int, int]
+    pcm16: bytes = b""
+    future: asyncio.Future[str | None] | None = None
+
+
+@dataclass
+class _LocalAsrRemoteStream:
+    stream_id: str
+    sequence: int
+    revisions: AsrStreamSession
+    future: asyncio.Future[str | None]
 
 
 def parse_local_memory_handoff(payload: Any) -> LocalMemoryHandoff:
@@ -316,11 +360,24 @@ def iter_pcm_aligned_chunks(chunks: list[bytes], *, sample_width: int = TTS_SAMP
         remainder = data[aligned_len:]
 
 
+def _local_main_foreground_monotonic() -> float:
+    return time.monotonic()
+
+
 class LocalIoBridge:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=8)
         self.priority_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=4)
         self.barge_in_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=4)
+        self._local_asr_stream_queue: asyncio.Queue[_LocalAsrStreamEvent] = asyncio.Queue(
+            maxsize=LOCAL_BRIDGE_ASR_STREAM_QUEUE_MAX
+        )
+        self._local_asr_stream_task: asyncio.Task[None] | None = None
+        self._local_asr_stream_shutdown = False
+        self._local_asr_stream_futures: dict[
+            tuple[int, int],
+            asyncio.Future[str | None],
+        ] = {}
         self.session: aiohttp.ClientSession | None = None
         self.service: LocalMicCaptureService | None = None
         # Capture is never activated from ambient process configuration. The
@@ -352,6 +409,7 @@ class LocalIoBridge:
         self.suppressed_mic_segment_count = 0
         self.discarded_pending_mic_segment_count = 0
         self.segment_count = 0
+        self.main_foreground_capture_generation = 0
         self.transcript_count = 0
         self.play_count = 0
         self.last_error = ""
@@ -368,6 +426,8 @@ class LocalIoBridge:
         self.restart_started = False
         self.speak_request_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
         self.speak_worker_task: asyncio.Task | None = None
+        self.control_speech_generation = 0
+        self.active_control_speech_generation = 0
         self.tts_warmup_task: asyncio.Task | None = None
         self.tts_warmup_done = False
         self.tts_warmup_error = ""
@@ -406,6 +466,7 @@ class LocalIoBridge:
         self.admission_accepted_count = 0
         self.admission_rejected_count = 0
         self.admission_last_reason = "not_started"
+        self.main_foreground_reservation_enabled = False
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -470,19 +531,52 @@ class LocalIoBridge:
                         if current_task is not None and current_task.cancelling():
                             raise
             finally:
-                if self.host_ui_action_task is not None:
-                    self.host_ui_action_task.cancel()
-                    with contextlib.suppress(
-                        asyncio.CancelledError,
-                        Exception,
-                    ):
-                        await self.host_ui_action_task
-                    self.host_ui_action_task = None
-                if self.host_vision_task is not None:
-                    self.host_vision_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await self.host_vision_task
-                    self.host_vision_task = None
+                cleanup_task = asyncio.create_task(
+                    self._cleanup_after_run(),
+                    name="local-bridge-run-cleanup",
+                )
+                cancellation: asyncio.CancelledError | None = None
+                while not cleanup_task.done():
+                    try:
+                        await asyncio.shield(cleanup_task)
+                    except asyncio.CancelledError as exc:
+                        if cleanup_task.cancelled():
+                            if cancellation is None:
+                                raise
+                            break
+                        if cancellation is None:
+                            cancellation = exc
+                    except BaseException:
+                        break
+                if cancellation is not None:
+                    if not cleanup_task.cancelled():
+                        with contextlib.suppress(BaseException):
+                            cleanup_task.result()
+                    raise cancellation
+                cleanup_task.result()
+
+    async def _cleanup_after_run(self) -> None:
+        if self.service is not None:
+            with contextlib.suppress(Exception):
+                await self._stop_mic_service(reason="bridge_stopping")
+            # Capture callbacks are registered before the to_thread
+            # completion, so let their loop callbacks observe the
+            # invalidated epoch before the worker is retired.
+            await asyncio.sleep(0)
+        await self._shutdown_local_asr_stream_worker()
+        if self.host_ui_action_task is not None:
+            self.host_ui_action_task.cancel()
+            with contextlib.suppress(
+                asyncio.CancelledError,
+                Exception,
+            ):
+                await self.host_ui_action_task
+            self.host_ui_action_task = None
+        if self.host_vision_task is not None:
+            self.host_vision_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.host_vision_task
+            self.host_vision_task = None
 
     async def _process_queued_segment(
         self,
@@ -495,6 +589,281 @@ class LocalIoBridge:
             await self._handle_segment(pcm_bytes, meta)
         finally:
             source_queue.task_done()
+
+    def _ensure_local_asr_stream_worker(self) -> None:
+        if not LOCAL_BRIDGE_STT_STREAMING_ENABLED or self._local_asr_stream_shutdown:
+            return
+        if self._local_asr_stream_task is not None and not self._local_asr_stream_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._local_asr_stream_task = loop.create_task(
+            self._local_asr_stream_worker(),
+            name="local-bridge-asr-stream",
+        )
+
+    @staticmethod
+    def _resolve_local_asr_future(
+        future: asyncio.Future[str | None] | None,
+        result: str | None,
+    ) -> None:
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    def _queue_local_asr_event(self, event: _LocalAsrStreamEvent) -> bool:
+        try:
+            self._local_asr_stream_queue.put_nowait(event)
+            return True
+        except asyncio.QueueFull:
+            if self._local_asr_stream_futures.get(event.key) is event.future:
+                self._local_asr_stream_futures.pop(event.key, None)
+            self._resolve_local_asr_future(event.future, None)
+            self.runtime_errors.record("stt_transcribe_failed", RuntimeError)
+            return False
+
+    def _start_local_asr_capture(self, key: tuple[int, int]) -> None:
+        if (
+            not LOCAL_BRIDGE_STT_STREAMING_ENABLED
+            or self._local_asr_stream_shutdown
+            or not self._voice_admission_lifecycle_is_current(key[0])
+        ):
+            return
+        previous = self._local_asr_stream_futures.pop(key, None)
+        self._resolve_local_asr_future(previous, None)
+        future = asyncio.get_running_loop().create_future()
+        self._local_asr_stream_futures[key] = future
+        self._ensure_local_asr_stream_worker()
+        self._queue_local_asr_event(
+            _LocalAsrStreamEvent("start", key, future=future)
+        )
+
+    def _push_local_asr_audio(self, key: tuple[int, int], pcm16: bytes) -> None:
+        future = self._local_asr_stream_futures.get(key)
+        if future is None:
+            return
+        if not self._voice_admission_lifecycle_is_current(key[0]):
+            self._abandon_local_asr_stream(key)
+            return
+        self._queue_local_asr_event(
+            _LocalAsrStreamEvent(
+                "chunk",
+                key,
+                pcm16=bytes(pcm16),
+                future=future,
+            )
+        )
+
+    def _finish_local_asr_capture(self, key: tuple[int, int], *, accepted: bool) -> None:
+        future = self._local_asr_stream_futures.get(key)
+        if future is None:
+            return
+        current = self._voice_admission_lifecycle_is_current(key[0])
+        kind = "finish" if accepted and current else "cancel"
+        self._queue_local_asr_event(
+            _LocalAsrStreamEvent(kind, key, future=future)
+        )
+        if kind == "cancel":
+            self._local_asr_stream_futures.pop(key, None)
+            self._resolve_local_asr_future(future, None)
+
+    @staticmethod
+    def _local_asr_key_from_meta(meta: dict[str, Any]) -> tuple[int, int] | None:
+        value = meta.get("_asrStreamKey")
+        if (
+            not isinstance(value, tuple)
+            or len(value) != 2
+            or any(type(part) is not int for part in value)
+        ):
+            return None
+        return value
+
+    def _abandon_local_asr_stream(self, key: tuple[int, int]) -> None:
+        future = self._local_asr_stream_futures.pop(key, None)
+        self._resolve_local_asr_future(future, None)
+        self._ensure_local_asr_stream_worker()
+        if self._local_asr_stream_task is not None:
+            self._queue_local_asr_event(
+                _LocalAsrStreamEvent("cancel", key, future=future)
+            )
+
+    def _abandon_local_asr_meta(self, meta: dict[str, Any]) -> None:
+        key = self._local_asr_key_from_meta(meta)
+        if key is not None:
+            self._abandon_local_asr_stream(key)
+
+    def _abandon_all_local_asr_streams(self) -> None:
+        for key in tuple(self._local_asr_stream_futures):
+            self._abandon_local_asr_stream(key)
+
+    @staticmethod
+    def _apply_local_asr_response(
+        state: _LocalAsrRemoteStream,
+        payload: Any,
+        *,
+        expected_final: bool,
+    ) -> AsrRevision:
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("revision")) is not int
+            or not isinstance(payload.get("text"), str)
+            or payload.get("isFinal") is not expected_final
+        ):
+            raise RuntimeError("stt_stream_response_invalid")
+        return state.revisions.apply(
+            revision=payload["revision"],
+            text=payload["text"],
+            is_final=expected_final,
+        )
+
+    async def _cancel_local_asr_remote(self, state: _LocalAsrRemoteStream) -> None:
+        with contextlib.suppress(Exception):
+            await run_stt_client_operation_with_cancellation_drain(
+                cancel_stt_stream_via_service,
+                service_url=STT_SERVICE_URL,
+                stream_id=state.stream_id,
+                timeout_sec=5.0,
+            )
+
+    async def _local_asr_stream_worker(self) -> None:
+        states: dict[tuple[int, int], _LocalAsrRemoteStream] = {}
+        try:
+            while True:
+                event = await self._local_asr_stream_queue.get()
+                try:
+                    if event.kind == "start":
+                        if (
+                            event.future is None
+                            or event.future.done()
+                            or not self._voice_admission_lifecycle_is_current(event.key[0])
+                        ):
+                            self._resolve_local_asr_future(event.future, None)
+                            continue
+                        payload = await start_stt_stream_with_cleanup(
+                            service_url=STT_SERVICE_URL,
+                            timeout_sec=10.0,
+                            language="Korean",
+                            start_stream=start_stt_stream_via_service,
+                            cancel_stream=cancel_stt_stream_via_service,
+                        )
+                        if not isinstance(payload, dict):
+                            raise RuntimeError("stt_stream_start_invalid")
+                        stream_id = payload.get("streamId")
+                        if (
+                            not isinstance(stream_id, str)
+                            or not stream_id.strip()
+                            or type(payload.get("samplingRate")) is not int
+                            or payload["samplingRate"] != 16000
+                            or payload.get("decoderProfile") != "realtime-ko"
+                            or type(payload.get("nextSequence")) is not int
+                            or payload["nextSequence"] != 0
+                        ):
+                            if isinstance(stream_id, str) and stream_id.strip():
+                                with contextlib.suppress(Exception):
+                                    await run_stt_client_operation_with_cancellation_drain(
+                                        cancel_stt_stream_via_service,
+                                        service_url=STT_SERVICE_URL,
+                                        stream_id=stream_id,
+                                        timeout_sec=5.0,
+                                    )
+                            raise RuntimeError("stt_stream_start_invalid")
+                        state = _LocalAsrRemoteStream(
+                            stream_id=stream_id,
+                            sequence=0,
+                            revisions=AsrStreamSession(),
+                            future=event.future,
+                        )
+                        if (
+                            event.future.done()
+                            or not self._voice_admission_lifecycle_is_current(event.key[0])
+                        ):
+                            await self._cancel_local_asr_remote(state)
+                            self._resolve_local_asr_future(event.future, None)
+                        else:
+                            states[event.key] = state
+                        continue
+
+                    state = states.get(event.key)
+                    if state is None:
+                        if event.kind in {"finish", "cancel"}:
+                            self._resolve_local_asr_future(event.future, None)
+                        continue
+                    if (
+                        event.kind == "cancel"
+                        or state.future.done()
+                        or not self._voice_admission_lifecycle_is_current(event.key[0])
+                    ):
+                        states.pop(event.key, None)
+                        state.revisions.cancel()
+                        await self._cancel_local_asr_remote(state)
+                        self._resolve_local_asr_future(state.future, None)
+                        continue
+                    if event.kind == "chunk":
+                        payload = await run_stt_client_operation_with_cancellation_drain(
+                            push_stt_stream_chunk_via_service,
+                            event.pcm16,
+                            service_url=STT_SERVICE_URL,
+                            stream_id=state.stream_id,
+                            sequence=state.sequence,
+                            timeout_sec=15.0,
+                        )
+                        self._apply_local_asr_response(
+                            state,
+                            payload,
+                            expected_final=False,
+                        )
+                        state.sequence += 1
+                        continue
+                    if event.kind != "finish":
+                        raise RuntimeError("stt_stream_event_invalid")
+                    payload = await run_stt_client_operation_with_cancellation_drain(
+                        finish_stt_stream_via_service,
+                        service_url=STT_SERVICE_URL,
+                        stream_id=state.stream_id,
+                        timeout_sec=45.0,
+                    )
+                    final = self._apply_local_asr_response(
+                        state,
+                        payload,
+                        expected_final=True,
+                    )
+                    states.pop(event.key, None)
+                    self._resolve_local_asr_future(
+                        state.future,
+                        final.text if final.authoritative else None,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    state = states.pop(event.key, None)
+                    if state is not None:
+                        state.revisions.cancel()
+                        await self._cancel_local_asr_remote(state)
+                    self._resolve_local_asr_future(
+                        state.future if state is not None else event.future,
+                        None,
+                    )
+                    self.runtime_errors.record("stt_transcribe_failed", exc)
+                finally:
+                    self._local_asr_stream_queue.task_done()
+        finally:
+            for state in states.values():
+                self._resolve_local_asr_future(state.future, None)
+                await self._cancel_local_asr_remote(state)
+            for future in self._local_asr_stream_futures.values():
+                self._resolve_local_asr_future(future, None)
+            self._local_asr_stream_futures.clear()
+
+    async def _shutdown_local_asr_stream_worker(self) -> None:
+        self._local_asr_stream_shutdown = True
+        task = self._local_asr_stream_task
+        self._local_asr_stream_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
     async def _start_mic(self) -> None:
         if not self.mic_enabled:
@@ -549,6 +918,28 @@ class LocalIoBridge:
                 context["validationAttemptId"] = interrupt_validation.get("attemptId")
             return context
 
+        def on_speech_start(capture_generation: int) -> None:
+            key = (capture_service_epoch, int(capture_generation))
+            # LocalMic invokes start/chunks/end/segment on one capture thread;
+            # thread-safe loop callbacks therefore preserve that exact order.
+            loop.call_soon_threadsafe(self._start_local_asr_capture, key)
+
+        def on_audio_chunk(capture_generation: int, pcm16: bytes) -> None:
+            key = (capture_service_epoch, int(capture_generation))
+            loop.call_soon_threadsafe(
+                self._push_local_asr_audio,
+                key,
+                bytes(pcm16),
+            )
+
+        def on_speech_end(capture_generation: int, accepted: bool) -> None:
+            key = (capture_service_epoch, int(capture_generation))
+
+            def finish() -> None:
+                self._finish_local_asr_capture(key, accepted=bool(accepted))
+
+            loop.call_soon_threadsafe(finish)
+
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
             # Bind every callback to the service generation that captured it.
             # A final flush racing with OFF/restart must stay stale.
@@ -558,25 +949,52 @@ class LocalIoBridge:
                 if isinstance(meta.get("_bargeSource"), dict)
                 else None
             )
+            raw_capture_generation = meta.get("_asrCaptureGeneration")
+            stream_key = (
+                (captured_admission_epoch, raw_capture_generation)
+                if type(raw_capture_generation) is int
+                else None
+            )
 
             def enqueue() -> None:
                 if not self._voice_admission_lifecycle_is_current(
                     captured_admission_epoch
                 ):
+                    if stream_key is not None:
+                        self._abandon_local_asr_stream(stream_key)
                     self.discarded_pending_mic_segment_count += 1
                     return
                 segment_meta = dict(meta)
+                segment_meta.pop("_asrCaptureGeneration", None)
+                if type(raw_capture_generation) is int:
+                    capture_generation = raw_capture_generation
+                    self.main_foreground_capture_generation = max(
+                        self.main_foreground_capture_generation,
+                        capture_generation,
+                    )
+                else:
+                    self.main_foreground_capture_generation += 1
+                    capture_generation = (
+                        self.main_foreground_capture_generation
+                    )
+                segment_meta["_mainForegroundCaptureGeneration"] = (
+                    capture_generation
+                )
+                if stream_key is not None:
+                    segment_meta["_asrStreamKey"] = stream_key
                 segment_meta.setdefault("turnId", uuid.uuid4().hex)
                 segment_meta["_admissionEpoch"] = captured_admission_epoch
                 if barge_source is not None:
                     segment_meta["_bargeSource"] = dict(barge_source)
                     if self.barge_in_queue.full():
                         with contextlib.suppress(Exception):
-                            self.barge_in_queue.get_nowait()
+                            _dropped_pcm, dropped_meta = self.barge_in_queue.get_nowait()
+                            self._abandon_local_asr_meta(dropped_meta)
                             self.barge_in_queue.task_done()
                     self.barge_in_queue.put_nowait((pcm_bytes, segment_meta))
                     return
                 if self._mic_input_is_suppressed():
+                    self._abandon_local_asr_meta(segment_meta)
                     self.suppressed_mic_segment_count += 1
                     return
                 validation = active_validation_context(surface="local")
@@ -587,7 +1005,8 @@ class LocalIoBridge:
                     segment_meta["validationAttemptId"] = validation.get("attemptId")
                 if self.queue.full():
                     try:
-                        self.queue.get_nowait()
+                        _dropped_pcm, dropped_meta = self.queue.get_nowait()
+                        self._abandon_local_asr_meta(dropped_meta)
                         self.queue.task_done()
                     except Exception:
                         pass
@@ -597,6 +1016,15 @@ class LocalIoBridge:
 
         self.service = LocalMicCaptureService(
             on_segment=on_segment,
+            on_speech_start=(
+                on_speech_start if LOCAL_BRIDGE_STT_STREAMING_ENABLED else None
+            ),
+            on_audio_chunk=(
+                on_audio_chunk if LOCAL_BRIDGE_STT_STREAMING_ENABLED else None
+            ),
+            on_speech_end=(
+                on_speech_end if LOCAL_BRIDGE_STT_STREAMING_ENABLED else None
+            ),
             capture_context_provider=capture_context,
             sample_rate=LOCAL_MIC_SAMPLE_RATE,
             block_ms=LOCAL_MIC_BLOCK_MS,
@@ -613,7 +1041,31 @@ class LocalIoBridge:
             env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
             waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
         )
-        started = await asyncio.to_thread(self.service.start)
+        start_task = asyncio.create_task(
+            asyncio.to_thread(self.service.start),
+            name="local-mic-capture-start",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not start_task.done():
+            try:
+                await asyncio.shield(start_task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+            except Exception:
+                pass
+        start_error: Exception | None = None
+        try:
+            started = start_task.result()
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+            started = False
+        except Exception as exc:
+            start_error = exc
+            started = False
+        if cancellation is not None:
+            raise cancellation
+        if start_error is not None:
+            raise start_error
         self.ready = bool(started and self.service.capture_ready)
         self.mic_capture_stopped = bool(self.service.capture_stopped)
         self.last_error = "" if self.ready else (self.service.last_error or "local_mic_not_ready")
@@ -639,6 +1091,42 @@ class LocalIoBridge:
         self.last_error = ""
         print("[LOCAL BRIDGE] mic_ready=false mic_disabled=true", flush=True)
 
+    async def _rollback_failed_mic_enable(self) -> None:
+        stop_task = asyncio.create_task(
+            self._stop_mic(reason="mic_enable_failed"),
+            name="local-mic-enable-rollback",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not stop_task.done():
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+            except Exception:
+                pass
+
+        stop_error: BaseException | None = None
+        try:
+            stop_task.result()
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        except Exception as exc:
+            stop_error = exc
+        if stop_error is None and (
+            self.mic_enabled
+            or self.service is not None
+            or not self.mic_capture_stopped
+        ):
+            stop_error = RuntimeError("local_mic_stop_unverified")
+        if stop_error is not None:
+            self.runtime_errors.record(
+                "mic_control_failed",
+                stop_error,
+            )
+            self._schedule_watchdog_fail_safe_exit()
+        if cancellation is not None:
+            raise cancellation
+
     def _capture_may_be_active(self) -> bool:
         return self.mic_enabled or self.service is not None or not self.mic_capture_stopped
 
@@ -654,6 +1142,7 @@ class LocalIoBridge:
         *,
         expected_binding: tuple[str, str] | None = None,
         require_pinned: bool = False,
+        allow_explicit_reenable: bool = False,
     ) -> str:
         if lease.get("authorized") is not True:
             return str(lease.get("reason") or "voice_capture_consent_heartbeat_untrusted")
@@ -670,12 +1159,16 @@ class LocalIoBridge:
             str(lease.get("leaseDigest") or ""),
         )
         expected = expected_binding or self.voice_capture_consent_binding
-        return (
-            "voice_capture_consent_lease_replaced"
-            if (require_pinned and expected is None)
-            or (expected is not None and observed != expected)
-            else ""
-        )
+        if (require_pinned and expected is None) or (
+            expected is not None and observed != expected
+        ):
+            return "voice_capture_consent_lease_replaced"
+        if (
+            self.voice_capture_watchdog_last_stopped_at is not None
+            and not allow_explicit_reenable
+        ):
+            return "voice_capture_watchdog_stopped"
+        return ""
 
     def _record_voice_capture_watchdog(
         self,
@@ -691,9 +1184,12 @@ class LocalIoBridge:
         self.voice_capture_fence_digest = (
             str(lease.get("fenceDigest") or "") if not reason else ""
         )
-        if not reason:
-            self.voice_capture_watchdog_last_stopped_at = None
-        if stopped:
+        latched_physical_stop = bool(
+            reason
+            and self.voice_capture_watchdog_last_stopped_at is not None
+            and not self._capture_may_be_active()
+        )
+        if stopped or latched_physical_stop:
             self.voice_capture_watchdog_checked_at = time.time()
             self.voice_capture_watchdog_last_stopped_at = (
                 self.voice_capture_watchdog_checked_at
@@ -776,7 +1272,10 @@ class LocalIoBridge:
                     lease = await asyncio.to_thread(
                         self._inspect_voice_capture_host_lease
                     )
-                    reason = self._voice_capture_lease_rejection(lease)
+                    reason = self._voice_capture_lease_rejection(
+                        lease,
+                        allow_explicit_reenable=True,
+                    )
                     if reason:
                         if self._capture_may_be_active():
                             await self._stop_mic_for_watchdog(lease, reason)
@@ -802,10 +1301,12 @@ class LocalIoBridge:
                     reason = self._voice_capture_lease_rejection(
                         current,
                         expected_binding=binding,
+                        allow_explicit_reenable=True,
                     )
                     if reason:
                         await self._stop_mic_for_watchdog(current, reason)
                         raise RuntimeError(reason)
+                    self.voice_capture_watchdog_last_stopped_at = None
                     self.voice_capture_consent_binding = binding
                     self._record_voice_capture_watchdog(current, reason="")
                 else:
@@ -819,21 +1320,32 @@ class LocalIoBridge:
                 self.mic_control_state = "applied"
                 self.mic_control_error = ""
             except asyncio.CancelledError:
-                self.mic_control_state = "failed"
-                self.mic_control_error = "mic_control_cancelled"
-                self.ready = False
+                try:
+                    if enabled:
+                        await self._rollback_failed_mic_enable()
+                finally:
+                    self.mic_control_state = "failed"
+                    self.mic_control_desired_enabled = enabled
+                    self.mic_control_error = "mic_control_cancelled"
+                    self.ready = False
+                    self.last_error = "mic_control_cancelled"
                 raise
             except Exception as exc:
-                self.mic_control_state = "failed"
-                self.mic_control_error = "mic_control_failed"
-                self.ready = False
-                self.runtime_errors.record("mic_control_failed", exc)
-                if not enabled:
-                    self.mic_capture_stopped = bool(
-                        self.service is None
-                        or self.service.capture_stopped
-                    )
-                self.last_error = "mic_control_failed"
+                try:
+                    if enabled:
+                        await self._rollback_failed_mic_enable()
+                finally:
+                    self.mic_control_state = "failed"
+                    self.mic_control_desired_enabled = enabled
+                    self.mic_control_error = "mic_control_failed"
+                    self.ready = False
+                    self.runtime_errors.record("mic_control_failed", exc)
+                    if not enabled:
+                        self.mic_capture_stopped = bool(
+                            self.service is None
+                            or self.service.capture_stopped
+                        )
+                    self.last_error = "mic_control_failed"
             finally:
                 self.mic_control_request_revision = revision
                 self.mic_control_action_id = action_id
@@ -974,31 +1486,26 @@ class LocalIoBridge:
             self.minecraft_command_error = ""
             self.minecraft_command_result = {}
             await self._post_status()
-            try:
-                raise RuntimeError(
-                    "minecraft_world_authorization_required"
-                )
-            except Exception as exc:
-                self.runtime_errors.record("minecraft_lazy_start_failed", exc)
-                self.minecraft_command_state = "failed"
-                self.minecraft_command_error = clean_text(repr(exc)) or "minecraft_lazy_start_failed"
-                self.minecraft_command_result = {
-                    "command": clean_text(command),
-                    "action": action,
-                    "commandApplied": False,
-                    "connected": False,
-                }
-            finally:
-                self.minecraft_command_pending_revision = max(
-                    self.minecraft_command_pending_revision,
-                    revision,
-                )
-                await self._post_status()
+            self.minecraft_command_state = "failed"
+            self.minecraft_command_error = (
+                "minecraft_world_authorization_required"
+            )
+            self.minecraft_command_result = {
+                "command": clean_text(command),
+                "action": action,
+                "commandApplied": False,
+                "connected": False,
+            }
+            self.minecraft_command_pending_revision = max(
+                self.minecraft_command_pending_revision,
+                revision,
+            )
+            await self._post_status()
             print(
                 "[LOCAL BRIDGE] minecraft_command_applied "
                 f"revision={revision} state={self.minecraft_command_state} "
                 f"connected={bool(self.minecraft_command_result.get('connected'))} "
-                f"error={self.minecraft_command_error or 'none'}",
+                f"errorCode={self.minecraft_command_error or 'none'}",
                 flush=True,
             )
 
@@ -1079,6 +1586,18 @@ class LocalIoBridge:
     def _apply_voice_admission_status(self, payload: Any) -> None:
         if not isinstance(payload, dict):
             return
+        main_foreground = payload.get("mainForegroundReservation")
+        if (
+            isinstance(main_foreground, dict)
+            and set(main_foreground) == {"schema", "enabled", "contentFree"}
+            and main_foreground.get("schema")
+            == LOCAL_VOICE_MAIN_FOREGROUND_SCHEMA
+            and type(main_foreground.get("enabled")) is bool
+            and main_foreground.get("contentFree") is True
+        ):
+            self.main_foreground_reservation_enabled = main_foreground[
+                "enabled"
+            ]
         status = payload.get("voiceAdmission")
         if not isinstance(status, dict):
             status = payload.get("admission")
@@ -1107,6 +1626,7 @@ class LocalIoBridge:
 
     def _invalidate_local_voice_admission(self, reason: str) -> None:
         self.admission_epoch += 1
+        self._abandon_all_local_asr_streams()
         self.admission_active = False
         self.admission_mode = "inactive"
         normalized = clean_text(reason).lower()
@@ -1149,6 +1669,100 @@ class LocalIoBridge:
             and not self.restart_started
             and not self.shutdown_started
         )
+
+    async def _reserve_main_foreground_before_stt(
+        self,
+        capture_generation: int,
+    ) -> MainForegroundReservation | None:
+        if self.session is None:
+            raise RuntimeError("main_foreground_reservation_unavailable")
+        generation = main_capture_generation_from_wire(capture_generation)
+        async with self.session.post(
+            f"{BOT_API_BASE}{LOCAL_VOICE_MAIN_FOREGROUND_PATH}",
+            json={
+                "action": "reserve",
+                "bridgeInstanceId": self.bridge_instance_id,
+                "turnId": self.active_turn_id,
+                "captureGeneration": generation,
+            },
+            headers={
+                LOCAL_BRIDGE_STATUS_AUTH_HEADER: (
+                    LOCAL_BRIDGE_STATUS_AUTH_TOKEN
+                )
+            },
+            timeout=aiohttp.ClientTimeout(
+                total=0.9,
+                connect=0.25,
+                sock_connect=0.25,
+            ),
+            allow_redirects=False,
+        ) as response:
+            data = await response.json(content_type=None)
+            rejected = {
+                "ok": False,
+                "schema": LOCAL_VOICE_MAIN_FOREGROUND_SCHEMA,
+                "error": "main_llm_foreground_reservation_rejected",
+            }
+            if response.status == 409 and data == rejected:
+                return None
+            if (
+                response.status != 201
+                or not isinstance(data, dict)
+                or set(data) != {"ok", "schema", "reservation"}
+                or data.get("ok") is not True
+                or data.get("schema")
+                != LOCAL_VOICE_MAIN_FOREGROUND_SCHEMA
+            ):
+                raise RuntimeError("main_foreground_reservation_unavailable")
+            try:
+                reservation = main_foreground_reservation_from_wire(
+                    data.get("reservation")
+                )
+            except ValueError:
+                raise RuntimeError(
+                    "main_foreground_reservation_receipt_invalid"
+                ) from None
+            if reservation.capture_generation != generation:
+                raise RuntimeError(
+                    "main_foreground_reservation_receipt_invalid"
+                )
+            return reservation
+
+    async def _cancel_main_foreground_reservation(
+        self,
+        reservation: MainForegroundReservation,
+    ) -> None:
+        if self.session is None:
+            return
+        try:
+            async with self.session.post(
+                f"{BOT_API_BASE}{LOCAL_VOICE_MAIN_FOREGROUND_PATH}",
+                json={
+                    "action": "cancel",
+                    "bridgeInstanceId": self.bridge_instance_id,
+                    "turnId": self.active_turn_id,
+                    "reservation": main_foreground_reservation_to_wire(
+                        reservation
+                    ),
+                },
+                headers={
+                    LOCAL_BRIDGE_STATUS_AUTH_HEADER: (
+                        LOCAL_BRIDGE_STATUS_AUTH_TOKEN
+                    )
+                },
+                timeout=aiohttp.ClientTimeout(
+                    total=0.9,
+                    connect=0.25,
+                    sock_connect=0.25,
+                ),
+                allow_redirects=False,
+            ) as response:
+                await response.read()
+        except Exception as exc:
+            self.runtime_errors.record(
+                "main_foreground_cancel_failed",
+                exc,
+            )
 
     async def _request_voice_admission(
         self,
@@ -1271,12 +1885,55 @@ class LocalIoBridge:
         grant["_botDispatched"] = dispatched
         return grant
 
+    async def _ensure_fresh_main_foreground_reservation(
+        self,
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
+        previous = grant.get("mainForegroundReservation")
+        if previous is None:
+            return grant
+        issued_at = grant.get("mainForegroundReservationIssuedMonotonic")
+        stale = bool(
+            not isinstance(issued_at, (int, float))
+            or isinstance(issued_at, bool)
+            or _local_main_foreground_monotonic() - float(issued_at)
+            >= max(
+                0.0,
+                previous.ttl_ms / 1000.0
+                - LOCAL_MAIN_FOREGROUND_FRESHNESS_MARGIN_SEC,
+            )
+        )
+        if not stale:
+            return grant
+        generation = main_capture_generation_from_wire(
+            grant.get("mainCaptureGeneration")
+        )
+        await self._cancel_main_foreground_reservation(previous)
+        grant.pop("mainForegroundReservation", None)
+        grant.pop("mainForegroundReservationIssuedMonotonic", None)
+        refreshed_at = _local_main_foreground_monotonic()
+        refreshed = await self._reserve_main_foreground_before_stt(
+            generation
+        )
+        if refreshed is None:
+            return grant
+        if (
+            refreshed.capture_generation != previous.capture_generation
+            or refreshed.backend_epoch != previous.backend_epoch
+        ):
+            await self._cancel_main_foreground_reservation(refreshed)
+            raise RuntimeError("main_foreground_reservation_refresh_mismatch")
+        grant["mainForegroundReservation"] = refreshed
+        grant["mainForegroundReservationIssuedMonotonic"] = refreshed_at
+        return grant
+
     async def _local_voice_chat_payload(
         self,
         text: str,
         grant: dict[str, Any],
     ) -> dict[str, Any]:
         await self._ensure_fresh_voice_admission(grant)
+        await self._ensure_fresh_main_foreground_reservation(grant)
         if clean_text(text) != clean_text(grant.get("forwardText")):
             raise LocalVoiceAdmissionDrop("admission_text_mismatch")
         payload: dict[str, Any] = {
@@ -1287,6 +1944,30 @@ class LocalIoBridge:
             "admissionToken": str(grant.get("admissionToken") or ""),
             "admissionMode": str(grant.get("mode") or ""),
         }
+        if (
+            self.main_foreground_reservation_enabled
+            or "mainCaptureGeneration" in grant
+        ):
+            payload["mainCaptureGeneration"] = (
+                main_capture_generation_from_wire(
+                    grant.get("mainCaptureGeneration")
+                )
+            )
+            attempted = grant.get("mainForegroundReservationAttempted")
+            if type(attempted) is not bool:
+                raise LocalVoiceAdmissionDrop(
+                    "main_foreground_reservation_binding_invalid"
+                )
+            payload["mainForegroundReservationAttempted"] = attempted
+        main_foreground_reservation = grant.get(
+            "mainForegroundReservation"
+        )
+        if main_foreground_reservation is not None:
+            payload["mainForegroundReservation"] = (
+                main_foreground_reservation_to_wire(
+                    main_foreground_reservation
+                )
+            )
         validation = dict(grant.get("validation") or {})
         if validation:
             payload["validation"] = validation
@@ -1544,8 +2225,38 @@ class LocalIoBridge:
             **payload,
         )
 
-    def _mark_playback_started_once(self) -> None:
+    def _mark_playback_started_once(
+        self,
+        *,
+        expected_owner_id: str,
+        expected_owner_token: object | None,
+    ) -> None:
         self._ensure_validation_attempt_current()
+        with self._barge_source_lock:
+            if (
+                expected_owner_id
+                and expected_owner_token is not None
+                and self.playback_controller.owner_id == expected_owner_id
+                and self.playback_controller.owner_token is expected_owner_token
+            ):
+                source_validation = (
+                    dict(self.active_validation or {})
+                    if expected_owner_id == self.active_turn_id
+                    else {}
+                )
+                self._barge_source_snapshot = {
+                    "turnId": (
+                        self.active_turn_id
+                        if expected_owner_id == self.active_turn_id
+                        else expected_owner_id
+                    ),
+                    "ownerId": expected_owner_id,
+                    "ownerToken": expected_owner_token,
+                    "validationSessionId": source_validation.get("sessionId"),
+                    "validationStepId": source_validation.get("stepId"),
+                    "validationAttempt": source_validation.get("attempt"),
+                    "validationAttemptId": source_validation.get("attemptId"),
+                }
         if self.playback_started_for_turn:
             return
         self._mark_reply_started_once()
@@ -1573,28 +2284,19 @@ class LocalIoBridge:
         if active_task is not None and not active_task.done():
             owner_id = self.active_turn_id
             cancel = active_task.cancel
-            source_turn_id = self.active_turn_id
-            source_validation = dict(self.active_validation or {})
         else:
             current_task = asyncio.current_task()
             if current_task is None:
                 raise RuntimeError("playback_task_missing")
             owner_id = f"control-{id(current_task)}"
             cancel = current_task.cancel
-            source_turn_id = owner_id
-            source_validation = {}
         with self._barge_source_lock:
+            previous_owner_token = self.playback_controller.owner_token
             if not self.playback_controller.claim(owner_id, cancel):
                 raise RuntimeError("active_playback_owner_conflict")
-            self._barge_source_snapshot = {
-                "turnId": source_turn_id,
-                "ownerId": owner_id,
-                "ownerToken": self.playback_controller.owner_token,
-                "validationSessionId": source_validation.get("sessionId"),
-                "validationStepId": source_validation.get("stepId"),
-                "validationAttempt": source_validation.get("attempt"),
-                "validationAttemptId": source_validation.get("attemptId"),
-            }
+            if self.playback_controller.owner_token is not previous_owner_token:
+                self._barge_source_snapshot = None
+                self._last_released_barge_source = None
         return owner_id
 
     def _release_playback_owner(self, owner_id: str) -> bool:
@@ -1682,6 +2384,7 @@ class LocalIoBridge:
     async def _barge_in_worker(self) -> None:
         while True:
             pcm_bytes, meta = await self.barge_in_queue.get()
+            handed_off = False
             try:
                 segment_epoch = meta.get(
                     "_admissionEpoch",
@@ -1743,24 +2446,47 @@ class LocalIoBridge:
                         **{**decision_payload, "reason": "validation_attempt_stale"},
                     )
                     continue
-                source_matches_current_owner = local_barge_source_binding_matches(
+                with self._barge_source_lock:
+                    active_owner_id = self.playback_controller.owner_id
+                    active_owner_token = self.playback_controller.owner_token
+                    current_source = (
+                        dict(self._barge_source_snapshot)
+                        if self._barge_source_snapshot is not None
+                        else None
+                    )
+                    released_source = (
+                        dict(self._last_released_barge_source)
+                        if self._last_released_barge_source is not None
+                        else None
+                    )
+                owner_generation_matches = local_barge_source_binding_matches(
                     meta,
                     active_turn_id=self.active_turn_id,
                     active_validation=self.active_validation,
-                    active_owner_id=self.playback_controller.owner_id,
-                    active_owner_token=self.playback_controller.owner_token,
+                    active_owner_id=active_owner_id,
+                    active_owner_token=active_owner_token,
+                )
+                if owner_generation_matches and current_source is None:
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        **{
+                            **decision_payload,
+                            "reason": "barge_in_playback_not_started",
+                        },
+                    )
+                    continue
+                source_matches_current_owner = bool(
+                    owner_generation_matches
+                    and current_source is not None
+                    and source_binding.get("ownerToken")
+                    is current_source.get("ownerToken")
                 )
                 if not source_matches_current_owner:
-                    with self._barge_source_lock:
-                        released_source = (
-                            dict(self._last_released_barge_source)
-                            if self._last_released_barge_source is not None
-                            else None
-                        )
                     source_matches_released_owner = bool(
                         not self.active_validation
-                        and not self.playback_controller.owner_id
-                        and self.playback_controller.owner_token is None
+                        and not active_owner_id
+                        and active_owner_token is None
                         and released_source
                         and local_barge_source_binding_matches(
                             meta,
@@ -1776,9 +2502,11 @@ class LocalIoBridge:
                         meta["_requiresFreshWake"] = True
                         if self.priority_queue.full():
                             with contextlib.suppress(Exception):
-                                self.priority_queue.get_nowait()
+                                _dropped_pcm, dropped_meta = self.priority_queue.get_nowait()
+                                self._abandon_local_asr_meta(dropped_meta)
                                 self.priority_queue.task_done()
                         self.priority_queue.put_nowait((pcm_bytes, meta))
+                        handed_off = True
                         continue
                     self._emit_validation(
                         "barge_in_rejected",
@@ -1841,10 +2569,14 @@ class LocalIoBridge:
                 )
                 if self.priority_queue.full():
                     with contextlib.suppress(Exception):
-                        self.priority_queue.get_nowait()
+                        _dropped_pcm, dropped_meta = self.priority_queue.get_nowait()
+                        self._abandon_local_asr_meta(dropped_meta)
                         self.priority_queue.task_done()
                 self.priority_queue.put_nowait((pcm_bytes, meta))
+                handed_off = True
             finally:
+                if not handed_off:
+                    self._abandon_local_asr_meta(meta)
                 self.barge_in_queue.task_done()
 
     def _discard_pending_mic_segments(self) -> int:
@@ -1856,9 +2588,10 @@ class LocalIoBridge:
         ):
             while True:
                 try:
-                    source_queue.get_nowait()
+                    _discarded_pcm, discarded_meta = source_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                self._abandon_local_asr_meta(discarded_meta)
                 source_queue.task_done()
                 discarded += 1
         self.discarded_pending_mic_segment_count += discarded
@@ -1872,12 +2605,32 @@ class LocalIoBridge:
         if not self._voice_admission_lifecycle_is_current(
             turn_admission_epoch
         ):
+            self._abandon_local_asr_meta(meta)
             self.discarded_pending_mic_segment_count += 1
             return
         turn_started = time.perf_counter()
         self.active_turn_started_at = turn_started
         self.active_turn_id = str(meta.get("turnId") or uuid.uuid4().hex)
         meta["turnId"] = self.active_turn_id
+        raw_capture_generation = meta.get(
+            "_mainForegroundCaptureGeneration"
+        )
+        if type(raw_capture_generation) is not int:
+            self.main_foreground_capture_generation += 1
+            raw_capture_generation = self.main_foreground_capture_generation
+            meta["_mainForegroundCaptureGeneration"] = (
+                raw_capture_generation
+            )
+        main_capture_generation = main_capture_generation_from_wire(
+            raw_capture_generation
+        )
+        main_foreground_enabled = (
+            self.main_foreground_reservation_enabled
+        )
+        main_foreground_attempted = False
+        main_foreground_reservation: MainForegroundReservation | None = None
+        main_foreground_issued_at: float | None = None
+        main_foreground_grant: dict[str, Any] | None = None
         self.active_validation = self._validation_context_from_meta(meta)
         self.playback_started_for_turn = False
         self.playback_cancelled_for_turn = False
@@ -1898,19 +2651,41 @@ class LocalIoBridge:
         public_segment_meta.pop("_bargeSource", None)
         public_segment_meta.pop("_admissionEpoch", None)
         public_segment_meta.pop("_requiresFreshWake", None)
+        public_segment_meta.pop("_asrStreamKey", None)
+        public_segment_meta.pop("_asrCaptureGeneration", None)
+        public_segment_meta.pop("_mainForegroundCaptureGeneration", None)
         public_segment_meta.pop("validationAttemptId", None)
         public_segment_meta.pop("validation_attempt_id", None)
         await self._post_status(extra={"lastSegmentMeta": public_segment_meta})
+        if not self._voice_admission_lifecycle_is_current(
+            turn_admission_epoch
+        ):
+            self._abandon_local_asr_meta(meta)
+            self.discarded_pending_mic_segment_count += 1
+            return
         if not validation_attempt_binding_is_current(
             meta,
             surface="local",
             reject_unbound_when_active=True,
         ):
+            self._abandon_local_asr_meta(meta)
             self.discarded_pending_mic_segment_count += 1
             return
         try:
+            if main_foreground_enabled and self.admission_active:
+                main_foreground_attempted = True
+                main_foreground_issued_at = (
+                    _local_main_foreground_monotonic()
+                )
+                main_foreground_reservation = (
+                    await self._reserve_main_foreground_before_stt(
+                        main_capture_generation
+                    )
+                )
+                if main_foreground_reservation is None:
+                    main_foreground_issued_at = None
             stage_started = time.perf_counter()
-            text = await self._transcribe(pcm_bytes)
+            text = await self._transcribe_stream_or_batch(pcm_bytes, meta)
             stt_ms = (time.perf_counter() - stage_started) * 1000.0
             if not validation_attempt_binding_is_current(
                 meta,
@@ -1924,7 +2699,14 @@ class LocalIoBridge:
             ):
                 self.discarded_pending_mic_segment_count += 1
                 return
+            context = self._validation_context_from_meta(meta)
             if len(text) < LOCAL_BRIDGE_MIN_TEXT_CHARS:
+                if context:
+                    self._emit_validation(
+                        "error",
+                        meta=meta,
+                        errorCode="stt_transcript_too_short",
+                    )
                 return
             transcript_text = text
             if meta.get("_requiresFreshWake"):
@@ -1936,7 +2718,6 @@ class LocalIoBridge:
                         "fresh_wake_required"
                     )
                     return
-            context = self._validation_context_from_meta(meta)
             if context:
                 emit_transcript_validation_event(
                     "local",
@@ -1953,7 +2734,29 @@ class LocalIoBridge:
                 expected_epoch=int(turn_admission_epoch),
             )
             if grant is None:
+                if context:
+                    self._emit_validation(
+                        "error",
+                        meta=meta,
+                        errorCode=(
+                            self.admission_last_reason
+                            or "local_voice_admission_rejected"
+                        ),
+                    )
                 return
+            main_foreground_grant = grant
+            if main_foreground_enabled:
+                grant["mainCaptureGeneration"] = main_capture_generation
+                grant["mainForegroundReservationAttempted"] = (
+                    main_foreground_attempted
+                )
+                if main_foreground_reservation is not None:
+                    grant["mainForegroundReservation"] = (
+                        main_foreground_reservation
+                    )
+                    grant["mainForegroundReservationIssuedMonotonic"] = (
+                        main_foreground_issued_at
+                    )
             text = clean_text(grant.get("forwardText"))
             if not text:
                 self._record_local_voice_admission_rejection(
@@ -2080,6 +2883,15 @@ class LocalIoBridge:
                 flush=True,
             )
         finally:
+            terminal_main_foreground_reservation = (
+                main_foreground_grant.get("mainForegroundReservation")
+                if main_foreground_grant is not None
+                else main_foreground_reservation
+            )
+            if terminal_main_foreground_reservation is not None:
+                await self._cancel_main_foreground_reservation(
+                    terminal_main_foreground_reservation
+                )
             total_ms = (time.perf_counter() - turn_started) * 1000.0
             self.last_latency = {
                 "sttMs": round(stt_ms, 1) if stt_ms is not None else None,
@@ -2099,6 +2911,45 @@ class LocalIoBridge:
                 await self._post_status()
             finally:
                 self.active_conversation_playback_ack = None
+
+    async def _transcribe_stream_or_batch(
+        self,
+        pcm_bytes: bytes,
+        meta: dict[str, Any],
+    ) -> str:
+        key = self._local_asr_key_from_meta(meta)
+        if key is not None and not self._voice_admission_lifecycle_is_current(key[0]):
+            self._abandon_local_asr_stream(key)
+            return ""
+        future = self._local_asr_stream_futures.get(key) if key is not None else None
+        if future is None:
+            return await self._transcribe(pcm_bytes)
+
+        streamed_text: str | None = None
+        try:
+            streamed_text = await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError as exc:
+            self.runtime_errors.record("stt_timeout", exc)
+            self._abandon_local_asr_stream(key)
+        except asyncio.CancelledError:
+            self._abandon_local_asr_stream(key)
+            raise
+        except Exception as exc:
+            self.runtime_errors.record("stt_transcribe_failed", exc)
+            self._abandon_local_asr_stream(key)
+        finally:
+            if self._local_asr_stream_futures.get(key) is future:
+                self._local_asr_stream_futures.pop(key, None)
+
+        final_text = clean_text(streamed_text)
+        if final_text:
+            return final_text
+        if key is not None and not self._voice_admission_lifecycle_is_current(key[0]):
+            return ""
+        return await self._transcribe(pcm_bytes)
 
     async def _transcribe(self, pcm_bytes: bytes) -> str:
         audio16k = np.asarray(prepare_stt_audio(pcm_bytes), dtype=np.float32)
@@ -2352,6 +3203,10 @@ class LocalIoBridge:
         receiver: asyncio.Task[None] | None = None
         active_output_stream: Any | None = None
         playback_owner = self._claim_playback_owner()
+        playback_owner_token = self.playback_controller.owner_token
+        if playback_owner_token is None:
+            self._release_playback_owner(playback_owner)
+            raise RuntimeError("playback_owner_token_missing")
 
         self.speaking = True
 
@@ -2377,10 +3232,13 @@ class LocalIoBridge:
                             aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
                             if aligned_len > 0:
                                 playable = data[:aligned_len]
+                                await self._write_delta_stream_chunk(stream, playable)
                                 if first_playback_ms is None:
                                     first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                                    self._mark_playback_started_once()
-                                await self._write_delta_stream_chunk(stream, playable)
+                                    self._mark_playback_started_once(
+                                        expected_owner_id=playback_owner,
+                                        expected_owner_token=playback_owner_token,
+                                    )
                                 played_bytes += len(playable)
                             remainder = data[aligned_len:]
                             continue
@@ -2400,10 +3258,13 @@ class LocalIoBridge:
                             break
                     if remainder:
                         padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
+                        await self._write_delta_stream_chunk(stream, padded)
                         if first_playback_ms is None:
                             first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                            self._mark_playback_started_once()
-                        await self._write_delta_stream_chunk(stream, padded)
+                            self._mark_playback_started_once(
+                                expected_owner_id=playback_owner,
+                                expected_owner_token=playback_owner_token,
+                            )
                         played_bytes += len(padded)
                     if played_bytes > 0:
                         await self._write_delta_stream_chunk(
@@ -2493,7 +3354,6 @@ class LocalIoBridge:
                 raise RuntimeError(f"voxcpm_stream_not_ready: {ready}")
             await websocket.send_json({"type": "start"})
 
-            saw_delta = False
             payload = await self._local_voice_chat_payload(text, grant)
             grant["_botDispatched"] = True
             async with self._local_voice_bot_response(
@@ -2565,12 +3425,8 @@ class LocalIoBridge:
                         fragment = str(event.get("text") or "")
                         if not fragment:
                             continue
-                        saw_delta = True
                         if first_delta_ms is None:
                             first_delta_ms = (time.perf_counter() - started_at) * 1000.0
-                        await submit_tts_command(
-                            {"type": "append", "text": fragment}
-                        )
                         continue
                     if event_type == "sentence":
                         sentence = clean_tts_text(event.get("text"))
@@ -2579,10 +3435,10 @@ class LocalIoBridge:
                         sentence_count += 1
                         if first_sentence_ms is None:
                             first_sentence_ms = (time.perf_counter() - started_at) * 1000.0
-                        if not saw_delta:
-                            await submit_tts_command(
-                                {"type": "append", "text": sentence}
-                            )
+                        await submit_tts_command(
+                            {"type": "append", "text": sentence}
+                        )
+                        await submit_tts_command({"type": "commit"})
                         continue
                     if event_type == "done":
                         if done_seen:
@@ -3063,6 +3919,10 @@ class LocalIoBridge:
     async def _speak_with_payload(self, payload: dict[str, Any]) -> None:
         assert self.session is not None
         playback_owner = self._claim_playback_owner()
+        playback_owner_token = self.playback_controller.owner_token
+        if playback_owner_token is None:
+            self._release_playback_owner(playback_owner)
+            raise RuntimeError("playback_owner_token_missing")
         self.speaking = True
         await self._post_status()
         try:
@@ -3092,6 +3952,8 @@ class LocalIoBridge:
                         await self._play_streaming_pcm_response(
                             resp,
                             started_at=request_started,
+                            playback_owner=playback_owner,
+                            playback_owner_token=playback_owner_token,
                         )
                     )
                     if (
@@ -3136,6 +3998,8 @@ class LocalIoBridge:
         resp: aiohttp.ClientResponse,
         *,
         started_at: float,
+        playback_owner: str,
+        playback_owner_token: object,
     ) -> tuple[int, int, float | None]:
         if sd is None:
             return 0, 0, None
@@ -3157,18 +4021,24 @@ class LocalIoBridge:
                 aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
                 if aligned_len > 0:
                     playable = data[:aligned_len]
+                    await self._write_delta_stream_chunk(stream, playable)
                     if first_playback_ms is None:
                         first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                        self._mark_playback_started_once()
-                    await self._write_delta_stream_chunk(stream, playable)
+                        self._mark_playback_started_once(
+                            expected_owner_id=playback_owner,
+                            expected_owner_token=playback_owner_token,
+                        )
                     played_bytes += len(playable)
                 remainder = data[aligned_len:]
             if remainder:
                 padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
+                await self._write_delta_stream_chunk(stream, padded)
                 if first_playback_ms is None:
                     first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                    self._mark_playback_started_once()
-                await self._write_delta_stream_chunk(stream, padded)
+                    self._mark_playback_started_once(
+                        expected_owner_id=playback_owner,
+                        expected_owner_token=playback_owner_token,
+                    )
                 played_bytes += len(padded)
             if played_bytes > 0:
                 await self._write_delta_stream_chunk(
@@ -3181,6 +4051,8 @@ class LocalIoBridge:
         if not chunks or sd is None:
             return 0
         played_bytes = 0
+        playback_owner = self.playback_controller.owner_id
+        playback_owner_token = self.playback_controller.owner_token
         with sd.RawOutputStream(
             samplerate=TTS_PCM_RATE,
             channels=TTS_PCM_CHANNELS,
@@ -3188,10 +4060,13 @@ class LocalIoBridge:
             device=self.output_device,
         ) as stream:
             for chunk in iter_pcm_aligned_chunks(chunks):
-                if played_bytes == 0:
-                    self._mark_playback_started_once()
                 self._ensure_validation_attempt_current()
                 stream.write(chunk)
+                if played_bytes == 0:
+                    self._mark_playback_started_once(
+                        expected_owner_id=playback_owner,
+                        expected_owner_token=playback_owner_token,
+                    )
                 played_bytes += len(chunk)
             self._ensure_validation_attempt_current()
             stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
@@ -3456,10 +4331,53 @@ class LocalIoBridge:
         self._handle_output_device_request(data)
         self._handle_minecraft_command_request(data)
 
+        raw_speech_generation = (
+            data.get("speakGeneration") if isinstance(data, dict) else None
+        )
+        speech_generation = (
+            raw_speech_generation
+            if isinstance(raw_speech_generation, int)
+            and not isinstance(raw_speech_generation, bool)
+            and raw_speech_generation >= 0
+            else None
+        )
+        if (
+            speech_generation is not None
+            and speech_generation > self.control_speech_generation
+        ):
+            self.control_speech_generation = speech_generation
+            while True:
+                try:
+                    self.speak_request_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    self.speak_request_queue.task_done()
+            if (
+                self.speak_worker_task is not None
+                and not self.speak_worker_task.done()
+                and self.active_control_speech_generation
+                < speech_generation
+            ):
+                self.speak_worker_task.cancel()
+
         speak_requests = data.get("speakRequests") if isinstance(data, dict) else None
         if isinstance(speak_requests, list):
             for request in speak_requests:
                 if not isinstance(request, dict):
+                    continue
+                request_generation = request.get("speechGeneration")
+                request_turn_id = clean_text(request.get("speechTurnId"))
+                prefix_index = request.get("prefixIndex")
+                if (
+                    speech_generation is None
+                    or request_generation != speech_generation
+                    or request_generation != self.control_speech_generation
+                    or not request_turn_id
+                    or not isinstance(prefix_index, int)
+                    or isinstance(prefix_index, bool)
+                    or prefix_index < 0
+                ):
                     continue
                 text = clean_text(request.get("text"))
                 if not text:
@@ -3502,7 +4420,19 @@ class LocalIoBridge:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self.speak_worker_task = loop.create_task(self._speak_request_worker())
+        task = loop.create_task(self._speak_request_worker())
+        self.speak_worker_task = task
+        task.add_done_callback(self._on_speak_worker_done)
+
+    def _on_speak_worker_done(self, task: asyncio.Task) -> None:
+        if self.speak_worker_task is task:
+            self.speak_worker_task = None
+        if (
+            not self.restart_started
+            and not self.shutdown_started
+            and not self.speak_request_queue.empty()
+        ):
+            self._ensure_speak_worker()
 
     async def _speak_request_worker(self) -> None:
         while True:
@@ -3512,9 +4442,23 @@ class LocalIoBridge:
                 return
             try:
                 text = clean_text(request.get("text"))
-                if text and LOCAL_BRIDGE_TTS_ENABLED:
+                request_generation = request.get("speechGeneration")
+                if (
+                    text
+                    and LOCAL_BRIDGE_TTS_ENABLED
+                    and request_generation
+                    == self.control_speech_generation
+                ):
+                    self.active_control_speech_generation = int(
+                        request_generation
+                    )
                     while self.active_turn_task is not None and not self.active_turn_task.done():
                         await asyncio.sleep(0.05)
+                    if (
+                        request_generation
+                        != self.control_speech_generation
+                    ):
+                        continue
                     started = time.perf_counter()
                     raw_boundary = request.get("memoryBoundary")
                     if raw_boundary is None:
@@ -3555,6 +4499,11 @@ class LocalIoBridge:
                 )
                 await self._post_status()
             finally:
+                if (
+                    self.active_control_speech_generation
+                    == request.get("speechGeneration")
+                ):
+                    self.active_control_speech_generation = 0
                 self.speak_request_queue.task_done()
 
     def _schedule_bridge_exit(self) -> None:

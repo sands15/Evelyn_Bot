@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from .conversation_memory_receipt import sanitize_memory_receipt_ref
 from .text import clean_text
 
 
@@ -13,7 +14,7 @@ def pick_recent_user_text(history: list[dict[str, Any]]) -> str:
         if clean_text(str(entry.get("role", ""))) != "user":
             continue
         text = clean_text(str(entry.get("content", "")))
-        if text and text != "[autonomy]":
+        if text and text not in {"[autonomy]", "[autonomy:error]"}:
             return text
     return ""
 
@@ -112,22 +113,44 @@ def build_default_autonomy_observation(
     cognitive_stale_sec = 999999.0 if cognitive_updated_at <= 0 else max(0.0, now_time_value - cognitive_updated_at)
     refresh_at = float(last_cognitive_refresh_at or 0.0)
     refresh_gap_sec = 999999.0 if refresh_at <= 0 else max(0.0, now_mono_value - refresh_at)
+    recent_history = history[-8:]
+    completed_autonomy_followup = -1
+    for index in range(1, len(recent_history)):
+        previous = recent_history[index - 1]
+        current = recent_history[index]
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            continue
+        receipt = sanitize_memory_receipt_ref(
+            current.get("memoryReceiptRef")
+        )
+        if (
+            clean_text(str(previous.get("role", ""))) == "user"
+            and clean_text(str(previous.get("content", "")))
+            == "[autonomy]"
+            and clean_text(str(current.get("role", "")))
+            == "assistant"
+            and bool(clean_text(str(current.get("content", ""))))
+            and receipt is not None
+            and receipt["state"] != "unattributed"
+        ):
+            completed_autonomy_followup = index
     unresolved_items = 0
     user_unresolved_items = 0
     search_pending = False
     recent_visible: list[str] = []
-    for entry in history[-8:]:
+    for index, entry in enumerate(recent_history):
         if not isinstance(entry, dict):
             continue
         content = clean_text(str(entry.get("content", "")))
         if not content:
             continue
         recent_visible.append(content)
-        if "?" in content:
+        unresolved = index > completed_autonomy_followup
+        if unresolved and "?" in content:
             unresolved_items += 1
             if clean_text(str(entry.get("role", ""))) == "user":
                 user_unresolved_items += 1
-        if answer_promises_search_fn(content):
+        if unresolved and answer_promises_search_fn(content):
             search_pending = True
 
     active_recent_context = bool(latest_user_text) and recent_context_items > 0

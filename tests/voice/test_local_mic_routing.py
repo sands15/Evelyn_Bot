@@ -6,6 +6,7 @@ import json
 import os
 import runpy
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -120,6 +121,7 @@ class LocalMicRoutingTests(unittest.TestCase):
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
             "EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN": "capture-secret",
+            "EVELYN_VOICE_INPUT_LEASE_TOKEN": "lease-secret",
             "DISCORD_BOT_TOKEN": "discord-secret",
             "OPENAI_API_KEY": "model-secret",
         }
@@ -386,8 +388,16 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         bridge._handle_control_response(
             {
+                "speakGeneration": 1,
                 "speakRequests": [
-                    {"id": "speak-1", "text": " hello from page ", "source": "control_page"},
+                    {
+                        "id": "speak-1",
+                        "text": " hello from page ",
+                        "source": "control_page",
+                        "speechGeneration": 1,
+                        "speechTurnId": "control-turn-1",
+                        "prefixIndex": 0,
+                    },
                     {"id": "empty", "text": " "},
                 ]
             }
@@ -395,6 +405,74 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         self.assertEqual(bridge.speak_request_queue.qsize(), 1)
         self.assertEqual(bridge.speak_request_queue.get_nowait()["text"], "hello from page")
+
+    def test_new_control_speech_generation_cancels_stale_active_worker(
+        self,
+    ) -> None:
+        async def scenario() -> tuple[list[str], bool]:
+            bridge = LocalIoBridge()
+            old_started = asyncio.Event()
+            old_cancelled = asyncio.Event()
+            new_spoken = asyncio.Event()
+            spoken: list[str] = []
+
+            async def speak(text: str) -> None:
+                if text == "old sentence":
+                    old_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        old_cancelled.set()
+                        raise
+                spoken.append(text)
+                new_spoken.set()
+
+            bridge._speak = speak  # type: ignore[method-assign]
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            with patch.object(
+                local_io_bridge,
+                "LOCAL_BRIDGE_TTS_ENABLED",
+                True,
+            ):
+                bridge._handle_control_response(
+                    {
+                        "speakGeneration": 1,
+                        "speakRequests": [
+                            {
+                                "text": "old sentence",
+                                "speechGeneration": 1,
+                                "speechTurnId": "old-turn",
+                                "prefixIndex": 0,
+                            }
+                        ],
+                    }
+                )
+                await asyncio.wait_for(old_started.wait(), timeout=1)
+                bridge._handle_control_response(
+                    {
+                        "speakGeneration": 2,
+                        "speakRequests": [
+                            {
+                                "text": "new sentence",
+                                "speechGeneration": 2,
+                                "speechTurnId": "new-turn",
+                                "prefixIndex": 0,
+                            }
+                        ],
+                    }
+                )
+                await asyncio.wait_for(old_cancelled.wait(), timeout=1)
+                await asyncio.wait_for(new_spoken.wait(), timeout=1)
+                await asyncio.wait_for(
+                    bridge.speak_request_queue.join(),
+                    timeout=1,
+                )
+            return spoken, old_cancelled.is_set()
+
+        spoken, old_cancelled = asyncio.run(scenario())
+
+        self.assertTrue(old_cancelled)
+        self.assertEqual(spoken, ["new sentence"])
 
     def test_local_io_bridge_help_reply_is_not_sent_to_tts(self) -> None:
         async def scenario() -> LocalIoBridge:
@@ -628,6 +706,170 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertFalse(bridge.mic_capture_stopped)
         bridge._start_mic.assert_awaited_once()  # type: ignore[union-attr]
 
+    def test_local_io_bridge_failed_mic_start_rolls_back_capture(self) -> None:
+        class FailedStartService:
+            capture_ready = False
+            capture_stopped = True
+            last_error = "local_mic_not_ready"
+
+            def __init__(self, **_kwargs) -> None:
+                self.stop_calls = 0
+
+            def start(self) -> bool:
+                return False
+
+            def stop(self) -> bool:
+                self.stop_calls += 1
+                return True
+
+        async def scenario():
+            bridge = LocalIoBridge()
+            with patch(
+                "evelyn_core.local_io_bridge.LocalMicCaptureService",
+                FailedStartService,
+            ):
+                await bridge._apply_mic_control_request(
+                    revision=18,
+                    enabled=True,
+                    action_id=f"{18:032x}",
+                )
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertFalse(bridge.mic_enabled)
+        self.assertIsNone(bridge.service)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertFalse(bridge.ready)
+        self.assertEqual(bridge.mic_control_request_revision, 18)
+        self.assertEqual(bridge.mic_control_action_id, f"{18:032x}")
+        self.assertEqual(bridge.mic_control_state, "failed")
+        self.assertTrue(bridge.mic_control_desired_enabled)
+        self.assertEqual(bridge.mic_control_error, "mic_control_failed")
+        self.assertEqual(bridge.last_error, "mic_control_failed")
+
+    def test_local_io_bridge_cancelled_mic_start_drains_late_capture(self) -> None:
+        class LateStartService:
+            def __init__(self, **_kwargs) -> None:
+                self.capture_ready = False
+                self.capture_stopped = True
+                self.last_error = None
+                self.start_entered = threading.Event()
+                self.release_start = threading.Event()
+                self.start_done = threading.Event()
+                self.stop_called = threading.Event()
+                self.stop_calls = 0
+                self.events: list[str] = []
+
+            def start(self) -> bool:
+                self.capture_stopped = False
+                self.start_entered.set()
+                self.release_start.wait(timeout=2.0)
+                self.capture_ready = True
+                self.events.append("start_return")
+                self.start_done.set()
+                return True
+
+            def stop(self) -> bool:
+                self.stop_calls += 1
+                self.events.append("stop")
+                self.capture_ready = False
+                self.capture_stopped = True
+                self.stop_called.set()
+                return True
+
+        async def scenario():
+            bridge = LocalIoBridge()
+            service = LateStartService()
+            with patch(
+                "evelyn_core.local_io_bridge.LocalMicCaptureService",
+                return_value=service,
+            ):
+                task = asyncio.create_task(
+                    bridge._apply_mic_control_request(
+                        revision=19,
+                        enabled=True,
+                        action_id=f"{19:032x}",
+                    )
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(service.start_entered.wait, 1.0)
+                )
+                task.cancel()
+                for _ in range(20):
+                    if task.done() or service.stop_called.is_set():
+                        break
+                    await asyncio.sleep(0)
+                service.release_start.set()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    cancelled = True
+                else:
+                    cancelled = False
+                finally:
+                    service.release_start.set()
+                    await asyncio.to_thread(service.start_done.wait, 1.0)
+            return bridge, service, cancelled
+
+        bridge, service, cancelled = asyncio.run(scenario())
+
+        self.assertTrue(cancelled)
+        self.assertEqual(service.stop_calls, 1)
+        self.assertEqual(service.events, ["start_return", "stop"])
+        self.assertFalse(service.capture_ready)
+        self.assertTrue(service.capture_stopped)
+        self.assertFalse(bridge.mic_enabled)
+        self.assertIsNone(bridge.service)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertFalse(bridge.ready)
+        self.assertEqual(bridge.mic_control_request_revision, 19)
+        self.assertEqual(bridge.mic_control_action_id, f"{19:032x}")
+        self.assertEqual(bridge.mic_control_state, "failed")
+        self.assertTrue(bridge.mic_control_desired_enabled)
+        self.assertEqual(bridge.mic_control_error, "mic_control_cancelled")
+        self.assertEqual(bridge.last_error, "mic_control_cancelled")
+
+    def test_failed_mic_start_stop_failure_uses_capture_fail_safe(self) -> None:
+        class StopFailureService:
+            capture_ready = False
+            capture_stopped = False
+            last_error = "local_mic_not_ready"
+
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> bool:
+                return False
+
+            def stop(self) -> bool:
+                raise RuntimeError("private stop failure")
+
+        async def scenario():
+            bridge = LocalIoBridge()
+            bridge._schedule_watchdog_fail_safe_exit = Mock()  # type: ignore[method-assign]
+            with patch(
+                "evelyn_core.local_io_bridge.LocalMicCaptureService",
+                StopFailureService,
+            ):
+                await bridge._apply_mic_control_request(
+                    revision=20,
+                    enabled=True,
+                    action_id=f"{20:032x}",
+                )
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertTrue(bridge.mic_enabled)
+        self.assertIsNotNone(bridge.service)
+        self.assertFalse(bridge.mic_capture_stopped)
+        self.assertFalse(bridge.ready)
+        self.assertEqual(bridge.mic_control_state, "failed")
+        self.assertTrue(bridge.mic_control_desired_enabled)
+        bridge._schedule_watchdog_fail_safe_exit.assert_called_once_with()  # type: ignore[union-attr]
+        self.assertEqual(bridge.runtime_errors.snapshot()["errorCount"], 2)
+
     def test_local_io_bridge_rejects_missing_or_malformed_mic_action_id(self) -> None:
         async def scenario(*, enabled: bool, action_id_state: str) -> LocalIoBridge:
             bridge = LocalIoBridge()
@@ -818,7 +1060,7 @@ class LocalMicRoutingTests(unittest.TestCase):
 
                 self.assertEqual(first_result["state"], "failed")
                 self.assertEqual(first_result["error"], "mic_control_failed")
-                self.assertIs(first_result["service"], existing)
+                self.assertIsNone(first_result["service"])
                 self.assertEqual(first_result["factoryCalls"], 0)
                 self.assertEqual(existing.stop_calls, 2)
                 capture_factory.assert_called_once()
@@ -914,13 +1156,14 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(bridge.minecraft_command_state, "failed")
         self.assertEqual(
             bridge.minecraft_command_error,
-            "RuntimeError('minecraft_world_authorization_required')",
+            "minecraft_world_authorization_required",
         )
         self.assertFalse(bridge.minecraft_command_result["commandApplied"])
         self.assertFalse(bridge.minecraft_command_result["connected"])
         bridge._launch_minecraft_stack.assert_not_awaited()  # type: ignore[union-attr]
         bridge._activate_minecraft_command.assert_not_awaited()  # type: ignore[union-attr]
         self.assertEqual(bridge._post_status.await_count, 2)  # type: ignore[union-attr]
+        self.assertEqual(bridge.runtime_errors.snapshot()["errorCount"], 0)
 
     def test_local_io_bridge_ignores_launcher_for_rejected_world_action(self) -> None:
         async def scenario() -> LocalIoBridge:
@@ -945,9 +1188,9 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         self.assertEqual(bridge.minecraft_command_request_revision, 32)
         self.assertEqual(bridge.minecraft_command_state, "failed")
-        self.assertIn(
-            "minecraft_world_authorization_required",
+        self.assertEqual(
             bridge.minecraft_command_error,
+            "minecraft_world_authorization_required",
         )
         self.assertFalse(bridge.minecraft_command_result["commandApplied"])
         bridge._launch_minecraft_stack.assert_not_awaited()  # type: ignore[union-attr]
@@ -1328,7 +1571,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("function New-SecureRuntimeToken", script)
         self.assertIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", script)
         self.assertIn("EVELYN_INTERNAL_CONTROL_TOKEN", script)
+        self.assertIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", script)
         self.assertIn("EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN", script)
+        self.assertIn("EVELYN_VOICE_INPUT_LEASE_TOKEN", script)
         self.assertIn(
             "Remove-Item Env:EVELYN_INTERNAL_CONTROL_TOKEN",
             script,
@@ -1350,10 +1595,20 @@ class LocalMicRoutingTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
+            compose_environment_keys.count("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN"),
+            1,
+        )
+        self.assertEqual(
             compose_environment_keys.count(
                 "EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN"
             ),
             1,
+        )
+        self.assertEqual(
+            compose_environment_keys.count(
+                "EVELYN_VOICE_INPUT_LEASE_TOKEN"
+            ),
+            2,
         )
         self.assertLess(
             script.index("Remove-Item Env:EVELYN_INTERNAL_CONTROL_TOKEN"),
@@ -1403,6 +1658,10 @@ class LocalMicRoutingTests(unittest.TestCase):
             config_source,
         )
         self.assertIn(
+            'OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "12"))',
+            config_source,
+        )
+        self.assertIn(
             'set "OMNIVOICE_STREAM_STRATEGY=sentence"',
             start_env,
         )
@@ -1410,6 +1669,7 @@ class LocalMicRoutingTests(unittest.TestCase):
             'set "OMNIVOICE_STREAM_FOLLOWUP_STRATEGY=sentence"',
             start_env,
         )
+        self.assertIn('set "OMNIVOICE_NUM_STEP=12"', start_env)
         self.assertNotIn("blockwise_capped_first", start_env)
         self.assertIn('"mic": mic_stats', bridge_source)
 
@@ -1579,6 +1839,59 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
             bridge.voice_capture_watchdog_last_stopped_at,
             bridge.voice_capture_watchdog_checked_at,
         )
+
+    async def test_same_lease_heartbeat_cannot_reauthorize_watchdog_stopped_mic(self):
+        bridge, _service = self.active_bridge()
+        fresh = fresh_host_lease()
+        blocked = self.blocked()
+        leases = [blocked, blocked, fresh]
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            side_effect=lambda: leases.pop(0)
+        )
+
+        await bridge._enforce_voice_capture_watchdog()
+        first_stopped_at = bridge.voice_capture_watchdog_last_stopped_at
+        await bridge._enforce_voice_capture_watchdog()
+
+        self.assertFalse(bridge.mic_enabled)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertEqual(bridge.voice_capture_watchdog_state, "blocked")
+        self.assertEqual(
+            bridge.voice_capture_watchdog_reason,
+            "voice_capture_watchdog_stopped",
+        )
+        self.assertEqual(bridge.voice_capture_fence_digest, "")
+        self.assertIsNotNone(bridge.voice_capture_watchdog_last_stopped_at)
+        self.assertGreaterEqual(
+            bridge.voice_capture_watchdog_last_stopped_at,
+            first_stopped_at,
+        )
+        self.assertEqual(
+            bridge.voice_capture_watchdog_last_stopped_at,
+            bridge.voice_capture_watchdog_checked_at,
+        )
+
+        service = SimpleNamespace(capture_ready=True, capture_stopped=False)
+
+        async def start() -> None:
+            bridge.service = service  # type: ignore[assignment]
+            bridge.ready = True
+            bridge.mic_capture_stopped = False
+
+        bridge._start_mic = AsyncMock(side_effect=start)  # type: ignore[method-assign]
+        bridge._inspect_voice_capture_host_lease = Mock(  # type: ignore[method-assign]
+            return_value=fresh
+        )
+        await bridge._apply_mic_control_request(
+            revision=43,
+            enabled=True,
+            action_id=f"{43:032x}",
+        )
+
+        self.assertTrue(bridge.mic_enabled)
+        self.assertFalse(bridge.mic_capture_stopped)
+        self.assertEqual(bridge.voice_capture_watchdog_state, "authorized")
+        self.assertIsNone(bridge.voice_capture_watchdog_last_stopped_at)
 
     async def test_stop_failure_never_publishes_false_capture_stopped(self):
         bridge, service = self.active_bridge(stop_fails=True)

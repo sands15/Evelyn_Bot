@@ -146,6 +146,43 @@ class MemoryContextStateTests(unittest.TestCase):
             ),
         )
 
+    def test_build_memory_context_accepts_trusted_local_owner(self) -> None:
+        owner_scope = memory_owner_scope(
+            guild_id=None,
+            person_key="control-page:local",
+        )
+        with patch(
+            "evelyn_core.memory_context_state.collect_memory_layers",
+            return_value={},
+        ), patch(
+            "evelyn_core.memory_context_state.build_memory_vault_context",
+            return_value="",
+        ) as vault:
+            build_memory_context(
+                0,
+                "기억을 이어가줘",
+                cognitive_state={},
+                person_key="user:42",
+                owner_scope=owner_scope,
+            )
+
+        self.assertEqual(
+            vault.call_args.kwargs["owner_scope"],
+            owner_scope,
+        )
+
+    def test_build_memory_context_rejects_invalid_owner_override(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "memory_owner_scope_invalid",
+        ):
+            build_memory_context(
+                0,
+                "기억을 이어가줘",
+                cognitive_state={},
+                owner_scope="memory-owner-invalid",
+            )
+
     def test_build_memory_context_emits_content_free_grounding_receipt(self) -> None:
         layers = {
             "guild": {

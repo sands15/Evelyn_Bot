@@ -79,20 +79,21 @@ class FakeOwner:
         self.calls.append(("connect", (guild_id, kwargs)))
         return {"connected": True}
 
-    async def disconnect(self, guild_id: int) -> dict:
-        self.calls.append(("disconnect", guild_id))
+    async def disconnect(self, guild_id: int, **kwargs) -> dict:
+        self.calls.append(("disconnect", (guild_id, kwargs)))
         return {"connected": False}
 
-    async def set_goal(self, guild_id: int, goal: str) -> dict:
-        self.calls.append(("goal", (guild_id, goal)))
+    async def set_goal(self, guild_id: int, goal: str, **kwargs) -> dict:
+        self.calls.append(("goal", (guild_id, goal, kwargs)))
         return {"goal": goal, "outcome_verified": True}
 
     async def dispatch_action(
         self,
         guild_id: int,
         request: dict,
+        **kwargs,
     ) -> dict:
-        self.calls.append(("action", (guild_id, request)))
+        self.calls.append(("action", (guild_id, request, kwargs)))
         return {"status": "accepted"}
 
     async def action_status(self, guild_id: int, **kwargs) -> dict:
@@ -105,9 +106,10 @@ class FakeOwner:
         self,
         guild_id: int,
         action_run_id: str,
+        **kwargs,
     ) -> dict:
         self.calls.append(
-            ("cancel_action", (guild_id, action_run_id))
+            ("cancel_action", (guild_id, action_run_id, kwargs))
         )
         return {"status": "cancelled"}
 
@@ -132,7 +134,11 @@ class MinecraftWorldLeaseDelegationTests(
         goal = await execute_minecraft_world_lease_delegation(
             owner,
             action="goal",
-            payload={"guildId": 7, "goal": "iron"},
+            payload={
+                "guildId": 7,
+                "goal": "iron",
+                "leaseId": "lease-1",
+            },
         )
         stopped = await execute_minecraft_world_lease_delegation(
             owner,
@@ -146,6 +152,17 @@ class MinecraftWorldLeaseDelegationTests(
         self.assertEqual(
             [call[0] for call in owner.calls],
             ["connect", "goal", "disconnect"],
+        )
+        self.assertEqual(
+            owner.calls[1],
+            (
+                "goal",
+                (
+                    7,
+                    "iron",
+                    {"expected_lease_id": "lease-1"},
+                ),
+            ),
         )
 
     async def test_delegation_rejects_untyped_or_unknown_action(
@@ -170,6 +187,15 @@ class MinecraftWorldLeaseDelegationTests(
                 owner,
                 action="shell",
                 payload={"guildId": 7},
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_goal_lease_invalid",
+        ):
+            await execute_minecraft_world_lease_delegation(
+                owner,
+                action="goal",
+                payload={"guildId": 7, "goal": "iron"},
             )
 
         self.assertEqual(owner.calls, [])
@@ -196,7 +222,26 @@ class MinecraftWorldLeaseDelegationTests(
             action="disconnect",
             payload={"guildId": 0},
         )
-        self.assertEqual(owner.calls, [("disconnect", 0)])
+        self.assertEqual(owner.calls, [("disconnect", (0, {}))])
+
+    async def test_exact_disconnect_forwards_lease_identity(self) -> None:
+        owner = FakeOwner()
+
+        await execute_minecraft_world_lease_delegation(
+            owner,
+            action="disconnect",
+            payload={"guildId": 7, "leaseId": "lease-1"},
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "disconnect",
+                    (7, {"expected_lease_id": "lease-1"}),
+                )
+            ],
+        )
 
     async def test_action_delegation_is_quick_typed_and_exact(
         self,
@@ -215,7 +260,11 @@ class MinecraftWorldLeaseDelegationTests(
         await execute_minecraft_world_lease_delegation(
             owner,
             action="action",
-            payload={"guildId": 7, "request": request},
+            payload={
+                "guildId": 7,
+                "leaseId": "lease-1",
+                "request": request,
+            },
         )
         await execute_minecraft_world_lease_delegation(
             owner,
@@ -234,12 +283,21 @@ class MinecraftWorldLeaseDelegationTests(
             payload={
                 "guildId": 7,
                 "actionRunId": "action-run-1",
+                "leaseId": "lease-1",
             },
         )
 
         self.assertEqual(
             [row[0] for row in owner.calls],
             ["action", "action_status", "cancel_action"],
+        )
+        self.assertEqual(
+            owner.calls[0][1][2],
+            {"expected_lease_id": "lease-1"},
+        )
+        self.assertEqual(
+            owner.calls[2][1][2],
+            {"expected_lease_id": "lease-1"},
         )
         with self.assertRaisesRegex(
             RuntimeError,
@@ -326,6 +384,20 @@ class MinecraftWorldLeaseRemoteTests(
                 "result": {
                     "connected": path.endswith("/connect"),
                     "outcome_verified": True,
+                    **(
+                        {"worldLease": {"leaseId": "lease-1"}}
+                        if path.endswith("/connect")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "acknowledged": True,
+                            "guildId": 7,
+                            "leaseId": "lease-1",
+                        }
+                        if path.endswith("/connect_ack")
+                        else {}
+                    ),
                 },
                 "leaseStatus": active_lease_status(),
             }
@@ -347,7 +419,7 @@ class MinecraftWorldLeaseRemoteTests(
             source="discord_command",
         )
 
-        get_call, post_call = self.calls
+        get_call, post_call, ack_call = self.calls
         self.assertEqual(get_call[3], {})
         self.assertEqual(
             post_call[3][
@@ -376,7 +448,397 @@ class MinecraftWorldLeaseRemoteTests(
             post_call[2]["issuerRef"],
             "discord_user:1",
         )
+        self.assertEqual(
+            ack_call[1:3],
+            (
+                "/internal/minecraft-world-lease/connect_ack",
+                {"guildId": 7, "leaseId": "lease-1"},
+            ),
+        )
         self.assertTrue(self.remote.status()["delegated"])
+
+    async def test_disconnect_forwards_expected_lease_identity(
+        self,
+    ) -> None:
+        await self.remote.disconnect(
+            7,
+            expected_lease_id="lease-old",
+        )
+
+        self.assertEqual(
+            self.calls[-1][1:3],
+            (
+                "/internal/minecraft-world-lease/disconnect",
+                {"guildId": 7, "leaseId": "lease-old"},
+            ),
+        )
+
+    async def test_goal_forwards_expected_lease_identity(self) -> None:
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
+
+        await self.remote.set_goal(7, "diamond")
+
+        self.assertEqual(
+            self.calls[-1][1:3],
+            (
+                "/internal/minecraft-world-lease/goal",
+                {
+                    "guildId": 7,
+                    "goal": "diamond",
+                    "leaseId": "lease-1",
+                },
+            ),
+        )
+
+    async def test_goal_without_cached_lease_never_sends_mutation(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.remote.set_goal(7, "diamond")
+
+        self.assertEqual(self.calls, [])
+
+    async def test_ack_response_loss_reconciles_committed_exact_lease(
+        self,
+    ) -> None:
+        calls: list[str] = []
+
+        async def request(_method, path, _payload, _headers):
+            calls.append(path)
+            if path.endswith("/connect"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "connected": True,
+                        "outcome_verified": True,
+                        "worldLease": {"leaseId": "lease-1"},
+                    },
+                    "leaseStatus": {
+                        **active_lease_status(),
+                        "delegatedConnectPending": True,
+                    },
+                }
+            if path.endswith("/connect_ack"):
+                raise RuntimeError("ack_response_lost")
+            return {
+                "ok": True,
+                "leaseStatus": {
+                    **active_lease_status(),
+                    "delegatedConnectPending": False,
+                },
+            }
+
+        self.remote.request = request
+        result = await self.remote.connect(
+            7,
+            issuer_ref="discord_user:1",
+            source="discord_command",
+        )
+
+        self.assertTrue(result["connected"])
+        self.assertEqual(
+            calls,
+            [
+                "/internal/minecraft-world-lease/connect",
+                "/internal/minecraft-world-lease/connect_ack",
+                "/internal/minecraft-world-lease",
+            ],
+        )
+
+    async def test_ack_result_cannot_confirm_replaced_active_lease(
+        self,
+    ) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        async def request(_method, path, payload, _headers):
+            calls.append((path, dict(payload or {})))
+            if path.endswith("/connect"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "connected": True,
+                        "outcome_verified": True,
+                        "worldLease": {"leaseId": "lease-old"},
+                    },
+                    "leaseStatus": {
+                        **active_lease_status(),
+                        "lease": {
+                            **active_lease_status()["lease"],
+                            "leaseId": "lease-old",
+                        },
+                    },
+                }
+            if path.endswith("/connect_ack"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "acknowledged": True,
+                        "guildId": 7,
+                        "leaseId": "lease-old",
+                    },
+                    "leaseStatus": {
+                        **active_lease_status(),
+                        "lease": {
+                            **active_lease_status()["lease"],
+                            "leaseId": "lease-new",
+                        },
+                    },
+                }
+            return {
+                "ok": False,
+                "error": "minecraft_world_authorization_required",
+                "leaseStatus": {
+                    **active_lease_status(),
+                    "lease": {
+                        **active_lease_status()["lease"],
+                        "leaseId": "lease-new",
+                    },
+                },
+            }
+
+        self.remote.request = request
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_response_invalid",
+        ):
+            await self.remote.connect(
+                7,
+                issuer_ref="discord_user:1",
+                source="discord_command",
+            )
+
+        self.assertEqual(
+            calls[-1],
+            (
+                "/internal/minecraft-world-lease/disconnect",
+                {"guildId": 7, "leaseId": "lease-old"},
+            ),
+        )
+
+    async def test_cancelled_connect_without_lease_id_leaves_owner_watchdog(
+        self,
+    ) -> None:
+        connect_started = asyncio.Event()
+        release_connect = asyncio.Event()
+        calls: list[tuple[str, dict]] = []
+
+        async def request(_method, path, payload, _headers):
+            calls.append((path, dict(payload or {})))
+            if path.endswith("/connect"):
+                connect_started.set()
+                await release_connect.wait()
+                return {
+                    "ok": True,
+                    "result": {"connected": True},
+                    "leaseStatus": active_lease_status(),
+                }
+            return {
+                "ok": True,
+                "result": {
+                    "running": False,
+                    "connected": False,
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_stopped",
+                },
+                "leaseStatus": inactive_lease_status(),
+            }
+
+        self.remote.request = request
+        task = asyncio.create_task(
+            self.remote.connect(
+                7,
+                issuer_ref="discord_user:1",
+                source="discord_command",
+            )
+        )
+        await connect_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release_connect.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "/internal/minecraft-world-lease/connect",
+                    {
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                ),
+            ],
+        )
+        self.assertFalse(self.remote.status()["active"])
+
+    async def test_cancelled_goal_collects_request_then_disconnects(
+        self,
+    ) -> None:
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
+        goal_started = asyncio.Event()
+        release_goal = asyncio.Event()
+        calls: list[tuple[str, dict]] = []
+
+        async def request(_method, path, payload, _headers):
+            calls.append((path, dict(payload or {})))
+            if path.endswith("/goal"):
+                goal_started.set()
+                await release_goal.wait()
+                return {
+                    "ok": True,
+                    "result": {
+                        "goal": "diamond",
+                        "outcome_verified": True,
+                    },
+                    "leaseStatus": active_lease_status(),
+                }
+            return {
+                "ok": True,
+                "result": {
+                    "running": False,
+                    "connected": False,
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_stopped",
+                },
+                "leaseStatus": inactive_lease_status(),
+            }
+
+        self.remote.request = request
+        task = asyncio.create_task(
+            self.remote.set_goal(7, "diamond")
+        )
+        await goal_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release_goal.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "/internal/minecraft-world-lease/goal",
+                    {
+                        "guildId": 7,
+                        "goal": "diamond",
+                        "leaseId": "lease-1",
+                    },
+                ),
+                (
+                    "/internal/minecraft-world-lease/disconnect",
+                    {"guildId": 7, "leaseId": "lease-1"},
+                ),
+            ],
+        )
+        self.assertFalse(self.remote.status()["active"])
+
+    async def test_response_lost_after_connect_or_goal_disconnects(
+        self,
+    ) -> None:
+        for action in ("connect", "goal"):
+            with self.subTest(action=action):
+                calls: list[str] = []
+                if action == "goal":
+                    self.assertTrue(
+                        self.remote._ingest_lease_status(
+                            active_lease_status()
+                        )
+                    )
+
+                async def request(_method, path, _payload, _headers):
+                    calls.append(path)
+                    if path.endswith(f"/{action}"):
+                        raise RuntimeError(
+                            "response_lost_after_effect"
+                        )
+                    return {
+                        "ok": True,
+                        "result": {
+                            "running": False,
+                            "connected": False,
+                            "outcome_verified": True,
+                            "outcome_code": "minecraft_stopped",
+                        },
+                        "leaseStatus": inactive_lease_status(),
+                    }
+
+                self.remote.request = request
+                operation = (
+                    self.remote.connect(
+                        7,
+                        issuer_ref="discord_user:1",
+                        source="discord_command",
+                    )
+                    if action == "connect"
+                    else self.remote.set_goal(7, "diamond")
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "response_lost_after_effect",
+                ):
+                    await operation
+
+                self.assertEqual(
+                    calls,
+                    [f"/internal/minecraft-world-lease/{action}"]
+                    + (
+                        []
+                        if action == "connect"
+                        else [
+                            "/internal/minecraft-world-lease/disconnect"
+                        ]
+                    ),
+                )
+                self.assertFalse(self.remote.status()["active"])
+
+    async def test_connect_failure_without_lease_id_never_blind_disconnects(
+        self,
+    ) -> None:
+        calls: list[str] = []
+
+        async def request(_method, path, _payload, _headers):
+            calls.append(path)
+            if path.endswith("/connect"):
+                raise RuntimeError("response_lost_after_effect")
+            return {
+                "ok": True,
+                "result": {
+                    "running": False,
+                    "connected": False,
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_stopped",
+                },
+                "leaseStatus": inactive_lease_status(),
+            }
+
+        self.remote.request = request
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "response_lost_after_effect",
+        ):
+            await self.remote.connect(
+                7,
+                issuer_ref="discord_user:1",
+                source="discord_command",
+            )
+        self.assertEqual(
+            calls,
+            ["/internal/minecraft-world-lease/connect"],
+        )
 
     async def test_mutation_error_ingests_authoritative_status_before_raising(
         self,
@@ -603,6 +1065,57 @@ class MinecraftWorldLeaseRemoteTests(
         self.assertFalse(status["active"])
         self.assertFalse(status["auditReady"])
 
+    async def test_mutations_use_operation_specific_timeouts(
+        self,
+    ) -> None:
+        observed_timeouts: list[float] = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def urlopen(_request, *, timeout):
+            observed_timeouts.append(timeout)
+            return Response()
+
+        remote = MinecraftWorldLeaseRemote(
+            base_url="http://bot-api:8798",
+            secret_path=self.secret_path,
+            request_timeout_sec=3.0,
+            connect_request_timeout_sec=30.0,
+            mutation_request_timeout_sec=12.0,
+        )
+        with patch(
+            "evelyn_core.minecraft_world_lease_remote.urllib_request.urlopen",
+            side_effect=urlopen,
+        ):
+            await remote._default_request(
+                "POST",
+                "/internal/minecraft-world-lease/connect",
+                {},
+                {},
+            )
+            await remote._default_request(
+                "POST",
+                "/internal/minecraft-world-lease/goal",
+                {},
+                {},
+            )
+            await remote._default_request(
+                "GET",
+                "/internal/minecraft-world-lease/status",
+                {},
+                {},
+            )
+
+        self.assertEqual(observed_timeouts, [30.0, 12.0, 3.0])
+
     async def test_success_without_typed_result_clears_authorization(
         self,
     ) -> None:
@@ -629,6 +1142,13 @@ class MinecraftWorldLeaseRemoteTests(
         )
         for action, invalid_result, operation in operations:
             with self.subTest(action=action):
+                if action == "goal":
+                    self.assertTrue(
+                        self.remote._ingest_lease_status(
+                            active_lease_status()
+                        )
+                    )
+
                 async def incomplete(*_args):
                     return {
                         "ok": True,
@@ -648,6 +1168,67 @@ class MinecraftWorldLeaseRemoteTests(
                 self.assertFalse(status["active"])
                 self.assertIsNone(status["lease"])
 
+    async def test_connect_or_goal_invalid_result_disconnects(
+        self,
+    ) -> None:
+        for action in ("connect", "goal"):
+            with self.subTest(action=action):
+                calls: list[str] = []
+                if action == "goal":
+                    self.assertTrue(
+                        self.remote._ingest_lease_status(
+                            active_lease_status()
+                        )
+                    )
+
+                async def request(_method, path, _payload, _headers):
+                    calls.append(path)
+                    if path.endswith(f"/{action}"):
+                        return {
+                            "ok": True,
+                            "result": None,
+                            "leaseStatus": active_lease_status(),
+                        }
+                    return {
+                        "ok": True,
+                        "result": {
+                            "running": False,
+                            "connected": False,
+                            "outcome_verified": True,
+                            "outcome_code": "minecraft_stopped",
+                        },
+                        "leaseStatus": inactive_lease_status(),
+                    }
+
+                self.remote.request = request
+                operation = (
+                    self.remote.connect(
+                        7,
+                        issuer_ref="discord_user:1",
+                        source="discord_command",
+                    )
+                    if action == "connect"
+                    else self.remote.set_goal(7, "diamond")
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minecraft_world_lease_response_invalid",
+                ):
+                    await operation
+
+                self.assertEqual(
+                    calls,
+                    [f"/internal/minecraft-world-lease/{action}"]
+                    + (
+                        []
+                        if action == "connect"
+                        else [
+                            "/internal/minecraft-world-lease/disconnect"
+                        ]
+                    ),
+                )
+                self.assertFalse(self.remote.status()["active"])
+
     async def test_missing_secret_blocks_mutation(self) -> None:
         self.secret_path.unlink()
 
@@ -664,6 +1245,9 @@ class MinecraftWorldLeaseRemoteTests(
     async def test_remote_action_dispatches_then_polls_exact_result(
         self,
     ) -> None:
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
         calls: list[tuple[str, dict, dict[str, str]]] = []
         bound: dict = {}
 
@@ -748,6 +1332,7 @@ class MinecraftWorldLeaseRemoteTests(
         )
 
         self.assertTrue(result["verified"])
+        self.assertEqual(calls[0][1]["leaseId"], "lease-1")
         self.assertEqual(
             [path.rsplit("/", 1)[-1] for path, _, _ in calls],
             ["action", "action_status"],
@@ -766,10 +1351,94 @@ class MinecraftWorldLeaseRemoteTests(
             json.dumps(calls).lower(),
         )
 
+    async def test_remote_action_requires_cached_exact_lease(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.remote.dispatch_action(
+                7,
+                {
+                    "schema": "minecraft_autonomy.action-request.v1",
+                    "guildId": 7,
+                    "actionKey": "minecraft:find_food_source",
+                    "actionRunId": "action-run-1",
+                    "authorizationGrantId": "grant-1",
+                    "contractCode": "mindcraft_food_recovery.v1",
+                    "parameters": {},
+                },
+            )
+
+        self.assertEqual(self.calls, [])
+
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.remote.execute_action(
+                7,
+                {
+                    "schema": "minecraft_autonomy.action-request.v1",
+                    "guildId": 7,
+                    "actionKey": "minecraft:find_food_source",
+                    "actionRunId": "action-run-1",
+                    "authorizationGrantId": "grant-1",
+                    "contractCode": "mindcraft_food_recovery.v1",
+                    "parameters": {},
+                },
+                expected_lease_id="stale-lease",
+            )
+
+        self.assertEqual(self.calls, [])
+
+    async def test_remote_cancel_rejects_stale_expected_lease(
+        self,
+    ) -> None:
+        bound = {
+            "schema": "minecraft_autonomy.action-request.v1",
+            "guildId": 7,
+            "actionKey": "minecraft:find_food_source",
+            "actionRunId": "action-run-1",
+            "authorizationGrantId": "grant-1",
+            "contractCode": "mindcraft_food_recovery.v1",
+            "parameters": {},
+            "goalRunId": "goal-run-1",
+            "leaseId": "lease-B",
+            "leaseProcessNonce": "process-1",
+        }
+        self.remote._inflight_actions["action-run-1"] = {
+            "guildId": 7,
+            "request": bound,
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.remote.cancel_action(
+                7,
+                "action-run-1",
+                expected_lease_id="lease-A",
+            )
+
+        self.assertEqual(self.calls, [])
+        self.assertIn(
+            "action-run-1",
+            self.remote._inflight_actions,
+        )
+
     async def test_cancel_transport_failure_uses_verified_disconnect(
         self,
     ) -> None:
-        paths: list[str] = []
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
+        calls: list[tuple[str, dict]] = []
         bound: dict = {}
         status_started = asyncio.Event()
 
@@ -796,7 +1465,7 @@ class MinecraftWorldLeaseRemoteTests(
             }
 
         async def request(_method, path, payload, _headers):
-            paths.append(path)
+            calls.append((path, dict(payload or {})))
             if path.endswith("/action"):
                 bound.update(payload["request"])
                 bound.update(
@@ -853,7 +1522,7 @@ class MinecraftWorldLeaseRemoteTests(
             await task
 
         self.assertEqual(
-            paths,
+            [path for path, _ in calls],
             [
                 "/internal/minecraft-world-lease/action",
                 "/internal/minecraft-world-lease/action_status",
@@ -861,12 +1530,20 @@ class MinecraftWorldLeaseRemoteTests(
                 "/internal/minecraft-world-lease/disconnect",
             ],
         )
+        self.assertEqual(calls[0][1]["leaseId"], "lease-1")
+        self.assertEqual(
+            calls[-1][1],
+            {"guildId": 7, "leaseId": "lease-1"},
+        )
         self.assertEqual(self.remote._inflight_actions, {})
         self.assertFalse(self.remote.status()["active"])
 
     async def test_cancel_and_disconnect_failure_retains_correlation(
         self,
     ) -> None:
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
         bound: dict = {}
         status_started = asyncio.Event()
 
@@ -948,7 +1625,10 @@ class MinecraftWorldLeaseRemoteTests(
     async def test_malformed_remote_dispatch_is_cancelled_by_run_id(
         self,
     ) -> None:
-        paths: list[str] = []
+        self.assertTrue(
+            self.remote._ingest_lease_status(active_lease_status())
+        )
+        calls: list[tuple[str, dict]] = []
         bound: dict = {}
 
         def ack(status: str) -> dict:
@@ -977,7 +1657,7 @@ class MinecraftWorldLeaseRemoteTests(
             }
 
         async def request(_method, path, payload, _headers):
-            paths.append(path)
+            calls.append((path, dict(payload or {})))
             if path.endswith("/action"):
                 bound.update(payload["request"])
                 bound.update(
@@ -990,7 +1670,20 @@ class MinecraftWorldLeaseRemoteTests(
                 result = ack("accepted")
                 result["actionRunId"] = "wrong-run"
             elif path.endswith("/cancel_action"):
-                result = ack("cancelled")
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_unavailable"
+                )
+            elif path.endswith("/disconnect"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "running": False,
+                        "connected": False,
+                        "outcome_verified": True,
+                        "outcome_code": "minecraft_stopped",
+                    },
+                    "leaseStatus": inactive_lease_status(),
+                }
             else:
                 self.fail(path)
             return {
@@ -1015,11 +1708,25 @@ class MinecraftWorldLeaseRemoteTests(
             )
 
         self.assertEqual(
-            paths,
+            [path for path, _ in calls],
             [
                 "/internal/minecraft-world-lease/action",
                 "/internal/minecraft-world-lease/cancel_action",
+                "/internal/minecraft-world-lease/disconnect",
             ],
+        )
+        self.assertEqual(calls[0][1]["leaseId"], "lease-1")
+        self.assertEqual(
+            calls[2][1],
+            {"guildId": 7, "leaseId": "lease-1"},
+        )
+        self.assertEqual(
+            calls[1][1],
+            {
+                "guildId": 7,
+                "actionRunId": "action-run-1",
+                "leaseId": "lease-1",
+            },
         )
         self.assertEqual(self.remote._inflight_actions, {})
 
@@ -1055,10 +1762,10 @@ class MinecraftWorldLeaseRemoteTests(
             "guildId": 7,
             "request": bound,
         }
-        paths: list[str] = []
+        calls: list[tuple[str, dict]] = []
 
-        async def cancel_request(_method, path, _payload, _headers):
-            paths.append(path)
+        async def cancel_request(_method, path, payload, _headers):
+            calls.append((path, dict(payload or {})))
             return {
                 "ok": True,
                 "result": {
@@ -1090,10 +1797,88 @@ class MinecraftWorldLeaseRemoteTests(
         self.assertEqual(result["actionsCancelled"], 1)
         self.assertEqual(result["fallbackDisconnects"], 0)
         self.assertEqual(
-            paths,
+            [path for path, _ in calls],
             ["/internal/minecraft-world-lease/cancel_action"],
         )
+        self.assertEqual(
+            calls[0][1],
+            {
+                "guildId": 7,
+                "actionRunId": "action-run-1",
+                "leaseId": "lease-1",
+            },
+        )
         self.assertTrue(self.remote.status()["active"])
+
+    async def test_remote_shutdown_fallback_disconnect_is_exact(
+        self,
+    ) -> None:
+        bound = {
+            "schema": "minecraft_autonomy.action-request.v1",
+            "guildId": 7,
+            "actionKey": "minecraft:find_food_source",
+            "actionRunId": "action-run-1",
+            "authorizationGrantId": "grant-1",
+            "contractCode": "mindcraft_food_recovery.v1",
+            "parameters": {},
+            "goalRunId": "goal-run-1",
+            "leaseId": "lease-old",
+            "leaseProcessNonce": "process-1",
+        }
+        self.remote._inflight_actions["action-run-1"] = {
+            "guildId": 7,
+            "request": bound,
+        }
+        calls: list[tuple[str, dict]] = []
+
+        async def request(_method, path, payload, _headers):
+            calls.append((path, dict(payload or {})))
+            if path.endswith("/cancel_action"):
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_unavailable"
+                )
+            if path.endswith("/disconnect"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "running": False,
+                        "connected": False,
+                        "outcome_verified": True,
+                        "outcome_code": "minecraft_stopped",
+                    },
+                    "leaseStatus": inactive_lease_status(),
+                }
+            self.fail(path)
+
+        self.remote.request = request
+        result = await self.remote.shutdown()
+
+        self.assertEqual(result["fallbackDisconnects"], 1)
+        self.assertEqual(
+            calls[-1],
+            (
+                "/internal/minecraft-world-lease/disconnect",
+                {"guildId": 7, "leaseId": "lease-old"},
+            ),
+        )
+
+    async def test_remote_shutdown_without_exact_lease_is_inert(
+        self,
+    ) -> None:
+        self.remote._inflight_actions["action-run-1"] = {
+            "guildId": 7,
+            "request": {
+                "actionRunId": "action-run-1",
+            },
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await self.remote.shutdown()
+
+        self.assertEqual(self.calls, [])
 
     async def test_poll_failure_is_fail_closed(self) -> None:
         async def unavailable(*_args):

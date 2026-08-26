@@ -14,9 +14,14 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.observability_metrics import (  # noqa: E402
     ModelCallMetricsStore,
+    VOICE_LATENCY_STAGES,
+    VOICE_LATENCY_TRACE_METRICS_KEY,
+    VOICE_LATENCY_TRACE_SCHEMA,
+    VoiceLatencyTrace,
     average,
     average_or_none,
     mark_turn_stage_from_runtime,
+    mark_voice_latency_stage,
     new_turn_metrics_from_runtime,
     p95_or_none,
     percentile_p95,
@@ -32,6 +37,63 @@ from evelyn_core.observability_metrics import (  # noqa: E402
 
 
 class ObservabilityMetricsTests(unittest.TestCase):
+    def test_voice_latency_trace_exports_only_bounded_content_free_markers(self) -> None:
+        trace = VoiceLatencyTrace(clock_ns=lambda: 1_000_000)
+
+        self.assertTrue(trace.mark("request_received"))
+        self.assertTrue(trace.mark("prompt_compiled", at_ns=3_000_000))
+        self.assertTrue(trace.mark("main_admission_requested", at_ns=4_000_000))
+        self.assertTrue(trace.mark("main_request_written", at_ns=6_000_000))
+        self.assertTrue(trace.mark("main_headers_received", at_ns=7_000_000))
+        self.assertTrue(trace.mark("raw_first_token", at_ns=11_500_000))
+        self.assertTrue(trace.mark("safe_first_delta", at_ns=12_000_000))
+        self.assertTrue(trace.mark("speech_prefix_committed", at_ns=13_000_000))
+        self.assertTrue(trace.mark("tts_first_pcm", at_ns=23_000_000))
+        self.assertTrue(trace.mark("playback_first_write", at_ns=24_000_000))
+        self.assertFalse(trace.mark("raw_first_token", at_ns=90_000_000))
+
+        summary = trace.public_summary()
+
+        self.assertEqual(summary["schema"], VOICE_LATENCY_TRACE_SCHEMA)
+        self.assertEqual(summary["markers_ms"]["request_received"], 0.0)
+        self.assertEqual(summary["markers_ms"]["raw_first_token"], 10.5)
+        self.assertEqual(
+            summary["durations_ms"]["main_request_written_to_raw_first_token_ms"],
+            5.5,
+        )
+        self.assertEqual(
+            summary["durations_ms"]["raw_first_token_to_speech_prefix_committed_ms"],
+            1.5,
+        )
+        self.assertEqual(
+            summary["durations_ms"]["speech_prefix_committed_to_tts_first_pcm_ms"],
+            10.0,
+        )
+        self.assertEqual(
+            summary["durations_ms"]["request_received_to_playback_first_write_ms"],
+            23.0,
+        )
+        self.assertNotIn("main_slot_acquired", summary["markers_ms"])
+        self.assertNotIn("clock_ns", json.dumps(summary, sort_keys=True))
+
+    def test_voice_latency_trace_rejects_unbounded_labels_and_invalid_durations(self) -> None:
+        trace = VoiceLatencyTrace()
+
+        with self.assertRaisesRegex(ValueError, "unsupported voice latency stage"):
+            trace.mark("private transcript C:/secret.wav")
+        with self.assertRaisesRegex(ValueError, "bounded monotonic timestamp"):
+            trace.mark("request_received", at_ns=-1)
+        trace.mark("raw_first_token", at_ns=3_000_000)
+        trace.mark("main_request_written", at_ns=4_000_000)
+
+        self.assertIsNone(trace.elapsed_ms("prompt_compiled", "raw_first_token"))
+        self.assertIsNone(trace.elapsed_ms("main_request_written", "raw_first_token"))
+        self.assertEqual(len(VOICE_LATENCY_STAGES), 18)
+        self.assertIn("main_slot_acquired", VOICE_LATENCY_STAGES)
+        self.assertIn("tts_started", VOICE_LATENCY_STAGES)
+        self.assertIn("turn_completed", VOICE_LATENCY_STAGES)
+        self.assertEqual(VoiceLatencyTrace().public_summary()["durations_ms"], {})
+
     def test_basic_metric_helpers(self) -> None:
         self.assertEqual(percentile_p95([]), 0.0)
         self.assertEqual(percentile_p95([1, 2, 3, 4, 5]), 5.0)
@@ -142,6 +204,16 @@ class ObservabilityMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["marks"], {"t_ingress": 0.0})
         self.assertEqual(metrics["meta"]["source"], "voice")
         self.assertEqual(metrics["meta"]["turn_id"], "turn-1")
+        self.assertEqual(
+            set(
+                metrics[
+                    VOICE_LATENCY_TRACE_METRICS_KEY
+                ].public_summary()["markers_ms"]
+            ),
+            {"request_received"},
+        )
+        self.assertTrue(mark_voice_latency_stage(metrics, "tts_requested"))
+        self.assertFalse(mark_voice_latency_stage(metrics, "tts_requested"))
         self.assertEqual(events[0][0], "turn_ingress")
         self.assertEqual(events[0][1]["room_session_key"], "room-1")
         self.assertEqual(events[0][1]["chunk_index"], 4)
@@ -253,7 +325,20 @@ class ObservabilityMetricsTests(unittest.TestCase):
                         "route": "fallback",
                         "context_pipeline": {
                             "route": "main",
-                            "policy": "full",
+                            "policy": {
+                                "needs_memory": True,
+                                "specialist": "deep_reasoning",
+                                "tools": [
+                                    {
+                                        "tool_name": "memory_recall",
+                                        "query": "private query",
+                                        "reason": "private reason",
+                                        "evidence": "private evidence",
+                                        "status": "private transcript in status",
+                                        "required_before_answer": True,
+                                    }
+                                ],
+                            },
                             "sections": ["memory", "vision"],
                             "section_chars": {"memory": 10},
                             "minecraft_context": True,
@@ -293,6 +378,17 @@ class ObservabilityMetricsTests(unittest.TestCase):
         self.assertTrue(record["vision_scene_available"])
         self.assertFalse(record["vision_ocr_available"])
         self.assertFalse(record["vision_actionable"])
+        self.assertTrue(record["policy"]["needs_memory"])
+        self.assertEqual(record["policy"]["tools"], [{
+            "tool_name": "memory_recall",
+            "status": "unknown",
+            "required_before_answer": True,
+        }])
+        serialized_record = json.dumps(record, ensure_ascii=False)
+        self.assertNotIn("private query", serialized_record)
+        self.assertNotIn("private reason", serialized_record)
+        self.assertNotIn("private evidence", serialized_record)
+        self.assertNotIn("private transcript in status", serialized_record)
         self.assertEqual(record["marks"], {"route_ready": 12.0, "vision_ready": 34.0})
         self.assertEqual(record["user_text_len"], 5)
         self.assertEqual(record["answer_len"], 6)

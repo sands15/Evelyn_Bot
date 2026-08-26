@@ -100,6 +100,16 @@ executor만 exact `mindcraft_action_gateway.readiness.v1` terminal projection의
 수 있다. 이 terminal projection은 최초 접속 readiness나 새 executor의
 authorization을 대신하지 않는다.
 
+## Goal completion restart boundary
+
+`lastDragonCombatAt`은 같은 Mindcraft process에서 성공한 autonomous dragon
+attack과 뒤이은 `entityDead`의 인과를 결박하는 process-local latch다. 일반 child
+restart에서는 절대 복원하지 않고 즉시 정리된 state를 다시 저장한다. 반대로 이미
+검증된 `ultimateGoalCompletedAt`과 completed autonomy state는 durable하게 복원한다.
+검증된 exact `!endGoal`만 completed 상태에서 survival recovery와 unarmed-hostile
+movement gate보다 우선해 기존 control-command 경계로 들어가며 SelfPrompter를 한 번
+멈춘다. 미검증 `!endGoal`, 다른 completed command와 manual pause는 계속 fail-closed한다.
+
 ## Consumers
 
 - `mindcraft_service.py`: runner/telemetry/lease에서 계약을 생산한다.

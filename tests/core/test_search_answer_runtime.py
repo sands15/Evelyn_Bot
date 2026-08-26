@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -49,6 +50,11 @@ class FakeSession:
 
 
 class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def decoded_evidence(rendered: str) -> dict:
+        encoded = rendered.split("evidencePreviewHex=", 1)[1].rstrip(".")
+        return json.loads(bytes.fromhex(encoded).decode("utf-8"))
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -84,61 +90,48 @@ class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_results_return_without_http_request(self) -> None:
         result = await answer_from_search_results_from_runtime("질문", [], deps=self.build_deps())
 
-        self.assertIn("결과를 못 찾았어", result)
+        self.assertIn("결과를 받지 못했어", result)
         self.assertEqual(self.session.calls, [])
 
-    async def test_builds_summary_request_and_returns_sanitized_answer(self) -> None:
+    async def test_renders_typed_external_cards_without_model_request(self) -> None:
         results = [{"title": " 제목 ", "snippet": " 내용 "}]
 
         result = await answer_from_search_results_from_runtime("질문", results, deps=self.build_deps())
 
-        self.assertEqual(result, "정리 답변")
-        url, request = self.session.calls[0]
-        self.assertEqual(url, "http://llm/chat")
-        self.assertEqual(request["json"]["model"], "main-model")
-        self.assertEqual(request["json"]["stop"], ["STOP"])
-        self.assertEqual(request["timeout"], {"total": 45})
-        self.assertIn("- 제목 | 내용", self.build_calls[0][0][1]["content"])
-        self.assertEqual(self.build_calls[0][1]["content_format"], "string")
+        evidence = self.decoded_evidence(result)
+        self.assertEqual(evidence["cards"][0]["title"], "제목")
+        self.assertEqual(evidence["cards"][0]["excerpt"], "내용")
+        self.assertIn("외부 인용 데이터", result)
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.build_calls, [])
 
-    async def test_request_uses_injected_memory_index_dir(self) -> None:
-        observed: list[Path] = []
+    async def test_deterministic_renderer_does_not_expose_memory_or_history(self) -> None:
+        result = await answer_from_search_results_from_runtime(
+            "질문",
+            [{"title": "제목", "snippet": "내용"}],
+            deps=self.build_deps(),
+        )
 
-        @asynccontextmanager
-        async def recording_request(
-            request_factory,
-            *args,
-            memory_index_dir,
-            **kwargs,
-        ):
-            observed.append(memory_index_dir)
-            async with request_factory(*args, **kwargs) as response:
-                yield response
+        self.assertNotIn(str(self.memory_index_dir), result)
+        self.assertEqual(self.session.calls, [])
 
-        with patch(
-            "evelyn_core.search_answer_runtime.memory_exposure_request",
-            recording_request,
-        ):
-            await answer_from_search_results_from_runtime(
-                "질문",
-                [{"title": "제목", "snippet": "내용"}],
-                deps=self.build_deps(),
-            )
-
-        self.assertEqual(observed, [self.memory_index_dir])
-
-    async def test_http_error_includes_bounded_response_text(self) -> None:
+    async def test_model_http_failure_is_irrelevant_to_deterministic_renderer(self) -> None:
         self.response = FakeResponse(status=500, text="x" * 400)
         self.session = FakeSession(self.response)
 
-        with self.assertRaisesRegex(RuntimeError, "검색 정리 LLM 오류: 500"):
-            await answer_from_search_results_from_runtime(
-                "질문",
-                [{"snippet": "내용"}],
-                deps=self.build_deps(),
-            )
+        result = await answer_from_search_results_from_runtime(
+            "질문",
+            [{"snippet": "내용"}],
+            deps=self.build_deps(),
+        )
 
-    async def test_empty_choices_falls_back_to_first_snippet_and_strips_source(self) -> None:
+        self.assertEqual(
+            self.decoded_evidence(result)["cards"][0]["excerpt"],
+            "내용",
+        )
+        self.assertEqual(self.session.calls, [])
+
+    async def test_snippet_urls_are_omitted_from_user_cards(self) -> None:
         self.response = FakeResponse(data={"choices": []})
         self.session = FakeSession(self.response)
 
@@ -148,7 +141,11 @@ class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
             deps=self.build_deps(),
         )
 
-        self.assertEqual(result, "찾아보니까 첫 내용")
+        self.assertEqual(
+            self.decoded_evidence(result)["cards"][0]["excerpt"],
+            "첫 내용",
+        )
+        self.assertNotIn("https://source", result)
 
     def test_main_delegates_search_answer_to_runtime_module(self) -> None:
         source = (

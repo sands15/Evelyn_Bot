@@ -89,16 +89,54 @@ async def execute_minecraft_world_lease_delegation(
             ttl_sec=_ttl_sec(payload.get("ttlSec")),
         )
     elif normalized_action == "disconnect":
-        result = await owner.disconnect(guild_id)
+        lease_id = payload.get("leaseId")
+        if lease_id is not None and (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or lease_id != lease_id.strip()
+        ):
+            raise RuntimeError(
+                "minecraft_world_disconnect_lease_invalid"
+            )
+        result = await owner.disconnect(
+            guild_id,
+            **(
+                {"expected_lease_id": lease_id}
+                if lease_id is not None
+                else {}
+            ),
+        )
     elif normalized_action == "goal":
         goal = str(payload.get("goal") or "").strip()
         if not goal:
             raise RuntimeError("minecraft_goal_missing")
-        result = await owner.set_goal(guild_id, goal)
+        lease_id = payload.get("leaseId")
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or lease_id != lease_id.strip()
+        ):
+            raise RuntimeError(
+                "minecraft_world_goal_lease_invalid"
+            )
+        result = await owner.set_goal(
+            guild_id,
+            goal,
+            expected_lease_id=lease_id,
+        )
     elif normalized_action == "action":
-        if set(payload) != {"guildId", "request"}:
+        if set(payload) != {"guildId", "leaseId", "request"}:
             raise RuntimeError(
                 "minecraft_action_delegation_fields_invalid"
+            )
+        lease_id = payload.get("leaseId")
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or lease_id != lease_id.strip()
+        ):
+            raise RuntimeError(
+                "minecraft_action_delegation_lease_invalid"
             )
         request = payload.get("request")
         if not isinstance(request, dict):
@@ -108,6 +146,7 @@ async def execute_minecraft_world_lease_delegation(
         result = await owner.dispatch_action(
             guild_id,
             dict(request),
+            expected_lease_id=lease_id,
         )
     elif normalized_action == "action_status":
         if set(payload) != {
@@ -130,13 +169,27 @@ async def execute_minecraft_world_lease_delegation(
             ),
         )
     elif normalized_action == "cancel_action":
-        if set(payload) != {"guildId", "actionRunId"}:
+        if set(payload) != {
+            "guildId",
+            "actionRunId",
+            "leaseId",
+        }:
             raise RuntimeError(
                 "minecraft_action_cancel_fields_invalid"
+            )
+        lease_id = payload.get("leaseId")
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or lease_id != lease_id.strip()
+        ):
+            raise RuntimeError(
+                "minecraft_action_cancel_lease_invalid"
             )
         result = await owner.cancel_action(
             guild_id,
             str(payload.get("actionRunId") or ""),
+            expected_lease_id=lease_id,
         )
     else:
         raise RuntimeError(

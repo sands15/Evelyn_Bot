@@ -47,6 +47,22 @@ class FakeVoiceClient:
         self.listen_calls = 0
         self.moves: list[FakeVoiceChannel] = []
         self.events: list[str] = []
+        self.lease_token = "existing" if healthy else ""
+        self.lease_release = None
+        self._listener_generation = 0
+        self.listener_failure_callback = None
+
+    def set_listener_failure_callback(self, callback) -> None:
+        self.listener_failure_callback = callback
+
+    def bind_voice_input_lease(self, token, release) -> None:
+        if self.lease_token:
+            raise RuntimeError("voice_input_lease_already_bound")
+        self.lease_token = token
+        self.lease_release = release
+
+    def has_voice_input_lease(self) -> bool:
+        return bool(self.lease_token)
 
     def is_internal_voice_reconnect_active(self) -> bool:
         return False
@@ -58,11 +74,19 @@ class FakeVoiceClient:
         return self.healthy
 
     def stop_listening(self) -> None:
+        self._listener_generation += 1
         self.stop_calls += 1
         self.events.append("stop")
         self.healthy = False
+        token, release = self.lease_token, self.lease_release
+        self.lease_token = ""
+        self.lease_release = None
+        if token and release is not None:
+            asyncio.create_task(release(token))
 
     def listen(self) -> None:
+        if not self.lease_token:
+            raise RuntimeError("voice_input_lease_required")
         self.listen_calls += 1
         self.events.append("listen")
         self.healthy = True
@@ -94,6 +118,16 @@ class FakeGuild:
 class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def build_deps(self, **overrides) -> VoiceSupportCompositionDeps:
         callback = object()
+        lease_sequence = 0
+
+        async def acquire_voice_input_lease() -> str:
+            nonlocal lease_sequence
+            lease_sequence += 1
+            return f"lease-{lease_sequence}"
+
+        async def release_voice_input_lease(_token: str) -> None:
+            return None
+
         values = dict(
             continuity=lambda: "continuity-deps",
             stt_warmup=lambda: "stt-warmup-deps",
@@ -132,6 +166,8 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             voice_channel_type=FakeVoiceChannel,
             now=Mock(return_value=123.0),
             log=Mock(),
+            acquire_voice_input_lease=acquire_voice_input_lease,
+            release_voice_input_lease=release_voice_input_lease,
         )
         values.update(overrides)
         return VoiceSupportCompositionDeps(**values)
@@ -615,6 +651,11 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             state_module = importlib.import_module("evelyn_voice.state")
 
         voice_client = object.__new__(client_module.EvelynVoiceClient)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^voice_input_lease_required$",
+        ):
+            voice_client.listen()
         voice_client.runtime = state_module.VoiceRuntimeState()
         voice_client.channel = SimpleNamespace(members=[])
         voice_client.connected_at = None
@@ -672,6 +713,898 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(voice_client.media_queue.empty())
         self.assertTrue(voice_client.utterance_queue.empty())
         self.assertEqual(voice_client._listener_generation, 1)
+
+        allow_capture_cleanup = asyncio.Event()
+        capture_stopped = asyncio.Event()
+        lease_released = asyncio.Event()
+
+        async def capture_loop() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await allow_capture_cleanup.wait()
+                capture_stopped.set()
+
+        async def release_lease(_token: str) -> None:
+            self.assertTrue(capture_stopped.is_set())
+            lease_released.set()
+
+        capture_task = asyncio.create_task(capture_loop())
+        await asyncio.sleep(0)
+        voice_client._receive_task = capture_task
+        voice_client._voice_input_lease_token = "listener-token"
+        voice_client._voice_input_lease_release = release_lease
+        voice_client._voice_input_lease_release_tasks = set()
+
+        voice_client.stop_listening()
+        await asyncio.sleep(0)
+        self.assertFalse(lease_released.is_set())
+        allow_capture_cleanup.set()
+        await asyncio.wait_for(lease_released.wait(), timeout=1.0)
+
+    async def test_cancelled_release_drain_waits_for_capture_stop_and_release(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        allow_capture_cleanup = asyncio.Event()
+        capture_stopped = asyncio.Event()
+        lease_released = asyncio.Event()
+
+        async def capture_loop() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await allow_capture_cleanup.wait()
+                capture_stopped.set()
+
+        async def release_lease(token: str) -> None:
+            self.assertEqual(token, "listener-token")
+            self.assertTrue(capture_stopped.is_set())
+            lease_released.set()
+
+        capture_task = asyncio.create_task(capture_loop())
+        await asyncio.sleep(0)
+        voice_client._voice_input_lease_token = "listener-token"
+        voice_client._voice_input_lease_release = release_lease
+        voice_client._voice_input_lease_release_tasks = set()
+
+        capture_task.cancel()
+        voice_client._release_voice_input_lease_after_stop((capture_task,))
+        drain_task = asyncio.create_task(
+            voice_client._drain_voice_input_lease_releases()
+        )
+        await asyncio.sleep(0)
+        drain_task.cancel()
+        await asyncio.sleep(0)
+        drain_task.cancel()
+        await asyncio.sleep(0)
+
+        self.assertFalse(lease_released.is_set())
+        self.assertFalse(next(iter(voice_client._voice_input_lease_release_tasks)).cancelled())
+
+        allow_capture_cleanup.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(drain_task, timeout=1.0)
+        self.assertTrue(lease_released.is_set())
+        self.assertEqual(voice_client._voice_input_lease_release_tasks, set())
+
+    async def test_actual_listener_terminal_notifies_once_but_explicit_or_stale_stop_does_not(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+            state_module = importlib.import_module("evelyn_voice.state")
+
+        class GatedUdp:
+            def __init__(self, *, fail: bool) -> None:
+                self.fail = fail
+                self.ready = asyncio.Event()
+
+            async def recv_packet(self) -> bytes:
+                await self.ready.wait()
+                if self.fail:
+                    raise OSError("private udp failure")
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        def make_client(udp: GatedUdp):
+            client = object.__new__(client_module.EvelynVoiceClient)
+            client.runtime = state_module.VoiceRuntimeState()
+            client.channel = SimpleNamespace(id=22, name="voice", members=[])
+            client.udp_transport = udp
+            client.media_queue = asyncio.Queue(maxsize=8)
+            client.utterance_queue = asyncio.Queue(maxsize=4)
+            client._receive_task = None
+            client._decrypt_task = None
+            client._utterance_task = None
+            client._utterance_processing_tasks = set()
+            client._listener_generation = 0
+            client.sink = None
+            client.utterance_states = {}
+            client.pending_ssrc_packets = {}
+            client.pending_inner_packets = {}
+            client.pending_inner_log_times = {}
+            client.unknown_ssrc_log_times = {}
+            client.opus_decoders = {}
+            client.opus_decoder_stats = {}
+            client.reorder_states = {}
+            client._voice_input_lease_token = "listener-token"
+            client._voice_input_lease_release = None
+            client._voice_input_lease_release_tasks = set()
+            return client
+
+        failed_udp = GatedUdp(fail=True)
+        failed = make_client(failed_udp)
+        failed_released = asyncio.Event()
+        failed_notifications: list[tuple[object, int]] = []
+
+        async def release_failed(_token: str) -> None:
+            failed_released.set()
+
+        failed._voice_input_lease_release = release_failed
+        failed.set_listener_failure_callback(
+            lambda client, generation: failed_notifications.append(
+                (client, generation)
+            )
+        )
+        failed.listen()
+        failed_udp.ready.set()
+
+        await asyncio.wait_for(failed_released.wait(), timeout=1.0)
+        self.assertEqual(failed_notifications, [(failed, 1)])
+        self.assertFalse(failed.has_voice_input_lease())
+        self.assertIsNone(failed._receive_task)
+        self.assertIsNone(failed._decrypt_task)
+        self.assertIsNone(failed._utterance_task)
+
+        explicit_udp = GatedUdp(fail=False)
+        explicit = make_client(explicit_udp)
+        explicit_released = asyncio.Event()
+        explicit_notifications: list[tuple[object, int]] = []
+
+        async def release_explicit(_token: str) -> None:
+            explicit_released.set()
+
+        explicit._voice_input_lease_release = release_explicit
+        explicit.set_listener_failure_callback(
+            lambda client, generation: explicit_notifications.append(
+                (client, generation)
+            )
+        )
+        explicit.listen()
+        await asyncio.sleep(0)
+        explicit.stop_listening()
+
+        await asyncio.wait_for(explicit_released.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        self.assertEqual(explicit_notifications, [])
+
+        stale_udp = GatedUdp(fail=True)
+        stale = make_client(stale_udp)
+        stale_released = asyncio.Event()
+        stale_notifications: list[tuple[object, int]] = []
+
+        async def release_stale(_token: str) -> None:
+            stale_released.set()
+
+        stale._voice_input_lease_release = release_stale
+        stale.set_listener_failure_callback(
+            lambda client, generation: stale_notifications.append(
+                (client, generation)
+            )
+        )
+        stale.listen()
+        stale_receive = stale._receive_task
+        stale._listener_generation += 1
+        stale_udp.ready.set()
+        await asyncio.gather(stale_receive, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        self.assertEqual(stale_notifications, [])
+        self.assertTrue(stale.has_voice_input_lease())
+        stale.stop_listening()
+        await asyncio.wait_for(stale_released.wait(), timeout=1.0)
+
+    async def test_actual_nonresume_same_socket_reconnect_resets_session_listener(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+        VoiceConnectionState = client_module.VoiceConnectionState
+        ConnectionFlowState = VoiceConnectionState.state.fget.__globals__[
+            "ConnectionFlowState"
+        ]
+
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.closed = False
+                self.messages: list[object] = []
+                self._connection = SimpleNamespace(dave_session=object())
+
+            async def received_message(self, message) -> None:
+                self.messages.append(message)
+
+            async def received_binary_message(self, _message) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+
+        runtime = client_module.VoiceRuntimeState()
+        gateway = client_module.VoiceGateway(
+            runtime,
+            SimpleNamespace(ready=False, status="idle"),
+        )
+        old_ws = FakeWebSocket()
+        new_ws = FakeWebSocket()
+        gateway.bind_ws(old_ws)
+        reconnect_flags: list[bool] = []
+        old_socket = object()
+        release = AsyncMock()
+        listener_rearms: list[tuple[object, int]] = []
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.gateway = gateway
+        voice_client.runtime = runtime
+        voice_client.channel = SimpleNamespace(id=22)
+        voice_client.client = SimpleNamespace(user=SimpleNamespace(id=1))
+        voice_client.udp_transport = SimpleNamespace(sock=old_socket)
+        voice_client._listener_generation = 4
+        voice_client._receive_task = None
+        voice_client._decrypt_task = None
+        voice_client._utterance_task = None
+        voice_client._utterance_processing_tasks = set()
+        voice_client.media_queue = asyncio.Queue(maxsize=8)
+        voice_client.utterance_queue = asyncio.Queue(maxsize=4)
+        voice_client.sink = None
+        voice_client.utterance_states = {}
+        voice_client.pending_ssrc_packets = {}
+        voice_client.pending_inner_packets = {}
+        voice_client.pending_inner_log_times = {}
+        voice_client.unknown_ssrc_log_times = {}
+        voice_client.opus_decoders = {}
+        voice_client.opus_decoder_stats = {}
+        voice_client.reorder_states = {}
+        voice_client._voice_input_lease_token = "old-listener"
+        voice_client._voice_input_lease_release = release
+        voice_client._voice_input_lease_release_tasks = set()
+        voice_client._listener_failure_callback = (
+            lambda client, generation: listener_rearms.append(
+                (client, generation)
+            )
+        )
+        voice_client._sync_dave_from_base = Mock()
+        voice_client._enable_dave_passthrough = Mock()
+        voice_client._set_internal_voice_reconnect_active = (
+            reconnect_flags.append
+        )
+        connection = object.__new__(
+            client_module.EvelynVoiceConnectionState
+        )
+        connection.voice_client = voice_client
+        voice_client._connection = connection
+        connection.timeout = 1.0
+        connection._state = ConnectionFlowState.got_voice_server_update
+        connection.ws = old_ws
+        connection.socket = old_socket
+        connection.endpoint = "voice.example"
+        connection.session_id = "fresh-session"
+        connection.token = "fresh-token"
+        connection.mode = "aead_xchacha20_poly1305_rtpsize"
+        connection.secret_key = [1] * 32
+        runtime.udp_ready.set()
+        runtime.bind_dave_ssrc(99, 555)
+        voice_client.media_queue.put_nowait({"old": True})
+        voice_client.utterance_queue.put_nowait({"old": True})
+        voice_client.utterance_states[555] = {"old": True}
+        voice_client.pending_ssrc_packets[555] = deque([{"old": True}])
+        voice_client.pending_inner_packets[555] = [{"old": True}]
+        voice_client.opus_decoders[555] = object()
+        voice_client.reorder_states[555] = {"old": True}
+
+        self.assertIsNone(
+            voice_client.prepare_base_udp_transport_change(
+                old_socket,
+                resume=True,
+            )
+        )
+        self.assertEqual(runtime.get_preferred_user_id(555), 99)
+        self.assertTrue(voice_client.has_voice_input_lease())
+
+        async def wait_for_state(*_states, timeout: float) -> None:
+            self.assertEqual(timeout, 1.0)
+
+        async def connect_websocket(_state, resume: bool):
+            self.assertFalse(resume)
+            return new_ws
+
+        async def handshake_websocket(_state) -> None:
+            connection.secret_key = [2] * 32
+            await connection.ws.received_message(
+                {
+                    "op": 12,
+                    "d": {"user_id": "42", "audio_ssrc": 555},
+                }
+            )
+
+        connection._wait_for_state = wait_for_state
+        with (
+            patch.object(
+                VoiceConnectionState,
+                "_connect_websocket",
+                connect_websocket,
+            ),
+            patch.object(
+                VoiceConnectionState,
+                "_handshake_websocket",
+                handshake_websocket,
+            ),
+        ):
+            result = await connection._potential_reconnect()
+
+        self.assertTrue(result)
+        self.assertIs(connection.ws, new_ws)
+        self.assertIs(gateway.ws, new_ws)
+        self.assertTrue(getattr(new_ws, "_evelyn_gateway_hooked", False))
+        self.assertTrue(old_ws.closed)
+        self.assertEqual(runtime.get_preferred_user_id(555), 42)
+        self.assertEqual(runtime.dave_ssrc_to_user_id, {})
+        self.assertEqual(runtime.voice_secret_key, bytes([2] * 32))
+        self.assertEqual(runtime.session_id, "fresh-session")
+        self.assertTrue(runtime.udp_ready.is_set())
+        self.assertTrue(voice_client.media_queue.empty())
+        self.assertTrue(voice_client.utterance_queue.empty())
+        self.assertEqual(voice_client.utterance_states, {})
+        self.assertEqual(voice_client.pending_ssrc_packets, {})
+        self.assertEqual(voice_client.pending_inner_packets, {})
+        self.assertEqual(voice_client.opus_decoders, {})
+        self.assertEqual(voice_client.reorder_states, {})
+        self.assertEqual(reconnect_flags, [True, False])
+        self.assertEqual(listener_rearms, [(voice_client, 5)])
+        self.assertFalse(voice_client.has_voice_input_lease())
+        await voice_client._drain_voice_input_lease_releases()
+        release.assert_awaited_once_with("old-listener")
+
+        await old_ws.received_message(
+            {"op": 12, "d": {"user_id": "99", "audio_ssrc": 555}}
+        )
+
+        self.assertEqual(runtime.get_preferred_user_id(555), 42)
+
+    async def test_actual_orphan_cleanup_preserves_ready_replacement(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+        from discord.state import ConnectionState
+
+        class Registry:
+            max_messages = None
+
+            def _get_voice_client(self, guild_id):
+                return self._voice_clients.get(guild_id)
+
+            def _remove_voice_client(self, guild_id):
+                self._voice_clients.pop(guild_id, None)
+
+        registry = Registry()
+        channel = SimpleNamespace(
+            name="voice",
+            _get_voice_client_key=lambda: (7, "guild_id"),
+        )
+        orphan = object.__new__(client_module.EvelynVoiceClient)
+        orphan.channel = channel
+        orphan.client = SimpleNamespace(_connection=registry)
+        orphan._listener_generation = 0
+        capture_tasks = tuple(
+            asyncio.create_task(asyncio.Event().wait())
+            for _ in range(4)
+        )
+        orphan._receive_task = capture_tasks[0]
+        orphan._decrypt_task = capture_tasks[1]
+        orphan._utterance_task = capture_tasks[2]
+        orphan._utterance_processing_tasks = {capture_tasks[3]}
+        orphan.media_queue = asyncio.Queue(maxsize=8)
+        orphan.utterance_queue = asyncio.Queue(maxsize=4)
+        sink = Mock()
+        orphan.sink = sink
+        orphan.utterance_states = {1: {}}
+        orphan.pending_ssrc_packets = {1: deque()}
+        orphan.pending_inner_packets = {1: []}
+        orphan.pending_inner_log_times = {1: 1.0}
+        orphan.unknown_ssrc_log_times = {1: 1.0}
+        orphan.opus_decoders = {1: object()}
+        orphan.opus_decoder_stats = {1: {}}
+        orphan.reorder_states = {1: {}}
+        release = AsyncMock()
+        orphan._voice_input_lease_token = "orphan-listener"
+        orphan._voice_input_lease_release = release
+        orphan._voice_input_lease_release_tasks = set()
+        registry._voice_clients = {7: orphan}
+
+        ConnectionState.clear(registry, views=False)
+        replacement = object()
+        registry._voice_clients[7] = replacement
+        orphan.cleanup()
+        await orphan._drain_voice_input_lease_releases()
+
+        self.assertIs(registry._voice_clients[7], replacement)
+        self.assertTrue(all(task.cancelled() for task in capture_tasks))
+        release.assert_awaited_once_with("orphan-listener")
+        sink.cleanup.assert_called_once_with()
+        self.assertFalse(orphan.has_voice_input_lease())
+
+        current = object.__new__(client_module.EvelynVoiceClient)
+        current.channel = channel
+        current.client = SimpleNamespace(_connection=registry)
+        registry._voice_clients[7] = current
+        current.cleanup()
+        self.assertNotIn(7, registry._voice_clients)
+
+    async def test_actual_connect_cancellation_drains_base_and_preserves_replacement(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        class Registry:
+            def __init__(self) -> None:
+                self._voice_clients = {}
+
+            def _get_voice_client(self, guild_id):
+                return self._voice_clients.get(guild_id)
+
+            def _remove_voice_client(self, guild_id):
+                self._voice_clients.pop(guild_id, None)
+
+        registry = Registry()
+        channel = SimpleNamespace(
+            id=9,
+            name="voice",
+            _get_voice_client_key=lambda: (7, "guild_id"),
+        )
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.channel = channel
+        voice_client.client = SimpleNamespace(
+            user=SimpleNamespace(id=42),
+            _connection=registry,
+        )
+        voice_client.runtime = SimpleNamespace(
+            dave_protocol_version=None,
+            dave_ready=False,
+            dave_status="",
+        )
+        voice_client.dave = SimpleNamespace(
+            protocol_version=1,
+            ready=False,
+            status="new",
+            init_session=Mock(),
+            reset=Mock(),
+        )
+        cleanup_started = asyncio.Event()
+
+        async def blocking_gateway_close() -> None:
+            cleanup_started.set()
+            await asyncio.Event().wait()
+
+        voice_client.gateway = SimpleNamespace(close=blocking_gateway_close)
+        voice_client.udp_transport = None
+        voice_client.stop_listening = Mock()
+        voice_client._voice_input_lease_release_tasks = set()
+        registry._voice_clients[7] = voice_client
+
+        base_started = asyncio.Event()
+        base_tasks: list[asyncio.Task] = []
+
+        async def blocking_base_connect(_self, **_kwargs) -> None:
+            base_tasks.append(asyncio.current_task())
+            base_started.set()
+            await asyncio.Event().wait()
+
+        replacement = object()
+        with patch.object(
+            client_module.discord.VoiceClient,
+            "connect",
+            blocking_base_connect,
+        ):
+            outer = asyncio.create_task(
+                voice_client.connect(timeout=0.05, reconnect=True)
+            )
+            await base_started.wait()
+            outer.cancel("caller-cancel")
+            try:
+                await asyncio.wait_for(cleanup_started.wait(), timeout=0.3)
+                cleanup_observed = True
+                registry._voice_clients[7] = replacement
+                outer.cancel("later-cancel")
+            except asyncio.TimeoutError:
+                cleanup_observed = False
+
+            cancellation_args: tuple = ()
+            try:
+                await asyncio.wait_for(outer, timeout=1.0)
+            except asyncio.CancelledError as exc:
+                cancellation_args = exc.args
+
+        base_done_before_manual_cleanup = bool(base_tasks and base_tasks[0].done())
+        registered_after_cancel = registry._voice_clients.get(7)
+
+        for task in base_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if registry._voice_clients.get(7) is voice_client:
+            voice_client.cleanup()
+
+        self.assertTrue(cleanup_observed)
+        self.assertTrue(base_done_before_manual_cleanup)
+        self.assertIs(registered_after_cancel, replacement)
+        self.assertEqual(cancellation_args, ("caller-cancel",))
+
+    async def test_connect_cancel_after_base_success_disconnects_base_and_preserves_replacement(
+        self,
+    ) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        class Registry:
+            def __init__(self) -> None:
+                self._voice_clients = {}
+
+            def _get_voice_client(self, guild_id):
+                return self._voice_clients.get(guild_id)
+
+            def _remove_voice_client(self, guild_id):
+                self._voice_clients.pop(guild_id, None)
+
+        registry = Registry()
+        channel = SimpleNamespace(
+            id=9,
+            name="voice",
+            _get_voice_client_key=lambda: (7, "guild_id"),
+        )
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.channel = channel
+        voice_client.client = SimpleNamespace(
+            user=SimpleNamespace(id=42),
+            _connection=registry,
+        )
+        voice_client.runtime = SimpleNamespace(
+            dave_protocol_version=None,
+            dave_ready=False,
+            dave_status="",
+        )
+        voice_client.dave = SimpleNamespace(
+            protocol_version=1,
+            ready=False,
+            status="new",
+            init_session=Mock(),
+            reset=Mock(),
+        )
+        voice_client.gateway = SimpleNamespace(close=AsyncMock())
+        voice_client.udp_transport = None
+        voice_client.stop_listening = Mock()
+        voice_client._voice_input_lease_release_tasks = set()
+        registry._voice_clients[7] = voice_client
+
+        custom_setup_started = asyncio.Event()
+
+        async def block_custom_setup() -> None:
+            custom_setup_started.set()
+            await asyncio.Event().wait()
+
+        voice_client._finish_connect_after_base = block_custom_setup
+        base_disconnect_calls: list[bool] = []
+
+        async def completed_base_connect(_self, **_kwargs) -> None:
+            return None
+
+        async def exact_base_disconnect(_self, *, force: bool = False) -> None:
+            base_disconnect_calls.append(force)
+            _self.cleanup()
+
+        replacement = object()
+        with (
+            patch.object(
+                client_module.discord.VoiceClient,
+                "connect",
+                completed_base_connect,
+            ),
+            patch.object(
+                client_module.discord.VoiceClient,
+                "disconnect",
+                exact_base_disconnect,
+            ),
+        ):
+            outer = asyncio.create_task(
+                voice_client.connect(timeout=0.1, reconnect=True)
+            )
+            await custom_setup_started.wait()
+            registry._voice_clients[7] = replacement
+            outer.cancel("cancel-during-custom-setup")
+            cancellation_args: tuple = ()
+            try:
+                await asyncio.wait_for(outer, timeout=1.0)
+            except asyncio.CancelledError as exc:
+                cancellation_args = exc.args
+
+        self.assertEqual(base_disconnect_calls, [True])
+        self.assertIs(registry._voice_clients[7], replacement)
+        self.assertEqual(cancellation_args, ("cancel-during-custom-setup",))
+
+    async def test_packet_send_receipt_requires_base_success_and_current_source(
+        self,
+    ) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        current = SimpleNamespace(mark_packet_sent=Mock())
+        voice_client._player = SimpleNamespace(source=current)
+        voice_client.sequence = 0
+        voice_client.timestamp = 0
+        voice_client.encoder = SimpleNamespace(
+            SAMPLES_PER_FRAME=960,
+            encode=Mock(return_value=b"encoded"),
+        )
+        voice_client._get_voice_packet = Mock(return_value=b"packet")
+        connection = object.__new__(
+            client_module.EvelynVoiceConnectionState
+        )
+        connection.voice_client = voice_client
+        connection.socket = SimpleNamespace(sendall=Mock())
+        voice_client._connection = connection
+
+        voice_client.send_audio_packet(b"pcm", encode=True)
+
+        voice_client.encoder.encode.assert_called_once_with(b"pcm", 960)
+        connection.socket.sendall.assert_called_once_with(b"packet")
+        current.mark_packet_sent.assert_called_once_with(b"pcm")
+
+        failed = SimpleNamespace(mark_packet_sent=Mock())
+        voice_client._player = SimpleNamespace(source=failed)
+        connection.socket.sendall.reset_mock(side_effect=True)
+        connection.socket.sendall.side_effect = OSError(
+            "udp send failed"
+        )
+
+        voice_client.send_audio_packet(b"pcm", encode=True)
+
+        failed.mark_packet_sent.assert_not_called()
+        connection.socket.sendall.side_effect = None
+        voice_client.send_audio_packet(b"pcm", encode=True)
+        failed.mark_packet_sent.assert_called_once_with(b"pcm")
+
+        stale = SimpleNamespace(mark_packet_sent=Mock())
+        replacement = SimpleNamespace(mark_packet_sent=Mock())
+        voice_client._player = SimpleNamespace(source=stale)
+
+        def replace_during_send(_packet: bytes) -> None:
+            voice_client._player = SimpleNamespace(source=replacement)
+
+        connection.socket.sendall.side_effect = replace_during_send
+        voice_client.send_audio_packet(b"pcm", encode=True)
+
+        stale.mark_packet_sent.assert_not_called()
+        replacement.mark_packet_sent.assert_not_called()
+
+        from evelyn_core.tts_playback import (
+            TtsPlaybackManager,
+            TtsSourcePlaybackRequest,
+        )
+
+        metrics: dict = {"meta": {}}
+        manager = TtsPlaybackManager()
+        voice_client.channel = SimpleNamespace(guild=SimpleNamespace(id=123))
+        voice_client._player = None
+        playing = False
+
+        def play(source, *, after) -> None:
+            nonlocal playing
+            playing = True
+            voice_client._player = SimpleNamespace(source=source)
+            try:
+                voice_client.send_audio_packet(source.read(), encode=True)
+            except Exception as exc:
+                playing = False
+                after(exc)
+                return
+            playing = False
+            after(None)
+
+        def stop() -> None:
+            nonlocal playing
+            playing = False
+            voice_client._player = None
+
+        voice_client.play = play
+        voice_client.stop = stop
+        voice_client.is_playing = lambda: playing
+        voice_client.is_paused = lambda: False
+        connection.socket.sendall.side_effect = OSError(
+            "udp send failed"
+        )
+        audible_source = SimpleNamespace(
+            error=None,
+            read=lambda: b"nonzero-pcm",
+            is_opus=lambda: False,
+            finish=lambda: None,
+        )
+
+        self.assertFalse(
+            await manager.play_source_once(
+                TtsSourcePlaybackRequest(
+                    voice_client,
+                    audible_source,
+                    guild_id=123,
+                    turn_id="turn-udp-failure",
+                    metrics=metrics,
+                )
+            )
+        )
+
+        self.assertFalse(
+            await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+        )
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn("qualified_tts_interrupt", metrics["meta"])
+
+    async def test_actual_client_refreshes_only_when_base_udp_socket_changed(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+            state_module = importlib.import_module("evelyn_voice.state")
+
+        class FakeTransport:
+            def __init__(self, sock) -> None:
+                self.sock = sock
+                self._closed = False
+                self.opened = False
+
+            async def open(self) -> None:
+                self.opened = True
+
+            async def close(self) -> None:
+                self._closed = True
+
+        old_socket = object()
+        current_socket = object()
+        old_transport = FakeTransport(old_socket)
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.runtime = state_module.VoiceRuntimeState()
+        voice_client.udp_transport = old_transport
+        voice_client._find_base_udp_socket = lambda: current_socket
+
+        with patch.object(client_module, "VoiceUDPTransport", FakeTransport):
+            self.assertTrue(
+                await voice_client.refresh_udp_transport_from_base()
+            )
+            self.assertFalse(
+                await voice_client.refresh_udp_transport_from_base()
+            )
+
+        self.assertTrue(old_transport._closed)
+        self.assertIs(voice_client.udp_transport.sock, current_socket)
+        self.assertTrue(voice_client.udp_transport.opened)
+        self.assertTrue(voice_client.runtime.udp_ready.is_set())
+
+        stale_rearm = Mock()
+        voice_client._listener_generation = 9
+        voice_client._listener_failure_callback = stale_rearm
+        self.assertTrue(
+            voice_client.rearm_listener_after_base_udp_change(8)
+        )
+        stale_rearm.assert_not_called()
 
     async def test_restore_last_channel_updates_success_state(self) -> None:
         channel = FakeVoiceChannel()
@@ -757,6 +1690,323 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             reason="ensure_listening",
             manual_disconnect=False,
         )
+
+    async def test_listener_rearm_refreshes_base_udp_transport_before_listen(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+
+        async def refresh_udp_transport() -> bool:
+            voice_client.events.append("refresh_udp")
+            return True
+
+        voice_client.refresh_udp_transport_from_base = refresh_udp_transport
+
+        result = await VoiceSupportComposition(
+            self.build_deps()
+        ).ensure_listening_voice_client(guild, channel)
+
+        self.assertIs(result, voice_client)
+        self.assertEqual(
+            voice_client.events,
+            ["stop", "refresh_udp", "listen"],
+        )
+
+    async def test_unexpected_listener_failure_uses_bounded_exact_client_rearm(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquire = AsyncMock(
+            side_effect=[
+                "initial-listener",
+                RuntimeError("private transient lease failure"),
+                "rearmed-listener",
+            ]
+        )
+        log = Mock()
+        composition = VoiceSupportComposition(
+            self.build_deps(
+                acquire_voice_input_lease=acquire,
+                log=log,
+            )
+        )
+
+        self.assertIs(
+            await composition.ensure_listening_voice_client(guild, channel),
+            voice_client,
+        )
+        rearm = AsyncMock(wraps=composition.ensure_listening_voice_client)
+        composition.ensure_listening_voice_client = rearm
+        callback = voice_client.listener_failure_callback
+        self.assertIsNotNone(callback)
+
+        voice_client.stop_listening()
+        callback(
+            voice_client,
+            voice_client._listener_generation,
+        )
+        tasks = tuple(composition._listener_rearm_tasks.values())
+        with patch(
+            "evelyn_core.voice_support_composition_runtime."
+            "VOICE_LISTENER_REARM_DELAY_SEC",
+            0.0,
+        ):
+            await asyncio.gather(*tasks)
+
+        self.assertEqual(acquire.await_count, 3)
+        self.assertEqual(rearm.await_count, 2)
+        for awaited in rearm.await_args_list:
+            self.assertEqual(awaited.args, (guild, channel))
+            self.assertEqual(
+                awaited.kwargs,
+                {
+                    "force_listener_reset": True,
+                    "expected_voice_client": voice_client,
+                },
+            )
+        self.assertTrue(voice_client.is_listener_healthy())
+        self.assertEqual(voice_client.listen_calls, 2)
+        log.assert_any_call(
+            "[VOICE LISTENER REARM OK] guild=11 channel=22"
+        )
+
+    async def test_stale_listener_failure_rearm_does_not_replace_newer_generation(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquire = AsyncMock(
+            side_effect=[
+                "initial-listener",
+                AssertionError("stale generation acquired a lease"),
+            ]
+        )
+        composition = VoiceSupportComposition(
+            self.build_deps(acquire_voice_input_lease=acquire)
+        )
+
+        await composition.ensure_listening_voice_client(guild, channel)
+        callback = voice_client.listener_failure_callback
+        voice_client.stop_listening()
+        failed_generation = voice_client._listener_generation
+        callback(voice_client, failed_generation)
+        voice_client.stop_listening()
+
+        await asyncio.gather(*tuple(composition._listener_rearm_tasks.values()))
+
+        acquire.assert_awaited_once_with()
+        self.assertFalse(voice_client.is_listener_healthy())
+
+    async def test_listener_failure_rearm_stops_after_three_transient_failures(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquire = AsyncMock(
+            side_effect=[
+                "initial-listener",
+                RuntimeError("private failure one"),
+                RuntimeError("private failure two"),
+                RuntimeError("private failure three"),
+                AssertionError("unbounded listener rearm"),
+            ]
+        )
+        log = Mock()
+        composition = VoiceSupportComposition(
+            self.build_deps(
+                acquire_voice_input_lease=acquire,
+                log=log,
+            )
+        )
+
+        await composition.ensure_listening_voice_client(guild, channel)
+        voice_client.stop_listening()
+        voice_client.listener_failure_callback(
+            voice_client,
+            voice_client._listener_generation,
+        )
+        with patch(
+            "evelyn_core.voice_support_composition_runtime."
+            "VOICE_LISTENER_REARM_DELAY_SEC",
+            0.0,
+        ):
+            await asyncio.gather(
+                *tuple(composition._listener_rearm_tasks.values())
+            )
+
+        self.assertEqual(acquire.await_count, 4)
+        log.assert_any_call(
+            "[VOICE LISTENER REARM FAIL] guild=11 channel=22 "
+            "errorType=RuntimeError"
+        )
+        self.assertNotIn("private failure", str(log.call_args_list))
+
+    async def test_immediate_terminal_failures_share_one_three_attempt_rearm_budget(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquire = AsyncMock(
+            side_effect=[f"listener-{index}" for index in range(20)]
+        )
+        composition = VoiceSupportComposition(
+            self.build_deps(acquire_voice_input_lease=acquire)
+        )
+        real_listen = voice_client.listen
+        remaining_failures = 8
+
+        def fail_current_listener() -> None:
+            nonlocal remaining_failures
+            if not voice_client.is_listener_healthy() or remaining_failures <= 0:
+                return
+            remaining_failures -= 1
+            voice_client.stop_listening()
+            voice_client.listener_failure_callback(
+                voice_client,
+                voice_client._listener_generation,
+            )
+
+        def listen_then_fail() -> None:
+            real_listen()
+            asyncio.get_running_loop().call_soon(fail_current_listener)
+
+        voice_client.listen = listen_then_fail
+
+        await composition.ensure_listening_voice_client(guild, channel)
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if not composition._listener_rearm_tasks:
+                break
+
+        self.assertEqual(voice_client.listen_calls, 4)
+        self.assertEqual(acquire.await_count, 4)
+        self.assertEqual(remaining_failures, 4)
+        self.assertFalse(voice_client.is_listener_healthy())
+
+    async def test_cancelled_listener_rearm_releases_transition_lease(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquired = iter(("initial-listener", "rearm-transition"))
+        release = AsyncMock()
+        transition_started = asyncio.Event()
+
+        async def acquire() -> str:
+            return next(acquired)
+
+        async def block_rearm_transition(
+            guild_id: int,
+            *,
+            reason: str,
+        ) -> None:
+            self.assertEqual((guild_id, reason), (11, "voice_channel_move"))
+            transition_started.set()
+            await asyncio.Event().wait()
+
+        composition = VoiceSupportComposition(
+            self.build_deps(
+                acquire_voice_input_lease=acquire,
+                release_voice_input_lease=release,
+                stop_active_tts_playback=block_rearm_transition,
+            )
+        )
+        await composition.ensure_listening_voice_client(guild, channel)
+        voice_client.stop_listening()
+        voice_client.listener_failure_callback(
+            voice_client,
+            voice_client._listener_generation,
+        )
+        task = next(iter(composition._listener_rearm_tasks.values()))
+
+        await transition_started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+
+        release.assert_any_await("rearm-transition")
+        self.assertFalse(composition._listener_rearm_tasks)
+        self.assertFalse(voice_transition_is_pending(guild.id))
+        self.assertFalse(voice_client.has_voice_input_lease())
+
+    async def test_non_force_health_check_resets_listener_rearm_budget(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        composition = VoiceSupportComposition(self.build_deps())
+        rearm_key = (guild.id, channel.id, id(voice_client))
+        composition._listener_rearm_attempts[rearm_key] = 3
+        composition._listener_rearm_generations[rearm_key] = (
+            voice_client._listener_generation
+        )
+
+        self.assertIs(
+            await composition.ensure_listening_voice_client(guild, channel),
+            voice_client,
+        )
+        self.assertNotIn(rearm_key, composition._listener_rearm_attempts)
+        self.assertNotIn(rearm_key, composition._listener_rearm_generations)
+
+        voice_client.stop_listening()
+        voice_client.listener_failure_callback(
+            voice_client,
+            voice_client._listener_generation,
+        )
+        await asyncio.gather(
+            *tuple(composition._listener_rearm_tasks.values())
+        )
+
+        self.assertTrue(voice_client.is_listener_healthy())
+        self.assertNotIn(rearm_key, composition._listener_rearm_attempts)
+        self.assertNotIn(rearm_key, composition._listener_rearm_generations)
+
+    async def test_listener_never_starts_when_input_lease_is_denied(self) -> None:
+        channel = FakeVoiceChannel()
+        voice_client = FakeVoiceClient(channel, healthy=False)
+        guild = FakeGuild(voice_client)
+        acquire = AsyncMock(side_effect=RuntimeError("voice_input_lease_conflict"))
+
+        with self.assertRaisesRegex(RuntimeError, "voice_input_lease_conflict"):
+            await VoiceSupportComposition(
+                self.build_deps(acquire_voice_input_lease=acquire)
+            ).ensure_listening_voice_client(guild, channel)
+
+        acquire.assert_awaited_once_with()
+        self.assertEqual(voice_client.listen_calls, 0)
+        self.assertEqual(voice_client.stop_calls, 0)
+
+    async def test_channel_move_holds_lease_across_stop_and_rearm(self) -> None:
+        old_channel = FakeVoiceChannel(channel_id=1, name="old")
+        target_channel = FakeVoiceChannel(channel_id=2, name="new")
+        voice_client = FakeVoiceClient(old_channel, healthy=True)
+        guild = FakeGuild(voice_client)
+        active_tokens = {"old-listener"}
+        events: list[str] = []
+        voice_client.lease_token = "old-listener"
+
+        async def release(token: str) -> None:
+            events.append(f"release:{token}")
+            active_tokens.discard(token)
+            if not active_tokens:
+                events.append("server-release")
+
+        async def acquire() -> str:
+            events.append("acquire:transition")
+            active_tokens.add("transition")
+            return "transition"
+
+        voice_client.lease_release = release
+        result = await VoiceSupportComposition(
+            self.build_deps(
+                acquire_voice_input_lease=acquire,
+                release_voice_input_lease=release,
+            )
+        ).ensure_listening_voice_client(guild, target_channel)
+        await asyncio.sleep(0)
+
+        self.assertIs(result, voice_client)
+        self.assertEqual(events[0], "acquire:transition")
+        self.assertIn("release:old-listener", events)
+        self.assertNotIn("server-release", events)
+        self.assertEqual(active_tokens, {"transition"})
+        self.assertTrue(voice_client.has_voice_input_lease())
 
     async def test_disconnected_same_channel_client_is_replaced(self) -> None:
         channel = FakeVoiceChannel()

@@ -7,7 +7,7 @@ import struct
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import davey
 import discord
@@ -672,6 +672,61 @@ def _parse_rtp_header(packet: bytes):
 
 
 class EvelynVoiceConnectionState(VoiceConnectionState):
+    def send_packet(self, packet: bytes) -> None:
+        super().send_packet(packet)
+        self.voice_client._mark_current_audio_packet_sent()
+
+    async def _connect_websocket(self, resume: bool) -> Any:
+        ws = await super()._connect_websocket(resume)
+        try:
+            listener_generation = (
+                self.voice_client.prepare_base_udp_transport_change(
+                    getattr(self, "socket", None),
+                    resume=resume,
+                )
+            )
+        except Exception as exc:
+            log.warning(
+                "VOICE TRANSPORT PREPARE FAIL | errorType=%s",
+                type(exc).__name__,
+            )
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            raise asyncio.TimeoutError(
+                "voice_transport_prepare_failed"
+            ) from None
+        self.voice_client.gateway.bind_ws(ws)
+        if listener_generation is not None:
+            self._evelyn_listener_rearm_generation = listener_generation
+        return ws
+
+    async def _handshake_websocket(self) -> None:
+        await super()._handshake_websocket()
+        try:
+            self.voice_client.sync_voice_connection_from_base()
+            listener_generation = getattr(
+                self,
+                "_evelyn_listener_rearm_generation",
+                None,
+            )
+            if listener_generation is None:
+                return
+            if not self.voice_client.rearm_listener_after_base_udp_change(
+                listener_generation
+            ):
+                raise RuntimeError("voice_listener_rearm_binding_unavailable")
+            self._evelyn_listener_rearm_generation = None
+        except Exception as exc:
+            log.warning(
+                "VOICE HANDSHAKE REFRESH FAIL | errorType=%s",
+                type(exc).__name__,
+            )
+            raise asyncio.TimeoutError(
+                "voice_handshake_refresh_failed"
+            ) from None
+
     async def _potential_reconnect(self) -> bool:
         voice_client = self.voice_client
         if hasattr(voice_client, "_set_internal_voice_reconnect_active"):
@@ -778,6 +833,126 @@ class EvelynVoiceClient(discord.VoiceClient):
         self._utterance_processing_tasks: set[asyncio.Task] = set()
         self._listener_generation = 0
         self.connected_at: float | None = None
+        self._voice_input_lease_token = ""
+        self._voice_input_lease_release: (
+            Callable[[str], Awaitable[None]] | None
+        ) = None
+        self._voice_input_lease_release_tasks: set[asyncio.Task[Any]] = set()
+        self._listener_failure_callback: (
+            Callable[[Any, int], Any] | None
+        ) = None
+
+    def set_listener_failure_callback(
+        self,
+        callback: Callable[[Any, int], Any] | None,
+    ) -> None:
+        if callback is not None and not callable(callback):
+            raise RuntimeError("voice_listener_failure_callback_invalid")
+        self._listener_failure_callback = callback
+
+    def _listener_task_finished(
+        self,
+        task: asyncio.Task[Any],
+        listener_generation: int,
+    ) -> None:
+        try:
+            if task.cancelled():
+                return
+            failure = task.exception()
+        except asyncio.CancelledError:
+            return
+        if listener_generation != self._listener_generation:
+            return
+        if failure is None:
+            failure = RuntimeError("voice_listener_task_stopped")
+        log.warning(
+            "VOICE LISTENER TASK STOPPED | errorType=%s",
+            type(failure).__name__,
+        )
+        self.stop_listening()
+        callback = getattr(self, "_listener_failure_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback(self, self._listener_generation)
+        except Exception as exc:
+            log.warning(
+                "VOICE LISTENER FAILURE CALLBACK FAIL | errorType=%s",
+                type(exc).__name__,
+            )
+
+    def bind_voice_input_lease(
+        self,
+        listener_token: str,
+        release: Callable[[str], Awaitable[None]],
+    ) -> None:
+        token = str(listener_token or "").strip()
+        if not token or not callable(release):
+            raise RuntimeError("voice_input_lease_invalid")
+        if self._voice_input_lease_token:
+            raise RuntimeError("voice_input_lease_already_bound")
+        self._voice_input_lease_token = token
+        self._voice_input_lease_release = release
+
+    def has_voice_input_lease(self) -> bool:
+        return bool(getattr(self, "_voice_input_lease_token", ""))
+
+    def _release_voice_input_lease_after_stop(
+        self,
+        cancelled_tasks: tuple[asyncio.Task[Any], ...],
+    ) -> None:
+        token = str(getattr(self, "_voice_input_lease_token", "") or "")
+        release = getattr(self, "_voice_input_lease_release", None)
+        self._voice_input_lease_token = ""
+        self._voice_input_lease_release = None
+        if not token or not callable(release):
+            return
+
+        async def release_after_capture_stops() -> None:
+            if cancelled_tasks:
+                await asyncio.gather(
+                    *cancelled_tasks,
+                    return_exceptions=True,
+                )
+            await release(token)
+
+        task = asyncio.create_task(release_after_capture_stops())
+        tasks = getattr(self, "_voice_input_lease_release_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._voice_input_lease_release_tasks = tasks
+        tasks.add(task)
+
+        def consume_result(done: asyncio.Task[Any]) -> None:
+            tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log.warning(
+                    "VOICE INPUT LEASE RELEASE FAIL | errorType=%s",
+                    type(exc).__name__,
+                )
+
+        task.add_done_callback(consume_result)
+
+    async def _drain_voice_input_lease_releases(self) -> None:
+        tasks = tuple(
+            getattr(self, "_voice_input_lease_release_tasks", set())
+        )
+        if not tasks:
+            return
+
+        drain = asyncio.gather(*tasks, return_exceptions=True)
+        cancellation: asyncio.CancelledError | None = None
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        if cancellation is not None:
+            raise cancellation
 
     def listener_binding(self) -> tuple[object, int, int | None]:
         return (
@@ -785,6 +960,74 @@ class EvelynVoiceClient(discord.VoiceClient):
             self._listener_generation,
             getattr(self.channel, "id", None),
         )
+
+    def prepare_base_udp_transport_change(
+        self,
+        base_socket: Any,
+        *,
+        resume: bool,
+    ) -> int | None:
+        transport = getattr(self, "udp_transport", None)
+        if transport is None or base_socket is None:
+            return None
+
+        socket_changed = getattr(transport, "sock", None) is not base_socket
+        if not socket_changed and resume:
+            return None
+
+        if socket_changed:
+            self.runtime.udp_ready.clear()
+        self.runtime.clear_mappings()
+        listener_active = bool(
+            self.has_voice_input_lease()
+            or self._receive_task is not None
+            or self._decrypt_task is not None
+            or self._utterance_task is not None
+        )
+        if not listener_active:
+            return None
+
+        self.stop_listening()
+        return self._listener_generation
+
+    def sync_voice_connection_from_base(self) -> None:
+        connection = getattr(self, "_connection", None)
+        self.runtime.endpoint = getattr(connection, "endpoint", None)
+        self.runtime.session_id = getattr(connection, "session_id", None)
+        self.runtime.token = getattr(connection, "token", None)
+        self.runtime.channel_id = getattr(self.channel, "id", None)
+
+        mode = getattr(connection, "mode", None)
+        raw_secret = getattr(connection, "secret_key", None)
+        if not isinstance(raw_secret, (bytes, bytearray, list, tuple)):
+            raw_secret = getattr(getattr(self, "ws", None), "secret_key", None)
+        try:
+            secret_key = bytes(raw_secret or ())
+        except (TypeError, ValueError):
+            secret_key = b""
+        if not isinstance(mode, str) or not mode or len(secret_key) != 32:
+            self.runtime.voice_mode = None
+            self.runtime.voice_secret_key = None
+            raise RuntimeError("voice_session_crypto_unavailable")
+
+        self.runtime.voice_mode = mode
+        self.runtime.voice_secret_key = secret_key
+        self.connected_at = asyncio.get_running_loop().time()
+        self._sync_dave_from_base()
+        self._enable_dave_passthrough()
+        self.gateway.try_apply_pending_dave()
+
+    def rearm_listener_after_base_udp_change(
+        self,
+        listener_generation: int,
+    ) -> bool:
+        if listener_generation != self._listener_generation:
+            return True
+        callback = getattr(self, "_listener_failure_callback", None)
+        if not callable(callback):
+            return False
+        callback(self, listener_generation)
+        return True
 
     def _set_internal_voice_reconnect_active(self, active: bool) -> None:
         self._internal_voice_reconnect_active = bool(active)
@@ -1120,21 +1363,39 @@ class EvelynVoiceClient(discord.VoiceClient):
             )
         )
 
-        hook_deadline = asyncio.get_running_loop().time() + max(1.5, min(float(timeout), 8.0))
-        while not connect_task.done() and asyncio.get_running_loop().time() < hook_deadline:
-            ws = getattr(self, "ws", None)
-            if (
-                ws is not None
-                and hasattr(ws, "received_message")
-                and not getattr(ws, "_evelyn_gateway_hooked", False)
+        base_connected = False
+        try:
+            hook_deadline = asyncio.get_running_loop().time() + max(
+                1.5,
+                min(float(timeout), 8.0),
+            )
+            while (
+                not connect_task.done()
+                and asyncio.get_running_loop().time() < hook_deadline
             ):
-                self.gateway.bind_ws(ws)
-                log.info("VOICE WS HOOK EARLY | handshake_phase=true")
-                break
-            await asyncio.sleep(0.01)
+                ws = getattr(self, "ws", None)
+                if (
+                    ws is not None
+                    and hasattr(ws, "received_message")
+                    and not getattr(ws, "_evelyn_gateway_hooked", False)
+                ):
+                    self.gateway.bind_ws(ws)
+                    log.info("VOICE WS HOOK EARLY | handshake_phase=true")
+                    break
+                await asyncio.sleep(0.01)
 
-        await connect_task
+            await connect_task
+            base_connected = True
+            await self._finish_connect_after_base()
+        except asyncio.CancelledError:
+            await self._cancel_connect_attempt(
+                connect_task,
+                timeout=timeout,
+                disconnect_base=base_connected,
+            )
+            raise
 
+    async def _finish_connect_after_base(self) -> None:
         self.runtime.endpoint = getattr(self, "endpoint", None)
         self.runtime.session_id = getattr(self, "session_id", None)
         self.runtime.token = getattr(self, "token", None)
@@ -1194,12 +1455,113 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.runtime.udp_ready.set()
 
         log.info("EvelynVoiceClient ready | udp=%s", self.runtime.udp_ready.is_set())
+
+    async def _cancel_connect_attempt(
+        self,
+        connect_task: asyncio.Task[Any],
+        *,
+        timeout: float,
+        disconnect_base: bool = False,
+    ) -> None:
+        connect_task.cancel()
+        await self._drain_cancelled_connect_task(connect_task)
+        if disconnect_base:
+            base_disconnect_task = asyncio.create_task(
+                self._disconnect_base_after_cancel(timeout=timeout)
+            )
+            await self._drain_cancelled_connect_task(base_disconnect_task)
+        cleanup_task = asyncio.create_task(
+            self._cleanup_cancelled_connect(timeout=timeout)
+        )
+        await self._drain_cancelled_connect_task(cleanup_task)
+
+    async def _disconnect_base_after_cancel(self, *, timeout: float) -> None:
         try:
-            if not self.is_listener_healthy():
-                self.listen()
-                print(f"[VOICE CLIENT AUTO ARM] channel={getattr(self.channel, 'name', None)}")
-        except Exception as e:
-            print(f"[VOICE CLIENT AUTO ARM FAIL] err={e!r}")
+            await asyncio.wait_for(
+                discord.VoiceClient.disconnect(self, force=True),
+                timeout=max(0.05, min(float(timeout), 1.0)),
+            )
+        except asyncio.TimeoutError:
+            log.warning("VOICE BASE DISCONNECT TIMEOUT")
+        except Exception as exc:
+            log.warning(
+                "VOICE BASE DISCONNECT FAIL | errorType=%s",
+                type(exc).__name__,
+            )
+
+    @staticmethod
+    async def _drain_cancelled_connect_task(task: asyncio.Task[Any]) -> None:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if task.done():
+            try:
+                task.result()
+            except BaseException:
+                pass
+
+    @staticmethod
+    def _consume_connect_cleanup_task(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
+
+    async def _cleanup_cancelled_connect(self, *, timeout: float) -> None:
+        try:
+            self.stop_listening()
+        except Exception:
+            pass
+
+        cleanup_tasks: list[asyncio.Task[Any]] = []
+        lease_release_tasks = getattr(
+            self,
+            "_voice_input_lease_release_tasks",
+            set(),
+        )
+        if lease_release_tasks:
+            cleanup_tasks.append(
+                asyncio.create_task(self._drain_voice_input_lease_releases())
+            )
+
+        gateway = getattr(self, "gateway", None)
+        close_gateway = getattr(gateway, "close", None)
+        if callable(close_gateway):
+            cleanup_tasks.append(asyncio.create_task(close_gateway()))
+
+        udp_transport = getattr(self, "udp_transport", None)
+        close_udp = getattr(udp_transport, "close", None)
+        if callable(close_udp):
+            self.udp_transport = None
+            cleanup_tasks.append(asyncio.create_task(close_udp()))
+
+        if cleanup_tasks:
+            _, pending = await asyncio.wait(
+                cleanup_tasks,
+                timeout=max(0.05, min(float(timeout), 1.0)),
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.sleep(0)
+            for task in cleanup_tasks:
+                if task.done():
+                    self._consume_connect_cleanup_task(task)
+                else:
+                    task.add_done_callback(self._consume_connect_cleanup_task)
+
+        try:
+            self.dave.reset()
+        except Exception:
+            pass
+        try:
+            self.cleanup()
+        except Exception:
+            log.warning("VOICE CONNECT CANCEL CLEANUP FAIL", exc_info=True)
     
     def _get_base_dave_session(self):
         base_conn = getattr(self, "_connection", None)
@@ -1982,21 +2344,42 @@ class EvelynVoiceClient(discord.VoiceClient):
         )
 
     def listen(self, sink: AudioSink | None = None) -> None:
+        if not self.has_voice_input_lease():
+            raise RuntimeError("voice_input_lease_required")
         if self.udp_transport is None:
             raise RuntimeError("UDP transport가 아직 준비되지 않았습니다. 먼저 join 상태를 확인하세요.")
 
         if sink is None:
             sink = NullSink()
         self.sink = sink
+        listener_generation = self._listener_generation
 
         if self._receive_task is None:
             self._receive_task = asyncio.create_task(self._receive_loop())
+            self._receive_task.add_done_callback(
+                lambda task: self._listener_task_finished(
+                    task,
+                    listener_generation,
+                )
+            )
 
         if self._decrypt_task is None:
             self._decrypt_task = asyncio.create_task(self._decrypt_loop())
+            self._decrypt_task.add_done_callback(
+                lambda task: self._listener_task_finished(
+                    task,
+                    listener_generation,
+                )
+            )
 
         if self._utterance_task is None:
             self._utterance_task = asyncio.create_task(self._utterance_loop())
+            self._utterance_task.add_done_callback(
+                lambda task: self._listener_task_finished(
+                    task,
+                    listener_generation,
+                )
+            )
 
         print(
             f"[VOICE LISTEN START] channel={getattr(self.channel, 'name', None)} "
@@ -2878,21 +3261,26 @@ class EvelynVoiceClient(discord.VoiceClient):
 
     def stop_listening(self) -> None:
         self._listener_generation += 1
+        cancelled_tasks: list[asyncio.Task[Any]] = []
 
         if self._receive_task is not None:
             self._receive_task.cancel()
+            cancelled_tasks.append(self._receive_task)
             self._receive_task = None
 
         if self._decrypt_task is not None:
             self._decrypt_task.cancel()
+            cancelled_tasks.append(self._decrypt_task)
             self._decrypt_task = None
 
         if self._utterance_task is not None:
             self._utterance_task.cancel()
+            cancelled_tasks.append(self._utterance_task)
             self._utterance_task = None
 
         for task in list(self._utterance_processing_tasks):
             task.cancel()
+            cancelled_tasks.append(task)
         self._utterance_processing_tasks.clear()
 
         self.media_queue = asyncio.Queue(maxsize=self.media_queue.maxsize)
@@ -2912,9 +3300,40 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.reorder_states.clear()
 
         log.info("Receive loop stopped")
+        self._release_voice_input_lease_after_stop(tuple(cancelled_tasks))
+
+    def send_audio_packet(self, data: bytes, *, encode: bool = True) -> None:
+        source = getattr(self, "source", None)
+        pending = (source, data)
+        previous = getattr(self, "_pending_audio_packet_receipt", None)
+        self._pending_audio_packet_receipt = pending
+        try:
+            super().send_audio_packet(data, encode=encode)
+        finally:
+            if getattr(self, "_pending_audio_packet_receipt", None) is pending:
+                self._pending_audio_packet_receipt = previous
+
+    def _mark_current_audio_packet_sent(self) -> None:
+        pending = getattr(self, "_pending_audio_packet_receipt", None)
+        if not isinstance(pending, tuple) or len(pending) != 2:
+            return
+        source, data = pending
+        if getattr(self, "source", None) is not source:
+            return
+        mark_packet_sent = getattr(source, "mark_packet_sent", None)
+        if not callable(mark_packet_sent):
+            return
+        try:
+            mark_packet_sent(data)
+        except Exception as exc:
+            log.warning(
+                "VOICE PLAYBACK RECEIPT FAIL | errorType=%s",
+                type(exc).__name__,
+            )
 
     async def disconnect(self, *, force: bool = False) -> None:
         self.stop_listening()
+        await self._drain_voice_input_lease_releases()
 
         if self.gateway is not None:
             await self.gateway.close()
@@ -2927,6 +3346,14 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         await super().disconnect(force=force)
         log.info("EvelynVoiceClient disconnected")
+
+    def cleanup(self) -> None:
+        key_id, _ = self.channel._get_voice_client_key()
+        current = self.client._connection._get_voice_client(key_id)
+        if current is self:
+            super().cleanup()
+            return
+        self.stop_listening()
 
     def _find_base_udp_socket(self):
         candidates = {
@@ -2943,6 +3370,26 @@ class EvelynVoiceClient(discord.VoiceClient):
             return candidates["self.socket"]
 
         return None
+
+    async def refresh_udp_transport_from_base(self) -> bool:
+        await self._drain_voice_input_lease_releases()
+        base_sock = self._find_base_udp_socket()
+        if base_sock is None:
+            raise RuntimeError("voice_udp_transport_unavailable")
+        current = self.udp_transport
+        if (
+            current is not None
+            and getattr(current, "sock", None) is base_sock
+            and not bool(getattr(current, "_closed", False))
+        ):
+            return False
+        if current is not None:
+            await current.close()
+        replacement = VoiceUDPTransport(base_sock)
+        await replacement.open()
+        self.udp_transport = replacement
+        self.runtime.udp_ready.set()
+        return True
 
     @staticmethod
     def _parse_endpoint(endpoint: str | None) -> tuple[str, int]:

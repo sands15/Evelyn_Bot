@@ -147,6 +147,8 @@ class AutonomyAuthorizationGrant:
     scopes: tuple[str, ...]
     issued_at: float
     expires_at: float
+    issued_monotonic: float
+    expires_monotonic: float
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -168,12 +170,14 @@ class AutonomyAuthorizationManager:
         status_path: Path,
         events_dir: Path,
         now: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
         default_ttl_sec: float = DEFAULT_AUTHORIZATION_TTL_SEC,
         max_ttl_sec: float = MAX_AUTHORIZATION_TTL_SEC,
     ) -> None:
         self.status_path = Path(status_path)
         self.events_dir = Path(events_dir)
         self.now = now
+        self.monotonic = monotonic
         self.default_ttl_sec = max(
             MIN_AUTHORIZATION_TTL_SEC,
             float(default_ttl_sec),
@@ -275,13 +279,18 @@ class AutonomyAuthorizationManager:
         )
 
         timestamp = self.now()
+        monotonic_timestamp = self.monotonic()
         active = [
             grant.public_dict()
             for grant in sorted(
                 self._grants.values(),
                 key=lambda item: item.guild_id,
             )
-            if grant.expires_at > timestamp
+            if self._grant_is_active(
+                grant,
+                now=timestamp,
+                monotonic_now=monotonic_timestamp,
+            )
         ]
         return {
             "schema": AUTONOMY_AUTHORIZATION_STATUS_SCHEMA,
@@ -328,12 +337,34 @@ class AutonomyAuthorizationManager:
             self._write_status()
             return self._status_payload()
 
+    def _grant_is_active(
+        self,
+        grant: AutonomyAuthorizationGrant,
+        *,
+        now: float | None = None,
+        monotonic_now: float | None = None,
+    ) -> bool:
+        return (
+            grant.expires_at > (self.now() if now is None else now)
+            and grant.expires_monotonic
+            > (
+                self.monotonic()
+                if monotonic_now is None
+                else monotonic_now
+            )
+        )
+
     def _prune_expired(self) -> bool:
         timestamp = self.now()
+        monotonic_timestamp = self.monotonic()
         expired = [
             guild_id
             for guild_id, grant in self._grants.items()
-            if grant.expires_at <= timestamp
+            if not self._grant_is_active(
+                grant,
+                now=timestamp,
+                monotonic_now=monotonic_timestamp,
+            )
         ]
         for guild_id in expired:
             grant = self._grants.pop(guild_id)
@@ -416,6 +447,7 @@ class AutonomyAuthorizationManager:
                         "error": "authorization_audit_unavailable",
                     }
             issued_at = self.now()
+            issued_monotonic = self.monotonic()
             grant = AutonomyAuthorizationGrant(
                 grant_id=secrets.token_urlsafe(18),
                 guild_id=resolved_guild_id,
@@ -424,6 +456,8 @@ class AutonomyAuthorizationManager:
                 scopes=resolved_scopes,
                 issued_at=issued_at,
                 expires_at=issued_at + effective_ttl,
+                issued_monotonic=issued_monotonic,
+                expires_monotonic=issued_monotonic + effective_ttl,
             )
             if not self._append_event(
                 "grant_issued",
@@ -598,6 +632,7 @@ class AutonomyAuthorizationManager:
         from .autonomy_outcome_evidence import (
             AUTONOMY_SUCCESS_STATUSES,
             autonomy_outcome_verified,
+            expected_autonomy_evidence_codes,
         )
 
         resolved_guild_id = _safe_guild_id(guild_id)
@@ -649,6 +684,13 @@ class AutonomyAuthorizationManager:
                 and not verified
             ):
                 status = "unverified"
+            evidence_code = str(
+                result.get("evidence_code") or ""
+            ).strip()
+            if evidence_code not in expected_autonomy_evidence_codes(
+                resolved_action
+            ):
+                evidence_code = ""
             if not self._append_event(
                 "action_outcome",
                 guild_id=resolved_guild_id,
@@ -662,7 +704,7 @@ class AutonomyAuthorizationManager:
                     else "unknown"
                 ),
                 verified=verified,
-                evidence_code=str(result.get("evidence_code") or ""),
+                evidence_code=evidence_code,
                 authorization_current=authorization_current,
                 action_run_id=action_run_id,
             ):

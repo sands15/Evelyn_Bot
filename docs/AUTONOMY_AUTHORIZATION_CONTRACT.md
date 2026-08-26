@@ -1,7 +1,7 @@
 # Evelyn Autonomy Authorization And Outcome Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-12 KST
+Last reviewed: 2026-08-24 KST
 
 이 문서는 이블린이 “허락된 세계에서 스스로 행동한다”는 목표를 현재
 런타임에서 어떻게 제한하고 검증하는지 정의한다. 기능 플래그, 저장된 상태,
@@ -13,7 +13,9 @@ Last reviewed: 2026-08-12 KST
    시작할 수 없다.
 2. grant는 guild별 exact action scope이며, 빈 scope와 지원하지 않는 action은
    허용하지 않는다.
-3. grant는 기본 1시간, 최대 4시간이고 프로세스 재시작 뒤 복구하지 않는다.
+3. grant는 기본 1시간, 최대 4시간이고 wall deadline과 같은 프로세스에서 발급한
+   monotonic deadline이 모두 남아 있을 때만 유효하다. 어느 한쪽이라도 만료되면
+   권한을 닫으며 프로세스 재시작 뒤 복구하지 않는다.
 4. `AUTONOMY_ENABLED=true`는 기능 사용 가능 여부일 뿐 자동 실행 승인이 아니다.
 5. 저장된 `enabled`와 `allowed_actions`는 재시작 뒤 실행 권한으로 복원하지 않는다.
 6. action 실행 직전에 grant와 exact scope를 다시 검사한다.
@@ -30,6 +32,16 @@ Last reviewed: 2026-08-12 KST
     `authorization_audit_unavailable`로 fail-closed한다.
 12. 구현되지 않은 callback은 `executor_callback_unavailable`로 차단하며
    성공 no-op으로 대체하지 않는다.
+
+### Bounded LLM task loop
+
+`/task|/작업`의 `TaskGrant`는 위 guild autonomy grant와 별도지만 같은 fail-closed
+원칙을 따른다. runtime은 worker admission과 worker/runtime-bound decision 반환 뒤,
+`workspace_test`, `workspace_edit` stage 및 automatic tool executor 진입 직전에 grant의
+wall `expiresAt`과 process-local monotonic task budget을 모두 재검사한다. 하나라도 끝나면
+late decision을 폐기하고 `task_grant_expired|task_deadline_exhausted`로 종료하며 executor를
+호출하지 않는다. 이미 생성된 exact stage의 bounded `workspace_edit_stage_cancel`은 새
+권한 effect가 아닌 fail-closed cleanup이므로 이 terminal budget 뒤에도 허용한다.
 
 ## 승인 진입점
 
@@ -55,6 +67,10 @@ disabled stale loop나 실패한 cleanup이 남으면 이를 선택적인 route 
 stale child 취소만 내부 처리하고 start 호출자 자신의 cleanup/route/start 취소는 grant cleanup 뒤 재전파한다.
 Minecraft executor는 readiness 확인 뒤 disconnect currentness와 inflight 등록을 같은
 admission lock에서 선형화한다. stop이 먼저 완료되면 world action을 dispatch하지 않는다.
+engine start는 `executor.connect()` await가 끝난 뒤에도 grant와 start currentness를
+runtime state·loop task commit 직전에 다시 검사한다. 그 사이 grant가 wall 또는
+monotonic deadline에서 만료되면 executor를 한 번 정리하고 running 상태를 commit하지
+않으며 `authorization_required`로 닫는다.
 
 현재 Control Page의 Minecraft 변경은 CSRF 보호를 통과한 명시적 사용자 요청
 경계에서만 실행한다. Control Page에는 일반 assistant 자율 루프를 시작하는
@@ -113,12 +129,27 @@ assistant 기본 executor의 대표 증거 코드는 다음과 같다.
 - 부작용 없는 idle: `no_side_effect_required`
 
 `assistant:send_followup`의 `discord_send_completed`는 Discord send await가 정상
-반환했다는 effect 증거다. 그 뒤 history/session/continuity 또는 선택적 memory/self-state
-후처리의 일반 예외는 이 effect를 미전달로 바꾸지 않으며, verified 결과와 현재 grant를
-다시 확인한 뒤 plan cursor를 전진시킨다. 같은 프로세스에서는 전송 직후 세운 900초
-ping fence가 search-pending과 unresolved maintain 계획의 즉시 재생성을 막는다. send
-await 내부 취소·timeout의 원격 전달 여부와 process crash exactly-once는 이 증거의
-보장이 아니다.
+반환했다는 effect 증거다. 일반 follow-up, ping과 오류 알림은 exact action-run ID로 ingress
+journal을 claim하고 `delivery_inflight`를 durable하게 기록한 뒤, physical send task 생성 직전에
+original grant ID·action·run ID가 아직 current인지 다시 검사한다. 만료·철회·mismatch·감사 실패는
+새 grant를 발급하거나 전송하지 않고 pre-effect journal을 안전하게 닫는다.
+
+전송이 정상 반환하면 `delivery_succeeded`, exact autonomy pair, continuity와 terminal completion을
+선택적 memory/self-state보다 먼저 기록한다. 그 뒤 일반 예외는 effect를 미전달로 바꾸지 않으며
+`sent_but_continuity_pending`으로 남겨 restart reconciler가 exact pair만 완성한다. 같은 action-run을
+다시 보내지 않고 verified 결과와 current grant를 확인한 뒤에만 plan cursor를 전진시킨다. send await
+내부 timeout·cancellation의 원격 수락 여부가 모호하면 journal은 successor effect를 차단하며 이를
+추측해 자동 재전송하지 않는다.
+
+send가 정상 반환한 뒤 호출 task가 취소되면 reply/session lock 아래의 journal·history·session·
+continuity finalizer와 outcome/state persist를 drain한 뒤 최초 `CancelledError`를 재전파한다. 사용자 가시
+cycle/executor 오류는 정상 cycle 전까지 한 episode로 묶고 stable action-run ID와 고정 private-free 문구로
+최대 한 번만 알린다. `[autonomy:error]` marker는 prior search promise를 완료시키거나 recent user text가
+되지 않는다. outcome audit에는 action별 allowlist evidence code만 저장하고 sanitized step의 `verified`는
+strict verifier로 다시 계산한다. 외부 effect 뒤 memory-deletion integrity 오류도 exact outcome audit와
+engine state/cursor/ping fence를 먼저 내구화하고 raw detail 없는 fixed integrity type으로만 재전파한다.
+remote delivery ambiguity와 continuity writer의 영구 정지는 계속
+availability fail-closed이며 live Discord fault 검증 전이다.
 
 대화형 `assistant:send_followup`과 `maybe_ping_user`는 현재 active인 canonical Discord
 text user session과 그 exact message/channel/last-active snapshot을 먼저 결박한다. 명시적
@@ -172,6 +203,13 @@ timestamp와 PID는 진단 정보이므로 오래됐다는 이유로 살아 있�
 shutdown은 revoke와 shielded runtime cleanup 뒤 kernel lock을 반납하고,
 crash·process exit에서는 OS가 lock을 해제한다. 새 owner는 lock 획득 뒤 새
 process nonce와 capability token을 발급하고 이전 lease를 복구하지 않는다.
+process-local lease도 공개 wall deadline과 같은 owner process의 monotonic deadline이
+모두 남아 있을 때만 유효하다. wall clock rollback으로 공개 deadline만 미래에 남아
+있어도 monotonic deadline이 끝나면 owner mutation과 status projection은 권한을
+인정하지 않는다. 외부 world proof의 공개 status/proof 형식은 그대로 유지하고,
+기존 same-host private secret에 exact `leaseId`와 `expiresMonotonic`을 결박한다.
+Mindcraft/Voyager request admission과 guarded lease loader는 공개 lease·process nonce·
+token 검증에 더해 이 비공개 결박과 monotonic 만료를 검사한다.
 15초 heartbeat freshness는 Mindcraft/Voyager가 stale status를 거부하고 runner를
 정지하는 service-side 경계이며 owner takeover 유예가 아니다.
 
@@ -189,6 +227,13 @@ busy·unavailable·위조 capability에서는 자동 시작하지 않는다.
 owner 초기화의 `process_started`, lease 발급, runner 시작 확인, goal 실행 전
 시도와 실행 후 확인 event는 각 JSONL 행을 flush하고 `fsync`한 뒤에만 성공으로
 인정한다. 필요한 event를 내구 기록할 수 없으면 다음 계약을 적용한다.
+
+world enable await가 정상 반환해도 owner는 `runtime_start_verified` 전에 같은
+lease의 wall·monotonic deadline을 다시 검사한다. 최종 status projection도 두
+deadline을 모두 요구하며 owner는 connect 성공을 반환하기 직전에 한 번 더
+재검사한다. 그 사이 lease가 만료되면 필요 시 goal failure를 기록하고 lease를
+철회한 뒤 cancellation-resistant verified stop을 수행하며, 만료된 연결을 성공으로
+commit하지 않는다.
 
 - 초기화, lease 발급, runner 시작과 goal 변경은 fail-closed한다.
 - 활성 lease와 process capability를 제거하고 공유 private capability artifact를
@@ -336,12 +381,15 @@ assistant의 exact outcome을 같은 grant·lease·actionRunId·goalRunId·contr
 
 단위·composition 테스트는 다음을 검증한다.
 
-- restart 비복구, TTL 만료, exact scope, grant 교체와 철회
+- restart 비복구, wall·same-process monotonic TTL 만료, wall clock rollback,
+  exact scope, grant 교체와 철회
 - 실제 새 Python 프로세스의 crash/restart grant 비복구
 - 민감 payload가 없는 상태와 JSONL 감사 이벤트
 - audit journal의 flush/fsync와 write 실패 시 grant 전부 fail-closed
 - verified action 뒤 outcome append 실패 또는 post-check race의 non-current outcome 시
   unverified 결과, cursor 유지와 engine 중단
+- outcome callback의 `None`·예외를 receipt로 인정하지 않고 grant 폐기, engine 중단과
+  cursor 유지를 수행
 - callback 부재와 evidence 누락의 fail-closed 처리
 - action별 evidence 교차 제출 거부와 전체 supported action policy coverage
 - 실행 중 grant 교체·만료 시 cursor 유지 및 원래 grant ID 감사
@@ -352,6 +400,8 @@ assistant의 exact outcome을 같은 grant·lease·actionRunId·goalRunId·contr
   correlation과 raw payload 거부
 - action gateway dispatch/poll/cancel, replay fence, effect false-to-true 검증,
   terminal runtime stop과 동일 actionRunId validation correlation
+- cancel/disconnect 뒤 늦은 action success의 stale 거부와, cancel 검증 실패로 남은
+  inflight binding의 exact cleanup 전 reconnect 거부
 - lifetime owner lock의 live-owner 경쟁 거부, crash release, nonce/token 회전과
   refresh/status/release adversarial interleaving
 - 변경성 Discord 명령의 owner/admin 권한 검사

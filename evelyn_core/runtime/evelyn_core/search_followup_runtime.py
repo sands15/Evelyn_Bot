@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .continuity_commit_contract import (
+    await_continuity_commit_without_early_unlock,
     require_durable_continuity_receipt,
 )
 from .discord_ingress import build_text_ingress_context
@@ -69,6 +70,7 @@ class SearchFollowupRuntimeDeps:
     commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     search_followup_recovery: Any | None = None
     continuity_status: Callable[[], dict[str, Any]] | None = None
+    guild_is_open: Callable[[int], bool] | None = None
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
     log: Callable[..., Any] = print
 
@@ -130,6 +132,239 @@ def build_search_query_from_runtime(
     )
 
 
+def _require_exact_delivery_receipt(
+    result: Any,
+    expected_text: str,
+) -> int:
+    message = getattr(result, "message", None)
+    message_id = getattr(message, "id", None)
+    if (
+        type(message_id) is not int
+        or message_id < 1
+        or str(getattr(message, "content", "")) != expected_text
+    ):
+        raise RuntimeError(
+            "search_followup_delivery_receipt_invalid"
+        )
+    return message_id
+
+
+def _require_current_durable_continuity_generation(
+    deps: SearchFollowupRuntimeDeps,
+) -> int:
+    if deps.continuity_status is None:
+        raise RuntimeError(
+            "search_followup_continuity_status_unavailable"
+        )
+    receipt = require_durable_continuity_receipt(
+        deps.continuity_status()
+    )
+    return int(receipt["generation"])
+
+
+def _mark_delivery_uncertain_best_effort(
+    recovery: Any,
+    intent_id: str,
+    *,
+    deps: SearchFollowupRuntimeDeps,
+    error_code: str,
+) -> None:
+    try:
+        recovery.mark_delivery_uncertain(
+            intent_id,
+            error_code=error_code,
+        )
+    except Exception as exc:
+        deps.log(
+            "[SEARCH] recovery_uncertain_mark_failed "
+            f"errorType={type(exc).__name__}"
+        )
+
+
+async def _commit_search_followup_canonical(
+    *,
+    guild_id: int,
+    query: str,
+    answer: str,
+    deps: SearchFollowupRuntimeDeps,
+    session_key: str,
+    ingress: Any,
+    delivery_turn_id: str,
+    exposure_position: Any,
+    memory_receipt_ref: dict[str, Any] | None,
+    stage_canonical: bool,
+) -> dict[str, Any]:
+    with memory_exposure_guard(
+        expected_position=exposure_position,
+        required=(exposure_position is not None),
+        index_dir=deps.memory_index_dir,
+    ):
+        if stage_canonical:
+            deps.start_new_turn(
+                session_key,
+                turn_id=delivery_turn_id,
+            )
+            deps.append_history(
+                session_key,
+                query,
+                answer,
+                guild_id=guild_id,
+                memory_receipt=memory_receipt_ref,
+            )
+            deps.mark_session_active(
+                session_key,
+                user_id=ingress.user_id,
+                ttl_sec=deps.active_conversation_text_sec,
+                speaker="assistant",
+                awaiting_user_reply=False,
+                topic_id=deps.build_topic_id(
+                    query,
+                    "search_followup",
+                    answer,
+                ),
+                answer_text=answer,
+                user_text=query,
+            )
+        try:
+            continuity_status = (
+                await await_continuity_commit_without_early_unlock(
+                    deps.commit_session_continuity(
+                        session_key,
+                        delivery_turn_id,
+                    )
+                )
+            )
+            return require_durable_continuity_receipt(
+                continuity_status
+            )
+        except Exception as exc:
+            deps.log(
+                "[SEARCH] followup_continuity_commit_failed "
+                f"guild={guild_id} session={session_key} "
+                f"errorType={type(exc).__name__}"
+            )
+            raise
+
+
+def _project_search_followup_delivery(
+    *,
+    guild_id: int,
+    query: str,
+    answer: str,
+    deps: SearchFollowupRuntimeDeps,
+    ingress: Any,
+    source: str,
+    completed_state: dict[str, Any] | None,
+    turn_scope: Any | None,
+    runtime_mode: str | None,
+    exposure_position: Any,
+) -> None:
+    with memory_exposure_guard(
+        expected_position=exposure_position,
+        required=(exposure_position is not None),
+        index_dir=deps.memory_index_dir,
+    ):
+        try:
+            deps.schedule_memory_update(
+                guild_id,
+                query,
+                answer,
+                room_key=ingress.room_key,
+                person_key=ingress.person_key,
+                session_memory_key=ingress.session_memory_key,
+                source=source,
+                user_speaker="search_task",
+                assistant_speaker="Evelyn",
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
+            )
+        except MemoryDeletionJournalIntegrityError:
+            raise
+        except Exception as exc:
+            deps.log(
+                "[SEARCH] memory_update_failed "
+                f"guild={guild_id} errorType={type(exc).__name__}"
+            )
+        try:
+            removed = deps.resolve_open_question_rows(
+                guild_id,
+                query,
+                answer,
+            )
+            for scope_type, scope_key in (
+                ("room", ingress.room_key),
+                ("person", ingress.person_key),
+                ("session", ingress.session_memory_key),
+            ):
+                if scope_key:
+                    removed += deps.resolve_open_question_rows(
+                        guild_id,
+                        query,
+                        answer,
+                        scope_type=scope_type,
+                        scope_key=scope_key,
+                    )
+            if removed:
+                deps.log(
+                    "[SEARCH] resolved_open_questions "
+                    f"guild={guild_id} removed={removed}"
+                )
+        except Exception as exc:
+            deps.log(
+                "[SEARCH] open_question_resolution_failed "
+                f"guild={guild_id} errorType={type(exc).__name__}"
+            )
+        if completed_state is not None:
+            try:
+                deps.write_json_file(
+                    deps.cognitive_state_path(guild_id),
+                    completed_state,
+                )
+                for scope_type, scope_key in (
+                    ("room", ingress.room_key),
+                    ("person", ingress.person_key),
+                    ("session", ingress.session_memory_key),
+                ):
+                    if scope_key:
+                        deps.write_json_file(
+                            deps.cognitive_state_path(
+                                guild_id,
+                                scope_type=scope_type,
+                                scope_key=scope_key,
+                            ),
+                            completed_state,
+                        )
+            except Exception as exc:
+                deps.log(
+                    "[SEARCH] cognitive_state_update_failed "
+                    f"guild={guild_id} errorType={type(exc).__name__}"
+                )
+
+
+def _completed_search_state(
+    query: str,
+    *,
+    failed: bool,
+) -> dict[str, Any]:
+    return {
+        "action": "answer",
+        "confidence": 0.0 if failed else 1.0,
+        "user_intent": clean_text(query),
+        "state_summary": (
+            "검색 시도가 실패해 사용자에게 실패 상태를 전달했다."
+            if failed
+            else "검색을 마쳤고 결과를 사용자에게 전달했다."
+        ),
+        "question_for_user": "",
+        "main_prompt_hint": "찾은 내용을 바로 전달해라.",
+        "reason_brief": (
+            "search_failed" if failed else "search_completed"
+        ),
+        "retrieved_context_ids": [],
+        "updated_at": int(time.time()),
+    }
+
+
 async def deliver_proactive_followup_from_runtime(
     guild_id: int,
     query: str,
@@ -149,6 +384,14 @@ async def deliver_proactive_followup_from_runtime(
     runtime_mode: str | None = None,
     recovery_intent_id: str | None = None,
 ) -> bool:
+    def guild_open() -> bool:
+        return (
+            deps.guild_is_open is None
+            or deps.guild_is_open(guild_id)
+        )
+
+    if not guild_open():
+        return False
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
     if "voice" in clean_text(source).lower():
@@ -186,165 +429,14 @@ async def deliver_proactive_followup_from_runtime(
         )
         return False
     prepared = False
-    delivery_turn_id = ""
     display_answer = deps.format_display_text(
-        answer,
+        plain_answer,
         session_key=session_key,
     )
     delivery_exposure_position = current_memory_exposure_position()
     delivery_memory_receipt_ref = memory_receipt_ref_from_exposure(
         delivery_exposure_position
     )
-
-    async def prepare_durable_followup() -> None:
-        nonlocal prepared, delivery_turn_id
-        if prepared:
-            return
-        delivery_turn_id = deps.start_new_turn(None)
-        if recovery_intent_id is not None:
-            recovery = deps.search_followup_recovery
-            if recovery is None:
-                raise RuntimeError(
-                    "search_followup_recovery_unavailable"
-                )
-            recovery.begin_delivery_prepare(
-                recovery_intent_id,
-                answer=plain_answer,
-                display_text=display_answer,
-                delivery_turn_id=delivery_turn_id,
-            )
-        deps.start_new_turn(
-            session_key,
-            turn_id=delivery_turn_id,
-        )
-        with memory_exposure_guard(
-            expected_position=delivery_exposure_position,
-            required=(delivery_exposure_position is not None),
-            index_dir=deps.memory_index_dir,
-        ):
-            deps.append_history(
-                session_key,
-                query,
-                plain_answer,
-                guild_id=guild_id,
-                memory_receipt=delivery_memory_receipt_ref,
-            )
-            deps.mark_session_active(
-                session_key,
-                user_id=ingress.user_id,
-                ttl_sec=deps.active_conversation_text_sec,
-                speaker="assistant",
-                awaiting_user_reply=False,
-                topic_id=deps.build_topic_id(
-                    query,
-                    "search_followup",
-                    plain_answer,
-                ),
-                answer_text=plain_answer,
-                user_text=query,
-            )
-            try:
-                continuity_status = (
-                    await deps.commit_session_continuity(
-                        session_key,
-                        delivery_turn_id,
-                    )
-                )
-                continuity_receipt = require_durable_continuity_receipt(
-                    continuity_status
-                )
-            except Exception as exc:
-                deps.log(
-                    "[SEARCH] followup_continuity_commit_failed "
-                    f"guild={guild_id} session={session_key} "
-                    f"errorType={type(exc).__name__}"
-                )
-                raise
-            try:
-                deps.schedule_memory_update(
-                    guild_id,
-                    query,
-                    plain_answer,
-                    room_key=ingress.room_key,
-                    person_key=ingress.person_key,
-                    session_memory_key=ingress.session_memory_key,
-                    source=source,
-                    user_speaker="search_task",
-                    assistant_speaker="Evelyn",
-                    turn_scope=turn_scope,
-                    runtime_mode=runtime_mode,
-                )
-            except MemoryDeletionJournalIntegrityError:
-                raise
-            except Exception as exc:
-                deps.log(
-                    "[SEARCH] memory_update_failed "
-                    f"guild={guild_id} errorType={type(exc).__name__}"
-                )
-            try:
-                removed = deps.resolve_open_question_rows(
-                    guild_id,
-                    query,
-                    plain_answer,
-                )
-                for scope_type, scope_key in (
-                    ("room", ingress.room_key),
-                    ("person", ingress.person_key),
-                    ("session", ingress.session_memory_key),
-                ):
-                    if scope_key:
-                        removed += deps.resolve_open_question_rows(
-                            guild_id,
-                            query,
-                            plain_answer,
-                            scope_type=scope_type,
-                            scope_key=scope_key,
-                        )
-                if removed:
-                    deps.log(
-                        "[SEARCH] resolved_open_questions "
-                        f"guild={guild_id} removed={removed}"
-                    )
-            except Exception as exc:
-                deps.log(
-                    "[SEARCH] open_question_resolution_failed "
-                    f"guild={guild_id} errorType={type(exc).__name__}"
-                )
-            if completed_state is not None:
-                try:
-                    deps.write_json_file(
-                        deps.cognitive_state_path(guild_id),
-                        completed_state,
-                    )
-                    for scope_type, scope_key in (
-                        ("room", ingress.room_key),
-                        ("person", ingress.person_key),
-                        ("session", ingress.session_memory_key),
-                    ):
-                        if scope_key:
-                            deps.write_json_file(
-                                deps.cognitive_state_path(
-                                    guild_id,
-                                    scope_type=scope_type,
-                                    scope_key=scope_key,
-                                ),
-                                completed_state,
-                            )
-                except Exception as exc:
-                    deps.log(
-                        "[SEARCH] cognitive_state_update_failed "
-                        f"guild={guild_id} errorType={type(exc).__name__}"
-                    )
-        if recovery_intent_id is not None:
-            recovery.mark_delivery_ready(
-                recovery_intent_id,
-                answer=plain_answer,
-                display_text=display_answer,
-                continuity_generation=int(
-                    continuity_receipt["generation"]
-                ),
-            )
-        prepared = True
 
     channel = None
     if target_channel_id is not None:
@@ -364,6 +456,8 @@ async def deliver_proactive_followup_from_runtime(
     )
     async with reply_lock:
         async with state_lock:
+            if not guild_open():
+                return False
             if clean_text(deps.current_turn_id(session_key)) != source_turn_id:
                 if recovery_intent_id is not None and deps.search_followup_recovery is not None:
                     deps.search_followup_recovery.mark_delivery_uncertain(
@@ -375,34 +469,129 @@ async def deliver_proactive_followup_from_runtime(
                     f"guild={guild_id} session={session_key}"
                 )
                 return False
-
-            if recovery_intent_id is not None:
-                await prepare_durable_followup()
-
             if channel is not None and hasattr(channel, "send"):
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
+                if not guild_open():
+                    return False
+                delivery_turn_id = deps.start_new_turn(None)
                 if recovery_intent_id is not None:
-                    deps.search_followup_recovery.mark_delivery_attempted(
+                    recovery = deps.search_followup_recovery
+                    if recovery is None:
+                        raise RuntimeError(
+                            "search_followup_recovery_unavailable"
+                        )
+                    recovery.begin_delivery_prepare(
+                        recovery_intent_id,
+                        answer=plain_answer,
+                        display_text=display_answer,
+                        delivery_turn_id=delivery_turn_id,
+                    )
+                    recovery.mark_delivery_baseline(
+                        recovery_intent_id,
+                        continuity_generation=(
+                            _require_current_durable_continuity_generation(
+                                deps
+                            )
+                        ),
+                    )
+                    recovery.mark_delivery_attempted(
                         recovery_intent_id
                     )
-                with memory_exposure_guard(
-                    expected_position=delivery_exposure_position,
-                    required=(delivery_exposure_position is not None),
-                    index_dir=deps.memory_index_dir,
-                ):
-                    await deps.send_discord_text(
-                        channel,
-                        display_answer,
-                        reference_message_id=reply_target_id,
-                        reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
+                try:
+                    with memory_exposure_guard(
+                        expected_position=delivery_exposure_position,
+                        required=(delivery_exposure_position is not None),
+                        index_dir=deps.memory_index_dir,
+                    ):
+                        delivery_result = (
+                            await await_continuity_commit_without_early_unlock(
+                                deps.send_discord_text(
+                                    channel,
+                                    display_answer,
+                                    reference_message_id=reply_target_id,
+                                    reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
+                                )
+                            )
+                        )
+                except asyncio.CancelledError:
+                    if recovery_intent_id is not None:
+                        _mark_delivery_uncertain_best_effort(
+                            recovery,
+                            recovery_intent_id,
+                            deps=deps,
+                            error_code=(
+                                "search_followup_delivery_cancelled"
+                            ),
+                        )
+                    raise
+                except Exception:
+                    if recovery_intent_id is not None:
+                        _mark_delivery_uncertain_best_effort(
+                            recovery,
+                            recovery_intent_id,
+                            deps=deps,
+                            error_code=(
+                                "search_followup_delivery_failed"
+                            ),
+                        )
+                    raise
+                try:
+                    delivery_message_id = (
+                        _require_exact_delivery_receipt(
+                            delivery_result,
+                            display_answer,
+                        )
                     )
+                except Exception:
+                    if recovery_intent_id is not None:
+                        _mark_delivery_uncertain_best_effort(
+                            recovery,
+                            recovery_intent_id,
+                            deps=deps,
+                            error_code=(
+                                "search_followup_delivery_receipt_invalid"
+                            ),
+                        )
+                    raise
                 if recovery_intent_id is not None:
-                    deps.search_followup_recovery.complete(
-                        recovery_intent_id
+                    recovery.mark_delivery_succeeded(
+                        recovery_intent_id,
+                        delivery_message_id=delivery_message_id,
                     )
-                else:
-                    await prepare_durable_followup()
+                continuity_receipt = await _commit_search_followup_canonical(
+                    guild_id=guild_id,
+                    query=query,
+                    answer=plain_answer,
+                    deps=deps,
+                    session_key=ingress.session_key,
+                    ingress=ingress,
+                    delivery_turn_id=delivery_turn_id,
+                    exposure_position=delivery_exposure_position,
+                    memory_receipt_ref=delivery_memory_receipt_ref,
+                    stage_canonical=True,
+                )
+                if recovery_intent_id is not None:
+                    recovery.mark_canonical_committed(
+                        recovery_intent_id,
+                        continuity_generation=int(
+                            continuity_receipt["generation"]
+                        ),
+                    )
+                    recovery.complete(recovery_intent_id)
+                _project_search_followup_delivery(
+                    guild_id=guild_id,
+                    query=query,
+                    answer=plain_answer,
+                    deps=deps,
+                    ingress=ingress,
+                    source=source,
+                    completed_state=completed_state,
+                    turn_scope=turn_scope,
+                    runtime_mode=runtime_mode,
+                    exposure_position=delivery_exposure_position,
+                )
+                prepared = True
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
@@ -415,6 +604,26 @@ async def deliver_proactive_followup_from_runtime(
 
 def normalize_search_key(session_key: str, query: str) -> str:
     return f"{session_key}:{clean_text(query).lower()}"
+
+
+def _track_search_task_drain(
+    guild_id: int,
+    task: asyncio.Task,
+    *,
+    deps: SearchFollowupRuntimeDeps,
+) -> None:
+    if task.done():
+        return
+    drain_key = f"guild:{guild_id}:search-drain:{id(task)}"
+    if deps.background_search_tasks.get(drain_key) is task:
+        return
+    deps.background_search_tasks[drain_key] = task
+
+    def release(completed: asyncio.Task) -> None:
+        if deps.background_search_tasks.get(drain_key) is completed:
+            deps.background_search_tasks.pop(drain_key, None)
+
+    task.add_done_callback(release)
 
 
 def _hashed_history_pairs(
@@ -462,20 +671,47 @@ def _find_hashed_history_pair(
 
 def _continuity_can_recover(
     entry: dict[str, Any],
-    status: dict[str, Any],
+    generation: int | None,
 ) -> bool:
-    if not isinstance(status, dict) or not bool(
-        status.get("rollbackProtected")
-    ):
-        return False
-    generation = status.get("checkpointGeneration")
-    if isinstance(generation, bool) or not isinstance(generation, int):
+    if generation is None:
         return False
     required = max(
         int(entry.get("continuityGeneration") or 0),
         int(entry.get("deliveryGeneration") or 0),
     )
     return required >= 1 and generation >= required
+
+
+def _discord_reply_reference_message_id(message: Any) -> int | None:
+    def field(value: Any, name: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(name)
+        return getattr(value, name, None)
+
+    try:
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return None
+        resolved = field(reference, "resolved")
+        cached = field(reference, "cached_message")
+        raw_candidates = (
+            field(reference, "message_id"),
+            field(reference, "id"),
+            field(resolved, "id"),
+            field(cached, "id"),
+        )
+    except Exception:
+        return None
+    candidates: list[int] = []
+    for value in raw_candidates:
+        if value is None:
+            continue
+        if type(value) is not int or value < 1:
+            return None
+        candidates.append(value)
+    if not candidates or any(value != candidates[0] for value in candidates[1:]):
+        return None
+    return candidates[0]
 
 
 async def _channel_contains_followup(
@@ -485,36 +721,102 @@ async def _channel_contains_followup(
     bot_user_id: int | None,
     after_message_id: int | None,
     discord_object_factory: Callable[..., Any],
-) -> bool | None:
+) -> int | bool | None:
     history_method = getattr(channel, "history", None)
-    if not callable(history_method) or bot_user_id is None:
+    if (
+        not callable(history_method)
+        or type(bot_user_id) is not int
+        or bot_user_id < 1
+        or type(after_message_id) is not int
+        or after_message_id < 1
+    ):
         return None
-    kwargs: dict[str, Any] = {"limit": 50}
-    if after_message_id is not None:
-        kwargs["after"] = discord_object_factory(
-            id=after_message_id
-        )
+    kwargs: dict[str, Any] = {
+        "limit": 50,
+        "after": discord_object_factory(id=after_message_id),
+    }
     try:
         iterator = history_method(**kwargs)
     except TypeError:
-        iterator = history_method(limit=50)
+        return None
     seen = 0
+    matches: list[tuple[int | None, int | None]] = []
     async for message in iterator:
         seen += 1
         author_id = getattr(getattr(message, "author", None), "id", None)
-        if author_id == bot_user_id and str(
-            getattr(message, "content", "")
-        ) == display_text:
-            return True
-    if after_message_id is None or seen >= 50:
+        content = getattr(message, "content", None)
+        if (
+            type(author_id) is int
+            and author_id == bot_user_id
+            and type(content) is str
+            and content == display_text
+        ):
+            message_id = getattr(message, "id", None)
+            matches.append(
+                (
+                    message_id
+                    if type(message_id) is int and message_id >= 1
+                    else None,
+                    _discord_reply_reference_message_id(message),
+                )
+            )
+    if seen >= 50:
         return None
-    return False
+    if not matches:
+        return False
+    if len(matches) != 1:
+        return None
+    message_id, reference_message_id = matches[0]
+    if message_id is None or reference_message_id != after_message_id:
+        return None
+    return message_id
 
 
 async def recover_search_followups_from_runtime(
     *,
     deps: SearchFollowupRuntimeDeps,
 ) -> dict[str, int]:
+    def guild_open(guild_id: int) -> bool:
+        return (
+            deps.guild_is_open is None
+            or deps.guild_is_open(guild_id)
+        )
+
+    def schedule_source_search(
+        entry: dict[str, Any],
+        *,
+        guild_id: int,
+        session_key: str,
+        query: str,
+        intent_id: str,
+    ) -> None:
+        task = schedule_search_followup_singleflight_from_runtime(
+            guild_id,
+            query,
+            deps=deps,
+            session_key=session_key,
+            room_key=entry.get("roomKey"),
+            person_key=entry.get("personKey"),
+            session_memory_key=entry.get("sessionMemoryKey"),
+            channel_id=entry.get("channelId"),
+            reply_to_message_id=entry.get("replyToMessageId"),
+            source=f"search-followup-recovery-{entry['source']}",
+            source_turn_id=clean_text(entry.get("turnId")),
+            recovery_intent_id=intent_id,
+        )
+        existing = deps.background_search_tasks.get(session_key)
+        if (
+            existing is not None
+            and existing is not task
+            and not existing.done()
+        ):
+            _track_search_task_drain(
+                guild_id,
+                existing,
+                deps=deps,
+            )
+        deps.background_search_tasks[session_key] = task
+
     reset_memory_exposure_position()
     recovery = deps.search_followup_recovery
     counts = {
@@ -528,48 +830,64 @@ async def recover_search_followups_from_runtime(
         return counts
     entries = recovery.pending()
     counts["pending"] = len(entries)
-    continuity_status = deps.continuity_status()
     for entry in entries:
         reset_memory_exposure_position()
         intent_id = str(entry["intentId"])
         session_key = str(entry["sessionKey"])
         guild_id = int(entry["guildId"])
         delivery_claimed = False
+        owner_task = asyncio.current_task()
+        owner_key = (
+            f"guild:{guild_id}:search-recovery:{intent_id}:{id(owner_task)}"
+            if owner_task is not None
+            else None
+        )
+        if owner_key is not None:
+            deps.background_search_tasks[owner_key] = owner_task
         try:
-            if entry["phase"] == "request_unrecoverable":
+            phase = str(entry["phase"])
+            if not guild_open(guild_id):
+                continue
+            if phase == "request_unrecoverable":
                 counts["uncertain"] += 1
                 continue
             if entry["source"] == "voice":
                 recovery.mark_delivery_uncertain(
                     intent_id,
-                    error_code="search_followup_delivery_owner_unavailable",
+                    error_code=(
+                        "search_followup_delivery_owner_unavailable"
+                    ),
                 )
                 counts["uncertain"] += 1
                 continue
             if (
-                entry["phase"] in {
-                    "delivery_preparing",
-                    "delivery_ready",
-                    "delivery_attempted",
-                }
+                phase != "running"
                 and not clean_text(entry.get("deliveryTurnId"))
             ):
                 recovery.mark_delivery_uncertain(
                     intent_id,
-                    error_code="search_followup_delivery_turn_unavailable",
+                    error_code=(
+                        "search_followup_delivery_turn_unavailable"
+                    ),
                 )
                 counts["uncertain"] += 1
                 continue
-            if not _continuity_can_recover(
-                entry,
-                continuity_status,
-            ):
+            try:
+                status_generation = (
+                    _require_current_durable_continuity_generation(
+                        deps
+                    )
+                )
+            except Exception:
+                status_generation = None
+            if not _continuity_can_recover(entry, status_generation):
                 recovery.mark_delivery_uncertain(
                     intent_id,
                     error_code="search_followup_continuity_unavailable",
                 )
                 counts["uncertain"] += 1
                 continue
+
             persisted_history = list(
                 deps.get_conversation_history(
                     session_key=session_key,
@@ -583,10 +901,8 @@ async def recover_search_followups_from_runtime(
                 )
             )
             history = list(history_outcome.messages)
-            recovery_exposure_position = (
-                capture_combined_memory_exposure(
-                    history_outcome.memory_exposure_position
-                )
+            exposure_position = capture_combined_memory_exposure(
+                history_outcome.memory_exposure_position
             )
             raw_request_matches = _hashed_history_pairs(
                 persisted_history,
@@ -615,104 +931,80 @@ async def recover_search_followups_from_runtime(
                 raise RuntimeError(
                     "search_followup_memory_exposure_rejected"
                 )
-            if entry["phase"] in {
-                "running",
-                "delivery_preparing",
-            }:
-                if entry["phase"] != "delivery_preparing":
-                    delivery_matches = []
-                elif len(delivery_matches) > 1:
-                    raise RuntimeError(
-                        "search_followup_delivery_context_ambiguous"
-                    )
-                if delivery_matches:
-                    if int(
-                        continuity_status[
-                            "checkpointGeneration"
-                        ]
-                    ) <= int(entry["continuityGeneration"]):
-                        raise RuntimeError(
-                            "search_followup_delivery_not_durable"
-                        )
-                    _query, answer = delivery_matches[0]
-                    display_text = deps.format_display_text(
-                        answer,
-                        session_key=session_key,
-                    )
-                    if content_sha256(
-                        display_text,
-                        normalized=False,
-                    ) != entry.get("displayHash"):
-                        raise RuntimeError(
-                            "search_followup_display_reconstruction_failed"
-                        )
-                    recovery.mark_delivery_ready(
-                        intent_id,
-                        answer=answer,
-                        display_text=display_text,
-                        continuity_generation=int(
-                            continuity_status[
-                                "checkpointGeneration"
-                            ]
-                        ),
-                    )
-                    entry = {
-                        **entry,
-                        "phase": "delivery_ready",
-                        "deliveryGeneration": int(
-                            continuity_status[
-                                "checkpointGeneration"
-                            ]
-                        ),
-                    }
-                else:
-                    pair = _find_hashed_history_pair(
-                        history,
-                        user_hash=str(entry["requestUserHash"]),
-                        assistant_hash=str(entry["requestAnswerHash"]),
-                    )
-                    if pair is None:
-                        raise RuntimeError(
-                            "search_followup_request_context_ambiguous"
-                        )
-                    user_text, _request_answer = pair
-                    query = deps.build_search_query(
-                        guild_id,
-                        user_text,
-                        session_key=session_key,
-                    )
-                    if content_sha256(query) != entry["queryHash"]:
-                        raise RuntimeError(
-                            "search_followup_query_reconstruction_failed"
-                        )
-                    task = schedule_search_followup_singleflight_from_runtime(
-                        guild_id,
-                        query,
-                        deps=deps,
-                        session_key=session_key,
-                        room_key=entry.get("roomKey"),
-                        person_key=entry.get("personKey"),
-                        session_memory_key=entry.get("sessionMemoryKey"),
-                        channel_id=entry.get("channelId"),
-                        reply_to_message_id=entry.get("replyToMessageId"),
-                        source=f"search-followup-recovery-{entry['source']}",
-                        source_turn_id=clean_text(entry.get("turnId")),
-                        recovery_intent_id=intent_id,
-                    )
-                    deps.background_search_tasks[session_key] = task
-                    counts["resumed"] += 1
-                    continue
-
-            pair = _find_hashed_history_pair(
+            request_pair = _find_hashed_history_pair(
                 history,
-                user_hash=str(entry["queryHash"]),
-                assistant_hash=str(entry["answerHash"]),
+                user_hash=str(entry["requestUserHash"]),
+                assistant_hash=str(entry["requestAnswerHash"]),
             )
-            if pair is None:
+            if request_pair is None:
+                raise RuntimeError(
+                    "search_followup_request_context_ambiguous"
+                )
+            query = (
+                delivery_matches[0][0]
+                if len(delivery_matches) == 1
+                else deps.build_search_query(
+                    guild_id,
+                    request_pair[0],
+                    session_key=session_key,
+                )
+            )
+            if content_sha256(query) != entry["queryHash"]:
+                raise RuntimeError(
+                    "search_followup_query_reconstruction_failed"
+                )
+
+            prepared_answer = str(entry.get("preparedAnswer") or "")
+            if phase == "running" or (
+                phase == "delivery_preparing"
+                and not prepared_answer
+            ):
+                schedule_source_search(
+                    entry,
+                    guild_id=guild_id,
+                    session_key=session_key,
+                    query=query,
+                    intent_id=intent_id,
+                )
+                counts["resumed"] += 1
+                continue
+
+            if len(delivery_matches) > 1:
                 raise RuntimeError(
                     "search_followup_delivery_context_ambiguous"
                 )
-            _query, answer = pair
+            legacy_canonical = (
+                phase == "delivery_ready"
+                or (
+                    phase == "delivery_preparing"
+                    and len(delivery_matches) == 1
+                    and int(
+                        status_generation or 0
+                    )
+                    > int(entry["continuityGeneration"])
+                )
+                or (
+                    phase in {
+                        "delivery_attempted",
+                        "delivery_uncertain",
+                    }
+                    and int(entry.get("deliveryGeneration") or 0)
+                    >= 1
+                    and not prepared_answer
+                )
+            )
+            if prepared_answer:
+                answer = prepared_answer
+                if content_sha256(answer) != entry["answerHash"]:
+                    raise RuntimeError(
+                        "search_followup_answer_reconstruction_failed"
+                    )
+            elif len(delivery_matches) == 1:
+                _delivery_query, answer = delivery_matches[0]
+            else:
+                raise RuntimeError(
+                    "search_followup_delivery_context_ambiguous"
+                )
             display_text = deps.format_display_text(
                 answer,
                 session_key=session_key,
@@ -724,9 +1016,7 @@ async def recover_search_followups_from_runtime(
                 raise RuntimeError(
                     "search_followup_display_reconstruction_failed"
                 )
-            if not recovery.claim_recovery(intent_id):
-                continue
-            delivery_claimed = True
+
             target = deps.session_followup_targets.get(
                 session_key,
                 {},
@@ -737,59 +1027,132 @@ async def recover_search_followups_from_runtime(
             reply_to_message_id = entry.get(
                 "replyToMessageId"
             ) or target.get("message_id")
-            channel = None
-            if channel_id is not None:
-                channel = deps.bot.get_channel(channel_id)
-                if channel is None:
-                    channel = await deps.bot.fetch_channel(channel_id)
             ingress = _text_search_ingress(
                 session_key,
                 guild_id=guild_id,
                 channel_id=channel_id,
             )
-            if (
-                channel is not None
-                and hasattr(channel, "send")
-                and ingress is not None
-            ):
-                reply_lock = deps.reply_slot_locks.setdefault(
-                    ingress.reply_slot_key,
-                    asyncio.Lock(),
+            if ingress is None:
+                recovery.mark_delivery_uncertain(
+                    intent_id,
+                    error_code=(
+                        "search_followup_delivery_unverifiable"
+                    ),
                 )
-                state_lock = deps.session_locks.setdefault(
-                    ingress.session_key,
-                    asyncio.Lock(),
-                )
-                async with reply_lock:
-                    async with state_lock:
-                        if clean_text(deps.current_turn_id(session_key)) != clean_text(
-                            entry.get("deliveryTurnId")
-                        ):
-                            recovery.mark_delivery_uncertain(
-                                intent_id,
-                                error_code="search_followup_source_turn_superseded",
-                            )
-                            recovery.release_recovery_claim(intent_id)
-                            counts["uncertain"] += 1
-                            continue
-                        bot_user_id = getattr(
-                            getattr(deps.bot, "user", None),
-                            "id",
-                            None,
+                counts["uncertain"] += 1
+                continue
+            if not recovery.claim_recovery(intent_id):
+                continue
+            delivery_claimed = True
+            reply_lock = deps.reply_slot_locks.setdefault(
+                ingress.reply_slot_key,
+                asyncio.Lock(),
+            )
+            state_lock = deps.session_locks.setdefault(
+                ingress.session_key,
+                asyncio.Lock(),
+            )
+            async with reply_lock:
+                async with state_lock:
+                    if not guild_open(guild_id):
+                        recovery.release_recovery_claim(intent_id)
+                        delivery_claimed = False
+                        continue
+                    delivery_turn_id = clean_text(
+                        entry.get("deliveryTurnId")
+                    )
+                    source_turn_id = clean_text(entry.get("turnId"))
+                    current_turn_id = clean_text(
+                        deps.current_turn_id(session_key)
+                    )
+                    status_generation = (
+                        _require_current_durable_continuity_generation(
+                            deps
                         )
-                        if entry["phase"] != "delivery_ready":
-                            delivery_exists = await _channel_contains_followup(
-                                channel,
-                                display_text,
-                                bot_user_id=bot_user_id,
-                                after_message_id=reply_to_message_id,
-                                discord_object_factory=deps.discord_object_factory,
+                    )
+                    source_generation = int(
+                        entry["continuityGeneration"]
+                    )
+                    delivery_generation = int(
+                        entry.get("deliveryGeneration") or 0
+                    )
+                    delivery_receipt_valid = (
+                        type(entry.get("deliveryMessageId")) is int
+                        and int(entry["deliveryMessageId"]) >= 1
+                    )
+                    delivery_baseline_valid = (
+                        delivery_generation >= source_generation
+                        and source_generation >= 1
+                    )
+                    canonical_persisted = (
+                        len(delivery_matches) == 1
+                        and delivery_receipt_valid
+                        and delivery_baseline_valid
+                        and (
+                            (
+                                phase == "delivery_succeeded"
+                                and status_generation
+                                > delivery_generation
+                                and current_turn_id
+                                not in {
+                                    source_turn_id,
+                                    delivery_turn_id,
+                                }
                             )
-                            if delivery_exists is True:
+                            or (
+                                phase == "canonical_committed"
+                                and status_generation
+                                >= delivery_generation
+                            )
+                        )
+                    )
+
+                    if legacy_canonical:
+                        if (
+                            len(delivery_matches) != 1
+                            or current_turn_id != delivery_turn_id
+                        ):
+                            raise RuntimeError(
+                                "search_followup_delivery_context_ambiguous"
+                            )
+                        channel = await _search_followup_channel(
+                            channel_id,
+                            deps=deps,
+                        )
+                        if channel is None:
+                            raise RuntimeError(
+                                "search_followup_delivery_unverifiable"
+                            )
+                        if not guild_open(guild_id):
+                            recovery.release_recovery_claim(intent_id)
+                            delivery_claimed = False
+                            continue
+                        if phase not in {
+                            "delivery_preparing",
+                            "delivery_ready",
+                        }:
+                            existing_message_id = (
+                                await _channel_contains_followup(
+                                    channel,
+                                    display_text,
+                                    bot_user_id=getattr(
+                                        getattr(deps.bot, "user", None),
+                                        "id",
+                                        None,
+                                    ),
+                                    after_message_id=(
+                                        reply_to_message_id
+                                    ),
+                                    discord_object_factory=(
+                                        deps.discord_object_factory
+                                    ),
+                                )
+                            )
+                            if type(existing_message_id) is int:
                                 recovery.complete(intent_id)
                                 counts["verified"] += 1
                                 continue
-                            if delivery_exists is None:
+                            if existing_message_id is None:
                                 recovery.mark_delivery_uncertain(
                                     intent_id,
                                     error_code=(
@@ -797,32 +1160,260 @@ async def recover_search_followups_from_runtime(
                                     ),
                                 )
                                 recovery.release_recovery_claim(intent_id)
+                                delivery_claimed = False
                                 counts["uncertain"] += 1
                                 continue
                         recovery.mark_delivery_attempted(intent_id)
-                        with memory_exposure_guard(
-                            expected_position=recovery_exposure_position,
-                            required=(recovery_exposure_position is not None),
-                            index_dir=deps.memory_index_dir,
-                        ):
-                            await deps.send_discord_text(
+                        try:
+                            delivery_result = await _send_search_followup(
                                 channel,
                                 display_text,
-                                reference_message_id=reply_to_message_id,
-                                reference_factory=lambda message_id: deps.discord_object_factory(
-                                    id=message_id
+                                reply_to_message_id=reply_to_message_id,
+                                exposure_position=exposure_position,
+                                deps=deps,
+                            )
+                        except asyncio.CancelledError:
+                            _mark_delivery_uncertain_best_effort(
+                                recovery,
+                                intent_id,
+                                deps=deps,
+                                error_code=(
+                                    "search_followup_delivery_cancelled"
                                 ),
                             )
+                            raise
+                        _require_exact_delivery_receipt(
+                            delivery_result,
+                            display_text,
+                        )
                         recovery.complete(intent_id)
                         counts["redelivered"] += 1
                         continue
 
-            recovery.mark_delivery_uncertain(
-                intent_id,
-                error_code="search_followup_delivery_unverifiable",
-            )
-            counts["uncertain"] += 1
-            recovery.release_recovery_claim(intent_id)
+                    delivery_was_verified = phase in {
+                        "delivery_succeeded",
+                        "canonical_committed",
+                    }
+                    if phase == "canonical_committed":
+                        if not canonical_persisted:
+                            raise RuntimeError(
+                                "search_followup_delivery_not_durable"
+                            )
+                    elif phase == "delivery_succeeded":
+                        if not (
+                            delivery_receipt_valid
+                            and delivery_baseline_valid
+                        ):
+                            recovery.mark_delivery_uncertain(
+                                intent_id,
+                                error_code=(
+                                    "search_followup_delivery_baseline_unavailable"
+                                ),
+                            )
+                            recovery.release_recovery_claim(intent_id)
+                            delivery_claimed = False
+                            counts["uncertain"] += 1
+                            continue
+                        if (
+                            not canonical_persisted
+                            and current_turn_id not in {
+                                source_turn_id,
+                                delivery_turn_id,
+                            }
+                        ):
+                            raise RuntimeError(
+                                "search_followup_source_turn_superseded"
+                            )
+                    else:
+                        if current_turn_id != source_turn_id:
+                            raise RuntimeError(
+                                "search_followup_source_turn_superseded"
+                            )
+                        channel = await _search_followup_channel(
+                            channel_id,
+                            deps=deps,
+                        )
+                        if channel is None:
+                            raise RuntimeError(
+                                "search_followup_delivery_unverifiable"
+                            )
+                        if not guild_open(guild_id):
+                            recovery.release_recovery_claim(intent_id)
+                            delivery_claimed = False
+                            continue
+                        if phase in {
+                            "delivery_attempted",
+                            "delivery_uncertain",
+                        }:
+                            existing_message_id = (
+                                await _channel_contains_followup(
+                                    channel,
+                                    display_text,
+                                    bot_user_id=getattr(
+                                        getattr(deps.bot, "user", None),
+                                        "id",
+                                        None,
+                                    ),
+                                    after_message_id=(
+                                        reply_to_message_id
+                                    ),
+                                    discord_object_factory=(
+                                        deps.discord_object_factory
+                                    ),
+                                )
+                            )
+                            if type(existing_message_id) is int:
+                                recovery.mark_delivery_baseline(
+                                    intent_id,
+                                    continuity_generation=(
+                                        _require_current_durable_continuity_generation(
+                                            deps
+                                        )
+                                    ),
+                                )
+                                recovery.mark_delivery_succeeded(
+                                    intent_id,
+                                    delivery_message_id=(
+                                        existing_message_id
+                                    ),
+                                )
+                                delivery_was_verified = True
+                            elif existing_message_id is None:
+                                recovery.mark_delivery_uncertain(
+                                    intent_id,
+                                    error_code=(
+                                        "search_followup_delivery_history_inconclusive"
+                                    ),
+                                )
+                                recovery.release_recovery_claim(intent_id)
+                                delivery_claimed = False
+                                counts["uncertain"] += 1
+                                continue
+                        if not delivery_was_verified:
+                            recovery.mark_delivery_baseline(
+                                intent_id,
+                                continuity_generation=(
+                                    _require_current_durable_continuity_generation(
+                                        deps
+                                    )
+                                ),
+                            )
+                            recovery.mark_delivery_attempted(intent_id)
+                            try:
+                                delivery_result = (
+                                    await _send_search_followup(
+                                        channel,
+                                        display_text,
+                                        reply_to_message_id=(
+                                            reply_to_message_id
+                                        ),
+                                        exposure_position=(
+                                            exposure_position
+                                        ),
+                                        deps=deps,
+                                    )
+                                )
+                                delivery_message_id = (
+                                    _require_exact_delivery_receipt(
+                                        delivery_result,
+                                        display_text,
+                                    )
+                                )
+                            except asyncio.CancelledError:
+                                _mark_delivery_uncertain_best_effort(
+                                    recovery,
+                                    intent_id,
+                                    deps=deps,
+                                    error_code=(
+                                        "search_followup_delivery_cancelled"
+                                    ),
+                                )
+                                raise
+                            except Exception:
+                                _mark_delivery_uncertain_best_effort(
+                                    recovery,
+                                    intent_id,
+                                    deps=deps,
+                                    error_code=(
+                                        "search_followup_delivery_failed"
+                                    ),
+                                )
+                                raise
+                            recovery.mark_delivery_succeeded(
+                                intent_id,
+                                delivery_message_id=delivery_message_id,
+                            )
+
+                    if not canonical_persisted:
+                        if (
+                            len(delivery_matches) == 0
+                            and current_turn_id == source_turn_id
+                        ):
+                            stage_canonical = True
+                        elif (
+                            len(delivery_matches) == 1
+                            and current_turn_id == delivery_turn_id
+                        ):
+                            stage_canonical = False
+                        else:
+                            raise RuntimeError(
+                                "search_followup_delivery_context_ambiguous"
+                            )
+                        continuity_receipt = (
+                            await _commit_search_followup_canonical(
+                                guild_id=guild_id,
+                                query=query,
+                                answer=answer,
+                                deps=deps,
+                                session_key=ingress.session_key,
+                                ingress=ingress,
+                                delivery_turn_id=delivery_turn_id,
+                                exposure_position=exposure_position,
+                                memory_receipt_ref=(
+                                    memory_receipt_ref_from_exposure(
+                                        exposure_position
+                                    )
+                                ),
+                                stage_canonical=stage_canonical,
+                            )
+                        )
+                        recovery.mark_canonical_committed(
+                            intent_id,
+                            continuity_generation=int(
+                                continuity_receipt["generation"]
+                            ),
+                        )
+                    elif phase != "canonical_committed":
+                        recovery.mark_canonical_committed(
+                            intent_id,
+                            continuity_generation=status_generation,
+                        )
+                    recovery.complete(intent_id)
+                    _project_search_followup_delivery(
+                        guild_id=guild_id,
+                        query=query,
+                        answer=answer,
+                        deps=deps,
+                        ingress=ingress,
+                        source=(
+                            f"search-followup-recovery-{entry['source']}"
+                        ),
+                        completed_state=_completed_search_state(
+                            query,
+                            failed=(
+                                int(entry.get("attemptCount") or 0)
+                                >= 3
+                            ),
+                        ),
+                        turn_scope=None,
+                        runtime_mode=None,
+                        exposure_position=exposure_position,
+                    )
+                    if delivery_was_verified:
+                        counts["verified"] += 1
+                    else:
+                        counts["redelivered"] += 1
+                    continue
         except asyncio.CancelledError:
             if delivery_claimed:
                 recovery.release_recovery_claim(intent_id)
@@ -830,8 +1421,10 @@ async def recover_search_followups_from_runtime(
         except Exception as exc:
             if delivery_claimed:
                 recovery.release_recovery_claim(intent_id)
-            recovery.mark_delivery_uncertain(
+            _mark_delivery_uncertain_best_effort(
+                recovery,
                 intent_id,
+                deps=deps,
                 error_code="search_followup_recovery_failed",
             )
             counts["uncertain"] += 1
@@ -840,8 +1433,60 @@ async def recover_search_followups_from_runtime(
                 f"guild={guild_id} session={session_key} "
                 f"errorType={type(exc).__name__}"
             )
+        finally:
+            if (
+                owner_key is not None
+                and deps.background_search_tasks.get(owner_key)
+                is owner_task
+            ):
+                deps.background_search_tasks.pop(owner_key, None)
     reset_memory_exposure_position()
     return counts
+
+
+async def _search_followup_channel(
+    channel_id: int | None,
+    *,
+    deps: SearchFollowupRuntimeDeps,
+) -> Any | None:
+    if channel_id is None:
+        return None
+    channel = deps.bot.get_channel(channel_id)
+    if channel is not None:
+        return channel if hasattr(channel, "send") else None
+    fetch = getattr(deps.bot, "fetch_channel", None)
+    if not callable(fetch):
+        return None
+    try:
+        channel = await fetch(channel_id)
+    except Exception:
+        return None
+    return channel if hasattr(channel, "send") else None
+
+
+async def _send_search_followup(
+    channel: Any,
+    display_text: str,
+    *,
+    reply_to_message_id: int | None,
+    exposure_position: Any,
+    deps: SearchFollowupRuntimeDeps,
+) -> Any:
+    with memory_exposure_guard(
+        expected_position=exposure_position,
+        required=(exposure_position is not None),
+        index_dir=deps.memory_index_dir,
+    ):
+        return await await_continuity_commit_without_early_unlock(
+            deps.send_discord_text(
+                channel,
+                display_text,
+                reference_message_id=reply_to_message_id,
+                reference_factory=lambda message_id: (
+                    deps.discord_object_factory(id=message_id)
+                ),
+            )
+        )
 
 
 def schedule_search_followup_singleflight_from_runtime(
@@ -864,7 +1509,7 @@ def schedule_search_followup_singleflight_from_runtime(
     search_key = normalize_search_key(session_key, query)
     existing = deps.inflight_search_tasks.get(search_key)
     if existing is not None and not existing.done():
-        existing.cancel()
+        _track_search_task_drain(guild_id, existing, deps=deps)
         deps.inflight_search_tasks.pop(search_key, None)
     task = deps.create_turn_scoped_task(
         run_search_followup_from_runtime(
@@ -1123,6 +1768,11 @@ def schedule_search_followup_from_runtime(
             "[SEARCH] recovery_anchor_unavailable "
             f"guild={guild_id} session={task_key}"
         )
+    if (
+        deps.search_followup_recovery is not None
+        and recovery_intent_id is None
+    ):
+        return
     for existing_key, existing_task in list(
         deps.inflight_search_tasks.items()
     ):
@@ -1138,14 +1788,18 @@ def schedule_search_followup_from_runtime(
             and existing_task is not None
             and not existing_task.done()
         ):
-            existing_task.cancel()
+            _track_search_task_drain(
+                guild_id,
+                existing_task,
+                deps=deps,
+            )
             deps.inflight_search_tasks.pop(
                 existing_key,
                 None,
             )
     existing = deps.background_search_tasks.get(task_key)
     if existing is not None and not existing.done():
-        existing.cancel()
+        _track_search_task_drain(guild_id, existing, deps=deps)
     deps.log(
         f"[SEARCH] scheduled guild={guild_id} "
         f"session={task_key!r} source={source}"

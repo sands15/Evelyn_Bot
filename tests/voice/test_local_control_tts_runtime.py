@@ -63,6 +63,32 @@ class LocalControlTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(schedule_local_control_tts_from_runtime("hello", deps=deps))
 
+    async def test_hex_evidence_uses_fixed_spoken_summary(self) -> None:
+        spoken: list[str] = []
+
+        async def speak_answer_local(answer: str, **_kwargs: Any) -> bool:
+            spoken.append(answer)
+            return True
+
+        deps = LocalControlTtsRuntimeDeps(
+            local_only_mode=True,
+            local_tts_enabled=lambda: True,
+            speak_answer_local=speak_answer_local,
+            create_turn_scoped_task=lambda coro, **_kwargs: asyncio.create_task(coro),
+            log_voice_bottleneck_summary=lambda *_args, **_kwargs: None,
+            memory_index_dir=REPO_ROOT / "unused-memory-index",
+        )
+        task = schedule_local_control_tts_from_runtime(
+            "검증된 결과야. evidenceEncoding=hex-canonical-json-utf8-prefix, "
+            "evidencePreviewHex=616263.",
+            deps=deps,
+        )
+
+        self.assertIsNotNone(task)
+        await task
+        self.assertEqual(spoken, ["검증된 결과를 화면에 정리했어."])
+        self.assertNotIn("evidencePreviewHex=", spoken[0])
+
 
 if __name__ == "__main__":
     unittest.main()

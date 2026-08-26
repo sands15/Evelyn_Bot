@@ -210,6 +210,7 @@ _ALLOWED_REASONS = {
     "obsolete_memory",
     "test_cleanup",
     "source_revoked",
+    "guild_reset",
 }
 
 _process_lock = threading.RLock()

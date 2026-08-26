@@ -301,6 +301,7 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             new_turn_id=lambda: "turn-1",
             room_state_snapshot=lambda _room_session_key: {},
             validation_context_provider=lambda **_kwargs: None,
+            capture_voice_ingress_epoch=lambda _guild_id: 0,
             build_voice_ingress_item=lambda **kwargs: dict(kwargs),
             voice_ingress_queue_depth=lambda: 0,
             schedule_voice_utterance_item=schedule_voice_utterance_item,

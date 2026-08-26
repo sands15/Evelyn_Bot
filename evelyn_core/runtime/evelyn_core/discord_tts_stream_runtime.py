@@ -8,6 +8,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .observability_metrics import voice_latency_trace_from_metrics
 from .text import clean_text
 
 
@@ -104,6 +105,7 @@ async def speak_answer_from_runtime(
                 session_key=session_key,
                 turn_scope=turn_scope,
                 trace_payload={"source_type": "OmniVoicePCMStream"},
+                latency_trace=voice_latency_trace_from_metrics(metrics),
                 on_first_packet_sent=lambda: deps.log_turn_event(
                     "first_packet_sent",
                     turn_id=turn_id,
@@ -156,6 +158,7 @@ async def stream_tts_sentences_from_runtime(
             session_key=session_key,
             turn_scope=turn_scope,
             trace_payload={"source_type": "OmniVoicePCMStream"},
+            latency_trace=voice_latency_trace_from_metrics(metrics),
             on_request_start=lambda: (
                 deps.mark_turn_stage(
                     metrics,

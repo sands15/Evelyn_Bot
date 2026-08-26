@@ -21,7 +21,9 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-if "numpy" not in sys.modules:
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
     class _DummyNdArray:
         pass
 
@@ -242,6 +244,7 @@ class ConversationMemoryExposureTests(unittest.TestCase):
             self.assertNotIn("memoryReceiptRef", serialized_payload)
             self.assertNotIn(CURRENT_NOTE, serialized_payload)
             self.assertNotIn(TOMBSTONED_NOTE, serialized_payload)
+            self.assertIs(payload["timings_per_token"], True)
             self.assertEqual(
                 sum(
                     "memoryReceipt" in message

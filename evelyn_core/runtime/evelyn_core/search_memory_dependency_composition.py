@@ -83,6 +83,7 @@ class SearchMemoryDependencyCompositionDeps:
     log: Callable[..., Any]
     search_followup_recovery: Any | None = None
     continuity_status: Callable[[], dict[str, Any]] | None = None
+    guild_is_open: Callable[[int], bool] | None = None
 
 
 class SearchMemoryDependencyComposition:
@@ -182,6 +183,7 @@ class SearchMemoryDependencyComposition:
             commit_session_continuity=deps.commit_session_continuity,
             search_followup_recovery=deps.search_followup_recovery,
             continuity_status=deps.continuity_status,
+            guild_is_open=deps.guild_is_open,
             log=deps.log,
         )
 

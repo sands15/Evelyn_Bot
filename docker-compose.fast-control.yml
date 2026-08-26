@@ -9,7 +9,7 @@ services:
       args:
         EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
     restart: "no"
-    stop_grace_period: 60s
+    stop_grace_period: 130s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -28,21 +28,33 @@ services:
       CONTROL_PAGE_BOT_API_HOST: "127.0.0.1"
       CONTROL_PAGE_BOT_API_PORT: "8798"
       CONTROL_PAGE_PUBLIC_PORT: "8799"
-      MAIN_LLM_HOST: "main_llm"
+      MAIN_LLM_HOST: "main_llm_gateway"
       ROUTER_LLM_HOST: "router_llm"
       SUB_LLM_HOST: "sub_llm"
       TTS_HOST: "tts"
       STT_HOST: "stt"
       VISION_HOST: "vision"
-      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
-      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      LLM_SERVER_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_GATEWAY_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_CLIENT_MODE: "gateway"
+      MAIN_LLM_IDENTITY_FILE: "/main-llm-epoch/identity"
+      MAIN_LLM_SERVER_IDENTITY_FILE: "/main-llm-epoch/server-identity"
+      MAIN_LLM_RUNTIME_TEMPLATE_IDENTITY_FILE: "/main-llm-epoch/runtime-template-identity"
+      MAIN_LLM_PROMPT_ASSETS_EMBEDDED: "true"
+      MAIN_LLM_REQUIRE_EXACT_PROMPT_ABI: "true"
       SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
       ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
       MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"
       MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"
+      MINDCRAFT_LLM_BROKER_URL: "http://127.0.0.1:8798/internal/mindcraft-llm"
+      SPECIALIST_LLM_TIMEOUT_SEC: "${SPECIALIST_LLM_TIMEOUT_SEC:-6}"
+      QWEN_ADMISSION_QUEUE_TIMEOUT_SEC: "${QWEN_ADMISSION_QUEUE_TIMEOUT_SEC:-30}"
       MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"
       MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"
       MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"
+      MAIN_LLM_EPOCH_FILE: "/main-llm-epoch/epoch"
+      MINDCRAFT_QWEN_EPOCH_FILE: "/qwen-admission/epoch"
       OMNIVOICE_SERVER_URL: "http://tts:8880"
       STT_SERVICE_URL: "http://stt:8892"
       VISION_SERVICE_URL: "http://vision:8891"
@@ -51,13 +63,21 @@ services:
       MINECRAFT_AUTONOMY_SERVICE_HOST: "voyager"
       VOYAGER_CODEX_GATEWAY_PORT: "8787"
       MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
+      MINECRAFT_CONTROL_MUTATION_TIMEOUT_SEC: "${MINECRAFT_CONTROL_MUTATION_TIMEOUT_SEC:-30}"
+      MINECRAFT_LAZY_START_TIMEOUT_SEC: "${MINECRAFT_LAZY_START_TIMEOUT_SEC:-300}"
+      MINECRAFT_CONNECT_READY_TIMEOUT_SEC: "${MINECRAFT_CONNECT_READY_TIMEOUT_SEC:-60}"
       BOT_API_PORT: "8798"
       LOCAL_BRIDGE_STATUS_AUTH_TOKEN: "${LOCAL_BRIDGE_STATUS_AUTH_TOKEN:-}"
       EVELYN_INTERNAL_CONTROL_TOKEN: "${EVELYN_INTERNAL_CONTROL_TOKEN:-}"
+      EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN: "${EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN:-}"
+      EVELYN_VOICE_INPUT_LEASE_TOKEN: "${EVELYN_VOICE_INPUT_LEASE_TOKEN:-}"
       START_WAIT_TIMEOUT_SEC: "8"
       START_WAIT_INTERVAL_SEC: "1"
       OPUS_ERROR_TO_SILENCE: "false"
       STT_USE_RAW_48K: "false"
+    depends_on:
+      main_llm_gateway:
+        condition: service_healthy
     volumes:
       - ./bot_memory:/app/bot_memory
       - ./bot_profiles:/app/bot_profiles
@@ -68,8 +88,14 @@ services:
       - ./assets:/app/assets
       - ./docs:/app/docs
       - mindcraft_llm_broker_token:/mindcraft-llm-broker
+      - main_llm_epoch:/main-llm-epoch:ro
+      - qwen_admission_epoch:/qwen-admission:ro
     ports:
       - "127.0.0.1:8798:8798"
+    networks:
+      - default
+      - main_llm_admission
+      - qwen_admission
     healthcheck:
       test: >-
         python -c "from urllib.request import urlopen; import json,sys; resp = urlopen('http://127.0.0.1:8798/api/control-page/state', timeout=3); payload = json.loads(resp.read() or b'{}'); sys.exit(0 if resp.getcode() == 200 and payload.get('ok') is True else 1)"
@@ -95,12 +121,13 @@ services:
       CONTROL_PAGE_BOT_API_PORT: "8798"
       CONTROL_PAGE_BOT_API_HOST: "bot_api"
       EVELYN_INTERNAL_CONTROL_TOKEN: "${EVELYN_INTERNAL_CONTROL_TOKEN:-}"
+      EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN: "${EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN:-}"
       EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN: "${EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN:-}"
       CONTROL_PAGE_SERVICE_HOST: "127.0.0.1"
       EVELYN_PROJECT_ROOT: /app
       EVELYN_CORE_ROOT: /app/evelyn_core
       EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
-      MAIN_LLM_HOST: "main_llm"
+      MAIN_LLM_HOST: "main_llm_gateway"
       ROUTER_LLM_HOST: "router_llm"
       SUB_LLM_HOST: "sub_llm"
       TTS_HOST: "tts"
@@ -108,21 +135,31 @@ services:
       VISION_HOST: "vision"
       VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
       MINECRAFT_AUTONOMY_SERVICE_HOST: "voyager"
-      MAIN_LLM_PORT: "9820"
+      MAIN_LLM_PORT: "9819"
       ROUTER_LLM_PORT: "9822"
       SUB_LLM_PORT: "9821"
       TTS_PORT: "8880"
       STT_PORT: "8892"
       VOYAGER_CODEX_GATEWAY_PORT: "8787"
       MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
-      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
-      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      LLM_SERVER_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_GATEWAY_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_CLIENT_MODE: "gateway"
+      MAIN_LLM_IDENTITY_FILE: "/main-llm-epoch/identity"
+      MAIN_LLM_SERVER_IDENTITY_FILE: "/main-llm-epoch/server-identity"
+      MAIN_LLM_RUNTIME_TEMPLATE_IDENTITY_FILE: "/main-llm-epoch/runtime-template-identity"
+      MAIN_LLM_PROMPT_ASSETS_EMBEDDED: "true"
+      MAIN_LLM_REQUIRE_EXACT_PROMPT_ABI: "true"
       SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
       ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
       OMNIVOICE_SERVER_URL: "http://tts:8880"
       STT_SERVICE_URL: "http://stt:8892"
       VISION_SERVICE_URL: "http://vision:8891"
       VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+    depends_on:
+      main_llm_gateway:
+        condition: service_healthy
     volumes:
       - ./bot_memory:/app/bot_memory
       - ./guild_settings:/app/guild_settings
@@ -131,8 +168,12 @@ services:
       - ./external:/app/external
       - ./assets:/app/assets
       - ./docs:/app/docs
+      - main_llm_epoch:/main-llm-epoch:ro
     ports:
       - "127.0.0.1:8799:8799"
+    networks:
+      - default
+      - main_llm_admission
     healthcheck:
       test: >-
         python -c "from urllib.request import urlopen; import json,sys; resp = urlopen('http://127.0.0.1:8799/health', timeout=3); payload = json.loads(resp.read() or b'{}'); sys.exit(0 if resp.getcode() == 200 and payload.get('ok') is True else 1)"
@@ -149,7 +190,7 @@ services:
       dockerfile: docker/Dockerfile.discord-bot
       args:
         EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
-    restart: "no"
+    restart: "on-failure:3"
     stop_signal: SIGINT
     stop_grace_period: 30s
     extra_hosts:
@@ -159,6 +200,7 @@ services:
       DISCORD_ENABLED: "true"
       LOCAL_ONLY: "false"
       DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:?Set DISCORD_BOT_TOKEN before starting discord_bot}"
+      EVELYN_VOICE_INPUT_LEASE_TOKEN: "${EVELYN_VOICE_INPUT_LEASE_TOKEN:-}"
       CROSS_SURFACE_CONTINUITY_ENABLED: "${CROSS_SURFACE_CONTINUITY_ENABLED:-false}"
       CROSS_SURFACE_CONTINUITY_GUILD_ID: "${CROSS_SURFACE_CONTINUITY_GUILD_ID:-0}"
       CROSS_SURFACE_CONTINUITY_USER_ID: "${CROSS_SURFACE_CONTINUITY_USER_ID:-0}"
@@ -169,19 +211,36 @@ services:
       CONTROL_PAGE_SERVICE_HOST: "control_page"
       CONTROL_PAGE_BOT_API_HOST: "bot_api"
       CONTROL_PAGE_BOT_API_PORT: "8798"
-      MAIN_LLM_HOST: "main_llm"
+      MAIN_LLM_HOST: "main_llm_gateway"
       ROUTER_LLM_HOST: "router_llm"
       SUB_LLM_HOST: "sub_llm"
       TTS_HOST: "tts"
       STT_HOST: "stt"
       VISION_HOST: "vision"
-      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
-      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      LLM_SERVER_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_GATEWAY_URL: "http://main_llm_gateway:9819/v1/chat/completions"
+      MAIN_LLM_ADMISSION_CLIENT_MODE: "gateway"
+      MAIN_LLM_IDENTITY_FILE: "/main-llm-epoch/identity"
+      MAIN_LLM_SERVER_IDENTITY_FILE: "/main-llm-epoch/server-identity"
+      MAIN_LLM_RUNTIME_TEMPLATE_IDENTITY_FILE: "/main-llm-epoch/runtime-template-identity"
+      MAIN_LLM_PROMPT_ASSETS_EMBEDDED: "true"
+      MAIN_LLM_REQUIRE_EXACT_PROMPT_ABI: "true"
       SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
       ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
       OMNIVOICE_SERVER_URL: "http://tts:8880"
+      TTS_WARMUP_GENERATE_ENABLED: "true"
       STT_SERVICE_URL: "http://stt:8892"
       STT_SERVICE_FALLBACK_LOCAL: "false"
+      STT_STREAMING_ENABLED: "${STT_STREAMING_ENABLED:-true}"
+      STT_FULL_RESCORING_ENABLED: "${STT_FULL_RESCORING_ENABLED:-false}"
+      MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"
+      MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"
+      MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"
+      SPECIALIST_LLM_TIMEOUT_SEC: "${SPECIALIST_LLM_TIMEOUT_SEC:-6}"
+      VOYAGER_SKILL_LLM_URL: "${VOYAGER_SKILL_LLM_URL:-http://sub_llm:9821/v1/chat/completions}"
+      VOYAGER_SKILL_MODEL_NAME: "${VOYAGER_SKILL_MODEL_NAME:-gemma-4-E4B-it-Q4_K_M-text-only}"
+      QWEN_ADMISSION_QUEUE_TIMEOUT_SEC: "${QWEN_ADMISSION_QUEUE_TIMEOUT_SEC:-30}"
       VISION_SERVICE_URL: "http://vision:8891"
       VISION_WATCH_ENABLED: "false"
       VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
@@ -190,6 +249,8 @@ services:
       VOYAGER_CODEX_GATEWAY_PORT: "8787"
       MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
       MINECRAFT_WORLD_LEASE_OWNER_URL: "http://bot_api:8798"
+      MINECRAFT_WORLD_LEASE_CONNECT_TIMEOUT_SEC: "${MINECRAFT_WORLD_LEASE_CONNECT_TIMEOUT_SEC:-480}"
+      MINECRAFT_WORLD_LEASE_MUTATION_TIMEOUT_SEC: "${MINECRAFT_WORLD_LEASE_MUTATION_TIMEOUT_SEC:-30}"
       LOCAL_MIC_ENABLED: "false"
       LOCAL_TTS_OUTPUT_ENABLED: "false"
       VOICE_INPUT_MODE: "discord"
@@ -202,9 +263,11 @@ services:
         condition: service_healthy
       control_page:
         condition: service_healthy
-      main_llm:
+      main_llm_gateway:
         condition: service_healthy
       router_llm:
+        condition: service_healthy
+      minecraft_llm:
         condition: service_healthy
       sub_llm:
         condition: service_healthy
@@ -221,50 +284,115 @@ services:
       - ./external:/app/external
       - ./assets:/app/assets
       - ./docs:/app/docs
+      - mindcraft_llm_broker_token:/mindcraft-llm-broker:ro
+      - main_llm_epoch:/main-llm-epoch:ro
+    networks:
+      - default
+      - main_llm_admission
     command: ["python", "main.py"]
 
   main_llm:
     container_name: evelyn-main-llm
-    profiles: ["llm"]
     build:
       context: .
       dockerfile: docker/Dockerfile.llama
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       MAIN_LLM_PORT: "9820"
+      MAIN_LLM_CONTEXT: "${MAIN_LLM_CONTEXT:-8192}"
+      MAIN_LLM_N_PARALLEL: "${MAIN_LLM_N_PARALLEL:-1}"
+      MAIN_LLM_BATCH_SIZE: "${MAIN_LLM_BATCH_SIZE:-2048}"
+      MAIN_LLM_UBATCH_SIZE: "${MAIN_LLM_UBATCH_SIZE:-2048}"
+      MAIN_LLM_CACHE_RAM_MIB: "${MAIN_LLM_CACHE_RAM_MIB:-8192}"
+      MAIN_LLM_CACHE_REUSE: "${MAIN_LLM_CACHE_REUSE:-256}"
+      MAIN_LLM_CUDA_GRAPHS_ENABLED: "${MAIN_LLM_CUDA_GRAPHS_ENABLED:-1}"
+      GGML_CUDA_GRAPH_OPT: "${MAIN_LLM_CUDA_GRAPH_OPT:-1}"
+      MAIN_LLM_SWA_FULL_ENABLED: "${MAIN_LLM_SWA_FULL_ENABLED:-1}"
     volumes:
-      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
-    ports:
-      - "127.0.0.1:9820:9820"
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama:ro
+      - ${EVELYN_MAIN_LLM_BUILD_DIR:-${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}/build-sm120-v1}:/llama/build:ro
+      - main_llm_epoch:/main-llm-epoch
+    networks:
+      - main_llm_internal
     command:
       - bash
       - -lc
       - >-
-        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
-        exec ./build/bin/llama-server
-        -m /llama/models/gemma4-12b-batiai-iq4xs/google-gemma-4-12B-it-IQ4_XS.gguf
+        set -e;
+        umask 077;
+        model_path=/llama/models/gemma4-12b-batiai-iq4xs/google-gemma-4-12B-it-IQ4_XS.gguf;
+        server_path=/llama/build/bin/llama-server;
+        test -x "$${server_path}";
+        grep -Eq '^CMAKE_CUDA_ARCHITECTURES:[^=]+=120a-real$$' /llama/build/CMakeCache.txt;
+        runtime_template_args=(--reasoning off --reasoning-budget 0 --reasoning-format none --jinja --no-mmproj);
+        case "$${MAIN_LLM_SWA_FULL_ENABLED}" in
+        1) swa_full_args=(--swa-full) ;;
+        0) swa_full_args=() ;;
+        *) exit 64 ;;
+        esac;
+        server_args=(
+        -m "$${model_path}"
         --host 0.0.0.0
         --port 9820
         --flash-attn on
         -ngl 999
-        -c 8192
-        -np 1
+        "$${swa_full_args[@]}"
+        -c "$${MAIN_LLM_CONTEXT}"
+        -np "$${MAIN_LLM_N_PARALLEL}"
+        --batch-size "$${MAIN_LLM_BATCH_SIZE}"
+        --ubatch-size "$${MAIN_LLM_UBATCH_SIZE}"
+        --cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}"
         --cache-prompt
-        --cache-reuse 256
+        --cache-reuse "$${MAIN_LLM_CACHE_REUSE}"
         --metrics
         --repeat-last-n 256
         --repeat-penalty 1.10
         --presence-penalty 0.00
         --frequency-penalty 0.20
-        --reasoning off
-        --reasoning-budget 0
-        --reasoning-format none
-        --jinja
-        --no-mmproj
+        "$${runtime_template_args[@]}"
+        );
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        case "$${MAIN_LLM_CUDA_GRAPHS_ENABLED}" in
+        1) unset GGML_CUDA_DISABLE_GRAPHS; graph_disable_state=absent ;;
+        0) export GGML_CUDA_DISABLE_GRAPHS=1; graph_disable_state=present ;;
+        *) exit 64 ;;
+        esac;
+        sha256sum "$${model_path}" | awk '{print $$1}' > /main-llm-epoch/identity.tmp;
+        test "$$(wc -c < /main-llm-epoch/identity.tmp)" -eq 65;
+        runtime_manifest=/main-llm-epoch/server-runtime-manifest.tmp;
+        {
+        printf 'evelyn.llama-server-runtime.v1\n';
+        while IFS= read -r runtime_path; do
+        test -f "$${runtime_path}";
+        printf 'local\t%s\t' "$${runtime_path}";
+        sha256sum "$${runtime_path}" | awk '{print $$1}';
+        done < <(find /llama/build/bin -maxdepth 1 \( -type f -o -type l \) \( -name llama-server -o -name '*.so*' \) -print | LC_ALL=C sort);
+        while IFS= read -r runtime_path; do
+        test -f "$${runtime_path}";
+        printf 'linked\t%s\t' "$${runtime_path}";
+        sha256sum "$${runtime_path}" | awk '{print $$1}';
+        done < <(ldd "$${server_path}" | awk '$$2 == "=>" && $$3 ~ /^\// {print $$3} $$1 ~ /^\// {print $$1}' | LC_ALL=C sort -u);
+        } > "$${runtime_manifest}";
+        test -s "$${runtime_manifest}";
+        sha256sum "$${runtime_manifest}" | awk '{print $$1}' > /main-llm-epoch/server-identity.tmp;
+        test "$$(wc -c < /main-llm-epoch/server-identity.tmp)" -eq 65;
+        { printf 'GGML_CUDA_GRAPHS_ENABLED=%s\0' "$${MAIN_LLM_CUDA_GRAPHS_ENABLED}"; printf 'GGML_CUDA_DISABLE_GRAPHS=%s\0' "$${graph_disable_state}"; printf 'GGML_CUDA_GRAPH_OPT=%s\0' "$${GGML_CUDA_GRAPH_OPT}"; printf '%s\0' "$${server_args[@]}"; } | sha256sum | awk '{print $$1}' > /main-llm-epoch/runtime-template-identity.tmp;
+        test "$$(wc -c < /main-llm-epoch/runtime-template-identity.tmp)" -eq 65;
+        sync /main-llm-epoch/identity.tmp;
+        sync /main-llm-epoch/server-identity.tmp;
+        sync /main-llm-epoch/runtime-template-identity.tmp;
+        mv -f /main-llm-epoch/identity.tmp /main-llm-epoch/identity;
+        mv -f /main-llm-epoch/server-identity.tmp /main-llm-epoch/server-identity;
+        mv -f /main-llm-epoch/runtime-template-identity.tmp /main-llm-epoch/runtime-template-identity;
+        rm -f "$${runtime_manifest}";
+        cat /proc/sys/kernel/random/uuid > /main-llm-epoch/epoch.tmp;
+        sync /main-llm-epoch/epoch.tmp;
+        mv -f /main-llm-epoch/epoch.tmp /main-llm-epoch/epoch;
+        exec "$${server_path}" "$${server_args[@]}"
     healthcheck:
       test: >-
         bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9820"
@@ -314,7 +442,7 @@ services:
 
   minecraft_llm:
     container_name: evelyn-minecraft-llm
-    profiles: ["voyager"]
+    profiles: ["llm", "voyager"]
     build:
       context: .
       dockerfile: docker/Dockerfile.llama
@@ -327,12 +455,24 @@ services:
       LLAMA_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
     volumes:
       - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
-    ports:
-      - "127.0.0.1:9823:9823"
+      - qwen_admission_epoch:/qwen-admission
+    expose:
+      - "9823"
+    networks:
+      - qwen_admission
+    depends_on:
+      bot_api:
+        condition: service_started
+        restart: true
     command:
       - bash
       - -lc
       - >-
+        set -e;
+        umask 077;
+        cat /proc/sys/kernel/random/uuid > /qwen-admission/epoch.tmp;
+        sync /qwen-admission/epoch.tmp;
+        mv -f /qwen-admission/epoch.tmp /qwen-admission/epoch;
         export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
         exec ./build/bin/llama-server
         -m /llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf
@@ -403,10 +543,49 @@ services:
       retries: 40
       start_period: 90s
 
+  main_llm_gateway:
+    container_name: evelyn-main-llm-gateway
+    image: evelyn-fast-control-bot_api:latest
+    pull_policy: never
+    restart: "no"
+    environment:
+      EVELYN_EXPECTED_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
+      EVELYN_RUNTIME_ROLE: "main_llm_gateway"
+      MAIN_LLM_GATEWAY_HOST: "0.0.0.0"
+      MAIN_LLM_GATEWAY_PORT: "9819"
+      MAIN_LLM_ADMISSION_UPSTREAM_URL: "http://main_llm:9820/v1/chat/completions"
+      MAIN_LLM_EPOCH_FILE: "/main-llm-epoch/epoch"
+      MAIN_LLM_FOREGROUND_RESERVATION_TTL_MS: "900"
+      MAIN_LLM_GATEWAY_UPSTREAM_HEADERS_TIMEOUT_SEC: "30"
+      MAIN_LLM_GATEWAY_STREAM_IDLE_TIMEOUT_SEC: "30"
+      MAIN_LLM_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_SEC: "300"
+    depends_on:
+      main_llm:
+        condition: service_healthy
+    expose:
+      - "9819"
+    volumes:
+      - main_llm_epoch:/main-llm-epoch:ro
+    networks:
+      - main_llm_admission
+      - main_llm_internal
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["python", "-m", "evelyn_core.main_llm_admission_gateway", "--host", "0.0.0.0", "--port", "9819"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:9819/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') is True and payload.get('upstreamReady') is True and payload.get('reservationReady') is True and payload.get('reservationTtlMs') == 900 else 1)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
   tts:
     container_name: evelyn-tts
     profiles: ["tts"]
-    image: evelyn-omnivoice-tts:recipe-7cfc51e96088
+    image: evelyn-omnivoice-tts:recipe-e8151492550b
     pull_policy: never
     build:
       context: .
@@ -416,17 +595,23 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       OMNIVOICE_HOST: "0.0.0.0"
       OMNIVOICE_PORT: "8880"
       OMNIVOICE_DEVICE: "cuda"
       OMNIVOICE_MODEL_ID: "k2-fsa/OmniVoice"
       OMNIVOICE_MODEL_REVISION: "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+      OMNIVOICE_RUNTIME_REVISION: "omnivoice-0.1.5"
+      OMNIVOICE_FLASHINFER_REVISION: "28bc0889d92110491d726a9c79f26a895db5a074"
       OMNIVOICE_PROFILE_DIR: "/home/ubuntu/app/profiles"
-      OMNIVOICE_NUM_STEP: "32"
-      OMNIVOICE_MAX_CONCURRENT: "2"
+      OMNIVOICE_NUM_STEP: "12"
+      OMNIVOICE_MAX_CONCURRENT: "1"
+      OMNIVOICE_FLASHINFER_ENABLED: "true"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH: "true"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH_BUCKETS: "[2,4,8]"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH_OVERHEAD_BUDGET: "512"
       OMNIVOICE_LOG_LEVEL: "info"
       OMNIVOICE_STREAM_STRATEGY: "sentence"
       HF_HUB_OFFLINE: "1"
@@ -436,7 +621,7 @@ services:
     ports:
       - "127.0.0.1:8880:8880"
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('status') == 'healthy' and payload.get('ready') is True and payload.get('model_loaded') is True and payload.get('model_id') == 'k2-fsa/OmniVoice' and payload.get('model_revision') == 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4' else 1)"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('status') == 'healthy' and payload.get('ready') is True and payload.get('model_loaded') is True and payload.get('model_id') == 'k2-fsa/OmniVoice' and payload.get('model_revision') == 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4' and payload.get('runtime_revision') == 'omnivoice-0.1.5' and payload.get('flashinfer_revision') == '28bc0889d92110491d726a9c79f26a895db5a074' and payload.get('inference_backend') == 'flashinfer_cuda_graph' and payload.get('flashinfer_python_version') == '0.6.15.post1' and payload.get('flashinfer_jit_cache_version') == '0.6.15.post1+cu129' and payload.get('torch_version') == '2.8.0+cu129' and payload.get('torch_cuda_version') == '12.9' and payload.get('flashinfer_jit_disabled') is True and isinstance(payload.get('flashinfer_cuda_graph_buckets'), list) and all(type(value) is float for value in payload.get('flashinfer_cuda_graph_buckets')) and payload.get('flashinfer_cuda_graph_buckets') == [2.0, 4.0, 8.0] and type(payload.get('max_concurrent')) is int and payload.get('max_concurrent') == 1 and type(payload.get('num_step')) is int and payload.get('num_step') == 12 else 1)"]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -458,9 +643,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"
       VOXCPM_MODEL_ID: "openbmb/VoxCPM2"
       VOXCPM_DEVICE: "cuda"
       VOXCPM_REFERENCE_AUDIO: "/app/profiles/evelyn/ref_audio.wav"
@@ -502,6 +687,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.vision
+      args:
+        EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
     restart: "no"
     gpus: all
     environment:
@@ -559,6 +746,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.vision-ingress
+      args:
+        EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
     restart: "no"
     depends_on:
       vision_runtime:
@@ -592,9 +781,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "${EVELYN_INGRESS_GPU_ID:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "${EVELYN_INGRESS_GPU_ID:-1}"
       STT_HOST: "0.0.0.0"
       STT_PORT: "8892"
       STT_MODEL_NAME: "Qwen/Qwen3-ASR-1.7B"
@@ -603,6 +792,7 @@ services:
       STT_COMPUTE_TYPE: "float16"
       STT_LOAD_ON_START: "true"
       STT_MAX_AUDIO_SEC: "30"
+      STT_VLLM_GPU_MEMORY_UTILIZATION: "${STT_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
     volumes:
       - ./logs:/app/logs
       - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
@@ -676,8 +866,13 @@ services:
       MINDCRAFT_STATUS_PATH: "/app/runtime_artifacts/mindcraft/status.json"
       MINDCRAFT_CODEX_ENABLED: "false"
       MINDCRAFT_GOAL_MANAGER_STATE_PATH: "/app/runtime_artifacts/mindcraft/goal_manager_state.json"
+      MINDCRAFT_COMBAT_HISTORY_PATH: "/app/runtime_artifacts/mindcraft/combat_history.json"
       MINDCRAFT_GOAL_MANAGER_MODE: "gated"
       MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"
+      MINDCRAFT_MODE_INTERVAL_MS: "100"
+      MINDCRAFT_INTERRUPT_POLL_MS: "100"
+      MINDCRAFT_INTERRUPT_STOP_WAIT_MS: "1200"
+      MINDCRAFT_SELF_PROMPT_COOLDOWN_MS: "300"
       MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"
       MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"
       MINDCRAFT_ALLOWED_PLAYERS: "${MINDCRAFT_ALLOWED_PLAYERS:-}"
@@ -718,8 +913,16 @@ services:
 
 volumes:
   codex_gateway_token:
+  main_llm_epoch:
   mindcraft_llm_broker_token:
+  qwen_admission_epoch:
 
 networks:
+  main_llm_admission:
+    internal: true
+  main_llm_internal:
+    internal: true
   vision_isolated:
+    internal: true
+  qwen_admission:
     internal: true

@@ -19,7 +19,8 @@ const BROKER_DELIVERY_LEASE_SCHEMA = 'mindcraft.llm-delivery-lease.v1';
 const BROKER_DELIVERY_ACK_SCHEMA = 'mindcraft.llm-delivery-ack.v1';
 const BROKER_TOKEN_HEADER = 'X-Evelyn-Mindcraft-LLM-Token';
 const BROKER_MAX_FRAME_BYTES = 256 * 1024;
-const BROKER_REQUEST_TIMEOUT_MS = 100 * 1000;
+const BROKER_MAX_ACK_BYTES = 4096;
+const BROKER_REQUEST_TIMEOUT_MS = 135 * 1000;
 const BROKER_ACK_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_GOAL_STATE_PATH = '/app/runtime_artifacts/mindcraft/goal_manager_state.json';
 const RECOVERY_PLAN_TTL_MS = 5 * 60 * 1000;
@@ -241,6 +242,32 @@ async function drainBrokerStream(reader, trailing) {
     }
 }
 
+async function readBoundedJson(response, maximumBytes) {
+    const reader = response.body?.getReader?.();
+    if (!reader) throw brokerError('mindcraft_llm_delivery_ack_invalid');
+    let bytes = new Uint8Array();
+    try {
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) {
+                const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+                return JSON.parse(text);
+            }
+            const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+            if (bytes.length + chunk.length > maximumBytes) {
+                throw brokerError('mindcraft_llm_delivery_ack_invalid');
+            }
+            const combined = new Uint8Array(bytes.length + chunk.length);
+            combined.set(bytes);
+            combined.set(chunk, bytes.length);
+            bytes = combined;
+        }
+    } catch (error) {
+        await reader.cancel().catch(() => {});
+        throw error;
+    }
+}
+
 async function postBrokerAck(url, token, requestId, leaseId, outcome) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), BROKER_ACK_TIMEOUT_MS);
@@ -261,7 +288,7 @@ async function postBrokerAck(url, token, requestId, leaseId, outcome) {
             redirect: 'error',
             signal: controller.signal,
         });
-        const payload = await response.json().catch(() => ({}));
+        const payload = await readBoundedJson(response, BROKER_MAX_ACK_BYTES).catch(() => ({}));
         if (
             !response.ok || !exactKeys(payload, ['ok', 'contentFree']) ||
             payload.ok !== true || payload.contentFree !== true
@@ -1029,6 +1056,7 @@ export class EvelynPlanner {
     }
 
     async recover(turns, systemMessage, stopSeq, reason) {
+        if (this.recoveryPlanInFlight) return '';
         const cooldownRemaining = this.codexCooldownMs - (Date.now() - this.lastCodexAt);
         if (!this.recoveryPlan && cooldownRemaining > 0) {
             const probe = this.safeProbe(systemMessage, reason);
@@ -1039,7 +1067,6 @@ export class EvelynPlanner {
         }
         try {
             if (!this.recoveryPlan) {
-                if (this.recoveryPlanInFlight) return '';
                 this.recoveryPlanInFlight = true;
                 try {
                     await this.createRecoveryPlan(turns, systemMessage, reason);

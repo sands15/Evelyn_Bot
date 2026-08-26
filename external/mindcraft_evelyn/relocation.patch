@@ -1,45 +1,531 @@
 diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
 --- a/src/agent/library/skills.js
 +++ b/src/agent/library/skills.js
-@@ -1406 +1406 @@ export async function moveAway(bot, distance) {
+@@ -12,0 +13,10 @@ export function log(bot, message) {
++
++export async function settleCraftOutput(bot, itemName, beforeCount, craftingTable) {
++    if (!craftingTable) bot.closeWindow(bot.inventory);
++    for (let attempt = 0; attempt < 10; attempt++) {
++        await new Promise(resolve => setTimeout(resolve, 100));
++        const storedCount = bot.inventory.items().reduce((count, item) => count + (item.name === itemName ? item.count : 0), 0);
++        if (storedCount > beforeCount) return true;
++    }
++    return false;
++}
+@@ -45,0 +56 @@ export async function craftRecipe(bot, itemName, num=1) {
++    try {
+@@ -64,13 +75,22 @@ export async function craftRecipe(bot, itemName, num=1) {
+             // Try to place crafting table
+             let hasTable = world.getInventoryCounts(bot)['crafting_table'] > 0;
+             if (hasTable) {
+-                let pos = world.getNearestFreeSpace(bot, 1, 6);
+-                await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
++                const pos = world.getNearestFreeSpace(bot, 1, 6, 2);
++                if (!pos) {
++                    log(bot, `No safe space is available for a crafting table.`);
++                    return false;
++                }
++                const placed = await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
++                if (!placed) {
++                    log(bot, `Unable to place a crafting table.`);
++                    return false;
++                }
++                placedTable = true;
+                 craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+                 if (craftingTable) {
+                     recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+-                    placedTable = true;
+                 }
++                else return false;
+             }
+             else {
+                 log(bot, `Crafting ${itemName} requires a crafting table.`)
+@@ -83,8 +104,5 @@ export async function craftRecipe(bot, itemName, num=1) {
+     }
+     if (!recipes || recipes.length === 0) {
+         log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
+-        if (placedTable) {
+-            await collectBlock(bot, 'crafting_table', 1);
+-        }
+         return false;
+     }
+@@ -92,3 +110,7 @@ export async function craftRecipe(bot, itemName, num=1) {
+     if (craftingTable && bot.entity.position.distanceTo(craftingTable.position) > 4) {
+-        await goToNearestBlock(bot, 'crafting_table', 4, craftingTableRange);
++        const reached = await goToNearestBlock(bot, 'crafting_table', 4, craftingTableRange);
++        if (!reached || bot.entity.position.distanceTo(craftingTable.position) > 5) {
++            log(bot, `Unable to reach a crafting table.`);
++            return false;
++        }
+     }
+@@ -101,0 +123,6 @@ export async function craftRecipe(bot, itemName, num=1) {
++    const craftCount = Math.min(craftLimit.num, num);
++    if (!Number.isFinite(craftCount) || craftCount <= 0) {
++        log(bot, `You do not have enough resources to craft ${itemName}.`);
++        return false;
++    }
++    const beforeCount = bot.inventory.items().reduce((count, item) => count + (item.name === itemName ? item.count : 0), 0);
+@@ -103,6 +131,9 @@ export async function craftRecipe(bot, itemName, num=1) {
+-    await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
+-    if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+-    else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+-    if (placedTable) {
+-        await collectBlock(bot, 'crafting_table', 1);
+-    }
++    await bot.craft(recipe, craftCount, craftingTable);
++    const outputSettled = await settleCraftOutput(bot, itemName, beforeCount, craftingTable);
++    const afterCount = bot.inventory.items().reduce((count, item) => count + (item.name === itemName ? item.count : 0), 0);
++    if (!outputSettled) {
++        log(bot, `Failed to craft ${itemName}: the output did not reach inventory.`);
++        return false;
++    }
++    if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${afterCount} ${itemName}.`);
++    else log(bot, `Successfully crafted ${itemName}, you now have ${afterCount} ${itemName}.`);
+@@ -114,0 +145,5 @@ export async function craftRecipe(bot, itemName, num=1) {
++    } finally {
++        if (placedTable) {
++            await collectBlock(bot, 'crafting_table', 1);
++        }
++    }
+@@ -757,7 +792,12 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
+     if (!dont_move_for.includes(item_name) && (pos.distanceTo(targetBlock.position) < 1.1 || pos_above.distanceTo(targetBlock.position) < 1.1)) {
+         // too close
+-        let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
+-        let inverted_goal = new pf.goals.GoalInvert(goal);
+-        bot.pathfinder.setMovements(new pf.Movements(bot));
+-        await bot.pathfinder.goto(inverted_goal);
++        try {
++            await moveAway(bot, 2);
++        } catch (err) {
++            log(bot, `Unable to make room for ${blockType}: ${err.message}.`);
++            return false;
++        }
++        const current = bot.entity.position;
++        const currentAbove = current.plus(Vec3(0,1,0));
++        if (current.distanceTo(targetBlock.position) < 1.1 || currentAbove.distanceTo(targetBlock.position) < 1.1) return false;
+     }
+@@ -769 +809,6 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
+-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
++        try {
++            await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
++        } catch (err) {
++            log(bot, `Unable to approach ${blockType}: ${err.message}.`);
++            return false;
++        }
+@@ -1070 +1115 @@
+-export async function goToGoal(bot, goal) {
++export async function goToGoal(bot, goal, movementsOrLegacyDynamic=null) {
+@@ -1074,0 +1120 @@
++     * @param {pf.Movements|boolean|null} movementsOrLegacyDynamic, optional movements or legacy dynamic flag.
+@@ -1077,4 +1123,12 @@
+-    const nonDestructiveMovements = new pf.Movements(bot);
+-    const dontBreakBlocks = ['glass', 'glass_pane'];
+-    for (let block of dontBreakBlocks) {
+-        nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
++    const suppliedMovements = movementsOrLegacyDynamic && typeof movementsOrLegacyDynamic === 'object'
++        ? movementsOrLegacyDynamic
++        : null;
++    const nonDestructiveMovements = suppliedMovements || new pf.Movements(bot);
++    if (!suppliedMovements) {
++        const dontBreakBlocks = ['glass', 'glass_pane'];
++        for (let block of dontBreakBlocks) {
++            const blockId = bot.registry?.blocksByName?.[block]?.id ?? mc.getBlockId(block);
++            nonDestructiveMovements.blocksCantBreak.add(blockId);
++        }
++        nonDestructiveMovements.placeCost = 2;
++        nonDestructiveMovements.digCost = 10;
+@@ -1082,6 +1135,0 @@
+-    nonDestructiveMovements.placeCost = 2;
+-    nonDestructiveMovements.digCost = 10;
+-
+-    const destructiveMovements = new pf.Movements(bot);
+-
+-    let final_movements = destructiveMovements;
+@@ -1088,0 +1137,2 @@
++    const destructiveMovements = suppliedMovements ? null : new pf.Movements(bot);
++    let final_movements = suppliedMovements || destructiveMovements;
+@@ -1090,9 +1140,14 @@
+-    if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
+-        final_movements = nonDestructiveMovements;
+-        log(bot, `Found non-destructive path.`);
+-    }
+-    else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
+-        log(bot, `Found destructive path.`);
+-    }
+-    else {
+-        log(bot, `Path not found, but attempting to navigate anyway using destructive movements.`);
++    const isUsablePreview = ({status}) => status === 'success' || status === 'partial';
++    let nonDestructivePath = null;
++    if (!suppliedMovements) {
++        nonDestructivePath = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout);
++        if (isUsablePreview(nonDestructivePath)) {
++            final_movements = nonDestructiveMovements;
++            log(bot, `Found non-destructive path.`);
++        }
++        else if (isUsablePreview(await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout))) {
++            log(bot, `Found destructive path.`);
++        }
++        else {
++            log(bot, `Path not found, but attempting to navigate anyway using destructive movements.`);
++        }
+@@ -1102,2 +1157,9 @@
+-
+-    bot.pathfinder.setMovements(final_movements);
++    let stuckResets = 0;
++    const stopAfterRepeatedStuck = (reason) => {
++        const activeGoal = bot.pathfinder.goal;
++        if (reason === 'stuck' && (activeGoal === undefined || activeGoal === goal) && ++stuckResets === 2) {
++            bot.pathfinder.stop();
++        }
++    };
++    bot.on('path_reset', stopAfterRepeatedStuck);
++    let completed = false;
+@@ -1104,0 +1167 @@
++        bot.pathfinder.setMovements(final_movements);
+@@ -1106 +1169 @@
+-        clearInterval(doorCheckInterval);
++        completed = true;
+@@ -1108,0 +1172,13 @@
++        const activeGoal = bot.pathfinder.goal;
++        const retryWithDestructive = !suppliedMovements &&
++            isUsablePreview(nonDestructivePath) &&
++            final_movements === nonDestructiveMovements &&
++            (err?.name === 'NoPath' || err?.name === 'Timeout') &&
++            (activeGoal === undefined || activeGoal === goal);
++        if (!retryWithDestructive) throw err;
++        log(bot, `Non-destructive path failed; retrying with destructive movements.`);
++        bot.pathfinder.setMovements(destructiveMovements);
++        await bot.pathfinder.goto(goal);
++        completed = true;
++        return true;
++    } finally {
+@@ -1110,2 +1186,2 @@
+-        // we need to catch so we can clean up the door check interval, then rethrow the error
+-        throw err;
++        if (!completed && bot.pathfinder.goal === goal) bot.pathfinder.stop();
++        bot.removeListener('path_reset', stopAfterRepeatedStuck);
+@@ -1248,0 +1325,2 @@
++    const SEARCH_CANDIDATES = 32;
++    const MAX_CANDIDATES = 4;
+@@ -1253 +1331 @@
+-    let block = null;
++    let blocks;
+@@ -1255 +1333 @@
+-        let blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, 1);
++        blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType && block.metadata === 0, range, SEARCH_CANDIDATES);
+@@ -1258 +1336 @@
+-            blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, 1);
++            blocks = world.getNearestBlocksWhere(bot, block => block.name === blockType, range, SEARCH_CANDIDATES);
+@@ -1260 +1337,0 @@
+-        block = blocks[0];
+@@ -1263 +1340,11 @@
+-        block = world.getNearestBlock(bot, blockType, range);
++        blocks = world.getNearestBlocks(bot, blockType, range, SEARCH_CANDIDATES);
++    }
++    blocks = blocks.filter((block) => block?.position);
++    const minimumSeparation = Math.max(2, (Number(min_distance) || 0) + 1);
++    const candidates = [];
++    for (const block of blocks) {
++        if (candidates.every((candidate) => Math.hypot(
++            candidate.position.x - block.position.x,
++            candidate.position.z - block.position.z,
++        ) >= minimumSeparation)) candidates.push(block);
++        if (candidates.length === MAX_CANDIDATES) break;
+@@ -1265 +1352,2 @@
+-    if (!block) {
++    blocks = candidates;
++    if (blocks.length === 0) {
+@@ -1269,2 +1357,16 @@
+-    log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
+-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
++    log(bot, `Found ${blocks.length} ${blockType} candidate(s). Navigating...`);
++    const goal = new pf.goals.GoalCompositeAny(blocks.map((block) => (
++        new pf.goals.GoalNear(block.position.x, block.position.y, block.position.z, min_distance)
++    )));
++    try {
++        await goToGoal(bot, goal);
++    } catch (err) {
++        log(bot, `Pathfinding stopped: ${err.message}.`);
++        return false;
++    }
++    const reached = blocks.some((block) => bot.entity.position.distanceTo(block.position) <= min_distance + 1);
++    if (!reached) {
++        log(bot, `Unable to reach any ${blockType} candidate.`);
++        return false;
++    }
++    log(bot, `Reached ${blockType}.`);
+@@ -1283 +1385 @@
+-    let entity = world.getNearestEntityWhere(bot, entity => entity.name === entityType, range);
++    const entity = world.getNearestEntityWhere(bot, entity => entity.name === entityType, range);
+@@ -1288 +1390 @@
+-    let distance = bot.entity.position.distanceTo(entity.position);
++    const distance = bot.entity.position.distanceTo(entity.position);
+@@ -1290 +1392,12 @@
+-    await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
++    try {
++        await goToGoal(bot, new pf.goals.GoalFollow(entity, min_distance));
++    } catch (err) {
++        log(bot, `Pathfinding stopped: ${err.message}.`);
++        return false;
++    }
++    const remainingDistance = bot.entity.position.distanceTo(entity.position);
++    if (remainingDistance > min_distance + 1) {
++        log(bot, `Unable to reach ${entityType}, it is ${Math.round(remainingDistance)} blocks away.`);
++        return false;
++    }
++    log(bot, `Reached ${entityType}.`);
+@@ -1406,2 +1519,8 @@
 -    const pos = bot.entity.position;
+-    let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
 +    const pos = bot.entity.position.clone();
-@@ -1434,4 +1434,33 @@ export async function moveAway(bot, distance) {
++    const requestedDistance = Number(distance);
++    if (!Number.isFinite(requestedDistance) || requestedDistance < 0) {
++        log(bot, `Invalid relocation distance: ${distance}.`);
++        return false;
++    }
++    if (requestedDistance === 0) return true;
++    let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, requestedDistance);
+@@ -1419 +1538,2 @@
+-    bot.pathfinder.setMovements(movements);
++    movements.canDig = false;
++    movements.allow1by1towers = false;
+@@ -1434,3 +1554,19 @@
 -    await bot.pathfinder.goto(inverted_goal);
 -    let new_pos = bot.entity.position;
 -    log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
--    return true;
-+    movements.canDig = false;
-+    movements.allow1by1towers = false;
-+    const targetDistance = Math.min(24, Math.max(8, Number(distance) || 8));
-+    const minimumMovement = Math.min(8, Math.max(4, targetDistance * 0.5));
++    const targetDistance = requestedDistance + 2;
 +    const directions = [
 +        [1, 0], [0, 1], [-1, 0], [0, -1],
 +        [1, 1], [-1, 1], [-1, -1], [1, -1],
 +    ];
-+    const startIndex = Math.abs(Math.floor(pos.x + pos.z)) % directions.length;
-+    let lastError = null;
-+    for (let offset = 0; offset < directions.length; offset++) {
-+        const [dx, dz] = directions[(startIndex + offset) % directions.length];
++    const goals = directions.map(([dx, dz]) => {
 +        const length = Math.hypot(dx, dz);
-+        const targetX = Math.floor(pos.x + ((dx / length) * targetDistance));
-+        const targetZ = Math.floor(pos.z + ((dz / length) * targetDistance));
-+        const relocationGoal = new pf.goals.GoalXZ(targetX, targetZ);
-+        try {
-+            const path = await bot.pathfinder.getPathTo(movements, relocationGoal, 3000);
-+            if (path?.status !== 'success' || !path.path?.length) continue;
-+            bot.pathfinder.setMovements(movements);
-+            await bot.pathfinder.goto(relocationGoal);
-+            const newPos = bot.entity.position;
-+            const moved = Math.hypot(newPos.x - pos.x, newPos.z - pos.z);
-+            if (moved >= minimumMovement) {
-+                log(bot, `Moved away from ${pos.floored()} to ${newPos.floored()} (${moved.toFixed(1)} blocks).`);
-+                return true;
-+            }
-+            lastError = new Error(`relocation moved only ${moved.toFixed(1)} blocks`);
-+        } catch (error) {
-+            lastError = error;
-+        }
++        return new pf.goals.GoalXZ(
++            Math.floor(pos.x + ((dx / length) * targetDistance)),
++            Math.floor(pos.z + ((dz / length) * targetDistance)),
++        );
++    });
++    await goToGoal(bot, new pf.goals.GoalCompositeAny(goals), movements);
++    const newPos = bot.entity.position;
++    const moved = Math.hypot(newPos.x - pos.x, newPos.z - pos.z);
++    if (moved < requestedDistance) {
++        throw new Error(`Relocation moved only ${moved.toFixed(1)} of ${requestedDistance} requested blocks`);
 +    }
-+    throw new Error(`Relocation failed: ${lastError?.message || 'no safe path'}`);
- }
++    log(bot, `Moved away from ${pos.floored()} to ${newPos.floored()} (${moved.toFixed(1)} blocks).`);
+
+diff --git a/src/agent/library/world.js b/src/agent/library/world.js
+--- a/src/agent/library/world.js
++++ b/src/agent/library/world.js
+@@ -5,10 +5,11 @@
+-export function getNearestFreeSpace(bot, size=1, distance=8) {
++export function getNearestFreeSpace(bot, size=1, distance=8, minDistance=0) {
+     /**
+      * Get the nearest empty space with solid blocks beneath it of the given size.
+      * @param {Bot} bot - The bot to get the nearest free space for.
+      * @param {number} size - The (size x size) of the space to find, default 1.
+      * @param {number} distance - The maximum distance to search, default 8.
++     * @param {number} minDistance - The minimum distance from the bot, default 0.
+      * @returns {Vec3} - The south west corner position of the nearest free space.
+      * @example
+      * let position = world.getNearestFreeSpace(bot, 1, 8);
+      **/
+@@ -20,6 +21,7 @@ export function getNearestFreeSpace(bot, size=1, distance=8) {
+         count: 1000
+     });
+     for (let i = 0; i < empty_pos.length; i++) {
++        if (bot.entity.position.distanceTo(empty_pos[i]) < minDistance) continue;
+         let empty = true;
+         for (let x = 0; x < size; x++) {
+             for (let z = 0; z < size; z++) {
+@@ -28 +30 @@ export function getNearestFreeSpace(bot, size=1, distance=8) {
+-                if (!top || !top.name == 'air' || !bottom || bottom.drops.length == 0 || !bottom.diggable) {
++                if (!top || top.name !== 'air' || !bottom || bottom.drops.length == 0 || !bottom.diggable) {
+
+diff --git a/node_modules/mineflayer-collectblock/lib/CollectBlock.js b/node_modules/mineflayer-collectblock/lib/CollectBlock.js
+--- a/node_modules/mineflayer-collectblock/lib/CollectBlock.js
++++ b/node_modules/mineflayer-collectblock/lib/CollectBlock.js
+@@ -23,0 +24,2 @@ function collectAll(bot, options) {
++            if (options.blocksFirst && bot.interrupt_code)
++                throw (0, Util_1.error)('PathStopped', 'Batch collection interrupted!');
+@@ -25 +25,3 @@
+-            const closest = options.targets.getClosest();
++            const closest = (options.blocksFirst &&
++                options.targets.getClosest(target => target.constructor.name === 'Block')) ||
++                options.targets.getClosest();
+@@ -28,8 +30,23 @@
+             switch (closest.constructor.name) {
+                 case 'Block': {
+                     const goal = new mineflayer_pathfinder_1.goals.GoalLookAtBlock(closest.position, bot.world);
+-                    yield bot.pathfinder.goto(goal);
+-                    yield mineBlock(bot, closest, options);
++                    const currentPosition = bot.entity.position.floored();
++                    const directlyReachable = bot.canDigBlock(closest) && bot.canSeeBlock(closest);
++                    const movements = bot.pathfinder.movements;
++                    const previousCanDig = movements == null ? undefined : movements.canDig;
++                    if (!directlyReachable && !goal.isEnd(currentPosition) && !goal.isEnd(currentPosition.offset(0, 1, 0))) {
++                        try {
++                            if (movements != null)
++                                movements.canDig = false;
++                            yield bot.pathfinder.goto(goal);
++                        }
++                        finally {
++                            if (movements != null)
++                                movements.canDig = previousCanDig;
++                        }
++                    }
++                    const currentBlock = bot.blockAt(closest.position);
++                    yield mineBlock(bot, currentBlock != null && currentBlock.type === closest.type ? currentBlock : closest, options);
+                     // TODO: options.ignoreNoPath
+                     break;
+                 }
+@@ -37,17 +54,48 @@
+                     // Don't collect any entities that are marked as 'invalid'
+                     if (!closest.isValid)
+                         break;
++                    const nearGoal = new mineflayer_pathfinder_1.goals.GoalFollow(closest, 1);
++                    const exactGoal = new mineflayer_pathfinder_1.goals.GoalFollow(closest, 0);
++                    const movements = bot.pathfinder.movements;
++                    const previousCanDig = movements == null ? undefined : movements.canDig;
+                     const tempEvents = new TemporarySubscriber_1.TemporarySubscriber(bot);
+-                    const waitForPickup = new Promise(resolve => {
+-                        tempEvents.subscribeTo('entityGone', (entity) => {
+-                            if (entity === closest) {
+-                                tempEvents.cleanup();
+-                                resolve();
+-                            }
+-                        });
+-                    });
+-                    yield bot.pathfinder.goto(new mineflayer_pathfinder_1.goals.GoalFollow(closest, 0));
+-                    yield waitForPickup;
++                    let timeout;
++                    let pickedUp = false;
++                    try {
++                        if (movements != null)
++                            movements.canDig = false;
++                        const waitForPickup = new Promise(resolve => {
++                            tempEvents.subscribeTo('entityGone', (entity) => {
++                                if (entity === closest) {
++                                    pickedUp = true;
++                                    resolve();
++                                }
++                            });
++                        });
++                        const pickupTimeout = new Promise((_, reject) => {
++                            timeout = setTimeout(() => reject((0, Util_1.error)('Timeout', 'Timed out while collecting a dropped item!')), 8000);
++                        });
++                        const collectItem = Promise.race([
++                            waitForPickup,
++                            bot.pathfinder.goto(nearGoal)
++                        ]).then(() => {
++                            if (pickedUp || !closest.isValid)
++                                return;
++                            return Promise.race([
++                                waitForPickup,
++                                bot.pathfinder.goto(exactGoal)
++                            ]);
++                        }).then(() => waitForPickup);
++                        yield Promise.race([collectItem, pickupTimeout]);
++                    }
++                    finally {
++                        clearTimeout(timeout);
++                        tempEvents.cleanup();
++                        if (bot.pathfinder.goal === nearGoal || bot.pathfinder.goal === exactGoal)
++                            bot.pathfinder.setGoal(null);
++                        if (movements != null)
++                            movements.canDig = previousCanDig;
++                    }
+                     break;
+                 }
+                 default: {
+@@ -79,22 +128,31 @@ function mineBlock(bot, block, options) {
+         const tempEvents = new TemporarySubscriber_1.TemporarySubscriber(bot);
++        let targetDropObserved = false;
+         tempEvents.subscribeTo('itemDrop', (entity) => {
+             if (entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5)) <= 0.5) {
++                targetDropObserved = true;
+                 options.targets.appendTarget(entity);
+             }
+         });
+         try {
+             yield bot.dig(block);
+             // Waiting for items to drop
+-            yield new Promise(resolve => {
+-                let remainingTicks = 10;
+-                tempEvents.subscribeTo('physicsTick', () => {
+-                    remainingTicks--;
+-                    if (remainingTicks <= 0) {
+-                        tempEvents.cleanup();
+-                        resolve();
+-                    }
+-                });
+-            });
++            yield bot.waitForTicks(10);
++            if (options.blocksFirst && !targetDropObserved) {
++                if (bot.interrupt_code)
++                    throw (0, Util_1.error)('PathStopped', 'Batch collection interrupted before retry!');
++                yield bot.waitForTicks(1);
++                if (!targetDropObserved) {
++                    if (bot.interrupt_code)
++                        throw (0, Util_1.error)('PathStopped', 'Batch collection interrupted before retry!');
++                    const currentBlock = bot.blockAt(block.position);
++                    if (currentBlock == null || (currentBlock.type !== 0 && currentBlock.type !== block.type))
++                        throw (0, Util_1.error)('PathStopped', 'The target block changed before retry!');
++                    yield bot.dig(currentBlock.type === block.type ? currentBlock : block);
++                    yield bot.waitForTicks(10);
++                    if (!targetDropObserved)
++                        throw (0, Util_1.error)('Timeout', 'The server did not confirm a dropped block item!');
++                }
++            }
+         }
+         finally {
+             tempEvents.cleanup();
+@@ -179,7 +234,8 @@
+             const optionsFull = {
+                 append: (_a = options.append) !== null && _a !== void 0 ? _a : false,
+                 ignoreNoPath: (_b = options.ignoreNoPath) !== null && _b !== void 0 ? _b : false,
++                blocksFirst: options.blocksFirst === true,
+                 chestLocations: (_c = options.chestLocations) !== null && _c !== void 0 ? _c : this.chestLocations,
+                 itemFilter: (_d = options.itemFilter) !== null && _d !== void 0 ? _d : this.itemFilter,
+                 targets: this.targets
+             };
+
+diff --git a/node_modules/mineflayer-collectblock/lib/BlockVeins.js b/node_modules/mineflayer-collectblock/lib/BlockVeins.js
+--- a/node_modules/mineflayer-collectblock/lib/BlockVeins.js
++++ b/node_modules/mineflayer-collectblock/lib/BlockVeins.js
+@@ -19,4 +19,4 @@ function findFromVein(bot, block, maxBlocks, maxDistance, floodRadius) {
+-                    if (targets.includes(neighbor))
++                    if (targets.some(target => target.position.equals(neighbor.position)))
+                         continue;
+-                    if (open.includes(neighbor))
++                    if (open.some(target => target.position.equals(neighbor.position)))
+                         continue;
+
+diff --git a/node_modules/mineflayer-collectblock/lib/CollectBlock.d.ts b/node_modules/mineflayer-collectblock/lib/CollectBlock.d.ts
+--- a/node_modules/mineflayer-collectblock/lib/CollectBlock.d.ts
++++ b/node_modules/mineflayer-collectblock/lib/CollectBlock.d.ts
+@@ -23,2 +23,3 @@ export interface CollectOptions {
+     ignoreNoPath?: boolean;
++    blocksFirst?: boolean;
+     /**
+
+diff --git a/node_modules/mineflayer-collectblock/lib/Targets.js b/node_modules/mineflayer-collectblock/lib/Targets.js
+--- a/node_modules/mineflayer-collectblock/lib/Targets.js
++++ b/node_modules/mineflayer-collectblock/lib/Targets.js
+@@ -24,8 +24,9 @@ class Targets {
+-    getClosest() {
++    getClosest(filter = () => true) {
+         let closest = null;
+         let distance = 0;
+         for (const target of this.targets) {
++            if (!filter(target)) continue;
+             const dist = target.position.distanceTo(this.bot.entity.position);
+             if (closest == null || dist < distance) {
+                 closest = target;
+                 distance = dist;
+
+diff --git a/node_modules/mineflayer-collectblock/lib/Targets.d.ts b/node_modules/mineflayer-collectblock/lib/Targets.d.ts
+--- a/node_modules/mineflayer-collectblock/lib/Targets.d.ts
++++ b/node_modules/mineflayer-collectblock/lib/Targets.d.ts
+@@ -16 +16 @@ export declare class Targets {
+-    getClosest(): Collectable | null;
++    getClosest(filter?: (target: Collectable) => boolean): Collectable | null;

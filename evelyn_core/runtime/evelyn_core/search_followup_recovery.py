@@ -19,6 +19,7 @@ SEARCH_FOLLOWUP_RECOVERY_HEAD_SCHEMA = "search_followup.recovery-head.v1"
 SEARCH_FOLLOWUP_RECOVERY_CHAIN_GENESIS = "0" * 64
 SEARCH_FOLLOWUP_RECOVERY_MAX_BYTES = 256 * 1024
 SEARCH_FOLLOWUP_RECOVERY_MAX_ENTRIES = 40
+SEARCH_FOLLOWUP_PREPARED_ANSWER_MAX_CHARS = 16 * 1024
 _INTENT_ID = re.compile(r"^search-followup-[0-9a-f]{24}$")
 _PHASES = frozenset(
     {
@@ -27,6 +28,8 @@ _PHASES = frozenset(
         "delivery_ready",
         "delivery_attempted",
         "delivery_uncertain",
+        "delivery_succeeded",
+        "canonical_committed",
         "request_unrecoverable",
     }
 )
@@ -90,6 +93,21 @@ def _bounded_key(value: Any, *, required: bool = False) -> str | None:
     return candidate
 
 
+def _prepared_answer(value: Any, *, required: bool = False) -> str:
+    if value is None:
+        candidate = ""
+    elif isinstance(value, str):
+        candidate = value
+    else:
+        raise ValueError("search_followup_prepared_answer_invalid")
+    if (
+        len(candidate) > SEARCH_FOLLOWUP_PREPARED_ANSWER_MAX_CHARS
+        or (required and not clean_text(candidate))
+    ):
+        raise ValueError("search_followup_prepared_answer_invalid")
+    return candidate
+
+
 def _journal_hash(payload: dict[str, Any]) -> str:
     material = {key: value for key, value in payload.items() if key != "journalHash"}
     encoded = json.dumps(
@@ -103,7 +121,7 @@ def _journal_hash(payload: dict[str, Any]) -> str:
 
 
 class SearchFollowupRecoveryJournal:
-    """Durable, content-free state for promised search follow-ups."""
+    """Durable private state for promised search follow-ups."""
 
     def __init__(
         self,
@@ -150,7 +168,8 @@ class SearchFollowupRecoveryJournal:
             "entries": [dict(entry) for entry in self._entries.values()],
             "lastErrorCode": self._last_error_code,
             "policy": {
-                "contentFree": True,
+                "contentFree": False,
+                "privatePreparedAnswer": True,
                 "rawQuery": False,
                 "rawTranscript": False,
                 "duplicateDeliveryPolicy": "verify_text_or_fail_closed",
@@ -190,6 +209,13 @@ class SearchFollowupRecoveryJournal:
             "queryHash": _valid_sha256(raw.get("queryHash")),
             "answerHash": clean_text(raw.get("answerHash")),
             "displayHash": clean_text(raw.get("displayHash")),
+            "preparedAnswer": _prepared_answer(
+                raw.get("preparedAnswer")
+            ),
+            "deliveryMessageId": _optional_positive_int(
+                raw.get("deliveryMessageId"),
+                code="search_followup_delivery_message_invalid",
+            ),
             "continuityGeneration": _nonnegative_int(raw.get("continuityGeneration"), code="search_followup_continuity_generation_invalid"),
             "deliveryGeneration": _nonnegative_int(raw.get("deliveryGeneration"), code="search_followup_delivery_generation_invalid"),
             "attemptCount": _nonnegative_int(raw.get("attemptCount"), code="search_followup_attempt_invalid"),
@@ -208,13 +234,34 @@ class SearchFollowupRecoveryJournal:
             "delivery_ready",
             "delivery_attempted",
             "delivery_uncertain",
+            "delivery_succeeded",
+            "canonical_committed",
         } and not entry["answerHash"]:
             raise ValueError("search_followup_delivery_anchor_invalid")
         if phase in {
             "delivery_ready",
-            "delivery_attempted",
-            "delivery_uncertain",
+            "canonical_committed",
         } and entry["deliveryGeneration"] < 1:
+            raise ValueError("search_followup_delivery_anchor_invalid")
+        if phase in {
+            "delivery_succeeded",
+            "canonical_committed",
+        }:
+            if (
+                not entry["preparedAnswer"]
+                or entry["deliveryMessageId"] is None
+            ):
+                raise ValueError(
+                    "search_followup_delivery_receipt_invalid"
+                )
+        if (
+            phase in {
+                "delivery_attempted",
+                "delivery_uncertain",
+            }
+            and entry["deliveryGeneration"] < 1
+            and not entry["preparedAnswer"]
+        ):
             raise ValueError("search_followup_delivery_anchor_invalid")
         return entry
 
@@ -262,7 +309,8 @@ class SearchFollowupRecoveryJournal:
                 "generation": generation,
                 "journalHash": journal_hash,
                 "updatedAt": self._now(),
-                "contentFree": True,
+                "contentFree": False,
+                "privatePreparedAnswer": True,
             },
             durable=True,
         )
@@ -298,7 +346,18 @@ class SearchFollowupRecoveryJournal:
             self._integrity = "verified"
             self._head_state = "current"
             self._load_state = "ready"
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        except OSError:
+            self._entries = {}
+            if head is not None:
+                self._generation = int(head["generation"])
+                self._journal_hash = str(head["journalHash"])
+            self._load_state = "error"
+            self._integrity = "failed"
+            self._head_state = "write_failed"
+            self._last_error_code = (
+                "search_followup_recovery_write_failed"
+            )
+        except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
             self._entries = {}
             if head is not None:
                 self._generation = int(head["generation"])
@@ -312,6 +371,12 @@ class SearchFollowupRecoveryJournal:
     def _target_allowed(path: Path) -> bool:
         return not path.is_symlink() and (not path.exists() or path.is_file())
 
+    def _require_ready(self) -> None:
+        if self._load_state != "ready":
+            raise RuntimeError(
+                "search_followup_recovery_unavailable"
+            )
+
     def _write(self) -> None:
         if not self.enabled:
             return
@@ -323,6 +388,17 @@ class SearchFollowupRecoveryJournal:
         payload = self._payload(generation=generation, previous_hash=self._journal_hash)
         journal_hash = str(payload["journalHash"])
         try:
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            if len(encoded) > SEARCH_FOLLOWUP_RECOVERY_MAX_BYTES:
+                raise ValueError(
+                    "search_followup_recovery_size_invalid"
+                )
             atomic_json_write(self.path, payload, durable=True)
             self._write_head(generation=generation, journal_hash=journal_hash)
         except Exception:
@@ -356,6 +432,7 @@ class SearchFollowupRecoveryJournal:
         if not self.enabled:
             return None
         with self._lock:
+            self._require_ready()
             continuity_generation = _nonnegative_int(
                 continuity_generation,
                 code="search_followup_continuity_generation_invalid",
@@ -369,14 +446,36 @@ class SearchFollowupRecoveryJournal:
                 raise ValueError("search_followup_intent_id_invalid")
             now = self._now()
             normalized_session = _bounded_key(session_key, required=True)
-            self._entries = {
+            existing = [
+                value
+                for value in self._entries.values()
+                if value["sessionKey"] == normalized_session
+            ]
+            if any(
+                value["phase"]
+                in {
+                    "delivery_attempted",
+                    "delivery_uncertain",
+                    "delivery_succeeded",
+                    "canonical_committed",
+                }
+                for value in existing
+            ):
+                raise RuntimeError(
+                    "search_followup_prior_delivery_unresolved"
+                )
+            retained_entries = {
                 key: value
                 for key, value in self._entries.items()
                 if value["sessionKey"] != normalized_session
             }
-            self._recovery_claims.intersection_update(
-                self._entries
-            )
+            if (
+                len(retained_entries)
+                >= SEARCH_FOLLOWUP_RECOVERY_MAX_ENTRIES
+            ):
+                raise RuntimeError(
+                    "search_followup_recovery_capacity_exhausted"
+                )
             entry = self._validated_entry(
                 {
                     "intentId": intent_id,
@@ -396,6 +495,8 @@ class SearchFollowupRecoveryJournal:
                     "queryHash": content_sha256(query),
                     "answerHash": "",
                     "displayHash": "",
+                    "preparedAnswer": "",
+                    "deliveryMessageId": None,
                     "continuityGeneration": continuity_generation,
                     "deliveryGeneration": 0,
                     "attemptCount": 0,
@@ -404,10 +505,9 @@ class SearchFollowupRecoveryJournal:
                     "lastErrorCode": "",
                 }
             )
-            self._entries[intent_id] = entry
-            if len(self._entries) > SEARCH_FOLLOWUP_RECOVERY_MAX_ENTRIES:
-                oldest = min(self._entries.values(), key=lambda item: item["createdAt"])
-                self._entries.pop(oldest["intentId"], None)
+            retained_entries[intent_id] = entry
+            self._entries = retained_entries
+            self._recovery_claims.intersection_update(self._entries)
             self._write()
             return intent_id
 
@@ -426,6 +526,7 @@ class SearchFollowupRecoveryJournal:
 
     def claim_recovery(self, intent_id: str) -> bool:
         with self._lock:
+            self._require_ready()
             if (
                 intent_id not in self._entries
                 or intent_id in self._recovery_claims
@@ -449,6 +550,7 @@ class SearchFollowupRecoveryJournal:
         if not intent_id:
             return
         with self._lock:
+            self._require_ready()
             continuity_generation = _nonnegative_int(
                 continuity_generation,
                 code="search_followup_delivery_generation_invalid",
@@ -475,6 +577,8 @@ class SearchFollowupRecoveryJournal:
                         display_text,
                         normalized=False,
                     ),
+                    "preparedAnswer": "",
+                    "deliveryMessageId": None,
                     "deliveryGeneration": int(continuity_generation),
                     "updatedAt": self._now(),
                     "lastErrorCode": "",
@@ -493,6 +597,7 @@ class SearchFollowupRecoveryJournal:
         if not intent_id:
             return
         with self._lock:
+            self._require_ready()
             entry = self._entries.get(intent_id)
             if entry is None:
                 raise RuntimeError(
@@ -512,6 +617,11 @@ class SearchFollowupRecoveryJournal:
                     display_text,
                     normalized=False,
                 ),
+                "preparedAnswer": _prepared_answer(
+                    answer,
+                    required=True,
+                ),
+                "deliveryMessageId": None,
                 "deliveryGeneration": 0,
                 "updatedAt": self._now(),
                 "lastErrorCode": "",
@@ -524,32 +634,195 @@ class SearchFollowupRecoveryJournal:
             entry.update(update)
             self._write()
 
+    def mark_delivery_baseline(
+        self,
+        intent_id: str | None,
+        *,
+        continuity_generation: int,
+    ) -> None:
+        if not intent_id:
+            return
+        with self._lock:
+            self._require_ready()
+            generation = _nonnegative_int(
+                continuity_generation,
+                code=(
+                    "search_followup_delivery_generation_invalid"
+                ),
+            )
+            entry = self._entries.get(intent_id)
+            if entry is None:
+                raise RuntimeError(
+                    "search_followup_recovery_intent_inactive"
+                )
+            if (
+                generation < 1
+                or generation < int(entry["continuityGeneration"])
+            ):
+                raise ValueError(
+                    "search_followup_delivery_generation_invalid"
+                )
+            if entry["phase"] not in {
+                "delivery_preparing",
+                "delivery_attempted",
+                "delivery_uncertain",
+            }:
+                raise RuntimeError(
+                    "search_followup_delivery_baseline_invalid"
+                )
+            entry.update(
+                {
+                    "deliveryGeneration": generation,
+                    "updatedAt": self._now(),
+                    "lastErrorCode": "",
+                }
+            )
+            self._write()
+
     def mark_delivery_attempted(self, intent_id: str | None) -> None:
         if not intent_id:
             return
         with self._lock:
+            self._require_ready()
             entry = self._entries.get(intent_id)
             if entry is None:
                 raise RuntimeError("search_followup_recovery_intent_inactive")
-            if entry["phase"] not in {"delivery_ready", "delivery_attempted"}:
+            if entry["phase"] not in {
+                "delivery_preparing",
+                "delivery_ready",
+                "delivery_attempted",
+                "delivery_uncertain",
+            }:
                 raise RuntimeError("search_followup_delivery_not_ready")
             entry["phase"] = "delivery_attempted"
             entry["updatedAt"] = self._now()
+            self._write()
+
+    def mark_delivery_succeeded(
+        self,
+        intent_id: str | None,
+        *,
+        delivery_message_id: int,
+    ) -> None:
+        if not intent_id:
+            return
+        with self._lock:
+            self._require_ready()
+            entry = self._entries.get(intent_id)
+            if entry is None:
+                raise RuntimeError(
+                    "search_followup_recovery_intent_inactive"
+                )
+            if entry["phase"] not in {
+                "delivery_attempted",
+                "delivery_uncertain",
+                "delivery_succeeded",
+            }:
+                raise RuntimeError(
+                    "search_followup_delivery_not_attempted"
+                )
+            if int(entry.get("deliveryGeneration") or 0) < max(
+                1,
+                int(entry["continuityGeneration"]),
+            ):
+                raise RuntimeError(
+                    "search_followup_delivery_baseline_invalid"
+                )
+            entry.update(
+                {
+                    "phase": "delivery_succeeded",
+                    "deliveryMessageId": _optional_positive_int(
+                        delivery_message_id,
+                        code=(
+                            "search_followup_delivery_message_invalid"
+                        ),
+                    ),
+                    "updatedAt": self._now(),
+                    "lastErrorCode": "",
+                }
+            )
+            self._write()
+
+    def mark_canonical_committed(
+        self,
+        intent_id: str | None,
+        *,
+        continuity_generation: int,
+    ) -> None:
+        if not intent_id:
+            return
+        with self._lock:
+            self._require_ready()
+            generation = _nonnegative_int(
+                continuity_generation,
+                code=(
+                    "search_followup_delivery_generation_invalid"
+                ),
+            )
+            if generation < 1:
+                raise ValueError(
+                    "search_followup_delivery_generation_invalid"
+                )
+            entry = self._entries.get(intent_id)
+            if entry is None:
+                raise RuntimeError(
+                    "search_followup_recovery_intent_inactive"
+                )
+            if entry["phase"] not in {
+                "delivery_succeeded",
+                "canonical_committed",
+            }:
+                raise RuntimeError(
+                    "search_followup_delivery_not_succeeded"
+                )
+            prior_generation = int(
+                entry.get("deliveryGeneration") or 0
+            )
+            if (
+                generation < int(entry["continuityGeneration"])
+                or (
+                    entry["phase"] == "delivery_succeeded"
+                    and generation <= prior_generation
+                )
+                or (
+                    entry["phase"] == "canonical_committed"
+                    and generation < prior_generation
+                )
+            ):
+                raise ValueError(
+                    "search_followup_delivery_generation_invalid"
+                )
+            entry.update(
+                {
+                    "phase": "canonical_committed",
+                    "deliveryGeneration": generation,
+                    "updatedAt": self._now(),
+                    "lastErrorCode": "",
+                }
+            )
             self._write()
 
     def mark_delivery_uncertain(self, intent_id: str | None, *, error_code: str) -> None:
         if not intent_id:
             return
         with self._lock:
+            self._require_ready()
             entry = self._entries.get(intent_id)
             if entry is None:
                 return
-            entry["phase"] = (
-                "delivery_uncertain"
-                if entry.get("answerHash")
-                and int(entry.get("deliveryGeneration") or 0) >= 1
-                else "request_unrecoverable"
-            )
+            if entry["phase"] not in {
+                "delivery_succeeded",
+                "canonical_committed",
+            }:
+                entry["phase"] = (
+                    "delivery_uncertain"
+                    if entry.get("answerHash")
+                    and (
+                        entry.get("preparedAnswer")
+                        or int(entry.get("deliveryGeneration") or 0) >= 1
+                    )
+                    else "request_unrecoverable"
+                )
             entry["lastErrorCode"] = clean_text(error_code)[:120]
             entry["updatedAt"] = self._now()
             self._write()
@@ -558,6 +831,7 @@ class SearchFollowupRecoveryJournal:
         if not intent_id:
             return 0
         with self._lock:
+            self._require_ready()
             entry = self._entries.get(intent_id)
             if entry is None:
                 return 0
@@ -571,6 +845,7 @@ class SearchFollowupRecoveryJournal:
         if not intent_id:
             return
         with self._lock:
+            self._require_ready()
             if self._entries.pop(intent_id, None) is not None:
                 self._recovery_claims.discard(intent_id)
                 self._write()
@@ -583,6 +858,19 @@ class SearchFollowupRecoveryJournal:
         if normalized_guild_id < 1:
             raise ValueError("search_followup_guild_invalid")
         with self._lock:
+            if not self.enabled:
+                return 0
+            if self._load_state != "ready":
+                if (
+                    self._load_state == "error"
+                    and self._last_error_code
+                    == "search_followup_recovery_write_failed"
+                ):
+                    self._load()
+                    self._recovery_claims.intersection_update(
+                        self._entries
+                    )
+                self._require_ready()
             removed_ids = {
                 intent_id
                 for intent_id, entry in self._entries.items()
@@ -590,10 +878,24 @@ class SearchFollowupRecoveryJournal:
             }
             if not removed_ids:
                 return 0
-            for intent_id in removed_ids:
-                self._entries.pop(intent_id, None)
-                self._recovery_claims.discard(intent_id)
-            self._write()
+            self._entries = {
+                intent_id: entry
+                for intent_id, entry in self._entries.items()
+                if intent_id not in removed_ids
+            }
+            self._recovery_claims = (
+                self._recovery_claims - removed_ids
+            )
+            try:
+                self._write()
+            except BaseException:
+                self._load_state = "error"
+                self._integrity = "failed"
+                self._head_state = "write_failed"
+                self._last_error_code = (
+                    "search_followup_recovery_write_failed"
+                )
+                raise
             return len(removed_ids)
 
     def pending(self) -> list[dict[str, Any]]:
@@ -617,7 +919,8 @@ class SearchFollowupRecoveryJournal:
                 "rollbackProtected": self._integrity == "verified" and self._head_state == "current",
                 "lastErrorCode": self._last_error_code,
                 "policy": {
-                    "contentFree": True,
+                    "contentFree": False,
+                    "privatePreparedAnswer": True,
                     "rawQuery": False,
                     "rawTranscript": False,
                     "duplicateDeliveryPolicy": "verify_text_or_fail_closed",

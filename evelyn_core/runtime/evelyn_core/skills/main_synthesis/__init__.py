@@ -28,10 +28,16 @@ async def execute(context: SkillContext) -> SkillResult:
         )
 
     synthesize_tool_result = require_callback(extras, "synthesize_tool_result_with_main_llm_fn")
+    tool_result_metadata = extras.get("search_metadata")
     final_text = await synthesize_tool_result(
         user_text=user_text,
         tool_name=tool_name,
         tool_result_text=tool_result_text,
+        tool_result_metadata=(
+            dict(tool_result_metadata)
+            if isinstance(tool_result_metadata, dict)
+            else None
+        ),
         guild_id=context.guild_id,
         session_key=context.session_key,
         source=context.source,

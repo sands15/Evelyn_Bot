@@ -70,6 +70,8 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
                     "schema": MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
                     "processNonce": "process-1",
                     "authorizationToken": "secret-1",
+                    "leaseId": "lease-1",
+                    "expiresMonotonic": 1e300,
                 }
             ),
             encoding="utf-8",
@@ -123,6 +125,25 @@ class MinecraftWorldLeaseContractTests(unittest.TestCase):
         )
         self.assertEqual(status, self.status)
         self.assertEqual(error, "")
+
+    def test_guarded_load_rejects_private_monotonic_expiry(self) -> None:
+        secret = json.loads(self.secret_path.read_text(encoding="utf-8"))
+        secret["expiresMonotonic"] = 60.0
+        self.secret_path.write_text(
+            json.dumps(secret),
+            encoding="utf-8",
+        )
+
+        status, error = load_guarded_world_lease(
+            self.path,
+            self.secret_path,
+            owner_claim_path=self.owner_claim_path,
+            now=self.now,
+            monotonic_now=61.0,
+        )
+
+        self.assertEqual(status, {})
+        self.assertEqual(error, "minecraft_world_lease_expired")
 
     def test_owner_claim_is_required_and_must_match_status_epoch(
         self,

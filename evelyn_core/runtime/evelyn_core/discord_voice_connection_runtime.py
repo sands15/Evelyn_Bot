@@ -47,7 +47,7 @@ async def connect_evelyn_voice_client_from_runtime(
     target_channel: Any,
     *,
     deps: DiscordVoiceConnectionRuntimeDeps,
-    arm_listener: bool = True,
+    arm_listener: bool = False,
 ) -> Any:
     guild_id = target_channel.guild.id
     lock = deps.voice_connect_locks.setdefault(guild_id, asyncio.Lock())

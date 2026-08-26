@@ -63,7 +63,7 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("promised_search_escalated", self.main_llm_runtime_py)
         self.assertIn("action_result = await deps.execute_search_then_answer_action", self.main_llm_runtime_py)
         self.assertIn("final_answer = await synthesize_tool_result_with_main_llm_from_runtime", self.main_llm_runtime_py)
-        self.assertIn("return clean_text(action_result.answer_text) or answer", self.main_llm_runtime_py)
+        self.assertIn('return tool_synthesis_failure_reply("search")', self.main_llm_runtime_py)
 
     def test_realtime_skip_does_not_drop_search_promises(self) -> None:
         skip_index = self.search_followup_runtime_py.index('opts.get("skip_search_followup")')

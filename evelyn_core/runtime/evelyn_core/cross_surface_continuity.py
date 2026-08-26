@@ -23,6 +23,9 @@ from .conversation_memory_receipt import (
     merge_memory_receipt_refs,
     sanitize_memory_receipt_ref,
 )
+from .fast_control_continuity import (
+    bound_fast_control_session_key,
+)
 from .session_continuity import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_GUILD_REVOCATIONS,
@@ -458,6 +461,7 @@ class VerifiedContinuitySnapshot:
     state: str
     saved_at: float | None = None
     selected_activity_at: float | None = None
+    reset_boundary_at: float | None = None
     generation: int = 0
     messages: tuple[dict[str, Any], ...] = ()
     session_count: int = 0
@@ -804,6 +808,10 @@ class CrossSurfaceContinuityBridge:
             authenticity_scope=(
                 CONTINUITY_AUTH_SCOPE_FAST_CONTROL
             ),
+            required_session_key=bound_fast_control_session_key(
+                guild_id=self.config.guild_id,
+                user_id=self.config.user_id,
+            ),
         )
 
     def merge_for_main(
@@ -1143,6 +1151,7 @@ def read_verified_continuity_snapshot(
     ),
     guild_id: int | None = None,
     user_id: int | None = None,
+    required_session_key: str | None = None,
     authenticity: ContinuityAuthenticity | None = None,
     authenticity_scope: str = CONTINUITY_AUTH_SCOPE_MAIN,
 ) -> VerifiedContinuitySnapshot:
@@ -1199,6 +1208,7 @@ def read_verified_continuity_snapshot(
                 source=source,
                 state="empty",
                 saved_at=validated_empty_head["updatedAt"],
+                reset_boundary_at=validated_empty_head["updatedAt"],
                 generation=validated_empty_head[
                     "generation"
                 ],
@@ -1296,11 +1306,67 @@ def read_verified_continuity_snapshot(
             or expires_at < saved_at
         ):
             raise ValueError("continuity_timestamp_rejected")
+        raw_reset_boundary_at = checkpoint.get("resetBoundaryAt")
+        if raw_reset_boundary_at is None:
+            reset_boundary_at = (
+                saved_at
+                if generation > 1
+                and previous_hash
+                == SESSION_CONTINUITY_CHAIN_GENESIS
+                else None
+            )
+        else:
+            if isinstance(raw_reset_boundary_at, bool):
+                raise ValueError("continuity_reset_boundary_rejected")
+            reset_boundary_at = _finite_float(
+                raw_reset_boundary_at,
+            )
+            if (
+                reset_boundary_at < 0.0
+                or reset_boundary_at
+                > saved_at + DEFAULT_CROSS_SURFACE_FUTURE_SKEW_SEC
+            ):
+                raise ValueError("continuity_reset_boundary_rejected")
+        raw_guild_reset_boundaries = checkpoint.get(
+            "guildResetBoundaries",
+            {},
+        )
+        if (
+            not isinstance(raw_guild_reset_boundaries, dict)
+            or len(raw_guild_reset_boundaries)
+            > DEFAULT_MAX_GUILD_REVOCATIONS
+        ):
+            raise ValueError("continuity_reset_boundary_rejected")
+        guild_reset_boundaries: dict[int, float] = {}
+        for raw_guild_id, raw_boundary in (
+            raw_guild_reset_boundaries.items()
+        ):
+            if (
+                not isinstance(raw_guild_id, str)
+                or not raw_guild_id.isdecimal()
+                or str(int(raw_guild_id)) != raw_guild_id
+                or isinstance(raw_boundary, bool)
+            ):
+                raise ValueError("continuity_reset_boundary_rejected")
+            boundary = _finite_float(raw_boundary)
+            if (
+                boundary < 0.0
+                or boundary
+                > saved_at + DEFAULT_CROSS_SURFACE_FUTURE_SKEW_SEC
+            ):
+                raise ValueError("continuity_reset_boundary_rejected")
+            guild_reset_boundaries[int(raw_guild_id)] = boundary
+        if guild_id is not None and guild_id in guild_reset_boundaries:
+            reset_boundary_at = max(
+                reset_boundary_at or 0.0,
+                guild_reset_boundaries[guild_id],
+            )
         if now > expires_at or now - saved_at > bounded_max_age:
             return VerifiedContinuitySnapshot(
                 source=source,
                 state="stale",
                 saved_at=saved_at,
+                reset_boundary_at=reset_boundary_at,
                 generation=generation,
                 error_code="cross_surface_continuity_stale",
             )
@@ -1316,6 +1382,14 @@ def read_verified_continuity_snapshot(
         sessions = checkpoint.get("sessions")
         if not isinstance(sessions, list):
             raise ValueError("continuity_sessions_rejected")
+        normalized_required_session_key = clean_text(
+            required_session_key
+        )
+        if required_session_key is not None and (
+            not normalized_required_session_key
+            or len(normalized_required_session_key) > 256
+        ):
+            raise ValueError("continuity_session_scope_rejected")
         selected: list[
             tuple[str, list[dict[str, Any]], float]
         ] = []
@@ -1327,6 +1401,11 @@ def read_verified_continuity_snapshot(
             session_key = clean_text(row.get("sessionKey"))
             if not session_key or len(session_key) > 256:
                 raise ValueError("continuity_session_rejected")
+            if (
+                normalized_required_session_key
+                and session_key != normalized_required_session_key
+            ):
+                continue
             row_guild_id, row_user_id = _parse_session_scope(
                 session_key
             )
@@ -1354,14 +1433,15 @@ def read_verified_continuity_snapshot(
                 0.0,
                 saved_at - last_active_ago_sec,
             )
-            if row_guild_id is not None:
-                revoked_at = revocations.get(row_guild_id, -1.0)
-                if revoked_at >= selected_activity_at:
-                    revocation_boundary_at = max(
-                        revoked_at,
-                        revocation_boundary_at or 0.0,
-                    )
-                    continue
+            if (
+                row_guild_id is not None
+                and row_guild_id in revocations
+            ):
+                revocation_boundary_at = max(
+                    revocations[row_guild_id],
+                    revocation_boundary_at or 0.0,
+                )
+                continue
             selected.append(
                 (
                     session_key,
@@ -1381,6 +1461,8 @@ def read_verified_continuity_snapshot(
             )
             if len(selected) >= selection_limit:
                 break
+        if normalized_required_session_key and not selected:
+            raise ValueError("continuity_session_scope_rejected")
         messages: list[dict[str, Any]] = []
         # The writer stores newest sessions first. Reverse session order so
         # the newest selected session is closest to the current user turn.
@@ -1394,6 +1476,11 @@ def read_verified_continuity_snapshot(
             if selected
             else revocation_boundary_at
         )
+        if revocation_boundary_at is not None:
+            reset_boundary_at = max(
+                reset_boundary_at or 0.0,
+                revocation_boundary_at,
+            )
         selected_max_age = min(
             bounded_max_age,
             max(0.0, expires_at - saved_at),
@@ -1407,6 +1494,7 @@ def read_verified_continuity_snapshot(
                 state="stale",
                 saved_at=saved_at,
                 selected_activity_at=selected_activity_at,
+                reset_boundary_at=reset_boundary_at,
                 generation=generation,
                 session_count=len(selected),
                 error_code="cross_surface_continuity_stale",
@@ -1416,6 +1504,7 @@ def read_verified_continuity_snapshot(
             state="verified",
             saved_at=saved_at,
             selected_activity_at=selected_activity_at,
+            reset_boundary_at=reset_boundary_at,
             generation=generation,
             messages=tuple(messages),
             session_count=len(selected),
@@ -1500,14 +1589,14 @@ def _cross_snapshot_precedes_empty_local_boundary(
 ) -> bool:
     if local_snapshot.state not in {"verified", "empty"}:
         return False
-    if local_snapshot.messages:
-        return False
-    local_saved_at = _snapshot_activity_at(local_snapshot)
-    cross_saved_at = _snapshot_activity_at(cross_snapshot)
+    reset_boundary_at = _finite_float(
+        local_snapshot.reset_boundary_at,
+    )
+    cross_activity_at = _snapshot_activity_at(cross_snapshot)
     return (
-        local_saved_at >= 0.0
-        and cross_saved_at >= 0.0
-        and cross_saved_at <= local_saved_at
+        reset_boundary_at >= 0.0
+        and cross_activity_at >= 0.0
+        and cross_activity_at <= reset_boundary_at
     )
 
 

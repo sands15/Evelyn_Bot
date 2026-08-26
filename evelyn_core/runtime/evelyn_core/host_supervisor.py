@@ -22,6 +22,7 @@ from .host_supervisor_client import (
     SUPERVISOR_REQUEST_SCHEMA,
     SUPERVISOR_RESPONSE_SCHEMA,
     SUPERVISOR_STATUS_SCHEMA,
+    sign_discord_stop_attestation,
 )
 from .instance_lock_runtime import (
     InstanceLockManager,
@@ -46,6 +47,32 @@ from .voice_capture_consent import (
 )
 from .voice_validation import active_validation_context, emit_voice_validation_event
 from .windows_process_job import KillOnCloseProcessOwner
+from .workspace_task_tools import (
+    WORKSPACE_MUTATION_AUTH_ENV,
+    WORKSPACE_MUTATION_MAX_REQUEST_BYTES,
+    WORKSPACE_MUTATION_MAX_RESPONSE_BYTES,
+    WORKSPACE_MUTATION_REQUEST_SCHEMA,
+    WORKSPACE_MUTATION_RESPONSE_SCHEMA,
+    WORKSPACE_SANDBOX_AUTH_ENV,
+    WORKSPACE_TASK_COMMAND_TIMEOUT_SEC,
+    WORKSPACE_TASK_MAX_REQUEST_BYTES,
+    WORKSPACE_TASK_ORPHAN_TTL_SEC,
+    WORKSPACE_TASK_REQUEST_SCHEMA,
+    WORKSPACE_TASK_RESPONSE_SCHEMA,
+    build_workspace_tracked_manifest,
+    ensure_workspace_queue_directory,
+    expire_workspace_edit_stages,
+    handle_workspace_mutation_request,
+    handle_workspace_task_request,
+    workspace_sandbox_request_is_authentic,
+    _signed_workspace_task_response,
+)
+from .workspace_test_sandbox import (
+    CapacityOneWorker,
+    WorkspaceTestSandbox,
+    attest_workspace_test_image_reference,
+    reconcile_workspace_snapshot_root,
+)
 
 
 PREVIEW_TTL_SEC = 120.0
@@ -63,6 +90,9 @@ BRIDGE_PROCESS_IDENTITY_SCHEMA = (
 BRIDGE_STATUS_FRESH_SEC = 3.0
 BRIDGE_STATUS_MAX_BYTES = 131072
 VOICE_CAPTURE_STOP_SCHEMA = "host_supervisor.voice-capture-stop.v1"
+DISCORD_CONTAINER_NAME = "evelyn-discord-bot"
+WORKSPACE_SANDBOX_IMAGE_REFERENCE = "evelyn-fast-control-bot_api:latest"
+_WORKSPACE_SANDBOX_IMAGE_ID_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 
 class HostSupervisor:
@@ -81,6 +111,10 @@ class HostSupervisor:
         bridge_lock_probe: Callable[[], bool] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         voice_capture_auth_token: str | None = None,
+        workspace_task_auth_token: str | None = None,
+        workspace_mutation_auth_token: str | None = None,
+        workspace_sandbox_auth_token: str | None = None,
+        workspace_test_sandbox: Any | None = None,
     ) -> None:
         self.project_root = Path(project_root or get_repo_root()).resolve()
         self.artifacts_root = Path(
@@ -89,6 +123,8 @@ class HostSupervisor:
         self.root = self.artifacts_root / "host_supervisor"
         self.requests_dir = self.root / "requests"
         self.responses_dir = self.root / "responses"
+        self.mutation_requests_dir = self.root / "mutation_requests"
+        self.mutation_responses_dir = self.root / "mutation_responses"
         self.status_path = self.root / "status.json"
         self.stop_request_path = self.root / "stop.request"
         self.bridge_status_path = self.artifacts_root / "local_bridge" / "status.json"
@@ -102,10 +138,46 @@ class HostSupervisor:
         self.voice_capture_auth_token = resolve_voice_capture_auth_token(
             voice_capture_auth_token
         )
+        self.workspace_task_auth_token = str(
+            os.getenv("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", "")
+            if workspace_task_auth_token is None
+            else workspace_task_auth_token
+        ).strip()
+        self.workspace_mutation_auth_token = str(
+            os.getenv(WORKSPACE_MUTATION_AUTH_ENV, "")
+            if workspace_mutation_auth_token is None
+            else workspace_mutation_auth_token
+        ).strip()
+        self.workspace_sandbox_auth_token = str(
+            os.getenv(WORKSPACE_SANDBOX_AUTH_ENV, "")
+            if workspace_sandbox_auth_token is None
+            else workspace_sandbox_auth_token
+        ).strip()
+        self._workspace_tracked_paths = build_workspace_tracked_manifest(
+            self.project_root,
+            run_command=self.run_command,
+        )
         self.birth_identity_reader = birth_identity_reader
         self.exact_process_terminator = exact_process_terminator
         self.bridge_lock_probe = bridge_lock_probe
         self.started_at = self.now()
+        self.host_instance_id = f"host-{secrets.token_hex(16)}"
+        self.workspace_test_sandbox = (
+            workspace_test_sandbox
+            if workspace_test_sandbox is not None
+            else self._attest_workspace_test_sandbox()
+        )
+        self._workspace_test_worker = CapacityOneWorker(
+            self._execute_workspace_test_request
+        )
+        self._workspace_test_pending: dict[str, Any] | None = None
+        self._workspace_query_worker = CapacityOneWorker(
+            self._execute_workspace_query_request
+        )
+        self._workspace_query_pending: dict[str, Any] | None = None
+        self._workspace_request_ids: dict[str, float] = {}
+        self._workspace_mutation_request_ids: dict[str, float] = {}
+        self._workspace_edit_stages: dict[str, dict[str, Any]] = {}
         self.child: Any | None = None
         self.child_started_at: float | None = None
         self.child_exit_code: int | None = None
@@ -139,6 +211,68 @@ class HostSupervisor:
             project_root=self.project_root,
             artifacts_root=self.artifacts_root,
             now=self.now,
+        )
+
+    def _attest_workspace_test_sandbox(self) -> WorkspaceTestSandbox:
+        snapshot_root = self.root / "workspace_test_snapshots"
+        unavailable = WorkspaceTestSandbox(
+            self.project_root,
+            run_command=self.run_command,
+            snapshot_root=snapshot_root,
+        )
+        sandbox_auth_size = len(
+            self.workspace_sandbox_auth_token.encode("utf-8")
+        )
+        snapshot_reconciled = False
+        if snapshot_root.exists():
+            if not reconcile_workspace_snapshot_root(
+                self.project_root,
+                snapshot_root,
+            ):
+                return unavailable
+            snapshot_reconciled = True
+        if not 32 <= sandbox_auth_size <= 512 or not self._workspace_manifest_ready():
+            return unavailable
+        if not snapshot_reconciled:
+            if not reconcile_workspace_snapshot_root(
+                self.project_root,
+                snapshot_root,
+            ):
+                return unavailable
+        attestation = attest_workspace_test_image_reference(
+            project_root=self.project_root,
+            image_reference=WORKSPACE_SANDBOX_IMAGE_REFERENCE,
+            run_command=self.run_command,
+        )
+        image_id = str(attestation.get("imageId") or "")
+        if not (
+            attestation.get("ready") is True
+            and attestation.get("canaryVerified") is True
+            and _WORKSPACE_SANDBOX_IMAGE_ID_PATTERN.fullmatch(image_id)
+        ):
+            return unavailable
+        return WorkspaceTestSandbox(
+            self.project_root,
+            image_id=image_id,
+            attested_image_id=image_id,
+            canary_verified=True,
+            run_command=self.run_command,
+            snapshot_root=snapshot_root,
+            snapshot_reconciled=True,
+        )
+
+    def _workspace_manifest_ready(self) -> bool:
+        return bool(self._workspace_tracked_paths) and any(
+            path.startswith("tests/")
+            and Path(path).name.startswith("test_")
+            and path.endswith(".py")
+            for path in self._workspace_tracked_paths
+        )
+
+    def _workspace_sandbox_ready(self) -> bool:
+        return bool(
+            self._workspace_manifest_ready()
+            and getattr(self.workspace_test_sandbox, "ready", False)
         )
 
     @staticmethod
@@ -806,6 +940,20 @@ class HostSupervisor:
                 "stop",
                 "discord_bot",
             ]
+        if action_id == "start_voyager":
+            return [
+                "docker",
+                "compose",
+                "-f",
+                str(self.project_root / "docker-compose.fast-control.yml"),
+                "--profile",
+                "voyager",
+                "up",
+                "-d",
+                "--no-build",
+                "--no-deps",
+                "voyager",
+            ]
         service_map = {
             "start_discord_bot": ("discord", "discord_bot"),
             "start_main_llm": ("llm", "main_llm"),
@@ -831,7 +979,11 @@ class HostSupervisor:
         ]
 
     def _docker_action_environment(self, action_id: str) -> dict[str, str]:
-        allowed = {"DISCORD_BOT_TOKEN"} if action_id == "start_discord_bot" else set()
+        allowed = (
+            {"DISCORD_BOT_TOKEN", "EVELYN_VOICE_INPUT_LEASE_TOKEN"}
+            if action_id == "start_discord_bot"
+            else set()
+        )
         env = self._credential_scoped_environment(allowed_credentials=allowed)
         if action_id != "start_discord_bot":
             env["DISCORD_BOT_TOKEN"] = "local-only-disabled"
@@ -924,6 +1076,91 @@ class HostSupervisor:
             "error": None if completed.returncode == 0 else "docker_compose_failed",
         }
 
+    def _discord_stopped_container_state(self) -> str:
+        try:
+            completed = self.run_command(
+                [
+                    "docker",
+                    "ps",
+                    "--all",
+                    "--filter",
+                    f"name=^/{DISCORD_CONTAINER_NAME}$",
+                    "--format",
+                    "{{.State}}",
+                ],
+                cwd=str(self.project_root),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+                env=self._docker_action_environment(
+                    "stop_discord_bot"
+                ),
+            )
+        except Exception as exc:
+            self.runtime_errors.record(
+                "discord_stop_attestation_probe_failed",
+                exc,
+            )
+            return ""
+        if completed.returncode != 0:
+            self.runtime_errors.record(
+                "discord_stop_attestation_probe_failed"
+            )
+            return ""
+        states = [
+            line.strip().lower()
+            for line in str(completed.stdout or "").splitlines()
+            if line.strip()
+        ]
+        if not states:
+            return "absent"
+        if len(states) == 1 and states[0] in {
+            "created",
+            "exited",
+            "dead",
+        }:
+            return states[0]
+        return ""
+
+    def _attest_discord_stopped(
+        self,
+        *,
+        request_id: str,
+        claim_id: str,
+    ) -> dict[str, Any]:
+        container_state = self._discord_stopped_container_state()
+        if not container_state:
+            return {
+                "ok": False,
+                "error": "discord_stop_attestation_unverified",
+                "actionId": "stop_discord_bot",
+                "operation": "attest",
+            }
+        try:
+            attestation = sign_discord_stop_attestation(
+                host_instance_id=self.host_instance_id,
+                request_id=request_id,
+                claim_id=claim_id,
+                container_state=container_state,
+                observed_at=self.now(),
+                auth_token=self.workspace_mutation_auth_token,
+            )
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "discord_stop_attestation_unavailable",
+                "actionId": "stop_discord_bot",
+                "operation": "attest",
+            }
+        return {
+            "ok": True,
+            "status": "stopped_verified",
+            "actionId": "stop_discord_bot",
+            "operation": "attest",
+            "attestation": attestation,
+        }
+
     def issue_preview_token(self, action_id: str) -> dict[str, Any]:
         if action_id not in ALLOWED_HOST_ACTIONS:
             return {"ok": False, "error": "unsupported_host_action", "actionId": action_id}
@@ -976,6 +1213,7 @@ class HostSupervisor:
             "requestId": request_id if _REQUEST_ID_PATTERN.fullmatch(request_id) else "",
             "respondedAt": self.now(),
         }
+        operation = str(request.get("operation") or "")
         allowed_keys = {
             "schema",
             "requestId",
@@ -984,6 +1222,8 @@ class HostSupervisor:
             "previewToken",
             "requestedAt",
         }
+        if operation == "attest":
+            allowed_keys.add("claimId")
         unexpected = sorted(set(request) - allowed_keys)
         if unexpected:
             return {**base, "ok": False, "error": "unexpected_request_fields", "fields": unexpected}
@@ -994,7 +1234,6 @@ class HostSupervisor:
         action_id = str(request.get("actionId") or "")
         if action_id not in ALLOWED_HOST_ACTIONS:
             return {**base, "ok": False, "error": "unsupported_host_action", "actionId": action_id}
-        operation = str(request.get("operation") or "")
         if operation == "preview":
             return {**base, **self.issue_preview_token(action_id)}
         if operation == "apply":
@@ -1005,18 +1244,422 @@ class HostSupervisor:
                     str(request.get("previewToken") or ""),
                 ),
             }
+        if operation == "attest" and action_id == "stop_discord_bot":
+            return {
+                **base,
+                **self._attest_discord_stopped(
+                    request_id=request_id,
+                    claim_id=str(request.get("claimId") or ""),
+                ),
+            }
         return {**base, "ok": False, "error": "unsupported_operation", "actionId": action_id}
 
+    def _workspace_query_terminal_response(
+        self,
+        request: dict[str, Any],
+        *,
+        code: str,
+        uncertain: bool = False,
+    ) -> dict[str, Any]:
+        if uncertain:
+            summary = "Workspace query outcome is unverified."
+        elif code == "workspace_request_replayed":
+            summary = "Workspace request was already consumed."
+        else:
+            summary = "Workspace query worker is busy."
+        return _signed_workspace_task_response(
+            request,
+            host_instance_id=self.host_instance_id,
+            auth_token=self.workspace_task_auth_token,
+            sandbox_auth_token=self.workspace_sandbox_auth_token,
+            responded_at=float(self.now()),
+            result={
+                "attempted": True,
+                "executed": uncertain,
+                "observed": not uncertain,
+                "verified": not uncertain,
+                "outcome": "outcome_unverified" if uncertain else "blocked",
+                "code": code,
+                "summary": summary,
+                "evidence": {},
+            },
+        )
+
+    def _validate_workspace_query_request(
+        self,
+        request: dict[str, Any],
+        *,
+        request_filename: str,
+    ) -> dict[str, Any] | None:
+        request_id = str(request.get("requestId") or "")
+        expires_at = request.get("expiresAt")
+        probe = {
+            request_id: float(expires_at)
+            if isinstance(expires_at, (int, float))
+            and not isinstance(expires_at, bool)
+            else 0.0
+        }
+        response = handle_workspace_task_request(
+            request,
+            project_root=self.project_root,
+            host_instance_id=self.host_instance_id,
+            host_started_at=self.started_at,
+            auth_token=self.workspace_task_auth_token,
+            sandbox_auth_token=self.workspace_sandbox_auth_token,
+            request_filename=request_filename,
+            consumed_request_ids=probe,
+            staged_edits=None,
+            workspace_test_executor=None,
+            sandbox_ready=self._workspace_sandbox_ready(),
+            external_tracked_paths=self._workspace_tracked_paths,
+            run_command=self.run_command,
+            now=self.now,
+        )
+        result = response.get("result") if isinstance(response, dict) else None
+        return None if (
+            isinstance(result, dict)
+            and result.get("code") == "workspace_request_replayed"
+        ) else response
+
+    def _dispatch_workspace_query_request(
+        self,
+        request: dict[str, Any],
+        *,
+        request_id: str,
+        request_filename: str,
+    ) -> dict[str, Any] | None:
+        invalid_response = self._validate_workspace_query_request(
+            request,
+            request_filename=request_filename,
+        )
+        if invalid_response is not None:
+            return invalid_response
+        if (
+            isinstance(self._workspace_query_pending, dict)
+            and self._workspace_query_pending.get("requestId") == request_id
+        ):
+            return None
+        if request_id in self._workspace_request_ids:
+            return self._workspace_query_terminal_response(
+                request,
+                code="workspace_request_replayed",
+            )
+        expires_at = float(request["expiresAt"])
+        self._workspace_request_ids[request_id] = expires_at
+        if (
+            self._workspace_query_pending is None
+            and self._workspace_query_worker.submit(
+                request_id,
+                request=request,
+                request_filename=request_filename,
+            )
+        ):
+            self._workspace_query_pending = {
+                "requestId": request_id,
+                "request": request,
+                "requestFilename": request_filename,
+            }
+            return None
+        return self._workspace_query_terminal_response(
+            request,
+            code="workspace_query_capacity_reached",
+        )
+
+    def _execute_workspace_query_request(
+        self,
+        *,
+        request: dict[str, Any],
+        request_filename: str,
+    ) -> dict[str, Any]:
+        return handle_workspace_task_request(
+            request,
+            project_root=self.project_root,
+            host_instance_id=self.host_instance_id,
+            host_started_at=self.started_at,
+            auth_token=self.workspace_task_auth_token,
+            sandbox_auth_token=self.workspace_sandbox_auth_token,
+            request_filename=request_filename,
+            consumed_request_ids=None,
+            staged_edits=None,
+            workspace_test_executor=None,
+            sandbox_ready=self._workspace_sandbox_ready(),
+            external_tracked_paths=self._workspace_tracked_paths,
+            run_command=self.run_command,
+            now=self.now,
+        )
+
+    def _poll_workspace_query_response(self) -> None:
+        pending = self._workspace_query_pending
+        if not isinstance(pending, dict):
+            return
+        request_id = str(pending.get("requestId") or "")
+        response = self._workspace_query_worker.poll(request_id)
+        if response is None:
+            return
+        if not (
+            isinstance(response, dict)
+            and response.get("schema") == WORKSPACE_TASK_RESPONSE_SCHEMA
+        ):
+            request = pending.get("request")
+            response = self._workspace_query_terminal_response(
+                request if isinstance(request, dict) else {},
+                code="workspace_query_outcome_unverified",
+                uncertain=True,
+            )
+        try:
+            atomic_json_write(
+                self.responses_dir / f"{request_id}.json",
+                response,
+            )
+        except (OSError, TypeError, ValueError):
+            self.last_error = "workspace_query_response_write_failed"
+        self._workspace_query_pending = None
+
+    def _close_workspace_query_worker(self) -> None:
+        deadline = time.monotonic() + WORKSPACE_TASK_COMMAND_TIMEOUT_SEC + 1.0
+        while self._workspace_query_pending is not None and time.monotonic() < deadline:
+            self._poll_workspace_query_response()
+            if self._workspace_query_pending is not None:
+                self.sleep(0.05)
+        if not self._workspace_query_worker.close():
+            self.last_error = "workspace_query_worker_cleanup_unverified"
+
+    @staticmethod
+    def _workspace_test_terminal(code: str) -> dict[str, Any]:
+        return {
+            "attempted": True,
+            "executed": False,
+            "observed": True,
+            "verified": True,
+            "outcome": "blocked",
+            "code": code,
+            "summary": "Workspace test sandbox is busy.",
+            "evidence": {},
+        }
+
+    @staticmethod
+    def _workspace_test_worker_unverified(**_: Any) -> dict[str, Any]:
+        return {
+            "attempted": True,
+            "executed": True,
+            "observed": False,
+            "verified": False,
+            "outcome": "outcome_unverified",
+            "code": "workspace_test_outcome_unverified",
+            "summary": "Workspace test worker outcome is unverified.",
+            "evidence": {},
+        }
+
+    def _execute_workspace_test_request(
+        self,
+        *,
+        request: dict[str, Any],
+        request_filename: str,
+        staged_edits_snapshot: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        return handle_workspace_task_request(
+            request,
+            project_root=self.project_root,
+            host_instance_id=self.host_instance_id,
+            host_started_at=self.started_at,
+            auth_token=self.workspace_task_auth_token,
+            sandbox_auth_token=self.workspace_sandbox_auth_token,
+            request_filename=request_filename,
+            consumed_request_ids=None,
+            staged_edits=staged_edits_snapshot,
+            workspace_test_executor=self.workspace_test_sandbox.run,
+            sandbox_ready=self._workspace_sandbox_ready(),
+            external_tracked_paths=self._workspace_tracked_paths,
+            run_command=self.run_command,
+            now=self.now,
+        )
+
+    def _poll_workspace_test_response(self) -> None:
+        pending = self._workspace_test_pending
+        if not isinstance(pending, dict):
+            return
+        request_id = str(pending.get("requestId") or "")
+        response = self._workspace_test_worker.poll(request_id)
+        if response is None:
+            return
+        request = pending.get("request")
+        request_filename = str(pending.get("requestFilename") or "")
+        stage_id = str(pending.get("stageId") or "")
+        stage_reference = pending.get("stageReference")
+        staged_edits_snapshot = pending.get("stagedEditsSnapshot")
+        snapshot_stage = (
+            staged_edits_snapshot.get(stage_id)
+            if isinstance(staged_edits_snapshot, dict)
+            else None
+        )
+        response_terminal = False
+        if not (
+            isinstance(response, dict)
+            and response.get("schema") == WORKSPACE_TASK_RESPONSE_SCHEMA
+        ):
+            before = self._workspace_edit_stages.get(stage_id)
+            response = handle_workspace_task_request(
+                request if isinstance(request, dict) else {},
+                project_root=self.project_root,
+                host_instance_id=self.host_instance_id,
+                host_started_at=self.started_at,
+                auth_token=self.workspace_task_auth_token,
+                sandbox_auth_token=self.workspace_sandbox_auth_token,
+                request_filename=request_filename,
+                consumed_request_ids=None,
+                staged_edits=self._workspace_edit_stages,
+                workspace_test_executor=self._workspace_test_worker_unverified,
+                sandbox_ready=self._workspace_sandbox_ready(),
+                external_tracked_paths=self._workspace_tracked_paths,
+                run_command=self.run_command,
+                now=self.now,
+            )
+            response_terminal = bool(
+                before is stage_reference
+                and self._workspace_edit_stages.get(stage_id) is not stage_reference
+            )
+        else:
+            result = response.get("result")
+            worker_passed = bool(
+                isinstance(result, dict)
+                and result.get("outcome") == "succeeded"
+                and result.get("code") == "workspace_test_passed"
+                and isinstance(snapshot_stage, dict)
+                and snapshot_stage.get("testedRunner") == "python_unittest"
+                and snapshot_stage.get("testedTargets")
+            )
+            current_stage = self._workspace_edit_stages.get(stage_id)
+            if worker_passed and current_stage is stage_reference:
+                for key in (
+                    "testedBaseTreeSha256",
+                    "testedCandidateTreeSha256",
+                    "testedRunner",
+                    "testedTargets",
+                    "testedTestsRun",
+                    "testedSemanticVerified",
+                    "testedAt",
+                ):
+                    current_stage[key] = snapshot_stage[key]
+                response_terminal = True
+            elif worker_passed:
+                response = handle_workspace_task_request(
+                    request if isinstance(request, dict) else {},
+                    project_root=self.project_root,
+                    host_instance_id=self.host_instance_id,
+                    host_started_at=self.started_at,
+                    auth_token=self.workspace_task_auth_token,
+                    sandbox_auth_token=self.workspace_sandbox_auth_token,
+                    request_filename=request_filename,
+                    consumed_request_ids=None,
+                    staged_edits={},
+                    workspace_test_executor=self._workspace_test_worker_unverified,
+                    sandbox_ready=self._workspace_sandbox_ready(),
+                    external_tracked_paths=self._workspace_tracked_paths,
+                    run_command=self.run_command,
+                    now=self.now,
+                )
+            elif (
+                isinstance(staged_edits_snapshot, dict)
+                and stage_id not in staged_edits_snapshot
+                and current_stage is stage_reference
+            ):
+                self._workspace_edit_stages.pop(stage_id, None)
+                response_terminal = True
+        try:
+            atomic_json_write(self.responses_dir / f"{request_id}.json", response)
+            self._workspace_test_pending = None
+        except (OSError, TypeError, ValueError):
+            if (
+                response_terminal
+                and self._workspace_edit_stages.get(stage_id) is stage_reference
+            ):
+                self._workspace_edit_stages.pop(stage_id, None)
+            self.last_error = "workspace_test_response_write_failed"
+            self._workspace_test_pending = None
+
+    def _close_workspace_test_worker(self) -> None:
+        deadline = time.monotonic() + 35.0
+        while self._workspace_test_pending is not None and time.monotonic() < deadline:
+            self._poll_workspace_test_response()
+            if self._workspace_test_pending is not None:
+                self.sleep(0.05)
+        if not self._workspace_test_worker.close():
+            self.last_error = "workspace_test_worker_cleanup_unverified"
+
     def process_request_queue(self) -> None:
-        self.requests_dir.mkdir(parents=True, exist_ok=True)
-        self.responses_dir.mkdir(parents=True, exist_ok=True)
+        if not all(
+            ensure_workspace_queue_directory(self.root, directory)
+            for directory in (self.requests_dir, self.responses_dir)
+        ):
+            self.last_error = "workspace_task_queue_unavailable"
+            return
+        if self.last_error == "workspace_task_queue_unavailable":
+            self.last_error = ""
+        self._poll_workspace_query_response()
+        self._poll_workspace_test_response()
+        current = float(self.now())
+        expire_workspace_edit_stages(
+            self._workspace_edit_stages,
+            current=current,
+        )
+        self._workspace_request_ids = {
+            request_id: expires_at
+            for request_id, expires_at in self._workspace_request_ids.items()
+            if expires_at + WORKSPACE_TASK_ORPHAN_TTL_SEC > current
+        }
+        for directory in (self.requests_dir, self.responses_dir):
+            for queue_path in directory.glob("*.json"):
+                try:
+                    payload = read_bounded_json(
+                        queue_path,
+                        maximum_bytes=WORKSPACE_TASK_MAX_REQUEST_BYTES,
+                    )
+                except (OSError, ValueError, TypeError):
+                    payload = {}
+                expires_at = payload.get("expiresAt") if isinstance(payload, dict) else None
+                stale_instance = bool(
+                    isinstance(payload, dict)
+                    and payload.get("schema") in {
+                        WORKSPACE_TASK_REQUEST_SCHEMA,
+                        WORKSPACE_TASK_RESPONSE_SCHEMA,
+                    }
+                    and payload.get("hostInstanceId") != self.host_instance_id
+                )
+                expired = bool(
+                    isinstance(expires_at, (int, float))
+                    and not isinstance(expires_at, bool)
+                    and float(expires_at) + WORKSPACE_TASK_ORPHAN_TTL_SEC <= current
+                )
+                old_file = False
+                try:
+                    old_file = (
+                        current - queue_path.stat().st_mtime
+                        >= WORKSPACE_TASK_ORPHAN_TTL_SEC
+                    )
+                except OSError:
+                    pass
+                if stale_instance or expired or old_file:
+                    try:
+                        queue_path.unlink()
+                    except OSError:
+                        pass
         for request_path in sorted(self.requests_dir.glob("*.json")):
             try:
-                request = json.loads(request_path.read_text(encoding="utf-8"))
+                request = read_bounded_json(
+                    request_path,
+                    maximum_bytes=WORKSPACE_TASK_MAX_REQUEST_BYTES,
+                )
                 if not isinstance(request, dict):
                     request = {}
             except (OSError, ValueError, TypeError):
                 request = {}
+            try:
+                request_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                self.last_error = "workspace_task_request_unlink_failed"
+                continue
             requested_id = str(request.get("requestId") or "")
             request_id = (
                 requested_id
@@ -1025,12 +1668,196 @@ class HostSupervisor:
                 if _REQUEST_ID_PATTERN.fullmatch(request_path.stem)
                 else uuid.uuid4().hex
             )
-            response = self.handle_request(request)
-            atomic_json_write(self.responses_dir / f"{request_id}.json", response)
+            response: dict[str, Any] | None
+            if (
+                request.get("schema") == WORKSPACE_TASK_REQUEST_SCHEMA
+                and request.get("tool") in ("list", "search", "diff")
+            ):
+                response = self._dispatch_workspace_query_request(
+                    request,
+                    request_id=request_id,
+                    request_filename=request_path.name,
+                )
+            elif request.get("schema") == WORKSPACE_TASK_REQUEST_SCHEMA:
+                is_test = request.get("tool") == "test"
+                is_discard = request.get("args") == {
+                    "runner": "discard",
+                    "targets": [],
+                }
+                sandbox_authentic = workspace_sandbox_request_is_authentic(
+                    request,
+                    auth_token=self.workspace_sandbox_auth_token,
+                )
+                stage_id = str(request.get("candidateStageId") or "")
+                stage_reference = self._workspace_edit_stages.get(stage_id)
+                staged_edits_snapshot = (
+                    {stage_id: dict(stage_reference)}
+                    if isinstance(stage_reference, dict)
+                    else {}
+                )
+                if (
+                    is_test
+                    and not is_discard
+                    and sandbox_authentic
+                    and isinstance(stage_reference, dict)
+                    and request_id not in self._workspace_request_ids
+                    and self._workspace_test_pending is None
+                    and self._workspace_test_worker.submit(
+                        request_id,
+                        request=request,
+                        request_filename=request_path.name,
+                        staged_edits_snapshot=staged_edits_snapshot,
+                    )
+                ):
+                    expires_at = request.get("expiresAt")
+                    if isinstance(expires_at, (int, float)) and not isinstance(
+                        expires_at,
+                        bool,
+                    ):
+                        self._workspace_request_ids[request_id] = float(expires_at)
+                    self._workspace_test_pending = {
+                        "requestId": request_id,
+                        "request": request,
+                        "requestFilename": request_path.name,
+                        "stageId": stage_id,
+                        "stageReference": stage_reference,
+                        "stagedEditsSnapshot": staged_edits_snapshot,
+                    }
+                    response = None
+                else:
+                    test_executor = (
+                        (
+                            lambda **_: self._workspace_test_terminal(
+                                "workspace_test_capacity_reached"
+                            )
+                        )
+                        if is_test and not is_discard and sandbox_authentic
+                        else self.workspace_test_sandbox.run
+                    )
+                    response = handle_workspace_task_request(
+                        request,
+                        project_root=self.project_root,
+                        host_instance_id=self.host_instance_id,
+                        host_started_at=self.started_at,
+                        auth_token=self.workspace_task_auth_token,
+                        sandbox_auth_token=self.workspace_sandbox_auth_token,
+                        request_filename=request_path.name,
+                        consumed_request_ids=self._workspace_request_ids,
+                        staged_edits=self._workspace_edit_stages,
+                        workspace_test_executor=test_executor,
+                        sandbox_ready=self._workspace_sandbox_ready(),
+                        external_tracked_paths=self._workspace_tracked_paths,
+                        run_command=self.run_command,
+                        now=self.now,
+                    )
+            else:
+                response = self.handle_request(request)
+            if response is not None:
+                atomic_json_write(
+                    self.responses_dir / f"{request_id}.json",
+                    response,
+                )
+        self._poll_workspace_query_response()
+        self._poll_workspace_test_response()
+        self._process_workspace_mutation_queue(current=current)
+
+    def _process_workspace_mutation_queue(self, *, current: float) -> None:
+        if not all(
+            ensure_workspace_queue_directory(self.root, directory)
+            for directory in (
+                self.mutation_requests_dir,
+                self.mutation_responses_dir,
+            )
+        ):
+            self.last_error = "workspace_mutation_queue_unavailable"
+            return
+        if self.last_error == "workspace_mutation_queue_unavailable":
+            self.last_error = ""
+        self._workspace_mutation_request_ids = {
+            request_id: expires_at
+            for request_id, expires_at in self._workspace_mutation_request_ids.items()
+            if expires_at + WORKSPACE_TASK_ORPHAN_TTL_SEC > current
+        }
+        for directory, maximum_bytes in (
+            (self.mutation_requests_dir, WORKSPACE_MUTATION_MAX_REQUEST_BYTES),
+            (self.mutation_responses_dir, WORKSPACE_MUTATION_MAX_RESPONSE_BYTES),
+        ):
+            for queue_path in directory.glob("*.json"):
+                try:
+                    payload = read_bounded_json(
+                        queue_path,
+                        maximum_bytes=maximum_bytes,
+                    )
+                except (OSError, ValueError, TypeError):
+                    payload = {}
+                expires_at = payload.get("expiresAt") if isinstance(payload, dict) else None
+                stale_instance = bool(
+                    isinstance(payload, dict)
+                    and payload.get("schema") in {
+                        WORKSPACE_MUTATION_REQUEST_SCHEMA,
+                        WORKSPACE_MUTATION_RESPONSE_SCHEMA,
+                    }
+                    and payload.get("hostInstanceId") != self.host_instance_id
+                )
+                expired = bool(
+                    isinstance(expires_at, (int, float))
+                    and not isinstance(expires_at, bool)
+                    and float(expires_at) + WORKSPACE_TASK_ORPHAN_TTL_SEC <= current
+                )
+                try:
+                    old_file = (
+                        current - queue_path.stat().st_mtime
+                        >= WORKSPACE_TASK_ORPHAN_TTL_SEC
+                    )
+                except OSError:
+                    old_file = False
+                if stale_instance or expired or old_file:
+                    try:
+                        queue_path.unlink()
+                    except OSError:
+                        pass
+        for request_path in sorted(self.mutation_requests_dir.glob("*.json")):
+            try:
+                request = read_bounded_json(
+                    request_path,
+                    maximum_bytes=WORKSPACE_MUTATION_MAX_REQUEST_BYTES,
+                )
+                if not isinstance(request, dict):
+                    request = {}
+            except (OSError, ValueError, TypeError):
+                request = {}
             try:
                 request_path.unlink()
-            except OSError:
+            except FileNotFoundError:
                 pass
+            except OSError:
+                self.last_error = "workspace_mutation_request_unlink_failed"
+                continue
+            requested_id = str(request.get("requestId") or "")
+            request_id = (
+                requested_id
+                if _REQUEST_ID_PATTERN.fullmatch(requested_id)
+                else request_path.stem
+                if _REQUEST_ID_PATTERN.fullmatch(request_path.stem)
+                else uuid.uuid4().hex
+            )
+            response = handle_workspace_mutation_request(
+                request,
+                project_root=self.project_root,
+                host_instance_id=self.host_instance_id,
+                host_started_at=self.started_at,
+                stages=self._workspace_edit_stages,
+                auth_token=self.workspace_mutation_auth_token,
+                request_filename=request_path.name,
+                consumed_request_ids=self._workspace_mutation_request_ids,
+                run_command=self.run_command,
+                external_tracked_paths=self._workspace_tracked_paths,
+                now=self.now,
+            )
+            atomic_json_write(
+                self.mutation_responses_dir / f"{request_id}.json",
+                response,
+            )
 
     def status(self) -> dict[str, Any]:
         child_running = bool(self.child is not None and self.child.poll() is None)
@@ -1040,6 +1867,24 @@ class HostSupervisor:
         )
         return {
             "schema": SUPERVISOR_STATUS_SCHEMA,
+            "hostInstanceId": self.host_instance_id,
+            "workspaceTaskAuthReady": (
+                32
+                <= len(self.workspace_task_auth_token.encode("utf-8"))
+                <= 512
+            ),
+            "workspaceMutationAuthReady": (
+                32
+                <= len(self.workspace_mutation_auth_token.encode("utf-8"))
+                <= 512
+            ),
+            "workspaceSandboxAuthReady": (
+                32
+                <= len(self.workspace_sandbox_auth_token.encode("utf-8"))
+                <= 512
+            ),
+            "workspaceSandboxReady": self._workspace_sandbox_ready(),
+            "workspaceSandboxSemanticVerified": False,
             "heartbeatAt": self.now(),
             "startedAt": self.started_at,
             "pid": os.getpid(),
@@ -1195,6 +2040,8 @@ class HostSupervisor:
                 self._observe_child()
                 time.sleep(0.1)
         finally:
+            self._close_workspace_query_worker()
+            self._close_workspace_test_worker()
             self._heartbeat_stop.set()
             if self._heartbeat_thread is not None:
                 self._heartbeat_thread.join(timeout=2.0)

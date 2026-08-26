@@ -2,5 +2,6 @@ fastapi>=0.115
 numpy>=2.0
 pydantic>=2
 qwen-asr==0.0.6
+vllm==0.14.0
 soxr>=0.5
 uvicorn>=0.32

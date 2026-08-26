@@ -346,6 +346,67 @@ class MinecraftActionTransportTests(
         )
         self.assertEqual(cancelled["status"], "cancelled")
 
+    async def test_action_mutations_reject_stale_lease_before_runtime(
+        self,
+    ) -> None:
+        lease_id = self.owner.status()["lease"]["leaseId"]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.dispatch_action(
+                7,
+                action_request(),
+                expected_lease_id="stale-lease",
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.dispatch_action(
+                7,
+                action_request(),
+                expected_lease_id="",
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.execute_action(
+                7,
+                action_request(),
+                expected_lease_id="stale-lease",
+            )
+        self.assertFalse(
+            any(name == "dispatch" for name, _ in self.runtime.calls)
+        )
+
+        await self.owner.dispatch_action(
+            7,
+            action_request(),
+            expected_lease_id=lease_id,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.cancel_action(
+                7,
+                "action-run-1",
+                expected_lease_id="stale-lease",
+            )
+        self.assertFalse(
+            any(name == "cancel" for name, _ in self.runtime.calls)
+        )
+
+        cancelled = await self.owner.cancel_action(
+            7,
+            "action-run-1",
+            expected_lease_id=lease_id,
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+
     async def test_dispatch_mismatch_triggers_fail_closed_cancel(
         self,
     ) -> None:

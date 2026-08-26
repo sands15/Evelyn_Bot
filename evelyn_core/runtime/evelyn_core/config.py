@@ -97,7 +97,7 @@ OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 OMNIVOICE_STREAM_STRATEGY = os.getenv("OMNIVOICE_STREAM_STRATEGY", "sentence")
 OMNIVOICE_STREAM_FOLLOWUP_STRATEGY = os.getenv("OMNIVOICE_STREAM_FOLLOWUP_STRATEGY", "sentence")
 OMNIVOICE_STREAM_BLOCK_SIZE = int(os.getenv("OMNIVOICE_STREAM_BLOCK_SIZE", "16"))
-OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "16"))
+OMNIVOICE_NUM_STEP = int(os.getenv("OMNIVOICE_NUM_STEP", "12"))
 OMNIVOICE_STREAM_FIRST_BLOCK_STEPS = int(os.getenv("OMNIVOICE_STREAM_FIRST_BLOCK_STEPS", "8"))
 OMNIVOICE_STREAM_BLOCK_STEPS = int(os.getenv("OMNIVOICE_STREAM_BLOCK_STEPS", "10"))
 OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS = float(os.getenv("OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS", "250"))
@@ -187,20 +187,57 @@ MINECRAFT_WORLD_LEASE_OWNER_URL = os.getenv(
     "MINECRAFT_WORLD_LEASE_OWNER_URL",
     "",
 ).strip()
+MINECRAFT_CONNECT_READY_TIMEOUT_SEC = max(
+    60.0,
+    float(
+        os.getenv(
+            "MINECRAFT_CONNECT_READY_TIMEOUT_SEC",
+            "60",
+        )
+    ),
+)
+MINECRAFT_WORLD_LEASE_CONNECT_TIMEOUT_SEC = max(
+    30.0,
+    float(
+        os.getenv(
+            "MINECRAFT_WORLD_LEASE_CONNECT_TIMEOUT_SEC",
+            "480",
+        )
+    ),
+)
+MINECRAFT_WORLD_LEASE_MUTATION_TIMEOUT_SEC = max(
+    5.0,
+    float(
+        os.getenv(
+            "MINECRAFT_WORLD_LEASE_MUTATION_TIMEOUT_SEC",
+            "30",
+        )
+    ),
+)
 # Codex gateway 전용 Python 실행 파일 경로. 기본적으로 Voyager 전용 venv를 재사용.
 VOYAGER_CODEX_GATEWAY_PYTHON_EXE = os.getenv("VOYAGER_CODEX_GATEWAY_PYTHON_EXE", VOYAGER_PYTHON_EXE)
 # Codex gateway 액션 생성 엔드포인트.
 VOYAGER_CODEX_GATEWAY_URL = os.getenv("VOYAGER_CODEX_GATEWAY_URL", "http://127.0.0.1:8787/codex/action")
 # Codex gateway에서 쓸 기본 모델 이름.
 VOYAGER_CODEX_MODEL = os.getenv("VOYAGER_CODEX_MODEL", "gpt-5.5")
-MINDCRAFT_LOCAL_LLM_URL = os.getenv(
-    "MINDCRAFT_LOCAL_LLM_URL",
-    "http://127.0.0.1:9823/v1/chat/completions",
-)
 MINDCRAFT_LOCAL_MODEL = os.getenv(
     "MINDCRAFT_LOCAL_MODEL",
     "Qwen3-14B-Q4_K_M.gguf",
 )
+MINDCRAFT_LLM_BROKER_URL = os.getenv(
+    "MINDCRAFT_LLM_BROKER_URL",
+    "http://127.0.0.1:8798/internal/mindcraft-llm",
+)
+MINDCRAFT_LLM_BROKER_TOKEN_FILE = os.getenv(
+    "MINDCRAFT_LLM_BROKER_TOKEN_FILE",
+    "",
+)
+QWEN_ADMISSION_QUEUE_TIMEOUT_SEC = max(
+    0.1,
+    float(os.getenv("QWEN_ADMISSION_QUEUE_TIMEOUT_SEC", "30")),
+)
+# Qwen specialist hard deadline. Failure remains Main-only.
+SPECIALIST_LLM_TIMEOUT_SEC = float(os.getenv("SPECIALIST_LLM_TIMEOUT_SEC", "6"))
 # Codex gateway 서비스 포트.
 VOYAGER_CODEX_GATEWAY_PORT = int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787"))
 # OpenAI 호환 nano API. `openai_api`라는 소문자 환경변수도 지원한다.
@@ -222,8 +259,8 @@ VOYAGER_CRITIC_RULE_FIRST = _env_flag("VOYAGER_CRITIC_RULE_FIRST", "true")
 VOYAGER_SKILL_LLM_URL = os.getenv("VOYAGER_SKILL_LLM_URL", LLM_SERVER_URL)
 # SkillManager가 쓸 모델 이름.
 VOYAGER_SKILL_MODEL_NAME = os.getenv("VOYAGER_SKILL_MODEL_NAME", MODEL_NAME)
-# Legacy Voyager ActionAgent도 기본적으로 로컬 Minecraft LLM을 사용한다.
-VOYAGER_ACTION_BACKEND = os.getenv("VOYAGER_ACTION_BACKEND", "local")
+# Legacy Voyager ActionAgent의 broker 없는 로컬 Qwen 경로는 비활성화한다.
+VOYAGER_ACTION_BACKEND = os.getenv("VOYAGER_ACTION_BACKEND", "disabled")
 # 작업 메모리 파일에 유지할 durable facts 최대 개수.
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 # open loop / 질문성 메모리 최대 개수.
@@ -272,8 +309,11 @@ STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() == "true"
 STT_FORCE_PUNCTUATION = os.getenv("STT_FORCE_PUNCTUATION", "true").lower() == "true"
 # STT에 원본 48k를 직접 쓸지 여부.
 STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
+# 새 Discord 완료-PCM 단일 final 재사용 경로를 사용할지 여부.
+# Packet-time Discord streaming은 아직 별도 rollout 단계다.
+STT_STREAMING_ENABLED = _env_flag("STT_STREAMING_ENABLED", "true")
 # full STT 재스코어링 사용 여부.
-STT_FULL_RESCORING_ENABLED = _env_flag("STT_FULL_RESCORING_ENABLED", "true")
+STT_FULL_RESCORING_ENABLED = _env_flag("STT_FULL_RESCORING_ENABLED", "false")
 # 재스코어링 시 추가 최대 토큰 수.
 STT_FULL_RESCORE_EXTRA_TOKENS = int(os.getenv("STT_FULL_RESCORE_EXTRA_TOKENS", "96"))
 STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
@@ -378,8 +418,8 @@ VOICE_DEBUG_PRESERVE_NEWEST = int(os.getenv("VOICE_DEBUG_PRESERVE_NEWEST", "10")
 
 # 대화 히스토리에 유지할 총 턴 수 상한.
 MAX_HISTORY_ITEMS = 1024
-# voice history tail 길이. 현재는 MAX_HISTORY_ITEMS와 맞춰 두지만 따로 조절 가능.
-VOICE_HISTORY_LIMIT = int(os.getenv("VOICE_HISTORY_LIMIT", str(MAX_HISTORY_ITEMS)))
+# Main LLM prompt에는 최근 대화만 넣고 전체 기록은 session store에 유지한다.
+VOICE_HISTORY_LIMIT = max(0, int(os.getenv("VOICE_HISTORY_LIMIT", "8")))
 # 채팅창에 보여줄 최대 글자 수.
 MAX_VISIBLE_TEXT = 1800
 # 활성 텍스트 세션 유지 시간(초).

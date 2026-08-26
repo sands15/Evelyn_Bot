@@ -736,6 +736,12 @@ class MindcraftWorldEffectProjector:
                 return _error_code(response[1], fallback)
         return ""
 
+    def active_guard_error(self) -> str:
+        with self._lock:
+            if self._binding is None or self._state != "armed":
+                return "mindcraft_world_effect_not_armed"
+            return self._guards(self._binding)
+
     @staticmethod
     def _binding_key(binding: Mapping[str, Any]) -> tuple[str, ...]:
         return tuple(str(binding[key]) for key in _IDENTITY_KEYS)

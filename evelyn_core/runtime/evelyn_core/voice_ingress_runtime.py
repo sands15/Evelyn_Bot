@@ -17,6 +17,65 @@ from .voice_validation import validation_attempt_binding_is_current
 _VOICE_TRANSITION_GUILD_IDS: set[int] = set()
 
 
+def _voice_ingress_guild_id(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def current_voice_ingress_epoch(
+    epochs: MutableMapping[int, int],
+    guild_id: Any,
+    *,
+    guild_is_open: Callable[[int], bool] | None = None,
+) -> int:
+    normalized_guild_id = _voice_ingress_guild_id(guild_id)
+    if normalized_guild_id is None:
+        return -1
+    if (
+        normalized_guild_id > 0
+        and guild_is_open is not None
+        and not guild_is_open(normalized_guild_id)
+    ):
+        return -1
+    epoch = epochs.get(normalized_guild_id, 0)
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        return -1
+    return epoch
+
+
+def advance_voice_ingress_epoch(
+    epochs: MutableMapping[int, int],
+    guild_id: Any,
+) -> int:
+    normalized_guild_id = _voice_ingress_guild_id(guild_id)
+    if normalized_guild_id is None or normalized_guild_id == 0:
+        raise ValueError("invalid_voice_ingress_guild_id")
+    current_epoch = current_voice_ingress_epoch(epochs, normalized_guild_id)
+    next_epoch = current_epoch + 1 if current_epoch >= 0 else 1
+    epochs[normalized_guild_id] = next_epoch
+    return next_epoch
+
+
+def voice_ingress_epoch_is_current(
+    epochs: MutableMapping[int, int],
+    guild_id: Any,
+    expected_epoch: Any,
+    *,
+    guild_is_open: Callable[[int], bool] | None = None,
+) -> bool:
+    return (
+        not isinstance(expected_epoch, bool)
+        and isinstance(expected_epoch, int)
+        and expected_epoch >= 0
+        and expected_epoch == current_voice_ingress_epoch(
+            epochs,
+            guild_id,
+            guild_is_open=guild_is_open,
+        )
+    )
+
+
 def _observe_handed_off_voice_task(
     task: asyncio.Task,
     *,
@@ -60,6 +119,7 @@ class VoiceIngressRuntimeDeps:
     apply_voice_ingress_dequeue_debug_meta: Callable[..., Any]
     enqueue_voice_ingress_item: Callable[..., Any]
     increment_voice_pipeline_counter: Callable[[str], Any]
+    voice_ingress_epoch_is_current: Callable[[int, Any], bool]
     process_member_audio: Callable[..., Awaitable[Any]]
     create_task: Callable[[Awaitable[Any]], asyncio.Task]
     log: Callable[..., Any] = print
@@ -78,10 +138,12 @@ class VoiceIngressEntrypointDeps:
     new_turn_id: Callable[[], str]
     room_state_snapshot: Callable[[str], dict[str, Any]]
     validation_context_provider: Callable[..., dict[str, Any] | None]
+    capture_voice_ingress_epoch: Callable[[int], int]
     build_voice_ingress_item: Callable[..., dict[str, Any]]
     voice_ingress_queue_depth: Callable[[], int]
     schedule_voice_utterance_item: Callable[[dict[str, Any]], Awaitable[Any]]
     monotonic: Callable[[], float] = time.monotonic
+    admit_search_followup_recovery: Callable[[], Awaitable[bool]] | None = None
 
 
 def voice_listener_binding_is_current(
@@ -129,6 +191,23 @@ def voice_utterance_buffer_key(item: dict[str, Any]) -> str:
     return session_key
 
 
+def _voice_ingress_item_epoch_is_current(
+    item: dict[str, Any],
+    *,
+    deps: VoiceIngressRuntimeDeps,
+) -> bool:
+    guild_id = getattr(getattr(item.get("member"), "guild", None), "id", None)
+    try:
+        return bool(
+            deps.voice_ingress_epoch_is_current(
+                guild_id,
+                item.get("voice_ingress_epoch"),
+            )
+        )
+    except Exception:
+        return False
+
+
 async def process_member_audio_from_runtime(
     member: Any,
     pcm_bytes: bytes,
@@ -138,8 +217,31 @@ async def process_member_audio_from_runtime(
 ) -> None:
     debug_meta_input = deps.normalize_voice_debug_meta(debug_meta)
     voice_listener_binding = debug_meta_input.pop("_voice_listener_binding", None)
-    await deps.ensure_startup_components_ready()
     if member is None or getattr(member, "bot", False):
+        return
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        return
+    guild_id = guild.id
+    voice_ingress_epoch = deps.capture_voice_ingress_epoch(guild_id)
+    if (
+        isinstance(voice_ingress_epoch, bool)
+        or not isinstance(voice_ingress_epoch, int)
+        or voice_ingress_epoch < 0
+    ):
+        return
+    await deps.ensure_startup_components_ready()
+    current_voice_ingress_epoch = deps.capture_voice_ingress_epoch(guild_id)
+    if (
+        isinstance(current_voice_ingress_epoch, bool)
+        or not isinstance(current_voice_ingress_epoch, int)
+        or current_voice_ingress_epoch != voice_ingress_epoch
+    ):
+        return
+    if (
+        deps.admit_search_followup_recovery is not None
+        and not await deps.admit_search_followup_recovery()
+    ):
         return
     if not voice_listener_binding_is_current(member, voice_listener_binding):
         return
@@ -147,13 +249,8 @@ async def process_member_audio_from_runtime(
     if deps.should_drop_discord_audio_for_local_mic(getattr(member, "id", None), source=source):
         return
 
-    guild = getattr(member, "guild", None)
-    if guild is None:
-        return
-
     deps.ensure_voice_worker_started()
 
-    guild_id = guild.id
     voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
     ingress = deps.build_voice_ingress_context(
         guild_id=guild_id,
@@ -212,6 +309,7 @@ async def process_member_audio_from_runtime(
         segment_id=segment_id,
         ingress_during_reply=bool(room_state.get("reply_in_progress")),
         owner_user_id_on_ingress=room_state.get("owner_user_id"),
+        voice_ingress_epoch=voice_ingress_epoch,
         queue_depth_at_enqueue=deps.voice_ingress_queue_depth(),
         enqueued_at=deps.monotonic(),
     )
@@ -224,6 +322,12 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
     while True:
         item = await deps.voice_ingress_queue.get()
         try:
+            if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+                deps.increment_voice_pipeline_counter(
+                    "voice_ingress_epoch_stale_drop_count"
+                )
+                deps.log("[VOICE QUEUE DROP] reason=guild_reset_epoch_stale")
+                continue
             if not voice_listener_binding_is_current(
                 item.get("member"),
                 item.get("voice_listener_binding"),
@@ -311,6 +415,12 @@ async def enqueue_voice_ingress_for_processing_from_runtime(
     *,
     deps: VoiceIngressRuntimeDeps,
 ) -> None:
+    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+        deps.increment_voice_pipeline_counter(
+            "voice_ingress_epoch_stale_drop_count"
+        )
+        deps.log("[VOICE QUEUE DROP] reason=guild_reset_epoch_stale")
+        return
     debug_meta = item.get("debug_meta")
     if isinstance(debug_meta, dict):
         debug_meta["voice_queue_depth_at_enqueue"] = deps.voice_ingress_queue.qsize()
@@ -347,6 +457,12 @@ async def flush_voice_utterance_buffer_from_runtime(
     if not buffer:
         return
     base_item = dict(buffer["base_item"])
+    if not _voice_ingress_item_epoch_is_current(base_item, deps=deps):
+        deps.increment_voice_pipeline_counter(
+            "voice_ingress_epoch_stale_drop_count"
+        )
+        deps.log("[VOICE UTTERANCE DROP] reason=guild_reset_epoch_stale")
+        return
     if not voice_listener_binding_is_current(
         base_item.get("member"),
         base_item.get("voice_listener_binding"),
@@ -397,6 +513,12 @@ async def schedule_voice_utterance_item_from_runtime(
     *,
     deps: VoiceIngressRuntimeDeps,
 ) -> None:
+    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+        deps.increment_voice_pipeline_counter(
+            "voice_ingress_epoch_stale_drop_count"
+        )
+        deps.log("[VOICE UTTERANCE DROP] reason=guild_reset_epoch_stale")
+        return
     config = deps.voice_utterance_assembly_config
     if not config.enabled or config.commit_wait_sec <= 0.0:
         await enqueue_voice_ingress_for_processing_from_runtime(item, deps=deps)
@@ -415,11 +537,21 @@ async def schedule_voice_utterance_item_from_runtime(
     buffer = deps.voice_utterance_buffers.get(key)
     if (
         buffer is not None
-        and buffer.get("base_item", {}).get("voice_listener_binding")
-        != item.get("voice_listener_binding")
+        and (
+            buffer.get("base_item", {}).get("voice_listener_binding")
+            != item.get("voice_listener_binding")
+            or buffer.get("base_item", {}).get("voice_ingress_epoch")
+            != item.get("voice_ingress_epoch")
+        )
     ):
         await flush_voice_utterance_buffer_from_runtime(key, deps=deps)
         buffer = None
+    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+        deps.increment_voice_pipeline_counter(
+            "voice_ingress_epoch_stale_drop_count"
+        )
+        deps.log("[VOICE UTTERANCE DROP] reason=guild_reset_epoch_stale")
+        return
     if buffer is None:
         buffer = {
             "base_item": dict(item),

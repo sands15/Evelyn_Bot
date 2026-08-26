@@ -1,7 +1,5 @@
 FROM python:3.11-slim
 
-ARG EVELYN_SOURCE_REVISION=unversioned
-
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -13,6 +11,8 @@ RUN python -m pip install --upgrade pip && \
     pip install --no-cache-dir aiohttp==3.13.* fastapi==0.115.* uvicorn==0.32.* requests==2.32.* numpy>=2.0
 
 COPY . /app
+
+ARG EVELYN_SOURCE_REVISION=unversioned
 
 ENV EVELYN_CORE_RUNTIME=/app/evelyn_core/runtime
 ENV EVELYN_CORE_ROOT=/app/evelyn_core

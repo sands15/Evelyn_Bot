@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -21,7 +22,11 @@ from .conversation_ingress_recovery import (
     final_text_sha256,
     normalize_final_conversation_text,
 )
-from .session_continuity import SessionContinuityCheckpoint
+from .runtime_artifact_io import durable_artifact_process_scope
+from .session_continuity import (
+    DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC,
+    SessionContinuityCheckpoint,
+)
 from .session_memory_state import (
     SessionStateStore,
     build_topic_id,
@@ -54,6 +59,31 @@ _EPHEMERAL_VALIDATION_RECOVERY_PREFIX = (
 )
 
 
+def bound_fast_control_session_key(
+    *,
+    guild_id: int,
+    user_id: int,
+) -> str:
+    """Return an opaque durable session key for one exact principal."""
+
+    if (
+        isinstance(guild_id, bool)
+        or not isinstance(guild_id, int)
+        or guild_id <= 0
+        or isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or user_id <= 0
+    ):
+        raise ValueError("fast_control_principal_invalid")
+    digest = hashlib.sha256(
+        (
+            "evelyn.fast-control.principal.v1\n"
+            f"guild:{guild_id}:user:{user_id}"
+        ).encode("ascii")
+    ).hexdigest()
+    return f"{FAST_CONTROL_SESSION_KEY}:principal-sha256:{digest}"
+
+
 class FastControlContinuityOwner:
     """Own a bounded checkpoint for the standalone Bot API conversation."""
 
@@ -69,6 +99,12 @@ class FastControlContinuityOwner:
         wall_time: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         authenticity: ContinuityAuthenticity | None = None,
+        artifact_process: Any | None = None,
+        commit_artifact_deadline_sec: float = (
+            DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC
+        ),
+        principal_guild_id: int | None = None,
+        principal_user_id: int | None = None,
         log: Callable[..., Any] = print,
     ) -> None:
         self.enabled = bool(enabled)
@@ -83,7 +119,24 @@ class FastControlContinuityOwner:
         self.authenticity = (
             authenticity or ContinuityAuthenticity()
         )
+        self.artifact_process = artifact_process
+        self.commit_artifact_deadline_sec = max(
+            0.1,
+            float(commit_artifact_deadline_sec),
+        )
         self.log = log
+        if (principal_guild_id is None) != (
+            principal_user_id is None
+        ):
+            raise ValueError("fast_control_principal_invalid")
+        self.session_key = (
+            FAST_CONTROL_SESSION_KEY
+            if principal_guild_id is None
+            else bound_fast_control_session_key(
+                guild_id=principal_guild_id,
+                user_id=principal_user_id,
+            )
+        )
         self._lock = threading.RLock()
         self.store = SessionStateStore.create_empty()
         self.checkpoint: SessionContinuityCheckpoint | None = None
@@ -116,6 +169,10 @@ class FastControlContinuityOwner:
             authenticity_scope=(
                 CONTINUITY_AUTH_SCOPE_FAST_CONTROL
             ),
+            artifact_process=self.artifact_process,
+            commit_artifact_deadline_sec=(
+                self.commit_artifact_deadline_sec
+            ),
             log=self.log,
         )
         self.restore_status = self.checkpoint.restore()
@@ -124,21 +181,40 @@ class FastControlContinuityOwner:
             # This is the only accepted fresh bootstrap; corrupt or partially
             # missing chains remain fail-closed in restore().
             self.restore_status = self.checkpoint.flush(force=True)
-        self.ingress = ConversationIngressRecoveryJournal(
-            path=root / "ingress.json",
-            head_path=root / "ingress.head.json",
-            enabled=True,
-            wall_time=self.wall_time,
+        ingress_suffix = self.session_key.removeprefix(
+            f"{FAST_CONTROL_SESSION_KEY}:principal-sha256:"
         )
-        self.ingress_recovery_status = (
-            self._reconcile_ingress_after_restore()
+        ingress_name = (
+            "ingress"
+            if self.session_key == FAST_CONTROL_SESSION_KEY
+            else f"ingress.{ingress_suffix}"
+        )
+        with self._artifact_scope():
+            self.ingress = ConversationIngressRecoveryJournal(
+                path=root / f"{ingress_name}.json",
+                head_path=root / f"{ingress_name}.head.json",
+                enabled=True,
+                wall_time=self.wall_time,
+                artifact_process=self.artifact_process,
+                artifact_deadline_sec=(
+                    self.commit_artifact_deadline_sec
+                ),
+            )
+            self.ingress_recovery_status = (
+                self._reconcile_ingress_after_restore()
+            )
+
+    def _artifact_scope(self) -> Any:
+        return durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.commit_artifact_deadline_sec,
         )
 
     def restored_chat_messages(self) -> list[dict[str, Any]]:
         if not self.enabled:
             return []
         history = self.store.histories.get(
-            FAST_CONTROL_SESSION_KEY,
+            self.session_key,
             [],
         )
         restored_at = float(
@@ -244,10 +320,11 @@ class FastControlContinuityOwner:
             self._reject_unrelated_pending(
                 ingress,
                 normalized_request_id,
+                session_key=self.session_key,
             )
             return ingress.claim(
                 surface=FAST_CONTROL_INGRESS_SURFACE,
-                scope=FAST_CONTROL_SESSION_KEY,
+                scope=self.session_key,
                 source_delivery_id=normalized_request_id,
                 accepted_text=accepted_text,
             )
@@ -256,11 +333,18 @@ class FastControlContinuityOwner:
     def _reject_unrelated_pending(
         ingress: ConversationIngressRecoveryJournal,
         request_id: str,
+        *,
+        session_key: str,
     ) -> None:
-        pending = ingress.recovery_records()
+        pending = [
+            record
+            for record in ingress.recovery_records()
+            if record.get("surface") == FAST_CONTROL_INGRESS_SURFACE
+            and record.get("scope") == session_key
+        ]
         if pending and not any(
             record.get("surface") == FAST_CONTROL_INGRESS_SURFACE
-            and record.get("scope") == FAST_CONTROL_SESSION_KEY
+            and record.get("scope") == session_key
             and normalize_final_conversation_text(
                 record.get("sourceDeliveryId")
             )
@@ -285,7 +369,7 @@ class FastControlContinuityOwner:
         with self._lock:
             return self._require_ingress().reserve_ingress(
                 surface=FAST_CONTROL_INGRESS_SURFACE,
-                scope=FAST_CONTROL_SESSION_KEY,
+                scope=self.session_key,
                 source_delivery_id=normalize_final_conversation_text(
                     request_id
                 ),
@@ -313,10 +397,11 @@ class FastControlContinuityOwner:
             self._reject_unrelated_pending(
                 ingress,
                 normalized_request_id,
+                session_key=self.session_key,
             )
             return ingress.claim_reserved_ingress(
                 surface=FAST_CONTROL_INGRESS_SURFACE,
-                scope=FAST_CONTROL_SESSION_KEY,
+                scope=self.session_key,
                 source_delivery_id=normalized_request_id,
                 accepted_text=accepted_text,
                 turn_id=turn_id,
@@ -343,7 +428,7 @@ class FastControlContinuityOwner:
                 [
                     {
                         "surface": FAST_CONTROL_INGRESS_SURFACE,
-                        "scope": FAST_CONTROL_SESSION_KEY,
+                        "scope": self.session_key,
                         "source_delivery_id": (
                             normalize_final_conversation_text(
                                 item.get("request_id")
@@ -363,7 +448,7 @@ class FastControlContinuityOwner:
         with self._lock:
             return self._require_ingress().revoke_reserved_ingress_scope(
                 surface=FAST_CONTROL_INGRESS_SURFACE,
-                scope=FAST_CONTROL_SESSION_KEY,
+                scope=self.session_key,
             )
 
     def bind_ingress_response(
@@ -474,7 +559,7 @@ class FastControlContinuityOwner:
                 )
             )
             if (
-                self.store.current_turn_id(FAST_CONTROL_SESSION_KEY)
+                self.store.current_turn_id(self.session_key)
                 == turn_id
                 and not user_turn_persisted
             ):
@@ -483,19 +568,19 @@ class FastControlContinuityOwner:
                 )
             if not user_turn_persisted:
                 self.store.start_new_turn(
-                    FAST_CONTROL_SESSION_KEY,
+                    self.session_key,
                     turn_id=turn_id,
                     now_monotonic=self.monotonic(),
                 )
                 self.store.append_history(
-                    FAST_CONTROL_SESSION_KEY,
+                    self.session_key,
                     accepted_text,
                     None,
                     system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
                     max_history_items=self.max_history_items,
                 )
             self.store.mark_active(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 ttl_sec=self.max_age_sec,
                 speaker="user",
                 awaiting_user_reply=False,
@@ -507,7 +592,7 @@ class FastControlContinuityOwner:
                 now_monotonic=self.monotonic(),
             )
             checkpoint.commit_completed_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 turn_id,
             )
             ingress.discard_ambiguous(
@@ -836,12 +921,12 @@ class FastControlContinuityOwner:
         self,
         record: dict[str, Any],
     ) -> bool:
-        if self.store.current_turn_id(FAST_CONTROL_SESSION_KEY) != clean_text(
+        if self.store.current_turn_id(self.session_key) != clean_text(
             record.get("turnId")
         ):
             return False
         history = self.store.histories.get(
-            FAST_CONTROL_SESSION_KEY,
+            self.session_key,
             [],
         )
         if len(history) < 2:
@@ -875,12 +960,12 @@ class FastControlContinuityOwner:
         self,
         record: dict[str, Any],
     ) -> bool:
-        if self.store.current_turn_id(FAST_CONTROL_SESSION_KEY) != clean_text(
+        if self.store.current_turn_id(self.session_key) != clean_text(
             record.get("turnId")
         ):
             return False
         history = self.store.histories.get(
-            FAST_CONTROL_SESSION_KEY,
+            self.session_key,
             [],
         )
         if not history or not isinstance(history[-1], dict):
@@ -1037,6 +1122,24 @@ class FastControlContinuityOwner:
         memory_receipt: Any = None,
         ingress_entry_id: str = "",
     ) -> dict[str, Any]:
+        with self._artifact_scope():
+            return self._record_completed_turn_scoped(
+                user_text,
+                assistant_text,
+                before_commit=before_commit,
+                memory_receipt=memory_receipt,
+                ingress_entry_id=ingress_entry_id,
+            )
+
+    def _record_completed_turn_scoped(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        before_commit: Callable[[int], Any] | None = None,
+        memory_receipt: Any = None,
+        ingress_entry_id: str = "",
+    ) -> dict[str, Any]:
         cleaned_user = clean_text(user_text)
         cleaned_assistant = clean_text(assistant_text)
         if not cleaned_user or not cleaned_assistant:
@@ -1095,7 +1198,7 @@ class FastControlContinuityOwner:
                     memory_receipt_ref=receipt_ref,
                 )
             turn_id = self.store.start_new_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 turn_id=(
                     str(ingress_record["turnId"])
                     if ingress_record is not None
@@ -1104,7 +1207,7 @@ class FastControlContinuityOwner:
                 now_monotonic=self.monotonic(),
             )
             self.store.finish_assistant_text_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 cleaned_user,
                 cleaned_assistant,
                 system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
@@ -1120,7 +1223,7 @@ class FastControlContinuityOwner:
                 memory_receipt=memory_receipt,
             )
             raw_status = checkpoint.commit_completed_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 turn_id,
             )
             if ingress is None:
@@ -1136,6 +1239,20 @@ class FastControlContinuityOwner:
             return result
 
     def record_assistant_followup(
+        self,
+        assistant_text: str,
+        *,
+        before_commit: Callable[[int], Any] | None = None,
+        memory_receipt: Any = None,
+    ) -> dict[str, Any]:
+        with self._artifact_scope():
+            return self._record_assistant_followup_scoped(
+                assistant_text,
+                before_commit=before_commit,
+                memory_receipt=memory_receipt,
+            )
+
+    def _record_assistant_followup_scoped(
         self,
         assistant_text: str,
         *,
@@ -1159,12 +1276,12 @@ class FastControlContinuityOwner:
             if before_commit is not None:
                 before_commit(current_generation + 1)
             turn_id = self.store.start_new_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 now_monotonic=self.monotonic(),
             )
             history = self.store.get_conversation_history(
                 system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
-                session_key=FAST_CONTROL_SESSION_KEY,
+                session_key=self.session_key,
             )
             history.append(
                 {
@@ -1182,10 +1299,10 @@ class FastControlContinuityOwner:
             self.store.trim_history(
                 system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
                 max_history_items=self.max_history_items,
-                session_key=FAST_CONTROL_SESSION_KEY,
+                session_key=self.session_key,
             )
             self.store.mark_active(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 ttl_sec=self.max_age_sec,
                 speaker="assistant",
                 awaiting_user_reply=False,
@@ -1197,7 +1314,7 @@ class FastControlContinuityOwner:
                 now_monotonic=self.monotonic(),
             )
             return checkpoint.commit_completed_turn(
-                FAST_CONTROL_SESSION_KEY,
+                self.session_key,
                 turn_id,
             )
 
@@ -1320,4 +1437,5 @@ __all__ = [
     "FAST_CONTROL_INGRESS_SURFACE",
     "FAST_CONTROL_SESSION_KEY",
     "FastControlContinuityOwner",
+    "bound_fast_control_session_key",
 ]

@@ -246,6 +246,86 @@ class CognitiveStateMemoryDeletionBoundaryTests(
 
         self.assertEqual(self.writes, [])
 
+    async def test_cognitive_action_logs_are_content_free(self) -> None:
+        private_question = "PRIVATE_QUESTION C:/secret/question.txt"
+        private_intent = "PRIVATE_INTENT bearer-token-value"
+        private_reason = "PRIVATE_REASON user relationship detail"
+        private_scope_key = "PRIVATE_SESSION_KEY user:42/channel:9"
+        results = iter(
+            (
+                {
+                    "action": "ask",
+                    "question_for_user": private_question,
+                    "reason_brief": private_reason,
+                    "confidence": 0.9,
+                },
+                {
+                    "action": "search_then_answer",
+                    "user_intent": private_intent,
+                    "reason_brief": private_reason,
+                },
+            )
+        )
+
+        async def ask(_messages, **_kwargs):
+            return next(results)
+
+        with TemporaryDirectory() as tmp:
+            deps = replace(
+                self.build_deps(ask),
+                should_log_voice_timing=lambda _elapsed: True,
+            )
+            index_dir = Path(tmp) / "memory_index"
+            await update_cognitive_state_from_runtime(
+                7,
+                "continue",
+                deps=deps,
+                session_memory_key=private_scope_key,
+                memory_index_dir=index_dir,
+            )
+            await update_cognitive_state_from_runtime(
+                7,
+                "continue",
+                deps=deps,
+                session_memory_key=private_scope_key,
+                memory_index_dir=index_dir,
+            )
+
+        rendered = "\n".join(self.logs)
+        self.assertIn("[COGNITIVE ASK]", rendered)
+        self.assertIn("[COGNITIVE SEARCH]", rendered)
+        for private_value in (
+            private_question,
+            private_intent,
+            private_reason,
+            private_scope_key,
+            "C:/secret/question.txt",
+            "bearer-token-value",
+        ):
+            self.assertNotIn(private_value, rendered)
+
+    async def test_cognitive_failure_log_uses_exception_type_only(self) -> None:
+        private_error = (
+            "PRIVATE_ROUTER_ERROR C:/secret/router-token.json"
+        )
+
+        async def ask(_messages, **_kwargs):
+            raise RuntimeError(private_error)
+
+        with TemporaryDirectory() as tmp:
+            state = await update_cognitive_state_from_runtime(
+                7,
+                "continue",
+                deps=self.build_deps(ask),
+                memory_index_dir=Path(tmp) / "memory_index",
+            )
+
+        rendered = "\n".join(self.logs)
+        self.assertTrue(state["fallback"])
+        self.assertIn("errorType=RuntimeError", rendered)
+        self.assertNotIn(private_error, rendered)
+        self.assertNotIn("C:/secret/router-token.json", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

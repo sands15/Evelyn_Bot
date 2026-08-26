@@ -125,10 +125,10 @@ class ShutdownScriptContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertNotIn("'--profile', 'voyager'", docker_core)
-        self.assertNotIn("'minecraft_llm'", docker_core)
+        self.assertIn("'minecraft_llm'", docker_core)
         self.assertNotIn("'codex_gateway'", docker_core)
         self.assertNotIn("'voyager'", docker_core)
-        self.assertIn("Minecraft services are deferred", docker_core)
+        self.assertIn("Minecraft world service is deferred", docker_core)
         self.assertIn("-Profiles voyager", voyager_start)
         self.assertIn(
             "-Services router_llm,minecraft_llm,voyager",
@@ -170,6 +170,23 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("$supervisorLog", script)
         self.assertIn("-WindowStyle $windowStyle", script)
         self.assertNotIn("py -3.11 -m evelyn_core.host_supervisor", script)
+
+    def test_local_launcher_clears_rotation_stop_request_before_restart(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        rotation = script[
+            script.index("function Stop-PreviousHostSupervisorGeneration") :
+            script.index("function Start-HostSupervisor")
+        ]
+
+        self.assertIn(
+            "Remove-Item -LiteralPath $supervisorStopRequest -Force "
+            "-ErrorAction SilentlyContinue",
+            rotation,
+        )
+        self.assertLess(
+            rotation.index("Set-Content -LiteralPath $supervisorStopRequest"),
+            rotation.index("Remove-Item -LiteralPath $supervisorStopRequest"),
+        )
 
     def test_local_launcher_requires_two_fresh_supervisor_and_bridge_heartbeats(self) -> None:
         script = self.read_script("start_local_background.ps1")
@@ -368,6 +385,14 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "$env:EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN = New-SecureRuntimeToken",
             script,
         )
+        self.assertNotIn(
+            "$env:EVELYN_VOICE_INPUT_LEASE_TOKEN = New-SecureRuntimeToken",
+            script,
+        )
+        self.assertNotIn(
+            "$env:EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN = New-SecureRuntimeToken",
+            script,
+        )
         self.assertIn(
             "$voiceCaptureHostAuthToken = New-SecureRuntimeToken",
             script,
@@ -395,7 +420,23 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertLess(
             script.index(
                 "[Environment]::SetEnvironmentVariable(\n"
+                "    'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',\n"
+                "    $null,"
+            ),
+            script.index("Initialize-EvelynSourceRevision"),
+        )
+        self.assertLess(
+            script.index(
+                "[Environment]::SetEnvironmentVariable(\n"
                 "    'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',\n"
+                "    $null,"
+            ),
+            script.index("Initialize-EvelynSourceRevision"),
+        )
+        self.assertLess(
+            script.index(
+                "[Environment]::SetEnvironmentVariable(\n"
+                "    'EVELYN_VOICE_INPUT_LEASE_TOKEN',\n"
                 "    $null,"
             ),
             script.index("Initialize-EvelynSourceRevision"),
@@ -403,6 +444,8 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("-Value $localBridgeStatusAuthToken", docker_helper)
         self.assertIn("-Value $internalControlToken", docker_helper)
         self.assertIn("-Value $voiceCaptureHostAuthToken", docker_helper)
+        self.assertIn("-Value $voiceInputLeaseToken", docker_helper)
+        self.assertIn("-Value $workspaceSandboxAuthToken", docker_helper)
         self.assertIn("Invoke-DockerCommandWithRuntimeChannelTokens", script)
         self.assertIn("-Value $localBridgeStatusAuthToken", supervisor)
         self.assertIn("-Name 'EVELYN_INTERNAL_CONTROL_TOKEN'", supervisor)
@@ -410,10 +453,20 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "-Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN'",
             supervisor,
         )
+        self.assertIn(
+            "-Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN'",
+            supervisor,
+        )
+        self.assertIn(
+            "-Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN'",
+            supervisor,
+        )
         self.assertIn("-Value $null", supervisor)
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", browser)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", browser)
         self.assertNotIn("EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN", browser)
+        self.assertNotIn("EVELYN_VOICE_INPUT_LEASE_TOKEN", browser)
+        self.assertNotIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", browser)
         self.assertLess(
             main.index("-Name 'LOCAL_BRIDGE_STATUS_AUTH_TOKEN'"),
             main.index("Assert-TtsProfileReady"),
@@ -426,7 +479,108 @@ class ShutdownScriptContractTests(unittest.TestCase):
             main.index("-Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN'"),
             main.index("Assert-TtsProfileReady"),
         )
+        self.assertLess(
+            main.index("-Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN'"),
+            main.index("Assert-TtsProfileReady"),
+        )
+        self.assertLess(
+            main.index("-Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN'"),
+            main.index("Assert-TtsProfileReady"),
+        )
         self.assertLess(main.index("Open-ControlPage"), main.index("} finally {"))
+
+    def test_workspace_mutation_token_is_ephemeral_and_scoped_to_compose_and_host(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        docker_helper = script[
+            script.index("function Invoke-DockerCommandWithRuntimeChannelTokens") :
+            script.index("function Test-DockerContainerRunning")
+        ]
+        supervisor = script[
+            script.index("function Start-HostSupervisor") :
+            script.index("function Open-ControlPage")
+        ]
+        browser = script[
+            script.index("function Open-ControlPage") :
+            script.index("\ntry {\n    # Keep channel credentials", script.index("function Open-ControlPage"))
+        ]
+
+        self.assertIn("$workspaceMutationAuthToken = New-SecureRuntimeToken", script)
+        self.assertNotIn("$previousWorkspaceMutationAuthToken.Trim()", script)
+        self.assertIn("-Value $workspaceMutationAuthToken", docker_helper)
+        self.assertIn("-Value $workspaceMutationAuthToken", supervisor)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", browser)
+        self.assertIn("-Value $previousWorkspaceMutationAuthToken", script)
+
+    def test_workspace_sandbox_token_is_ephemeral_and_scoped_to_bot_and_host(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        docker_helper = script[
+            script.index("function Invoke-DockerCommandWithRuntimeChannelTokens") :
+            script.index("function Test-DockerContainerRunning")
+        ]
+        supervisor = script[
+            script.index("function Start-HostSupervisor") :
+            script.index("function Open-ControlPage")
+        ]
+        browser = script[
+            script.index("function Open-ControlPage") :
+            script.index("\ntry {\n    # Keep channel credentials", script.index("function Open-ControlPage"))
+        ]
+
+        self.assertIn("$workspaceSandboxAuthToken = New-SecureRuntimeToken", script)
+        self.assertNotIn("$previousWorkspaceSandboxAuthToken.Trim()", script)
+        self.assertIn("-Value $workspaceSandboxAuthToken", docker_helper)
+        self.assertIn("-Value $workspaceSandboxAuthToken", supervisor)
+        self.assertNotIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", browser)
+        self.assertIn("-Value $previousWorkspaceSandboxAuthToken", script)
+
+    def test_keep_discord_requires_stable_voice_lease_token_before_mutation(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        capture = script.index("$previousVoiceInputLeaseToken =")
+        keep = script.index("$keepDiscordBot =", capture)
+        guard = script.index("if (\n    $keepDiscordBot -and (", keep)
+        failure = script.index(
+            "throw 'discord_keep_requires_stable_voice_input_lease_token'",
+            guard,
+        )
+        first_mutation = script.index(
+            "[Environment]::SetEnvironmentVariable(",
+            failure,
+        )
+
+        self.assertEqual(script.count("$keepDiscordBot ="), 1)
+        self.assertIn(
+            "[string]::IsNullOrWhiteSpace($previousVoiceInputLeaseToken)",
+            script[guard:failure],
+        )
+        self.assertIn(
+            "$previousVoiceInputLeaseToken.Trim().Length -lt 32",
+            script[guard:failure],
+        )
+        self.assertLess(capture, keep)
+        self.assertLess(keep, guard)
+        self.assertLess(guard, failure)
+        self.assertLess(failure, first_mutation)
+        self.assertLess(failure, script.rindex("Stop-PreviousHostSupervisorGeneration"))
+        self.assertLess(failure, script.rindex("Start-DockerCore"))
+
+    def test_keep_discord_reuses_valid_prior_voice_lease_token(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        assignment = script[
+            script.index("$voiceInputLeaseToken = if (") :
+            script.index("\n\nif (Test-Path $stopMarker)")
+        ]
+
+        self.assertIn(
+            "-not [string]::IsNullOrWhiteSpace($previousVoiceInputLeaseToken)",
+            assignment,
+        )
+        self.assertIn(
+            "$previousVoiceInputLeaseToken.Trim().Length -ge 32",
+            assignment,
+        )
+        self.assertIn("$previousVoiceInputLeaseToken.Trim()", assignment)
+        self.assertIn("New-SecureRuntimeToken", assignment)
 
     def test_local_launcher_uses_path_safe_allowlisted_image_builder(self) -> None:
         launcher = self.read_script("start_local_background.ps1")
@@ -491,7 +645,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
             "if ($dockerBuildServices -contains 'bot_api')",
             launcher,
         )
-        self.assertIn("'--timeout', '60'", launcher)
+        self.assertIn("'--timeout', '130'", launcher)
         self.assertIn("$minecraftOwnerClaim", launcher)
         refresh = launcher[
             launcher.index("function Stop-BotApiForImageRefresh") :
@@ -509,7 +663,8 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertNotIn("@('compose') + $composeBaseArgs + @('build'", launcher)
 
         self.assertIn(
-            "[ValidateSet('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')]",
+            "[ValidateSet('bot_api', 'control_page', 'discord_bot', "
+            "'main_llm', 'tts', 'vision')]",
             builder,
         )
         self.assertIn("$requiresAsciiAlias", builder)
@@ -520,7 +675,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'evelyn-fast-control-bot_api'", builder)
         self.assertIn("'evelyn-fast-control-control_page'", builder)
         self.assertIn("'evelyn-fast-control-discord_bot'", builder)
-        self.assertIn("'evelyn-omnivoice-tts:recipe-7cfc51e96088'", builder)
+        self.assertIn("'evelyn-omnivoice-tts:recipe-e8151492550b'", builder)
         self.assertIn("'docker\\Dockerfile.omnivoice'", builder)
         self.assertIn("--build-context", builder)
         self.assertIn("omnivoice_source=", builder)
@@ -533,6 +688,84 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'docker\\Dockerfile.vision-ingress'", builder)
         self.assertIn("'docker\\Dockerfile.vision'", builder)
         self.assertNotIn("Invoke-Expression", builder)
+
+    def test_local_launcher_seals_and_refreshes_only_the_main_llm_runtime_image(self) -> None:
+        launcher = self.read_script("start_local_background.ps1")
+        builder = self.read_script("build_local_docker_images.ps1")
+
+        self.assertIn("function Test-MainLlmDockerImageContract", launcher)
+        self.assertIn(
+            "io.evelyn.llama-runtime-contract-sha256",
+            launcher,
+        )
+        self.assertIn(
+            "$mainLlmRuntimeContract = (Get-FileHash",
+            launcher,
+        )
+        self.assertIn("-Algorithm SHA256).Hash.ToLowerInvariant()", launcher)
+        self.assertIn(
+            "$mainLlmImage = 'evelyn-fast-control-main_llm:latest'",
+            launcher,
+        )
+        self.assertIn(
+            "$mainLlmImageMissing = -not "
+            "(Test-DockerImageExists -Image $mainLlmImage)",
+            launcher,
+        )
+        self.assertIn("$mainLlmImageNeedsBuild = $buildEnabled -or", launcher)
+        self.assertIn("$mainLlmImageMissing -or", launcher)
+        main_build = launcher[
+            launcher.index("if ($mainLlmImageNeedsBuild)") :
+            launcher.index("if ($buildEnabled -or $ttsImageMissing)")
+        ]
+        self.assertIn("$dockerBuildServices += 'main_llm'", main_build)
+        self.assertNotIn("router_llm", main_build)
+        self.assertNotIn("minecraft_llm", main_build)
+        self.assertNotIn("sub_llm", main_build)
+
+        final_contract_check = launcher.rindex(
+            "if (-not (Test-MainLlmDockerImageContract"
+        )
+        compose_up = launcher.index(
+            "$composeArgs = $composeBaseArgs + @('up', '-d', '--no-build')"
+        )
+        self.assertLess(final_contract_check, compose_up)
+        self.assertIn(
+            "throw 'Main LLM runtime image does not match "
+            "docker\\Dockerfile.llama.'",
+            launcher[final_contract_check:compose_up],
+        )
+
+        self.assertIn("main_llm = @{", builder)
+        self.assertIn("Dockerfile = 'docker\\Dockerfile.llama'", builder)
+        self.assertIn("Image = 'evelyn-fast-control-main_llm'", builder)
+        self.assertIn("SealDockerfile = $true", builder)
+        self.assertIn("-DockerfileContract $dockerfileContract", builder)
+        self.assertIn(
+            '"io.evelyn.llama-runtime-contract-sha256=$DockerfileContract"',
+            builder,
+        )
+        self.assertNotIn("router_llm = @{", builder)
+        self.assertNotIn("minecraft_llm = @{", builder)
+        self.assertNotIn("sub_llm = @{", builder)
+
+    def test_local_launcher_selects_and_validates_native_main_build_only(self) -> None:
+        launcher = self.read_script("start_local_background.ps1")
+
+        self.assertIn("Join-Path $llamaCppRoot 'build-sm120-v1'", launcher)
+        self.assertIn("$env:EVELYN_LLAMA_CPP_DIR = $llamaCppRoot", launcher)
+        self.assertIn(
+            "$env:EVELYN_MAIN_LLM_BUILD_DIR = $mainLlmBuildRoot",
+            launcher,
+        )
+        self.assertIn(
+            "-Pattern '^CMAKE_CUDA_ARCHITECTURES:[^=]+=120a-real$'",
+            launcher,
+        )
+        self.assertLess(
+            launcher.index("$mainLlmServer ="),
+            launcher.index("Start-DockerCore"),
+        )
 
     def test_runtime_launchers_require_an_exact_clean_source_revision(self) -> None:
         local_launcher = self.read_script("start_local_background.ps1")

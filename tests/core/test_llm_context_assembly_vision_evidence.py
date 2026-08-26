@@ -41,9 +41,16 @@ from evelyn_core.memory_deletion_journal import (  # noqa: E402
 from evelyn_core.memory_deletion_outbound import (  # noqa: E402
     capture_memory_deletion_outbound_position,
 )
+from evelyn_core.memory_confirmation_contract import (  # noqa: E402
+    memory_owner_scope_for_local_surface,
+)
 from evelyn_core.memory_prompt_policy import (  # noqa: E402
     MEMORY_PROMPT_MAX_CHARS,
     memory_deletion_boundary_from_position,
+)
+from evelyn_core.observability_metrics import (  # noqa: E402
+    VOICE_LATENCY_TRACE_METRICS_KEY,
+    VoiceLatencyTrace,
 )
 from evelyn_core.skills.routing.voice_llm import (  # noqa: E402
     build_main_llm_payload,
@@ -218,6 +225,57 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             ),
             log=lambda *_args, **_kwargs: None,
         )
+
+    async def test_cached_cognitive_state_does_not_spend_pre_main_refresh(
+        self,
+    ) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        cached_state = {"action": "answer", "state_summary": "cached"}
+        scheduled = []
+        deps = replace(
+            self.build_deps(no_vision),
+            apply_runtime_mode=lambda _mode: {
+                "skip_router": True,
+                "memory_update_mode": "normal",
+            },
+            read_cached_cognitive_state=(
+                lambda *_args, **_kwargs: cached_state
+            ),
+            schedule_cognitive_refresh=(
+                lambda *_args, **kwargs: scheduled.append(kwargs)
+            ),
+        )
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {},
+            "marks": {},
+            VOICE_LATENCY_TRACE_METRICS_KEY: VoiceLatencyTrace(),
+        }
+
+        _messages, state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                "current request",
+                deps=deps,
+                guild_id=7,
+                session_key="session-7",
+                metrics=metrics,
+            )
+        )
+
+        self.assertEqual(state, cached_state)
+        self.assertEqual(scheduled, [])
+        self.assertEqual(metrics["meta"]["cognitive_mode"], "cached")
+        trace_markers = metrics[
+            VOICE_LATENCY_TRACE_METRICS_KEY
+        ].public_summary()["markers_ms"]
+        self.assertIn("route_done", trace_markers)
+        self.assertIn("context_done", trace_markers)
 
     async def test_verified_cross_surface_context_enters_common_prompt(
         self,
@@ -410,6 +468,58 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                 and row.get("content") == current_text
                 for row in unbound_messages
             )
+        )
+
+    async def test_precommitted_control_page_user_is_sent_once_to_main_llm(
+        self,
+    ) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        current_text = "현재 텍스트 질문"
+        deps = self.build_deps(
+            no_vision,
+            conversation_history=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": current_text},
+            ],
+            session_snapshot={"turn_id": "turn-1"},
+        )
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                current_text,
+                deps=deps,
+                session_key="session-1",
+                source="control_page",
+                metrics={
+                    "started_at": time.monotonic(),
+                    "meta": {
+                        "turn_id": "turn-1",
+                        "accepted_user_turn_precommitted": True,
+                    },
+                    "marks": {},
+                },
+            )
+        )
+        payload = build_main_llm_payload(
+            model_name="test-model",
+            messages=messages,
+            final_user_text=current_text,
+            source="control_page",
+            stream=True,
+        )
+
+        self.assertEqual(
+            sum(
+                row.get("role") == "user"
+                and row.get("content") == current_text
+                for row in payload["messages"]
+            ),
+            1,
         )
 
     async def test_precommitted_voice_tail_mismatch_fails_closed(self) -> None:
@@ -805,6 +915,36 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertNotIn(private_note_id, str(receipt))
         self.assertNotIn("PRIVATE_MEMORY_TEXT", str(receipt))
         self.assertNotIn("PRIVATE_RECEIPT_FIELD", str(receipt))
+
+    async def test_local_owner_reaches_memory_context_without_observability_leak(
+        self,
+    ) -> None:
+        async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            return ""
+
+        memory_calls = []
+
+        def capture_memory(*_args, **kwargs):
+            memory_calls.append(dict(kwargs))
+            return ""
+
+        owner_scope = memory_owner_scope_for_local_surface()
+        deps = self.build_deps(
+            no_vision,
+            memory_context_callback=capture_memory,
+        )
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+
+        await prepare_llm_messages_from_runtime(
+            "local request",
+            deps=deps,
+            guild_id=0,
+            memory_owner_scope=owner_scope,
+            metrics=metrics,
+        )
+
+        self.assertEqual(memory_calls[0]["owner_scope"], owner_scope)
+        self.assertNotIn(owner_scope, str(metrics))
 
     async def test_unattributed_memory_body_is_withheld_at_final_prompt_boundary(self) -> None:
         async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:

@@ -19,7 +19,9 @@ RUNTIME_PACKAGE = RUNTIME_ROOT / "evelyn_core"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-if "numpy" not in sys.modules:
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
     class _DummyNdArray:
         pass
 
@@ -111,8 +113,7 @@ class MemoryExposureIndexDirDiTests(unittest.TestCase):
         expected_calls = {
             "main_llm_runtime.py": 1,
             "voice_response_runtime.py": 2,
-            "voice_route_execution.py": 4,
-            "search_answer_runtime.py": 1,
+            "voice_route_execution.py": 3,
             "search_followup_runtime.py": 5,
             "autonomy_runtime_factory.py": 1,
         }

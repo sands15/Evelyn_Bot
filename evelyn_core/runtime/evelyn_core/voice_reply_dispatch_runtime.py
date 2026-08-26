@@ -17,6 +17,7 @@ class VoiceReplyDispatchDeps:
     active_conversation_awaiting_reply_sec: float
     active_conversation_voice_sec: float
     canned_wake_reply: str
+    voice_ingress_epoch_is_current: Callable[[int, Any], bool]
 
 
 async def dispatch_voice_reply_from_runtime(
@@ -38,12 +39,27 @@ async def dispatch_voice_reply_from_runtime(
     room_key: str | None,
     person_key: str | None,
     session_memory_key: str | None,
+    voice_ingress_epoch: int,
     voice_listener_binding: Any = None,
     release_ingress_worker: Callable[[], Any] | None = None,
     reply_deps: VoiceTranscriptReplyDeps,
     deps: VoiceReplyDispatchDeps,
 ) -> None:
-    if not voice_listener_binding_is_current(member, voice_listener_binding):
+    def voice_ingress_is_current() -> bool:
+        try:
+            return bool(
+                deps.voice_ingress_epoch_is_current(
+                    guild_id,
+                    voice_ingress_epoch,
+                )
+            )
+        except Exception:
+            return False
+
+    if (
+        not voice_ingress_is_current()
+        or not voice_listener_binding_is_current(member, voice_listener_binding)
+    ):
         return
     if voice_listener_binding is not None:
         get_voice_client = reply_deps.get_voice_client
@@ -82,8 +98,12 @@ async def dispatch_voice_reply_from_runtime(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        voice_ingress_is_current=voice_ingress_is_current,
         release_ingress_worker=release_ingress_worker,
     )
-    if not voice_listener_binding_is_current(member, voice_listener_binding):
+    if (
+        not voice_ingress_is_current()
+        or not voice_listener_binding_is_current(member, voice_listener_binding)
+    ):
         return
     await deps.process_voice_reply(context=context, deps=reply_deps)

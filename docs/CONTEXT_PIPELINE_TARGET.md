@@ -254,6 +254,13 @@ Phase 1 is the stable contract that later phases will wire into.
 - Failed Main/Fast tool decisions serialize only `<tool_name>_failed`, and
   unexpected Main vision failures expose only `vision_runtime_error`; raw
   exception evidence does not enter the next prompt or turn metrics.
+- Main/Fast required evidence uses one shared hard gate: only exact `executed`
+  may reach answer generation. Empty, withheld, planned, failed, unavailable,
+  or local-tool-needed states return a deterministic missing-evidence answer.
+  Search and task routes preserve their registered executor as the next owner;
+  optional evidence keeps the existing degraded behavior.
+- Runtime status context rejects a cached timestamp whose age is negative, so a
+  wall-clock rollback cannot keep future-dated stale service/GPU evidence fresh.
 - Main과 Fast Control은 공통 `conversation.unanswered-user.v1` system-context
   규칙으로 마지막 history row가 `user`인 미응답 턴을 명시한다. 판정은 restart
   restore와 cross-surface merge 뒤에 수행하며 metrics/turn summary에는 사용자
@@ -273,4 +280,26 @@ Phase 1 is the stable contract that later phases will wire into.
 - Discord attachment metadata is forwarded as `[Attached Visual Inputs]`; OpenAI/vLLM content-array payloads now convert those image URLs into `image_url` entries for actual multimodal main-model calls.
 - Context pipeline benchmark rows are appended to `runtime_artifacts/benchmarks/context_pipeline_benchmarks.jsonl` so router/context sections, timing marks, answer length, Minecraft usage, and requested-versus-observed vision state can be compared across turns.
 - `MAIN_LLM_CONTEXT` now defaults to `2048` in the launcher environment.
+- Router output now owns an authoritative multi-tool plan plus the bounded
+  `none|deep_reasoning|minecraft_planning` specialist choice. A missing nested
+  `context_policy` no longer discards valid top-level tools or specialist data.
+- Obvious low-cost turns keep the deterministic Router-zero fast path. A voice
+  turn that does not qualify for that fast path reaches the semantic Router;
+  ambiguous retrieval words alone no longer force a web route.
+- Specialist and registered-skill results are bounded untrusted evidence for
+  Main, never an independent user-facing answer. Qwen consumes selected
+  memory/runtime/tool/Minecraft/vision packet sections as low-privilege data;
+  Main remains the single final response owner.
+- Normal call budgets are now `direct: Router 0 + Main 1`, `semantic: Router 1
+  + optional specialist 1 + Main 1`, and `search: tool + Main 1`. Search no
+  longer performs an intermediate Main summary, empty-stream retry reuses the
+  existing plan, and cached cognitive refresh is not duplicated before Main.
+- Fast background research and runtime investigation now execute the same
+  conditional Qwen-evidence-to-Main pattern. Sub remains post-response
+  write-behind rather than a foreground answer generator.
 - Still incomplete: a persistent OpenHA/CrossAgent action-interface index and a benchmark dashboard/summary job are not wired yet.
+- Still unverified live: Qwen latency/quality and GPU1 contention while Router,
+  Sub, and Qwen servers overlap. Source tests do not establish this runtime
+  performance claim. OS clock rollback and a stalled live runtime probe also
+  remain fault-injection gaps; deterministic source regressions only establish
+  fail-closed routing and cache refresh behavior.

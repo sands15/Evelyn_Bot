@@ -11,6 +11,7 @@ from typing import Any
 
 from .memory_vault import (
     _memory_vault_note_owner_scope,
+    _memory_vault_note_reset_scope,
     memory_vault_user_note,
     write_memory_vault_note,
 )
@@ -22,7 +23,10 @@ from .memory_confirmation_contract import (
     explicit_memory_writer_skip_decision,
     is_explicit_memory_confirmation_receipt,
     is_user_confirmed_memory_integrity_valid,
+    memory_owner_scope,
     memory_owner_scope_is_canonical,
+    memory_reset_scope,
+    memory_reset_scope_is_canonical,
 )
 from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
@@ -136,6 +140,8 @@ def _verified_stored_card(
     expected_source: str,
     expected_owner_scope: str,
     actual_owner_scope: str,
+    expected_reset_scope: str,
+    actual_reset_scope: str,
     expected_source_ref: str | None = None,
 ) -> tuple[str, str, str]:
     provenance = dict(card.get("provenance") or {})
@@ -175,6 +181,10 @@ def _verified_stored_card(
             actual_owner_scope,
             expected_owner_scope,
         )
+        and secrets.compare_digest(
+            actual_reset_scope,
+            expected_reset_scope,
+        )
         and len(source_refs) == 1
         and evidence_hashes == [expected_evidence_hash]
         and (
@@ -194,6 +204,7 @@ def store_explicit_memory_confirmation(
     *,
     action_id: object = "",
     owner_scope: object,
+    reset_scope: object | None = None,
     evidence_turn_id: object | None = None,
     source: str = "control-page-user",
     root: Path | None = None,
@@ -216,6 +227,29 @@ def store_explicit_memory_confirmation(
     if not memory_owner_scope_is_canonical(normalized_owner_scope):
         raise ExplicitMemoryConfirmationError(
             "memory_confirmation_owner_scope_invalid"
+        )
+    normalized_reset_scope = clean_text(reset_scope)
+    if not normalized_reset_scope:
+        local_owner_scope = memory_owner_scope(
+            guild_id=None,
+            person_key="control-page:local",
+        )
+        if (
+            normalized_source != "control-page-user"
+            or not secrets.compare_digest(
+                normalized_owner_scope,
+                local_owner_scope,
+            )
+        ):
+            raise ExplicitMemoryConfirmationError(
+                "memory_confirmation_reset_scope_required"
+            )
+        normalized_reset_scope = memory_reset_scope(None)
+    if not memory_reset_scope_is_canonical(
+        normalized_reset_scope
+    ):
+        raise ExplicitMemoryConfirmationError(
+            "memory_confirmation_reset_scope_invalid"
         )
 
     evidence_hash = hashlib.sha256(
@@ -262,6 +296,13 @@ def store_explicit_memory_confirmation(
                         root=root,
                     )
                 ),
+                expected_reset_scope=normalized_reset_scope,
+                actual_reset_scope=(
+                    _memory_vault_note_reset_scope(
+                        rel_path,
+                        root=root,
+                    )
+                ),
             )
             return _verified_receipt(
                 state="duplicate",
@@ -280,6 +321,7 @@ def store_explicit_memory_confirmation(
             projects=["evelyn"],
             source=normalized_source,
             owner_scope=normalized_owner_scope,
+            reset_scope=normalized_reset_scope,
             source_refs=[source_ref],
             evidence_hashes=[evidence_hash],
             confirmed_at=confirmed_at,
@@ -312,6 +354,13 @@ def store_explicit_memory_confirmation(
                     root=root,
                 )
             ),
+            expected_reset_scope=normalized_reset_scope,
+            actual_reset_scope=(
+                _memory_vault_note_reset_scope(
+                    rel_path,
+                    root=root,
+                )
+            ),
             expected_source_ref=source_ref,
         )
         return _verified_receipt(
@@ -327,6 +376,7 @@ def execute_explicit_memory_confirmation(
     *,
     action_id: object = "",
     owner_scope: object,
+    reset_scope: object | None = None,
     evidence_turn_id: object | None = None,
     source: str = "control-page-user",
 ) -> tuple[bool, str, dict[str, Any] | None, str]:
@@ -351,6 +401,7 @@ def execute_explicit_memory_confirmation(
             fact,
             action_id=action_id,
             owner_scope=owner_scope,
+            reset_scope=reset_scope,
             evidence_turn_id=evidence_turn_id,
             source=source,
         )

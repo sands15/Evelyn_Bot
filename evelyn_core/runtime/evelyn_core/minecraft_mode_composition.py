@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .minecraft_autonomy_readiness import (
+    validate_minecraft_autonomy_readiness,
+)
+
 
 MINECRAFT_CONNECTED_OUTCOME = "minecraft_connected"
 MINECRAFT_STOPPED_OUTCOME = "minecraft_stopped"
@@ -51,22 +55,55 @@ class MinecraftModeCompositionDeps:
     clean_text: Callable[[str], str]
     monotonic: Callable[[], float]
     sleep: Callable[[float], Awaitable[Any]]
+    ready_timeout_sec: float = 60.0
 
 
 class MinecraftModeComposition:
     def __init__(self, deps: MinecraftModeCompositionDeps) -> None:
         self.deps = deps
 
-    async def wait_for_minecraft_ready(
+    @staticmethod
+    def _runtime_ready(
+        status: Any,
+        observed: Any,
+    ) -> bool:
+        status_payload = status if isinstance(status, dict) else {}
+        readiness, contract_state = (
+            validate_minecraft_autonomy_readiness(status_payload)
+        )
+        if (
+            str(status_payload.get("runtime") or "").strip().lower()
+            == "mindcraft"
+            or contract_state != "missing"
+        ):
+            return bool(
+                contract_state == "valid"
+                and readiness is not None
+                and readiness.get("ready") is True
+            )
+        return bool(
+            minecraft_connection_confirmed(status_payload)
+            or (
+                observed is not status
+                and minecraft_connection_confirmed(observed)
+            )
+        )
+
+    async def _wait_for_minecraft_ready(
         self,
         guild_id: int,
         *,
-        timeout_sec: float = 12.0,
+        timeout_sec: float | None = None,
         poll_sec: float = 1.0,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         _ = guild_id
         deps = self.deps
-        deadline = deps.monotonic() + max(0.5, timeout_sec)
+        wait_timeout_sec = (
+            deps.ready_timeout_sec
+            if timeout_sec is None
+            else timeout_sec
+        )
+        deadline = deps.monotonic() + max(0.5, wait_timeout_sec)
         last_observed: dict[str, Any] = {}
         client = deps.get_client()
         while deps.monotonic() < deadline:
@@ -85,11 +122,8 @@ class MinecraftModeComposition:
                     )
                     or dict(observed)
                 )
-                if minecraft_connection_confirmed(status) or (
-                    observed is not status
-                    and minecraft_connection_confirmed(observed)
-                ):
-                    return last_observed
+                if self._runtime_ready(status, observed):
+                    return last_observed, True
                 last_error = deps.clean_text(
                     str(
                         (
@@ -104,11 +138,29 @@ class MinecraftModeComposition:
                 if last_error:
                     last_observed["wait_last_error"] = last_error
             await deps.sleep(max(0.1, poll_sec))
-        return last_observed or {
-            "connected": False,
-            "active": False,
-            "last_error": "timeout_waiting_for_voyager_service",
-        }
+        return (
+            last_observed
+            or {
+                "connected": False,
+                "active": False,
+                "last_error": "timeout_waiting_for_voyager_service",
+            },
+            False,
+        )
+
+    async def wait_for_minecraft_ready(
+        self,
+        guild_id: int,
+        *,
+        timeout_sec: float | None = None,
+        poll_sec: float = 1.0,
+    ) -> dict[str, Any]:
+        observed, _ready = await self._wait_for_minecraft_ready(
+            guild_id,
+            timeout_sec=timeout_sec,
+            poll_sec=poll_sec,
+        )
+        return observed
 
     async def wait_for_minecraft_stopped(
         self,
@@ -143,14 +195,16 @@ class MinecraftModeComposition:
         if world_lease:
             start_kwargs["world_lease"] = dict(world_lease)
         started = await client.start(**start_kwargs)
-        observed = await self.wait_for_minecraft_ready(guild_id)
+        observed, ready = await self._wait_for_minecraft_ready(
+            guild_id
+        )
         merged = dict(observed) if isinstance(observed, dict) else {}
         merged["voyager_repo_present"] = (
             started.get("voyager_repo_present")
             if isinstance(started, dict)
             else None
         )
-        if not minecraft_connection_confirmed(merged):
+        if not ready or not minecraft_connection_confirmed(merged):
             raise RuntimeError("minecraft_start_unverified")
         merged["outcome_verified"] = True
         merged["outcome_code"] = MINECRAFT_CONNECTED_OUTCOME

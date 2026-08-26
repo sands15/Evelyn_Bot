@@ -21,6 +21,69 @@ def locked_version(path: Path, package: str) -> str:
 
 
 class DependencySecurityPolicyTests(unittest.TestCase):
+    def test_microsoft_auth_caches_are_excluded_from_git_and_docker(self) -> None:
+        git_required = {
+            "external/mindcraft/_tmp_ms_profiles/",
+            "external/mindcraft_evelyn/tmp-ms-profile-*/",
+            "tmp-ms-profile-*/",
+        }
+        docker_required = {
+            "external/mindcraft/keys.json",
+            "external/mindcraft/_tmp_ms_profiles/",
+            "external/mindcraft/bots/",
+            "external/mindcraft/code_records/",
+            "external/mindcraft/experiments/",
+            "external/mindcraft/node_modules*/",
+            "external/mindcraft/results/",
+            "external/mindcraft/server_data*/",
+            "external/mindcraft/services/viaproxy/jars/",
+            "external/mindcraft/services/viaproxy/logs/",
+            "external/mindcraft/services/viaproxy/plugins/",
+            "external/mindcraft/services/viaproxy/ViaLoader/",
+            "external/mindcraft/services/viaproxy/saves.json",
+            "external/mindcraft/services/viaproxy/viaproxy.yml",
+            "external/mindcraft/wandb/",
+            "external/mindcraft/andy_*.json",
+            "external/mindcraft/jill_*.json",
+            "external/mindcraft/temp_*",
+            "external/mindcraft_evelyn/node_modules/",
+            "external/mindcraft_evelyn/tmp-ms-profile-*/",
+            "external/mindcraft_evelyn/*-ms-code.mjs",
+            "tmp-ms-profile-*/",
+        }
+        gitignore = set(
+            (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        )
+        dockerignore_lines = (
+            (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        )
+        dockerignore = set(dockerignore_lines)
+        self.assertTrue(git_required.issubset(gitignore))
+        self.assertTrue(docker_required.issubset(dockerignore))
+        last_external_include = max(
+            index
+            for index, line in enumerate(dockerignore_lines)
+            if line.startswith("!external/")
+        )
+        for pattern in docker_required:
+            if pattern.startswith("external/"):
+                self.assertGreater(
+                    dockerignore_lines.index(pattern),
+                    last_external_include,
+                )
+        mindcraft_overlay_patch = set(
+            (REPO_ROOT / "external" / "mindcraft_evelyn" / "evelyn.patch")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        self.assertIn("+_tmp_ms_profiles/", mindcraft_overlay_patch)
+        mindcraft_base_ignore = set(
+            (REPO_ROOT / "external" / "mindcraft" / ".gitignore")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        self.assertIn("keys.json", mindcraft_base_ignore)
+
     def test_root_torch_is_on_patched_release(self) -> None:
         lock = REPO_ROOT / "requirements.lock"
         self.assertEqual(locked_version(lock, "torch"), "2.13.0")
@@ -44,11 +107,15 @@ class DependencySecurityPolicyTests(unittest.TestCase):
         stt = (REPO_ROOT / "docker" / "Dockerfile.stt").read_text(
             encoding="utf-8"
         )
+        stt_requirements = (
+            REPO_ROOT / "docker" / "requirements.stt.txt"
+        ).read_text(encoding="utf-8")
         vision = (REPO_ROOT / "docker" / "Dockerfile.vision").read_text(
             encoding="utf-8"
         )
-        self.assertIn("torch==2.11.0+cu128", stt)
-        self.assertIn("torchaudio==2.11.0+cu128", stt)
+        self.assertIn("torch==2.9.1+cu128", stt)
+        self.assertIn("vllm==0.14.0", stt_requirements)
+        self.assertIn("torchaudio==2.9.1+cu128", stt)
         self.assertIn("torch==2.11.0+cu128", vision)
         self.assertIn("torchvision==0.26.0+cu128", vision)
         self.assertIn(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +38,13 @@ from evelyn_core.session_memory_state import (  # noqa: E402
     SessionStateStore,
     build_topic_id,
 )
+from evelyn_core.session_continuity import (  # noqa: E402
+    SessionContinuityCheckpoint,
+)
+from evelyn_core.session_turn_runtime import (  # noqa: E402
+    SessionTurnRuntimeDeps,
+    begin_user_text_turn_from_runtime,
+)
 from evelyn_core.turn_lifecycle import (  # noqa: E402
     TurnScope,
     TurnScopeRegistry,
@@ -59,6 +68,26 @@ def memory_exposure() -> MemoryExposurePosition:
         ),
         memory_version=7,
         supplied_note_ids=(NOTE_A,),
+    )
+
+
+def session_runtime_deps(
+    root: Path,
+    store: SessionStateStore,
+    *,
+    turn_id: str,
+) -> SessionTurnRuntimeDeps:
+    return SessionTurnRuntimeDeps(
+        session_state_store=store,
+        system_prompt="system",
+        memory_index_dir=root / "memory_index",
+        active_conversation_awaiting_reply_sec=120.0,
+        active_conversation_text_question_sec=120.0,
+        active_conversation_text_sec=90.0,
+        max_history_items=12,
+        session_topic_ids=store.topic_ids,
+        build_topic_id_fn=build_topic_id,
+        new_turn_id_fn=lambda: turn_id,
     )
 
 
@@ -125,7 +154,17 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
         state["turnStarts"].append(
             (session_key, user_text, kwargs, turn_id)
         )
-        return SimpleNamespace(turn_id=turn_id)
+        return SimpleNamespace(
+            turn_id=turn_id,
+            topic_id=f"topic:{user_text}",
+            history=[
+                {"role": "user", "content": "recent"},
+                {"role": "user", "content": user_text},
+            ],
+        )
+
+    def unexpected_history_read(**_kwargs):
+        raise AssertionError("accepted turn snapshot must be reused")
 
     def schedule_local_control_tts(*args, **kwargs):
         state["lockChecks"].append(
@@ -162,7 +201,7 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
     deps = ControlPageSearchRuntimeDeps(
         control_page_effective_guild_id=lambda guild: int(getattr(guild, "id", 999) or 999),
         control_page_session_key=lambda guild_id: f"control:{guild_id}",
-        get_conversation_history=lambda **kwargs: [{"role": "user", "content": "recent"}],
+        get_conversation_history=unexpected_history_read,
         memory_index_dir=REPO_ROOT / "unused-memory-index",
         build_route_decision=lambda **kwargs: state["route"].append(kwargs) or SimpleNamespace(**kwargs),
         monotonic=lambda: 12.5,
@@ -213,7 +252,23 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
         self.assertEqual(state["search"][0]["session_key"], "control:7")
         self.assertEqual(state["synthesis"][0]["tool_result_text"], "search answer")
         self.assertEqual(state["synthesis"][0]["metrics"]["meta"]["selected_path"], "control_page_search_direct")
+        self.assertTrue(
+            state["synthesis"][0]["metrics"]["meta"][
+                "accepted_user_turn_precommitted"
+            ]
+        )
+        self.assertEqual(
+            state["search"][0]["messages"],
+            [
+                {"role": "user", "content": "recent"},
+                {"role": "user", "content": "오늘 날씨"},
+            ],
+        )
         self.assertEqual(state["history"][0][0], ("control:7", "오늘 날씨", "final answer"))
+        self.assertEqual(
+            state["history"][0][1]["complete_turn_id"],
+            "search-turn:control:7",
+        )
         self.assertEqual(state["active"][0][1]["topic_id"], "topic:오늘 날씨|search_executor|final answer")
         self.assertEqual(state["tts"][0][0], ("final answer",))
         self.assertEqual(state["turnStarts"][0][0:2], ("control:7", "오늘 날씨"))
@@ -223,6 +278,7 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             state["lockChecks"],
             [
                 ("begin", True),
+                ("commit", True),
                 ("search", False),
                 ("synthesis", False),
                 ("commit", True),
@@ -238,10 +294,16 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             [event[0] for event in state["lifecycle"]],
             ["replace", "attach", "detach", "clear"],
         )
-        self.assertEqual(state["events"], ["history", "active", "commit", "tts"])
+        self.assertEqual(
+            state["events"],
+            ["commit", "history", "active", "commit", "tts"],
+        )
         self.assertEqual(
             state["commitTargets"],
-            [("control:7", "search-turn:control:7")],
+            [
+                ("control:7", "search-turn:control:7"),
+                ("control:7", "search-turn:control:7"),
+            ],
         )
         self.assertEqual(
             state["synthesis"][0]["metrics"]["meta"]["continuity_generation"],
@@ -267,6 +329,40 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             tts_tasks: list[asyncio.Task] = []
 
             def begin_turn(key, text, **kwargs):
+                if kwargs.pop("precommit_user_only", False):
+                    kwargs.pop("guild_id", None)
+                    user_id = kwargs.pop("user_id", None)
+                    turn_id = (
+                        "normal-turn"
+                        if text == "normal request"
+                        else "search-turn"
+                    )
+                    topic_id = build_topic_id(
+                        text,
+                        store.topic_ids.get(key, ""),
+                    )
+                    store.begin_user_only_turn(
+                        key,
+                        text,
+                        turn_id=turn_id,
+                        system_prompt="system",
+                        max_history_items=12,
+                        user_id=user_id,
+                        ttl_sec=30.0,
+                        topic_id=topic_id,
+                        active_conversation_awaiting_reply_sec=30.0,
+                    )
+                    return SimpleNamespace(
+                        turn_id=turn_id,
+                        topic_id=topic_id,
+                        history=[
+                            dict(message)
+                            for message in store.get_conversation_history(
+                                system_prompt="system",
+                                session_key=key,
+                            )
+                        ],
+                    )
                 return store.begin_user_text_turn(
                     key,
                     text,
@@ -447,11 +543,19 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
                 successor_scope,
             )
             self.assertEqual(store.current_turn_id(session_key), "search-turn")
-            self.assertEqual(commits, [(session_key, "search-turn")])
+            self.assertEqual(
+                commits,
+                [
+                    (session_key, "normal-turn"),
+                    (session_key, "search-turn"),
+                    (session_key, "search-turn"),
+                ],
+            )
             self.assertEqual(tts, [("search final answer", "search-turn")])
             self.assertEqual(
                 history,
                 [
+                    ("user", "normal request"),
                     ("user", "search request"),
                     ("assistant", "search final answer"),
                 ],
@@ -562,12 +666,18 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             self.assertEqual(successor_reply, "successor answer")
             self.assertTrue(search_scope.cancelled)
             self.assertEqual(search_state["history"], [])
-            self.assertEqual(search_state["commitTargets"], [])
+            self.assertEqual(
+                search_state["commitTargets"],
+                [(session_key, f"search-turn:{session_key}")],
+            )
             self.assertEqual(search_state["tts"], [])
             self.assertEqual(len(normal_history), 1)
             self.assertEqual(
                 normal_commits,
-                [(session_key, "successor-turn")],
+                [
+                    (session_key, "successor-turn"),
+                    (session_key, "successor-turn"),
+                ],
             )
             self.assertEqual(normal_tts, [("successor answer",)])
 
@@ -591,6 +701,205 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
 
         self.assertEqual(reply, "display:search answer")
 
+    def test_search_failure_restores_precommitted_unanswered_user(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = SessionStateStore.create_empty()
+                checkpoint = SessionContinuityCheckpoint(
+                    store=store,
+                    checkpoint_path=root / "active.json",
+                    status_path=root / "status.json",
+                    system_prompt="system",
+                )
+                session_deps = session_runtime_deps(
+                    root,
+                    store,
+                    turn_id="search-accepted",
+                )
+                state_lock = asyncio.Lock()
+
+                async def fail_search(**_kwargs):
+                    raise RuntimeError("search failed")
+
+                deps, state = _deps(
+                    get_session_lock=lambda _key: state_lock,
+                    begin_user_text_turn=lambda *args, **kwargs: (
+                        begin_user_text_turn_from_runtime(
+                            *args,
+                            **kwargs,
+                            deps=session_deps,
+                        )
+                    ),
+                    commit_session_continuity=(
+                        checkpoint.commit_completed_turn_async
+                    ),
+                    execute_search_then_answer_action=fail_search,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^search failed$",
+                ):
+                    await self._run(deps)
+
+                restored_store = SessionStateStore.create_empty()
+                restored = SessionContinuityCheckpoint(
+                    store=restored_store,
+                    checkpoint_path=root / "active.json",
+                    status_path=root / "restored-status.json",
+                    system_prompt="system",
+                ).restore()
+
+                self.assertEqual(restored["state"], "restored")
+                self.assertEqual(
+                    restored_store.histories["control:7"],
+                    [
+                        {"role": "system", "content": "system"},
+                        {"role": "user", "content": "오늘 날씨"},
+                    ],
+                )
+                self.assertEqual(
+                    restored_store.current_turn_id("control:7"),
+                    "search-accepted",
+                )
+                self.assertEqual(state["tts"], [])
+
+        asyncio.run(scenario())
+
+    def test_cancelled_completion_commit_holds_lock_until_disk_drain(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = SessionStateStore.create_empty()
+                checkpoint = SessionContinuityCheckpoint(
+                    store=store,
+                    checkpoint_path=root / "active.json",
+                    status_path=root / "status.json",
+                    system_prompt="system",
+                )
+                session_deps = session_runtime_deps(
+                    root,
+                    store,
+                    turn_id="search-cancelled",
+                )
+                commit_started = threading.Event()
+                release_commit = threading.Event()
+                state_lock = asyncio.Lock()
+                commit_count = 0
+
+                def pause_physical_commit(_generation: int) -> None:
+                    commit_started.set()
+                    if not release_commit.wait(timeout=2.0):
+                        raise TimeoutError("test_commit_release_timed_out")
+
+                async def commit(
+                    session_key: str,
+                    turn_id: str,
+                ) -> dict[str, object]:
+                    nonlocal commit_count
+                    commit_count += 1
+                    before_commit = (
+                        pause_physical_commit
+                        if commit_count == 2
+                        else None
+                    )
+                    return await checkpoint.commit_completed_turn_async(
+                        session_key,
+                        turn_id,
+                        before_commit=before_commit,
+                    )
+
+                deps, state = _deps(
+                    get_session_lock=lambda _key: state_lock,
+                    begin_user_text_turn=lambda *args, **kwargs: (
+                        begin_user_text_turn_from_runtime(
+                            *args,
+                            **kwargs,
+                            deps=session_deps,
+                        )
+                    ),
+                    append_history=lambda *args, **kwargs: (
+                        store.append_history(
+                            *args,
+                            system_prompt="system",
+                            max_history_items=12,
+                            **kwargs,
+                        )
+                    ),
+                    mark_session_active=lambda *args, **kwargs: (
+                        store.mark_active(
+                            *args,
+                            active_conversation_awaiting_reply_sec=120.0,
+                            **kwargs,
+                        )
+                    ),
+                    commit_session_continuity=commit,
+                )
+                answer_task = asyncio.create_task(self._run(deps))
+                successor_acquired = asyncio.Event()
+                successor_task: asyncio.Task[None] | None = None
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            commit_started.wait,
+                            1.0,
+                        )
+                    )
+                    answer_task.cancel()
+
+                    async def acquire_successor_lock() -> None:
+                        async with state_lock:
+                            successor_acquired.set()
+
+                    successor_task = asyncio.create_task(
+                        acquire_successor_lock()
+                    )
+                    await asyncio.sleep(0)
+                    self.assertFalse(answer_task.done())
+                    self.assertFalse(successor_acquired.is_set())
+                    self.assertEqual(state["tts"], [])
+
+                    release_commit.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(answer_task, timeout=2.0)
+                    await asyncio.wait_for(successor_task, timeout=1.0)
+
+                    restored_store = SessionStateStore.create_empty()
+                    restored = SessionContinuityCheckpoint(
+                        store=restored_store,
+                        checkpoint_path=root / "active.json",
+                        status_path=root / "restored-status.json",
+                        system_prompt="system",
+                    ).restore()
+                    self.assertEqual(restored["state"], "restored")
+                    self.assertEqual(
+                        [
+                            (row["role"], row["content"])
+                            for row in restored_store.histories["control:7"]
+                        ],
+                        [
+                            ("system", "system"),
+                            ("user", "오늘 날씨"),
+                            ("assistant", "final answer"),
+                        ],
+                    )
+                    self.assertEqual(state["tts"], [])
+                finally:
+                    release_commit.set()
+                    answer_task.cancel()
+                    pending = [answer_task]
+                    if successor_task is not None:
+                        pending.append(successor_task)
+                    await asyncio.gather(
+                        *pending,
+                        return_exceptions=True,
+                    )
+
+        asyncio.run(scenario())
+
     def test_stale_scope_reaches_no_final_sink(self) -> None:
         deps, state = _deps(
             get_room_turn_scope=lambda _key: TurnScope("successor-turn")
@@ -601,10 +910,13 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
 
         self.assertEqual(state["history"], [])
         self.assertEqual(state["active"], [])
-        self.assertEqual(state["commitTargets"], [])
+        self.assertEqual(
+            state["commitTargets"],
+            [("control:7", "search-turn:control:7")],
+        )
         self.assertEqual(state["tts"], [])
 
-    def test_partial_commit_status_is_not_marked_durable(
+    def test_partial_completion_commit_fails_closed_before_tts(
         self,
     ) -> None:
         private = (
@@ -612,7 +924,13 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             "https://internal.example/private"
         )
 
+        commit_count = 0
+
         async def partial_commit(*_args):
+            nonlocal commit_count
+            commit_count += 1
+            if commit_count == 1:
+                return durable_continuity_status(4)
             return {
                 "state": "ready",
                 "rollbackProtected": True,
@@ -623,10 +941,13 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             commit_session_continuity=partial_commit
         )
 
-        reply = asyncio.run(self._run(deps))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            asyncio.run(self._run(deps))
         metrics = state["synthesis"][0]["metrics"]["meta"]
 
-        self.assertEqual(reply, "display:final answer")
         self.assertEqual(
             metrics["continuity_commit"],
             "failed",
@@ -636,6 +957,31 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             "conversation_continuity_commit_failed",
         )
         self.assertNotIn(private, str(metrics))
+        self.assertEqual(state["tts"], [])
+
+    def test_partial_precommit_reaches_no_search_or_sink(self) -> None:
+        async def partial_commit(*_args):
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+            }
+
+        deps, state = _deps(
+            commit_session_continuity=partial_commit
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            asyncio.run(self._run(deps))
+
+        self.assertEqual(state["search"], [])
+        self.assertEqual(state["synthesis"], [])
+        self.assertEqual(state["history"], [])
+        self.assertEqual(state["active"], [])
+        self.assertEqual(state["tts"], [])
+        self.assertEqual(state["lifecycle"], [])
 
     def test_bound_receipt_note_mismatch_reaches_no_sink(self) -> None:
         async def synthesize_with_mismatched_boundary(**kwargs):
@@ -663,9 +1009,12 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
 
         self.assertEqual(state["history"], [])
         self.assertEqual(state["active"], [])
-        self.assertEqual(state["commitTargets"], [])
+        self.assertEqual(
+            state["commitTargets"],
+            [("control:7", "search-turn:control:7")],
+        )
         self.assertEqual(state["tts"], [])
-        self.assertEqual(state["events"], [])
+        self.assertEqual(state["events"], ["commit"])
         self.assertEqual(
             [event[0] for event in state["lifecycle"]],
             ["replace", "attach", "detach", "clear"],

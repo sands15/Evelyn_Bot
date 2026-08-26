@@ -26,6 +26,7 @@ class DiscordStreamingVoiceDeliveryRequest:
     log_stage: Callable[..., Any] | None
     prefetch_chunks: int | None
     log: Callable[[str], None] | None = None
+    eager_start_allowed: Callable[[], bool] | None = None
 
 
 def _discord_http_status(exc: BaseException) -> int | None:
@@ -39,8 +40,8 @@ def _discord_http_status(exc: BaseException) -> int | None:
     return normalized if 100 <= normalized <= 599 else None
 
 
-def _is_definitive_reference_rejection(exc: BaseException) -> bool:
-    """Return true only when Discord definitely rejected the first send.
+def is_definitive_discord_send_failure(exc: BaseException) -> bool:
+    """Return true only when Discord definitely rejected a send.
 
     A timeout, connection failure, or 5xx may happen after Discord accepted
     the message. Retrying those failures without the reference can duplicate
@@ -53,6 +54,10 @@ def _is_definitive_reference_rejection(exc: BaseException) -> bool:
         and 400 <= status < 500
         and status not in {408, 409, 425, 429}
     )
+
+
+def _is_definitive_reference_rejection(exc: BaseException) -> bool:
+    return is_definitive_discord_send_failure(exc)
 
 
 async def send_discord_text(
@@ -116,6 +121,7 @@ def build_streaming_voice_delivery(request: DiscordStreamingVoiceDeliveryRequest
         metrics=request.metrics,
         log_stage=request.log_stage,
         prefetch_chunks=request.prefetch_chunks,
+        eager_start_allowed=request.eager_start_allowed,
     )
 
 

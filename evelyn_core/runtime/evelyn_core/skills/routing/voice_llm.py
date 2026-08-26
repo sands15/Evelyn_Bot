@@ -1,48 +1,16 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable
 
+from ...main_inference_contract import (
+    MainLlmPayload,
+    compile_main_prompt,
+    main_request_kind_for_source,
+    normalize_main_chat_messages,
+)
 from ...text import clean_text
 from ...voice_pipeline import RouteDecision
-
-
-def _extract_image_urls_from_text(text: str) -> list[str]:
-    urls: list[str] = []
-    for match in re.finditer(r"url=(https?://[^\s;]+)", text):
-        url = match.group(1).strip().rstrip(").,]")
-        if url and url not in urls:
-            urls.append(url)
-    for match in re.finditer(r"https?://[^\s<>)]+", text):
-        url = match.group(0).strip().rstrip(").,]")
-        lowered = url.lower()
-        if any(lowered.endswith(suffix) for suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif")) and url not in urls:
-            urls.append(url)
-    return urls[:4]
-
-
-def _as_openai_text_content(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        normalized: list[dict[str, Any]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "text" and isinstance(item.get("text"), str):
-                normalized.append({"type": "text", "text": item["text"]})
-            elif item.get("type") == "image_url":
-                image_url = item.get("image_url")
-                if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
-                    normalized.append({"type": "image_url", "image_url": {"url": image_url["url"]}})
-                elif isinstance(image_url, str):
-                    normalized.append({"type": "image_url", "image_url": {"url": image_url}})
-        return normalized
-    text = clean_text(str(value))
-    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    if "[Attached Visual Inputs]" in text:
-        for url in _extract_image_urls_from_text(text):
-            content.append({"type": "image_url", "image_url": {"url": url}})
-    return content
 
 
 def build_chat_messages(
@@ -50,32 +18,10 @@ def build_chat_messages(
     *,
     content_format: str = "plain",
 ) -> list[dict[str, Any]]:
-    content_array = clean_text(content_format).lower() in {
-        "openai",
-        "content-array",
-        "content_array",
-    }
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = clean_text(str(message.get("role") or "user")) or "user"
-        content = message.get("content", "")
-        if role == "user" and content_array:
-            content = _as_openai_text_content(content)
-        projected: dict[str, Any] = {
-            "role": role,
-            "content": content,
-        }
-        for optional_key in (
-            "name",
-            "tool_call_id",
-            "tool_calls",
-        ):
-            if optional_key in message:
-                projected[optional_key] = message[optional_key]
-        normalized.append(projected)
-    return normalized
+    return normalize_main_chat_messages(
+        messages,
+        content_format=content_format,
+    )
 
 
 def build_main_llm_payload(
@@ -90,18 +36,21 @@ def build_main_llm_payload(
     max_tokens: int | None = None,
     stop_tokens: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    final_messages = build_chat_messages(
-        messages + [{"role": "user", "content": final_user_text}],
+    compiled = compile_main_prompt(
+        model_name=model_name,
+        messages=messages,
+        final_user_text=final_user_text,
         content_format=content_format,
     )
-    payload = {
+    payload = MainLlmPayload({
         "model": model_name,
-        "messages": final_messages,
+        "messages": compiled.wire_messages(),
         "temperature": temperature if temperature is not None else (0.3 if source == "voice" else 0.1),
         "max_tokens": max_tokens,
         "stream": stream,
         "cache_prompt": True,
-    }
+        "timings_per_token": True,
+    }, prompt_abi=compiled.abi, request_kind=main_request_kind_for_source(source))
     if stop_tokens:
         payload["stop"] = list(stop_tokens)
     return payload
@@ -213,6 +162,8 @@ def build_route_decision_from_state(
     action = clean_text(str((gated_state or {}).get("action") or ("answer" if policy_response else "main_direct"))) or "answer"
     if action == "search_then_answer":
         route = "search_executor"
+    elif action == "execute_task":
+        route = "task_executor"
     elif action not in {"answer", "ask", "wait", "main_direct"} and not policy_response:
         route = action
     else:

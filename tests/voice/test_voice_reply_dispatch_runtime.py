@@ -16,11 +16,16 @@ from evelyn_core.voice_reply_dispatch_runtime import (
     VoiceReplyDispatchDeps,
     dispatch_voice_reply_from_runtime,
 )
+from evelyn_core.voice_ingress_runtime import (  # noqa: E402
+    advance_voice_ingress_epoch,
+    voice_ingress_epoch_is_current,
+)
 
 
 class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.calls: list[tuple[Any, Any]] = []
+        self.epochs = {11: 0}
         self.room_state = {"reply_in_progress": True}
         self.reply_deps = SimpleNamespace(marker="reply-deps")
 
@@ -35,6 +40,9 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             active_conversation_awaiting_reply_sec=20.0,
             active_conversation_voice_sec=15.0,
             canned_wake_reply="네, 정훈님.",
+            voice_ingress_epoch_is_current=lambda guild_id, epoch: (
+                voice_ingress_epoch_is_current(self.epochs, guild_id, epoch)
+            ),
         )
 
     async def dispatch(
@@ -66,6 +74,7 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
             room_key="room-memory",
             person_key="person-memory",
             session_memory_key="session-memory",
+            voice_ingress_epoch=0,
             voice_listener_binding=voice_listener_binding,
             release_ingress_worker=release_ingress_worker,
             reply_deps=reply_deps or self.reply_deps,
@@ -89,6 +98,10 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.rms, 0.08)
         self.assertTrue(context.wake_detected)
         self.assertIs(context.release_ingress_worker, release_ingress_worker)
+        self.assertTrue(context.voice_ingress_is_current())
+
+        advance_voice_ingress_epoch(self.epochs, 11)
+        self.assertFalse(context.voice_ingress_is_current())
 
     async def test_dispatch_derives_room_topic_and_timing_state(self) -> None:
         context = await self.dispatch()

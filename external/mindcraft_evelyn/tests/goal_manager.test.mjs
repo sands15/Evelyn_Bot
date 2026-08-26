@@ -13,6 +13,7 @@ import {
     buildWorldState,
     hostileIsActionable,
     inventoryCountForTarget,
+    isKnownHostile,
     itemMatchesTarget
 } from '../src/agent/evelyn_world_state.js';
 
@@ -41,12 +42,15 @@ function fakeBot(items = [], overrides = {}) {
     };
 }
 
-function fakeAgent(bot, candidates) {
+function fakeAgent(bot, candidates, onPropose = () => {}) {
     return {
         bot,
         prompter: {
             chat_model: {
-                proposeSubgoals: async () => candidates
+                proposeSubgoals: async () => {
+                    onPropose();
+                    return candidates;
+                }
             }
         }
     };
@@ -89,6 +93,43 @@ test('world state groups inventory into progression tags', () => {
     assert.equal(snapshot.inventorySummary.food, 3);
     assert.equal(itemMatchesTarget('oak_log', '#logs'), true);
     assert.equal(itemMatchesTarget('sandstone', '#logs'), false);
+});
+
+test('unsafe raw chicken does not satisfy the food reserve', () => {
+    const snapshot = buildWorldState(fakeBot([
+        ['chicken', 3],
+        ['cooked_chicken', 1],
+    ]));
+    assert.equal(snapshot.inventorySummary.food, 1);
+});
+
+test('food recovery guides only safe land prey', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-safe-food-prey-'));
+    try {
+        const bot = fakeBot([], {food: 6});
+        const manager = new EvelynGoalManager(fakeAgent(bot, []), {
+            statePath: path.join(directory, 'state.json'),
+            mode: 'gated',
+            ultimateGoal: 'survive',
+        });
+        await manager.initialize();
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        await manager.prepareForPrompt();
+
+        const targets = manager.state.currentSubgoal.allowedTargets;
+        for (const name of ['cow', 'pig', 'sheep']) assert.ok(targets.includes(name));
+        for (const name of ['chicken', 'cod', 'rabbit', 'salmon']) assert.equal(targets.includes(name), false);
+        assert.equal(manager.state.currentSubgoal.allowedCommands.includes('!attack'), false);
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('survival hostile classification ignores passive mobs', () => {
+    assert.equal(isKnownHostile('zombie'), true);
+    for (const name of ['cow', 'sheep', 'pig', 'villager']) {
+        assert.equal(isKnownHostile(name), false);
+    }
 });
 
 test('world state marks vertically separated mobs as non-actionable threats', () => {
@@ -199,10 +240,12 @@ test('hostile recovery without an actionable hostile releases planner movement',
         };
         manager.agent.bot.evelynSurvivalState = {
             phase: 'handle_hostile',
-            hostiles: [
-                {name: 'husk', distance: 14, verticalDistance: 11, actionable: false},
-            ],
-            hostileCount: 0,
+            snapshot: {
+                hostiles: [
+                    {name: 'husk', distance: 14, verticalDistance: 11, actionable: false},
+                ],
+                hostileCount: 0,
+            },
             cooldown_until: {},
         };
 
@@ -244,8 +287,7 @@ test('repeated safe recovery failures can release movement ownership for planner
         manager.agent.bot.evelynSurvivalState = {
             phase: 'escape_to_surface',
             failures: {escape_to_surface: 20},
-            hostiles: [],
-            hostileCount: 0,
+            snapshot: {hostiles: [], hostileCount: 0},
             cooldown_until: {},
         };
         const gate = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
@@ -282,13 +324,217 @@ test('high recovery failures outside explicit recovery phase still release movem
         manager.agent.bot.evelynSurvivalState = {
             phase: 'planner_control',
             failures: {escape_to_surface: 20},
-            hostiles: [],
-            hostileCount: 0,
+            snapshot: {hostiles: [], hostileCount: 0},
             cooldown_until: {},
         };
         const gate = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
         assert.equal(gate.allowed, true);
         assert.equal(gate.reason, 'relevant');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('snapshot hostile keeps survival recovery ownership after repeated failures', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-hostile-snapshot-'));
+    try {
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot(), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'handle_hostile',
+            failures: {handle_hostile: 20},
+            snapshot: {
+                hostiles: [{name: 'zombie', distance: 3, actionable: true}],
+                hostileCount: 1,
+            },
+            cooldown_until: {},
+        };
+
+        const gate = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
+
+        assert.equal(gate.allowed, false);
+        assert.equal(gate.reason, 'survival_recovery_owns_movement');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('food recovery owns planner actions only while active or critically hungry or hurt', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-food-owner-'));
+    try {
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot(), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        manager.state.currentSubgoal = {
+            ...foodReserveSubgoal(),
+            allowedCommands: ['!searchForBlock', '!attack'],
+            allowedTargets: ['#food', 'wheat', 'cow'],
+            gateRejects: 0,
+        };
+        manager.lastSnapshot = {inventory: {}, hostilesNearby: []};
+
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'acquire_food',
+            snapshot: {hunger: 0},
+            cooldown_until: {},
+        };
+        const criticalMove = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
+        assert.equal(criticalMove.allowed, false);
+        assert.equal(criticalMove.reason, 'survival_recovery_owns_movement');
+
+        manager.state.currentSubgoal.gateRejects = 0;
+        const criticalAttack = manager.gateCommand('!attack("cow")', {autonomous: true});
+        assert.equal(criticalAttack.allowed, false);
+        assert.equal(criticalAttack.reason, 'survival_recovery_owns_movement');
+
+        manager.state.currentSubgoal.gateRejects = 0;
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'acquire_food',
+            snapshot: {health: 10, hunger: 15},
+            cooldown_until: {},
+        };
+        const criticalHealthMove = manager.gateCommand(
+            '!searchForBlock("wheat", 32)',
+            {autonomous: true},
+        );
+        assert.equal(criticalHealthMove.allowed, false);
+        assert.equal(criticalHealthMove.reason, 'survival_recovery_owns_movement');
+
+        manager.state.currentSubgoal.gateRejects = 0;
+        manager.agent.actions = {currentActionLabel: 'mode:evelyn_survival'};
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'acquire_food',
+            snapshot: {hunger: 12},
+            cooldown_until: {},
+        };
+        const activeMove = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
+        assert.equal(activeMove.allowed, false);
+        assert.equal(activeMove.reason, 'survival_recovery_owns_movement');
+
+        manager.state.currentSubgoal.gateRejects = 0;
+        manager.agent.actions.currentActionLabel = '';
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'acquire_food',
+            snapshot: {hunger: 12},
+            cooldown_until: {},
+        };
+        const handedOffMove = manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
+        assert.equal(handedOffMove.allowed, true);
+        assert.equal(handedOffMove.reason, 'relevant');
+
+        manager.state.currentSubgoal.gateRejects = 0;
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'planner_control',
+            snapshot: {hunger: 0},
+            cooldown_until: {acquire_food: Date.now() + 30000},
+            recovery_handoff_until: Date.now() / 1000 + 30,
+        };
+        const criticalSearchHandoff = manager.gateCommand(
+            '!searchForBlock("wheat", 32)',
+            {autonomous: true},
+        );
+        assert.equal(criticalSearchHandoff.allowed, true);
+        assert.equal(criticalSearchHandoff.reason, 'relevant');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('zero hunger requests food priority instead of defaulting to full hunger', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-zero-hunger-'));
+    try {
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {food: 0}), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        assert.equal(manager.state.priorityRequest?.kind, 'food');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('critical health requests food priority before hunger becomes low', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-critical-health-food-'));
+    try {
+        const bot = fakeBot([], {health: 20, food: 15});
+        const manager = new EvelynGoalManager(
+            fakeAgent(bot, []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+        assert.equal(foodRecoveryCandidate(manager.captureSnapshot()), null);
+
+        bot.health = 10;
+        const critical = manager.captureSnapshot();
+        assert.equal(foodRecoveryCandidate(critical)?.target, '#food');
+        manager.requestPriorityGoal('food', critical);
+        assert.equal(manager.state.priorityRequest?.kind, 'food');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('recent failed food goals suppress immediate priority reinsertion', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-food-backoff-'));
+    try {
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {food: 0}), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+        manager.state.blockedSubgoals = [{
+            id: 'restore_food_reserve',
+            signature: 'obtain:#food',
+            blockedAt: Date.now() / 1000,
+            attempts: 8,
+            reason: 'action_budget_exhausted',
+        }];
+
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        manager.requestPriorityGoal('minimum_kit', manager.captureSnapshot());
+        assert.equal(manager.state.priorityRequest, null);
+
+        manager.state.priorityRequest = {kind: 'food', requestedAt: Date.now() / 1000};
+        await manager.prepareForPrompt();
+        assert.equal(manager.state.currentSubgoal, null);
+
+        manager.state.blockedSubgoals[0].blockedAt = Date.now() / 1000 - 31;
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        assert.equal(manager.state.priorityRequest?.kind, 'food');
+
+        manager.state.priorityRequest = null;
+        manager.state.blockedSubgoals[0] = {
+            ...manager.state.blockedSubgoals[0],
+            blockedAt: Date.now() / 1000,
+            reason: 'repeated_irrelevant_commands',
+        };
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        assert.equal(manager.state.priorityRequest, null);
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
     }
@@ -519,10 +765,11 @@ test('death clears stale work and requests minimum-kit recovery', async () => {
     }
 });
 
-test('shadow mode selects a verifiable subgoal and audits unrelated commands', async () => {
+test('routine fallback skips model proposal and audits unrelated commands', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-shadow-'));
     try {
         const bot = fakeBot();
+        let proposalCalls = 0;
         const manager = new EvelynGoalManager(
             fakeAgent(bot, [{
                 id: 'obtain_logs',
@@ -534,7 +781,7 @@ test('shadow mode selects a verifiable subgoal and audits unrelated commands', a
                 action_budget: 6,
                 unlock_score: 5,
                 risk: 'low'
-            }]),
+            }], () => proposalCalls++),
             {
                 statePath: path.join(directory, 'state.json'),
                 mode: 'shadow',
@@ -544,7 +791,8 @@ test('shadow mode selects a verifiable subgoal and audits unrelated commands', a
         await manager.initialize();
         await manager.prepareForPrompt();
 
-        assert.equal(manager.state.currentSubgoal.id, 'obtain_logs');
+        assert.equal(proposalCalls, 0);
+        assert.equal(manager.state.currentSubgoal.id, 'obtain_initial_logs');
         const relevant = manager.gateCommand(
             'I will gather wood. !collectBlocks("oak_log", 3)',
             {autonomous: true}
@@ -558,6 +806,43 @@ test('shadow mode selects a verifiable subgoal and audits unrelated commands', a
         assert.equal(unsafeCombat.allowed, false);
         assert.equal(unsafeCombat.relevant, false);
         assert.ok(fs.existsSync(path.join(directory, 'state.json')));
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('novel progression still calls model proposal', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-novel-'));
+    try {
+        let proposalCalls = 0;
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot([
+                ['oak_log', 3],
+                ['crafting_table', 1],
+                ['wooden_sword', 1],
+                ['wooden_pickaxe', 1],
+                ['bread', 3],
+            ]), [{
+                id: 'obtain_iron',
+                kind: 'obtain',
+                target: 'raw_iron',
+                quantity: 3,
+                success: {kind: 'inventory', target: 'raw_iron', count: 3},
+                unlock_score: 5,
+                risk: 'low',
+            }], () => proposalCalls++),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'shadow',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+
+        await manager.initialize();
+        await manager.prepareForPrompt();
+
+        assert.equal(proposalCalls, 1);
+        assert.equal(manager.state.currentSubgoal.id, 'obtain_iron');
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
     }
@@ -690,6 +975,14 @@ test('world effect candidate is content-free, action-bound, and emitted once', a
         );
         assert.deepEqual(
             manager.gateCommand('!collectBlocks("bread", 1)', {autonomous: true}),
+            {
+                allowed: false,
+                relevant: false,
+                reason: 'autonomy_not_active',
+            },
+        );
+        assert.deepEqual(
+            manager.gateCommand('!endGoal', {autonomous: true}),
             {
                 allowed: false,
                 relevant: false,
@@ -970,8 +1263,10 @@ test('initial and periodic predicate completion never publish effect candidates'
         );
 
         const periodicBot = fakeBot([['bread', 3]], {food: 6});
+        const periodicAgent = fakeAgent(periodicBot, []);
+        periodicAgent.actions = {executing: false};
         const periodicManager = new EvelynGoalManager(
-            fakeAgent(periodicBot, []),
+            periodicAgent,
             {
                 statePath: path.join(directory, 'periodic-state.json'),
                 mode: 'gated',
@@ -989,6 +1284,53 @@ test('initial and periodic predicate completion never publish effect candidates'
         assert.equal(
             periodicBot.evelynGoalState.postcondition_candidate,
             null,
+        );
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('bound in-flight action retains predicate until result evidence is recorded', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-inflight-'));
+    try {
+        const items = [];
+        const bot = fakeBot(items, {food: 6});
+        const agent = fakeAgent(bot, []);
+        agent.actions = {executing: true};
+        const manager = new EvelynGoalManager(
+            agent,
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding({
+                    goalRunId: 'goal-run-inflight',
+                    actionRunId: 'action-run-inflight',
+                }),
+            },
+        );
+        await manager.initialize();
+        manager.state.currentSubgoal = foodReserveSubgoal();
+        const before = manager.captureSnapshot();
+
+        items.push(['bread', 3]);
+        await manager.update();
+        assert.notEqual(manager.state.currentSubgoal, null);
+
+        agent.actions.executing = false;
+        const after = manager.captureSnapshot();
+        await manager.recordActionResult(
+            '!collectBlocks("bread", 3)',
+            'Collected three bread.',
+            before,
+            after,
+            {autonomous: true},
+        );
+
+        assert.equal(manager.state.currentSubgoal, null);
+        assert.equal(
+            bot.evelynGoalState.postcondition_candidate?.actionRunId,
+            'action-run-inflight',
         );
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
@@ -1045,6 +1387,208 @@ test('ender dragon completion requires a recent autonomous combat action', async
     }
 });
 
+test('successful nonterminal dragon combat cannot arm completion across a restart', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-dragon-restart-'));
+    try {
+        const statePath = path.join(directory, 'state.json');
+        const candidate = {
+            id: 'defeat_dragon',
+            kind: 'defeat',
+            target: 'ender_dragon',
+            quantity: 1,
+            reason: 'Complete the ultimate goal',
+            success: {kind: 'entity_defeated', target: 'ender_dragon', count: 1},
+            action_budget: 12,
+            unlock_score: 5,
+            risk: 'high'
+        };
+        const first = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {game: {dimension: 'minecraft:the_end'}}), [candidate]),
+            {statePath, mode: 'gated', ultimateGoal: 'Defeat the Ender Dragon'}
+        );
+        await first.initialize();
+        await first.prepareForPrompt();
+        const snapshot = first.captureSnapshot();
+        await first.recordActionResult(
+            '!attack("ender_dragon")',
+            'Fighting ender_dragon.',
+            snapshot,
+            snapshot,
+            {autonomous: true}
+        );
+        assert.ok(first.state.lastDragonCombatAt);
+        assert.equal(first.state.ultimateGoalCompletedAt, null);
+
+        const listeners = {};
+        const restarted = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {
+                game: {dimension: 'minecraft:the_end'},
+                on: (event, callback) => {
+                    listeners[event] = callback;
+                }
+            }), [candidate]),
+            {statePath, mode: 'gated', ultimateGoal: 'Defeat the Ender Dragon'}
+        );
+        await restarted.initialize();
+        assert.equal(restarted.state.lastDragonCombatAt, null);
+
+        listeners.entityDead({name: 'ender_dragon'});
+        assert.equal(restarted.state.ultimateGoalCompletedAt, null);
+        assert.deepEqual(
+            restarted.gateCommand('!endGoal', {autonomous: true}),
+            {
+                allowed: false,
+                relevant: false,
+                reason: 'goal_manager_has_not_verified_ultimate_completion',
+            },
+        );
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('dragon death during the awaited attack completes the ultimate goal', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-dragon-order-'));
+    try {
+        const listeners = {};
+        const bot = fakeBot([], {
+            game: {dimension: 'minecraft:the_end'},
+            on: (event, callback) => {
+                listeners[event] = callback;
+            }
+        });
+        const manager = new EvelynGoalManager(
+            fakeAgent(bot, [{
+                id: 'defeat_dragon',
+                kind: 'defeat',
+                target: 'ender_dragon',
+                quantity: 1,
+                success: {kind: 'entity_defeated', target: 'ender_dragon', count: 1},
+                action_budget: 12,
+                unlock_score: 5,
+                risk: 'high'
+            }]),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon'
+            }
+        );
+        await manager.initialize();
+        await manager.prepareForPrompt();
+        const before = manager.captureSnapshot();
+
+        listeners.entityDead({name: 'ender_dragon'});
+        const after = manager.captureSnapshot();
+        assert.equal(Number(before.defeatedEntities.ender_dragon || 0), 0);
+        assert.equal(after.defeatedEntities.ender_dragon, 1);
+        assert.equal(manager.state.ultimateGoalCompletedAt, null);
+        await manager.recordActionResult(
+            '!attack("ender_dragon")',
+            'Successfully killed ender_dragon.',
+            before,
+            after,
+            {autonomous: true}
+        );
+
+        assert.ok(manager.state.ultimateGoalCompletedAt);
+        assert.equal(manager.state.autonomyState, 'completed');
+        assert.match(manager.promptContext(), /Use !endGoal now/);
+        assert.deepEqual(
+            manager.gateCommand('!endGoal', {autonomous: true}),
+            {
+                allowed: true,
+                relevant: true,
+                reason: 'ultimate_goal_verified_complete',
+            },
+        );
+        assert.deepEqual(
+            manager.gateCommand('!stats', {autonomous: true}),
+            {
+                allowed: false,
+                relevant: false,
+                reason: 'autonomy_not_active',
+            },
+        );
+
+        const completedAt = manager.state.ultimateGoalCompletedAt;
+        const restarted = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {game: {dimension: 'minecraft:the_end'}}), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon'
+            }
+        );
+        await restarted.initialize();
+        assert.equal(restarted.state.lastDragonCombatAt, null);
+        assert.equal(restarted.state.ultimateGoalCompletedAt, completedAt);
+        assert.equal(restarted.state.autonomyState, 'completed');
+        assert.equal(restarted.gateCommand('!endGoal', {autonomous: true}).allowed, true);
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('failed or cancelled dragon combat cannot arm completion across a restart', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-dragon-failed-'));
+    try {
+        const statePath = path.join(directory, 'state.json');
+        const candidate = {
+            id: 'defeat_dragon',
+            kind: 'defeat',
+            target: 'ender_dragon',
+            quantity: 1,
+            reason: 'Complete the ultimate goal',
+            success: {kind: 'entity_defeated', target: 'ender_dragon', count: 1},
+            action_budget: 12,
+            unlock_score: 5,
+            risk: 'high'
+        };
+        const first = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {game: {dimension: 'minecraft:the_end'}}), [candidate]),
+            {statePath, mode: 'gated', ultimateGoal: 'Defeat the Ender Dragon'}
+        );
+        await first.initialize();
+        await first.prepareForPrompt();
+        const snapshot = first.captureSnapshot();
+        await first.recordActionResult(
+            '!attack("ender_dragon")',
+            'No ender_dragon nearby.',
+            snapshot,
+            snapshot,
+            {autonomous: true}
+        );
+        await first.recordActionResult(
+            '!attack("ender_dragon")',
+            undefined,
+            snapshot,
+            snapshot,
+            {autonomous: true}
+        );
+
+        const listeners = {};
+        const restartedBot = fakeBot([], {
+            game: {dimension: 'minecraft:the_end'},
+            on: (event, callback) => {
+                listeners[event] = callback;
+            }
+        });
+        const restarted = new EvelynGoalManager(
+            fakeAgent(restartedBot, [candidate]),
+            {statePath, mode: 'gated', ultimateGoal: 'Defeat the Ender Dragon'}
+        );
+        await restarted.initialize();
+        listeners.entityDead({name: 'ender_dragon'});
+
+        assert.equal(restarted.state.lastDragonCombatAt, null);
+        assert.equal(restarted.state.ultimateGoalCompletedAt, null);
+        assert.equal(restarted.state.autonomyState, 'active');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
 test('autonomous goal control is blocked even in shadow mode until verified completion', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-owner-'));
     try {
@@ -1062,6 +1606,60 @@ test('autonomous goal control is blocked even in shadow mode until verified comp
         assert.equal(manager.gateCommand('!endGoal', {autonomous: true}).allowed, false);
         manager.state.ultimateGoalCompletedAt = Date.now() / 1000;
         assert.equal(manager.gateCommand('!endGoal', {autonomous: true}).allowed, true);
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('verified endGoal bypasses recovery and unsafe-unarmed gates while other control stays closed', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-end-recovery-'));
+    try {
+        const agent = fakeAgent(fakeBot(), []);
+        agent.bot.evelynSurvivalState = {
+            phase: 'escape_to_surface',
+            cooldown_until: {},
+        };
+        const manager = new EvelynGoalManager(agent, {
+            statePath: path.join(directory, 'state.json'),
+            mode: 'gated',
+            ultimateGoal: 'Defeat the Ender Dragon',
+        });
+        manager.state.ultimateGoalCompletedAt = Date.now() / 1000;
+        manager.state.autonomyState = 'completed';
+
+        const recoveryGate = manager.gateCommand('!endGoal', {autonomous: true});
+        agent.bot.evelynSurvivalState = null;
+        manager.lastSnapshot = {
+            inventory: {},
+            hostilesNearby: [{name: 'zombie', distance: 3, actionable: true}],
+        };
+        const unsafeUnarmedGate = manager.gateCommand('!endGoal', {autonomous: true});
+        const verifiedEndGate = {
+            allowed: true,
+            relevant: true,
+            reason: 'ultimate_goal_verified_complete',
+        };
+        assert.deepEqual(
+            [recoveryGate, unsafeUnarmedGate],
+            [verifiedEndGate, verifiedEndGate],
+        );
+        assert.deepEqual(
+            manager.gateCommand('!goal("keep going")', {autonomous: true}),
+            {allowed: false, relevant: false, reason: 'autonomy_not_active'},
+        );
+
+        manager.state.ultimateGoalCompletedAt = null;
+        manager.state.autonomyState = 'active';
+        assert.deepEqual(
+            manager.gateCommand('!endGoal', {autonomous: true}),
+            {allowed: false, relevant: false, reason: 'survival_recovery_owns_movement'},
+        );
+
+        manager.state.autonomyState = 'manual_pause';
+        assert.deepEqual(
+            manager.gateCommand('!endGoal', {autonomous: true}),
+            {allowed: false, relevant: false, reason: 'autonomy_not_active'},
+        );
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
     }
@@ -1258,8 +1856,9 @@ test('two observations require an action before another query', async () => {
 test('historically blocked prerequisites remain retryable instead of leaving no goal', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-retry-'));
     try {
+        let proposalCalls = 0;
         const manager = new EvelynGoalManager(
-            fakeAgent(fakeBot(), [{
+            fakeAgent(fakeBot([['bread', 3]]), [{
                 id: 'obtain_logs',
                 kind: 'obtain',
                 target: '#logs',
@@ -1269,7 +1868,7 @@ test('historically blocked prerequisites remain retryable instead of leaving no 
                 action_budget: 8,
                 unlock_score: 5,
                 risk: 'low'
-            }]),
+            }], () => proposalCalls++),
             {
                 statePath: path.join(directory, 'state.json'),
                 mode: 'gated',
@@ -1294,6 +1893,7 @@ test('historically blocked prerequisites remain retryable instead of leaving no 
         ];
         await manager.initialize();
         await manager.prepareForPrompt();
+        assert.equal(proposalCalls, 1);
         assert.equal(manager.state.currentSubgoal.target, '#logs');
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});

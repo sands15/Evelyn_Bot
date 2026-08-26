@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .observability_metrics import VoiceLatencyTrace
 from .omnivoice_request_runtime import (
     build_omnivoice_tts_request_bundle_from_runtime,
     build_omnivoice_tts_result_from_runtime,
@@ -44,10 +45,13 @@ async def create_omnivoice_source_from_runtime(
     session_key: str | None = None,
     turn_scope: Any = None,
     trace_payload: dict[str, Any] | None = None,
+    latency_trace: VoiceLatencyTrace | None = None,
 ) -> Any:
     text = deps.clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
+    if latency_trace is not None:
+        latency_trace.mark("tts_requested")
 
     trace = deps.merge_log_event_payload(
         explicit={
@@ -103,6 +107,8 @@ async def create_omnivoice_source_from_runtime(
                     extra=trace,
                 ),
             )
+            if latency_trace is not None:
+                latency_trace.mark("tts_started")
             async with session.post(
                 f"{deps.omnivoice_server_url}/v1/audio/speech",
                 json=payload,
@@ -129,6 +135,8 @@ async def create_omnivoice_source_from_runtime(
                             on_first_byte()
                         if not first_pcm_logged:
                             first_pcm_logged = True
+                            if latency_trace is not None:
+                                latency_trace.mark("tts_first_pcm")
                             first_audio_ms = (deps.monotonic() - request_started_mono) * 1000.0
                             deps.log_turn_event(
                                 "tts_first_pcm_received",

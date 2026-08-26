@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VENV_ACT="${VENV_ACT:-source ~/venvs/vllm-env/bin/activate}"
 MAIN_LLM_BACKEND="${MAIN_LLM_BACKEND:-llama}"
 MAIN_LLM_VENV_ACT="${MAIN_LLM_VENV_ACT:-source /home/sands12/venvs/evelyn-gemma4-vllm/bin/activate}"
 LLAMA_DIR="${LLAMA_DIR:-/mnt/c/Users/Admin/llama.cpp}"
+MAIN_LLM_BUILD_DIR="${MAIN_LLM_BUILD_DIR:-$LLAMA_DIR/build-sm120-v1}"
 MAIN_LLM_GPU="${MAIN_LLM_GPU:-GPU-0cb1f962-418e-41f0-cdfc-4bfca6b9486f}"
 MAIN_LLM_PORT="${MAIN_LLM_PORT:-9820}"
 MAIN_LLM_CONTEXT="${MAIN_LLM_CONTEXT:-8192}"
 MAIN_LLM_N_PARALLEL="${MAIN_LLM_N_PARALLEL:-1}"
+MAIN_LLM_BATCH_SIZE="${MAIN_LLM_BATCH_SIZE:-2048}"
+MAIN_LLM_UBATCH_SIZE="${MAIN_LLM_UBATCH_SIZE:-2048}"
+MAIN_LLM_CACHE_RAM_MIB="${MAIN_LLM_CACHE_RAM_MIB:-8192}"
 MAIN_LLM_CACHE_REUSE="${MAIN_LLM_CACHE_REUSE:-256}"
+MAIN_LLM_CUDA_GRAPHS_ENABLED="${MAIN_LLM_CUDA_GRAPHS_ENABLED:-1}"
+MAIN_LLM_CUDA_GRAPH_OPT="${MAIN_LLM_CUDA_GRAPH_OPT:-1}"
+MAIN_LLM_SWA_FULL_ENABLED="${MAIN_LLM_SWA_FULL_ENABLED:-1}"
 MAIN_LLM_REASONING="${MAIN_LLM_REASONING:-off}"
 MAIN_LLM_REASONING_BUDGET="${MAIN_LLM_REASONING_BUDGET:-0}"
 MAIN_LLM_HF="${MAIN_LLM_HF:-off}"
@@ -34,6 +40,18 @@ MAIN_LLM_REASONING_FORMAT="${MAIN_LLM_REASONING_FORMAT:-none}"
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES="$MAIN_LLM_GPU"
 export LLAMA_CHAT_TEMPLATE_KWARGS="$MAIN_LLM_CHAT_TEMPLATE_KWARGS"
+export GGML_CUDA_GRAPH_OPT="$MAIN_LLM_CUDA_GRAPH_OPT"
+case "$MAIN_LLM_CUDA_GRAPHS_ENABLED" in
+  1) unset GGML_CUDA_DISABLE_GRAPHS ;;
+  0) export GGML_CUDA_DISABLE_GRAPHS=1 ;;
+  *) echo "[Main-LLM] MAIN_LLM_CUDA_GRAPHS_ENABLED must be 0 or 1" >&2; exit 64 ;;
+esac
+swa_full_args=()
+case "$MAIN_LLM_SWA_FULL_ENABLED" in
+  1) swa_full_args=(--swa-full) ;;
+  0) ;;
+  *) echo "[Main-LLM] MAIN_LLM_SWA_FULL_ENABLED must be 0 or 1" >&2; exit 64 ;;
+esac
 
 if [[ "$MAIN_LLM_BACKEND" == "vllm" ]]; then
   eval "$MAIN_LLM_VENV_ACT"
@@ -55,8 +73,16 @@ if [[ "$MAIN_LLM_BACKEND" == "vllm" ]]; then
   exec "${cmd[@]}"
 fi
 
-eval "$VENV_ACT"
 cd "$LLAMA_DIR"
+main_llm_server="$MAIN_LLM_BUILD_DIR/bin/llama-server"
+if [[ ! -x "$main_llm_server" ]]; then
+  echo "[Main-LLM] native build is missing: $MAIN_LLM_BUILD_DIR" >&2
+  exit 78
+fi
+if ! grep -Eq '^CMAKE_CUDA_ARCHITECTURES:[^=]+=120a-real$' "$MAIN_LLM_BUILD_DIR/CMakeCache.txt"; then
+  echo "[Main-LLM] MAIN_LLM_BUILD_DIR must select the native 120a build" >&2
+  exit 78
+fi
 
 model_args=()
 if [[ "${MAIN_LLM_HF,,}" == "off" || "${MAIN_LLM_HF,,}" == "none" || "$MAIN_LLM_HF" == "0" ]]; then
@@ -95,9 +121,11 @@ if [[ "${MAIN_LLM_MMPROJ,,}" == "off" || "${MAIN_LLM_MMPROJ,,}" == "none" || "$M
   template_args+=(--no-mmproj)
 fi
 
-exec ./build/bin/llama-server \
+export LD_LIBRARY_PATH="$MAIN_LLM_BUILD_DIR/bin:${LD_LIBRARY_PATH:-}"
+exec "$main_llm_server" \
   "${model_args[@]}" \
   "${lora_args[@]}" \
+  "${swa_full_args[@]}" \
   "${template_args[@]}" \
   --host 0.0.0.0 \
   --port "$MAIN_LLM_PORT" \
@@ -105,6 +133,9 @@ exec ./build/bin/llama-server \
   -ngl 999 \
   -c "$MAIN_LLM_CONTEXT" \
   -np "$MAIN_LLM_N_PARALLEL" \
+  --batch-size "$MAIN_LLM_BATCH_SIZE" \
+  --ubatch-size "$MAIN_LLM_UBATCH_SIZE" \
+  --cache-ram "$MAIN_LLM_CACHE_RAM_MIB" \
   --cache-prompt \
   --cache-reuse "$MAIN_LLM_CACHE_REUSE" \
   --metrics \

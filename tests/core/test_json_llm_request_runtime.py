@@ -94,16 +94,38 @@ class JsonLlmRequestRuntimeTests(unittest.IsolatedAsyncioTestCase):
             guild_id=7,
         )
 
-    async def test_content_json_is_parsed_and_success_is_traced(self) -> None:
-        result = await self.ask()
+    async def test_hot_path_router_payload_is_cached_json_and_traced(self) -> None:
+        result = await self.ask(self.build_deps(role="router", label="router LLM"))
 
         self.assertEqual(result, {"parsed": '{"ok": true}'})
-        self.assertEqual(self.session.posts[0]["json"]["model"], "summary-model")
-        self.assertEqual(self.session.posts[0]["json"]["max_tokens"], 123)
+        payload = self.session.posts[0]["json"]
+        self.assertEqual(payload["model"], "router-model")
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertEqual(payload["max_tokens"], 123)
+        self.assertTrue(payload["cache_prompt"])
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(self.session.posts[0]["timeout"].total, 4.5)
-        self.assertEqual(self.traces[0]["model_role"], "summary")
+        self.assertEqual(self.traces[0]["model_role"], "router")
         self.assertEqual(self.traces[0]["turn_id"], "turn-1")
         self.assertTrue(self.traces[0]["success"])
+
+    async def test_non_hot_summary_keeps_existing_sampling_and_skips_hot_path_hints(self) -> None:
+        result = await ask_json_llm_from_runtime(
+            [{"role": "user", "content": "summarize"}],
+            deps=self.build_deps(),
+            max_tokens=321,
+            timeout_seconds=9.0,
+            purpose="memory_summary",
+            hot_path=False,
+        )
+
+        self.assertEqual(result, {"parsed": '{"ok": true}'})
+        payload = self.session.posts[0]["json"]
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertEqual(payload["max_tokens"], 321)
+        self.assertNotIn("cache_prompt", payload)
+        self.assertNotIn("response_format", payload)
+        self.assertFalse(self.traces[0]["hot_path"])
 
     async def test_reasoning_content_is_used_when_content_is_empty(self) -> None:
         self.session = FakeSession(FakeResponse(data={

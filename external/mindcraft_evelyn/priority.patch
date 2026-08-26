@@ -1,7 +1,7 @@
 diff --git a/src/agent/action_manager.js b/src/agent/action_manager.js
 --- a/src/agent/action_manager.js
 +++ b/src/agent/action_manager.js
-@@ -59,6 +59,16 @@ export class ActionManager {
+@@ -59,24 +59,33 @@ export class ActionManager {
      }
  
      async _executeAction(actionLabel, actionFn, timeout = 10) {
@@ -18,3 +18,23 @@ diff --git a/src/agent/action_manager.js b/src/agent/action_manager.js
          let TIMEOUT;
          try {
              if (this.last_action_time > 0) {
+                 let time_diff = Date.now() - this.last_action_time;
+                 if (time_diff < 20) {
+                     this.recent_action_counter++;
+                 }
+                 else {
+                     this.recent_action_counter = 0;
+                 }
+                 if (this.recent_action_counter > 3) {
+                     console.warn('Fast action loop detected, cancelling resume.');
+                     this.cancelResume(); // likely cause of repetition
+                 }
+                 if (this.recent_action_counter > 5) {
+-                    console.error('Infinite action loop detected, shutting down.');
+-                    this.agent.cleanKill('Infinite action loop detected, shutting down.');
+-                    return { success: false, message: 'Infinite action loop detected, shutting down.', interrupted: false, timedout: false };
++                    console.error('Rapid action loop detected, safely rejecting new action.');
++                    return { success: false, message: 'Rapid action loop safely rejected.', interrupted: true, timedout: false, busy: true };
+                 }
+             }
+             this.last_action_time = Date.now();

@@ -691,6 +691,18 @@ class LocalVoiceAdmissionManager:
                 "contentFree": True,
             }
 
+    def active_for_bridge(self, bridge_instance_id: Any) -> bool:
+        bridge_id = _identifier(bridge_instance_id)
+        with self._lock:
+            now_value = float(self._now())
+            self._cleanup(now_value)
+            return bool(
+                bridge_id
+                and not self._revocation_fenced
+                and bridge_id == self._bridge_instance_id
+                and now_value < self._active_until
+            )
+
     def issue(
         self,
         bridge_instance_id: Any,

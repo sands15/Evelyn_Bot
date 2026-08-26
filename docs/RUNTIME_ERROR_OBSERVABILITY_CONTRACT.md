@@ -1,7 +1,7 @@
 # Runtime Error Observability Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-12 KST
+Last reviewed: 2026-08-16 KST
 
 ## Purpose
 
@@ -65,6 +65,13 @@ Discord `마크접속`은 물리 연결 확인 뒤 Minecraft autonomy route 활�
 연결은 자동 rollback하지 않는다. observer 자체의 일반 예외는 실패 응답을 막지 않는다.
 두 effect가 성공한 뒤 Discord 응답 전송이 실패하면 연결 실패로 기록하거나 재응답하지 않고
 원래 예외를 전파한다. effect await의 취소도 오류로 기록하거나 응답하지 않고 재전파한다.
+
+의도적으로 꺼져 있는 Voyager 자체는 Runtime Error가 아니다. 명시적 Fast Control connect가
+이를 기동하는 동안에는 initial reply 뒤 `minecraft_runtime` background action이 `running`이고,
+service start 또는 최종 연결 검증 실패는 고정 `minecraft_connect_failed`/`minecraft_goal_failed`
+작업 결과로 닫힌다. Host Supervisor의 실제 fixed action 실행 예외·compose 비정상 종료는 기존
+Host Supervisor counter에 type-only로 기록한다. 폐기된 Local Bridge command queue의
+authorization-required 거절은 launcher 실패로 세지 않으며 raw exception/path를 저장하지 않는다.
 
 자율 후속의 Discord 전송이 정상 반환한 뒤 history, active session, continuity,
 memory 또는 self-state 후처리에서 발생한 일반 예외는
@@ -181,6 +188,10 @@ detail도 `errorType=<exception-type>`만 남겨 예외 메시지·경로를 운
 
 Background cognitive refresh 실패 로그는 fixed prefix와 exception type만 남기며,
 guild/session key·reason·예외 메시지·경로를 운영 로그에 복제하지 않는다.
+
+Cognitive-state action·latency 로그도 질문, 검색 의도, reason, session scope key와
+예외 메시지를 복제하지 않는다. fixed action/scope type, 문자 수, latency와
+`errorType=<exception-type>`만 남긴다.
 
 Main LLM warmup non-200 response body는 읽지 않고 startup component detail과 외부
 wrapper에 각각 fixed `llm_warmup_failed`, `LLM warmup failed`만 남긴다.

@@ -26,7 +26,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 # The bundled test Python may not have ABI-compatible host audio/image wheels.
 # None of those implementations are exercised by these protocol-only tests.
-sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
+    sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
 
 _host_vision_module_name = "evelyn_core.host_vision_bridge"
 _host_vision_stubbed = False
@@ -656,7 +659,23 @@ class LocalBridgeDirectMemoryHandoffTests(
             self.assertEqual(result["reply"], "안녕.")
             self.assertEqual(
                 [item["type"] for item in websocket.sent],
-                ["start", "append", "commit", "append", "flush"],
+                [
+                    "start",
+                    "append",
+                    "commit",
+                    "append",
+                    "commit",
+                    "flush",
+                ],
+            )
+            self.assertEqual(websocket.sent[3]["text"], "안녕.")
+            self.assertNotIn(
+                "안녕",
+                [
+                    item.get("text")
+                    for item in websocket.sent
+                    if item.get("type") == "append"
+                ][:-1],
             )
             for command, response_exited, guard_active in (
                 websocket.send_observations[1:]

@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
-from .session_memory_state import SessionStateStore, new_conversation_history as create_empty_conversation_history
+from .session_memory_state import (
+    SessionStateStore,
+    UserTextTurnStart,
+    new_conversation_history as create_empty_conversation_history,
+)
 
 
 @dataclass(frozen=True)
@@ -96,8 +100,38 @@ def begin_user_text_turn_from_runtime(
     guild_id: int | None = None,
     user_id: int | None = None,
     turn_id: str | None = None,
+    precommit_user_only: bool = False,
     deps: SessionTurnRuntimeDeps,
 ) -> Any:
+    if precommit_user_only:
+        topic_id = deps.build_topic_id_fn(
+            user_text,
+            deps.session_topic_ids.get(session_key, ""),
+        )
+        accepted_turn_id = turn_id or deps.new_turn_id_fn()
+        deps.session_state_store.begin_user_only_turn(
+            session_key,
+            user_text,
+            turn_id=accepted_turn_id,
+            system_prompt=deps.system_prompt,
+            max_history_items=deps.max_history_items,
+            user_id=user_id,
+            ttl_sec=deps.active_conversation_text_sec,
+            topic_id=topic_id,
+            active_conversation_awaiting_reply_sec=(
+                deps.active_conversation_awaiting_reply_sec
+            ),
+        )
+        history = deps.session_state_store.get_conversation_history(
+            system_prompt=deps.system_prompt,
+            session_key=session_key,
+            guild_id=guild_id,
+        )
+        return UserTextTurnStart(
+            turn_id=accepted_turn_id,
+            topic_id=topic_id,
+            history=history,
+        )
     return deps.session_state_store.begin_user_text_turn(
         session_key,
         user_text,
@@ -121,11 +155,17 @@ def finish_assistant_text_turn_from_runtime(
     awaiting_user_reply: bool,
     topic_id: str | None = None,
     memory_receipt: Any = None,
+    complete_turn_id: str | None = None,
     deps: SessionTurnRuntimeDeps,
 ) -> Any:
     receipt_kwargs = (
         {"memory_receipt": memory_receipt}
         if memory_receipt is not None
+        else {}
+    )
+    completion_kwargs = (
+        {"complete_turn_id": complete_turn_id}
+        if complete_turn_id is not None
         else {}
     )
     return deps.session_state_store.finish_assistant_text_turn(
@@ -141,6 +181,7 @@ def finish_assistant_text_turn_from_runtime(
         question_ttl_sec=deps.active_conversation_text_question_sec,
         topic_id=topic_id,
         **receipt_kwargs,
+        **completion_kwargs,
     )
 
 

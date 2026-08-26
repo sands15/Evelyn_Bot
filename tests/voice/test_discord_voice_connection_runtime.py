@@ -138,7 +138,7 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, vc)
         self.assertEqual(vc.wait_timeouts, [5.0])
 
-    async def test_connect_sets_audio_callback_and_arms_listener(self) -> None:
+    async def test_connect_sets_audio_callback_and_defers_listener(self) -> None:
         guild = FakeGuild()
         channel = FakeChannel(guild)
         vc = FakeVoiceClient(channel=channel)
@@ -148,7 +148,7 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(result, vc)
         self.assertIs(vc.on_user_audio, self.process_member_audio)
-        self.assertEqual(vc.listen_calls, 1)
+        self.assertEqual(vc.listen_calls, 0)
         self.assertEqual(channel.connect_calls, [{
             "cls": FakeVoiceClient,
             "timeout": 3.0,
@@ -162,11 +162,11 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         deferred_result = await connect_evelyn_voice_client_from_runtime(
             channel,
             deps=self.build_deps(),
-            arm_listener=False,
+            arm_listener=True,
         )
         self.assertIs(deferred_result, deferred)
         self.assertIs(deferred.on_user_audio, self.process_member_audio)
-        self.assertEqual(deferred.listen_calls, 0)
+        self.assertEqual(deferred.listen_calls, 1)
 
     async def test_connect_serializes_stale_cleanup_and_reuses_replacement(self) -> None:
         guild = FakeGuild()

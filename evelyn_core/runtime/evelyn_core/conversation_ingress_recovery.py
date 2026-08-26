@@ -15,7 +15,12 @@ from .conversation_memory_receipt import (
     sanitize_memory_receipt_ref,
     unattributed_memory_receipt_ref,
 )
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import (
+    artifact_target_allowed,
+    atomic_json_write,
+    durable_artifact_process_scope,
+    read_bounded_text,
+)
 
 
 CONVERSATION_INGRESS_RECOVERY_SCHEMA = (
@@ -39,6 +44,7 @@ DEFAULT_INGRESS_MAX_AGE_SEC = 15 * 60.0
 DEFAULT_INGRESS_MAX_ENTRIES = 128
 DEFAULT_INGRESS_MAX_CONTENT_CHARS = 2_000
 DEFAULT_INGRESS_MAX_BYTES = 1024 * 1024
+DEFAULT_INGRESS_ARTIFACT_DEADLINE_SEC = 5.0
 
 _HARD_MAX_AGE_SEC = 30 * 60.0
 _HARD_MAX_ENTRIES = 1024
@@ -342,6 +348,20 @@ def _clone_entries(
     return {key: dict(value) for key, value in entries.items()}
 
 
+def _logical_entry_updated_at(
+    entry: dict[str, Any],
+    now: float,
+) -> float:
+    return min(
+        max(
+            float(entry["createdAt"]),
+            float(entry["updatedAt"]),
+            float(now),
+        ),
+        float(entry["expiresAt"]),
+    )
+
+
 class ConversationIngressRecoveryJournal:
     """Durable at-most-once boundary for accepted conversation ingress.
 
@@ -363,6 +383,10 @@ class ConversationIngressRecoveryJournal:
         max_bytes: int = DEFAULT_INGRESS_MAX_BYTES,
         wall_time: Callable[[], float] = time.time,
         turn_id_factory: Callable[[], str] | None = None,
+        artifact_process: Any | None = None,
+        artifact_deadline_sec: float = (
+            DEFAULT_INGRESS_ARTIFACT_DEADLINE_SEC
+        ),
     ) -> None:
         self.path = Path(path)
         self.head_path = Path(
@@ -406,6 +430,11 @@ class ConversationIngressRecoveryJournal:
             ),
         )
         self.wall_time = wall_time
+        self.artifact_process = artifact_process
+        self.artifact_deadline_sec = max(
+            0.1,
+            float(artifact_deadline_sec),
+        )
         self.turn_id_factory = turn_id_factory or (
             lambda: f"ingress-{uuid.uuid4().hex}"
         )
@@ -707,13 +736,13 @@ class ConversationIngressRecoveryJournal:
         return entries, generation, previous_hash, journal_hash
 
     def _load_head(self) -> dict[str, Any] | None:
-        if not self.head_path.exists() and not self.head_path.is_symlink():
+        raw_text = read_bounded_text(
+            self.head_path,
+            maximum_bytes=self.max_bytes,
+            missing_ok=True,
+        )
+        if raw_text is None:
             return None
-        if self.head_path.is_symlink() or not self.head_path.is_file():
-            raise ConversationIngressRecoveryError(
-                "conversation_ingress_head_invalid"
-            )
-        raw_text = self.head_path.read_text(encoding="utf-8")
         payload = _strict_json_loads(raw_text)
         if not isinstance(payload, dict) or frozenset(payload) != _HEAD_KEYS:
             raise ConversationIngressRecoveryError(
@@ -754,11 +783,16 @@ class ConversationIngressRecoveryJournal:
 
     @staticmethod
     def _target_allowed(path: Path) -> bool:
-        return not path.is_symlink() and (
-            not path.exists() or path.is_file()
-        )
+        return artifact_target_allowed(path)
 
     def _write(self) -> None:
+        with durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.artifact_deadline_sec,
+        ):
+            self._write_scoped()
+
+    def _write_scoped(self) -> None:
         self._require_ready()
         if not self._target_allowed(self.path) or not self._target_allowed(
             self.head_path
@@ -811,16 +845,38 @@ class ConversationIngressRecoveryJournal:
         self._head_state = "current"
         self._last_error_code = ""
 
-    def _load(self) -> None:
+    def _load(self, *, recover_after_restart: bool = True) -> None:
+        with durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.artifact_deadline_sec,
+        ):
+            self._load_scoped(
+                recover_after_restart=recover_after_restart,
+            )
+
+    def _load_scoped(self, *, recover_after_restart: bool = True) -> None:
         head: dict[str, Any] | None = None
         try:
             head = self._load_head()
-            missing = not self.path.exists() and not self.path.is_symlink()
-            if missing:
+            raw_text = read_bounded_text(
+                self.path,
+                maximum_bytes=self.max_bytes,
+                missing_ok=True,
+            )
+            if raw_text is None:
                 if head is not None:
                     raise ConversationIngressRecoveryError(
                         "conversation_ingress_journal_missing_after_head"
                     )
+                if not recover_after_restart:
+                    if self._generation != 0 or self._entries:
+                        raise ConversationIngressRecoveryError(
+                            "conversation_ingress_journal_missing"
+                        )
+                    self._state = "ready"
+                    self._integrity = "missing"
+                    self._head_state = "missing"
+                    self._last_error_code = ""
                 try:
                     self._write()
                 except Exception:
@@ -830,15 +886,6 @@ class ConversationIngressRecoveryJournal:
                     # persistence did not complete.
                     return
                 return
-            if (
-                self.path.is_symlink()
-                or not self.path.is_file()
-                or self.path.stat().st_size > self.max_bytes
-            ):
-                raise ConversationIngressRecoveryError(
-                    "conversation_ingress_journal_invalid"
-                )
-            raw_text = self.path.read_text(encoding="utf-8")
             payload = _strict_json_loads(raw_text)
             (
                 entries,
@@ -882,9 +929,10 @@ class ConversationIngressRecoveryJournal:
             self._integrity = "verified"
             self._head_state = "current"
             self._state = "ready"
-            self._recover_after_restart()
+            self._last_error_code = ""
+            if recover_after_restart:
+                self._recover_after_restart()
         except (
-            OSError,
             UnicodeError,
             json.JSONDecodeError,
             TypeError,
@@ -900,6 +948,13 @@ class ConversationIngressRecoveryJournal:
             self._integrity = "failed"
             self._last_error_code = (
                 "conversation_ingress_recovery_journal_corrupt"
+            )
+        except OSError:
+            self._state = "error"
+            self._integrity = "failed"
+            self._head_state = "write_failed"
+            self._last_error_code = (
+                "conversation_ingress_recovery_write_failed"
             )
 
     def _recover_after_restart(self) -> None:
@@ -918,16 +973,16 @@ class ConversationIngressRecoveryJournal:
                 entry["lastErrorCode"] = (
                     "conversation_ingress_delivery_ambiguous_after_restart"
                 )
+            logical_recovery_at = _logical_entry_updated_at(entry, now)
             if not float(entry["recoveredAt"]):
-                entry["recoveredAt"] = now
-            entry["updatedAt"] = min(
-                max(float(entry["updatedAt"]), now),
-                float(entry["expiresAt"]),
-            )
+                entry["recoveredAt"] = logical_recovery_at
+            entry["updatedAt"] = logical_recovery_at
         if self._entries != before:
             self._write()
 
     def _require_ready(self) -> None:
+        if self._state == "error" and self.artifact_process is not None:
+            self._load(recover_after_restart=False)
         if not self.enabled or self._state != "ready":
             raise ConversationIngressRecoveryError(
                 "conversation_ingress_recovery_unavailable"
@@ -980,6 +1035,20 @@ class ConversationIngressRecoveryJournal:
     ) -> None:
         before = _clone_entries(self._entries)
         mutation()
+        now = self._now()
+        for entry_id, entry in self._entries.items():
+            previous = before.get(entry_id)
+            if entry == previous:
+                continue
+            entry["updatedAt"] = _logical_entry_updated_at(
+                entry,
+                max(
+                    now,
+                    float(previous["updatedAt"])
+                    if previous is not None
+                    else now,
+                ),
+            )
         try:
             self._write()
         except Exception:
@@ -1364,6 +1433,34 @@ class ConversationIngressRecoveryJournal:
                 "durable": True,
                 "revokedCount": len(bindings),
                 "bindings": bindings,
+                "journalGeneration": int(self._generation),
+            }
+
+    def reset_guild(self, guild_id: Any) -> dict[str, Any]:
+        """Durably remove every ingress phase owned by one exact guild."""
+
+        normalized_guild_id = _nonnegative_int(
+            guild_id,
+            code="conversation_ingress_guild_id_invalid",
+        )
+        prefix = f"guild:{normalized_guild_id}:"
+        with self._lock:
+            self._require_ready()
+            self._prune_expired()
+            entry_ids = [
+                entry_id
+                for entry_id, entry in self._entries.items()
+                if str(entry["scope"]).startswith(prefix)
+            ]
+            if entry_ids:
+                def remove_entries() -> None:
+                    for entry_id in entry_ids:
+                        self._entries.pop(entry_id, None)
+
+                self._mutate_and_write(remove_entries)
+            return {
+                "durable": True,
+                "removedCount": len(entry_ids),
                 "journalGeneration": int(self._generation),
             }
 

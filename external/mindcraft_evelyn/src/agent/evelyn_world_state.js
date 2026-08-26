@@ -8,9 +8,13 @@ const HOSTILE_NAMES = new Set([
     'zoglin', 'zombie', 'zombie_villager'
 ]);
 
+export function isKnownHostile(name) {
+    return HOSTILE_NAMES.has(String(name || '').toLowerCase());
+}
+
 const FOOD_NAMES = new Set([
     'apple', 'baked_potato', 'beef', 'beetroot', 'beetroot_soup', 'bread', 'carrot',
-    'chicken', 'cod', 'cooked_beef', 'cooked_chicken', 'cooked_cod', 'cooked_mutton',
+    'cod', 'cooked_beef', 'cooked_chicken', 'cooked_cod', 'cooked_mutton',
     'cooked_porkchop', 'cooked_rabbit', 'cooked_salmon', 'cookie', 'dried_kelp',
     'golden_apple', 'golden_carrot', 'melon_slice', 'mushroom_stew', 'mutton',
     'porkchop', 'potato', 'pumpkin_pie', 'rabbit', 'rabbit_stew', 'salmon',
@@ -94,7 +98,7 @@ function nearbyHostiles(bot) {
     return Object.values(bot?.entities || {})
         .filter((entity) => (
             entity?.position &&
-            HOSTILE_NAMES.has(String(entity?.name || '').toLowerCase())
+            isKnownHostile(entity?.name)
         ))
         .map((entity) => {
             const distance = Math.round(origin.distanceTo(entity.position) * 10) / 10;

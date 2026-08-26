@@ -15,6 +15,7 @@ from .audio import (
 from .text import (
     apply_stt_post_corrections,
     clean_text,
+    extract_leading_wake_alias,
     fuzzy_leading_wake_alias,
     looks_like_brief_filler_text,
     looks_like_repetitive_noise_text,
@@ -127,6 +128,7 @@ class VoiceIngressDependencyComposition:
             should_require_confirm_exact_for_wake=deps.should_require_confirm_exact_for_wake,
             apply_strict_wake_confirm_policy=apply_strict_wake_confirm_policy,
             apply_fuzzy_wake_near_miss=apply_fuzzy_wake_near_miss,
+            extract_leading_wake_alias=extract_leading_wake_alias,
             fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
             register_drop_reason=deps.register_drop_reason,
             log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,

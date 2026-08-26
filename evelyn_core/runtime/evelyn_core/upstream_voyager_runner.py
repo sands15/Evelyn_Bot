@@ -23,8 +23,6 @@ if str(UPSTREAM_ROOT) not in sys.path:
     sys.path.insert(0, str(UPSTREAM_ROOT))
 
 from evelyn_core.config import (  # noqa: E402
-    MINDCRAFT_LOCAL_LLM_URL,
-    MINDCRAFT_LOCAL_MODEL,
     OPENAI_API_KEY,
     OPENAI_CHAT_COMPLETIONS_URL,
     VOYAGER_ACTION_BACKEND,
@@ -634,9 +632,11 @@ def inspect_resume_checkpoint(ckpt_dir: str) -> dict[str, Any]:
 
 
 def build_voyager(goal: str) -> tuple[Any, dict[str, Any]]:
+    codex_action = VOYAGER_ACTION_BACKEND.strip().lower() == "codex-gateway"
+    if not codex_action:
+        raise RuntimeError("legacy_voyager_local_qwen_unbrokered")
     from voyager import Voyager  # type: ignore  # noqa: E402
 
-    codex_action = VOYAGER_ACTION_BACKEND.strip().lower() == "codex-gateway"
     ckpt_dir = str(DEFAULT_CKPT_DIR)
     skill_library_dir = str(DEFAULT_SKILL_LIBRARY_DIR)
     mc_port = int(os.getenv("MINEFLAYER_PORT", "25565"))
@@ -651,10 +651,10 @@ def build_voyager(goal: str) -> tuple[Any, dict[str, Any]]:
         env_wait_ticks=20,
         env_request_timeout=600,
         max_iterations=max_iterations,
-        action_agent_model_name=("codex-gateway" if codex_action else MINDCRAFT_LOCAL_MODEL),
+        action_agent_model_name="codex-gateway",
         action_agent_temperature=0,
         action_agent_task_max_retries=4,
-        action_agent_llm_url=(VOYAGER_CODEX_GATEWAY_URL if codex_action else MINDCRAFT_LOCAL_LLM_URL),
+        action_agent_llm_url=VOYAGER_CODEX_GATEWAY_URL,
         curriculum_agent_model_name=VOYAGER_CURRICULUM_MODEL_NAME,
         curriculum_agent_temperature=0,
         curriculum_agent_qa_model_name=VOYAGER_CURRICULUM_MODEL_NAME,

@@ -445,6 +445,69 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
         )
         self.assertNotIn("private", json.dumps(summary))
 
+    def test_inflight_continuity_stall_age_is_derived_content_free(
+        self,
+    ) -> None:
+        write_status(
+            self.root,
+            "conversation_continuity/status.json",
+            {
+                "schema": "conversation_continuity.status.v1",
+                "state": "ready",
+                "heartbeatAt": self.now - 0.8,
+                "errorCount": 0,
+                "lastErrorAt": None,
+                "lastErrorCode": "",
+                "lastErrorType": "",
+                "errorCounters": {},
+                "completedTurnCommit": {
+                    "schema": (
+                        "conversation_continuity.commit-metrics.v1"
+                    ),
+                    "state": "warming",
+                    "attemptCount": 0,
+                    "successCount": 0,
+                    "failureCount": 0,
+                    "sampleCount": 0,
+                    "inFlight": True,
+                    "inFlightCount": 1,
+                    "stallAgeMs": 0.0,
+                    "stalled": False,
+                    "artifactDeadlineMs": 500.0,
+                    "warningCode": "",
+                    "privateText": "do not expose this request",
+                },
+            },
+        )
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+        )
+
+        source = summary["sources"]["conversationContinuity"]
+        metrics = source["completedTurnCommit"]
+        self.assertEqual(summary["state"], "attention")
+        self.assertEqual(source["state"], "degraded")
+        self.assertTrue(metrics["inFlight"])
+        self.assertEqual(metrics["inFlightCount"], 1)
+        self.assertGreaterEqual(metrics["stallAgeMs"], 800.0)
+        self.assertTrue(metrics["stalled"])
+        self.assertEqual(
+            metrics["warningCode"],
+            "conversation_continuity_commit_stalled",
+        )
+        self.assertEqual(
+            summary["warnings"],
+            [
+                {
+                    "source": "conversationContinuity",
+                    "code": "conversation_continuity_commit_stalled",
+                }
+            ],
+        )
+        self.assertNotIn("privateText", json.dumps(summary))
+
     def test_stale_continuity_latency_does_not_raise_current_warning(
         self,
     ) -> None:

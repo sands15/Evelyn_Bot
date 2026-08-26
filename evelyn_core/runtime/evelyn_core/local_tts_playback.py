@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .config import DISCORD_FRAME_BYTES, DISCORD_PCM_CHANNELS, DISCORD_PCM_RATE, LOCAL_TTS_TAIL_SILENCE_MS
+from .observability_metrics import mark_voice_latency_stage
 from .text import clean_text
 from .voice_validation import validation_attempt_binding_is_current
 
@@ -529,6 +530,10 @@ class LocalTtsPlaybackManager:
             with self._state_lock:
                 if self._active_binding is binding:
                     binding.playback_started = True
+            mark_voice_latency_stage(
+                binding.metrics,
+                "playback_first_write",
+            )
             if on_first_playback is not None:
                 try:
                     on_first_playback()

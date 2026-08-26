@@ -189,11 +189,22 @@
             "ready": true,
             "model_loaded": true,
             "model_id": "k2-fsa/OmniVoice",
-            "model_revision": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+            "model_revision": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+            "runtime_revision": "omnivoice-0.1.5",
+            "flashinfer_revision": "28bc0889d92110491d726a9c79f26a895db5a074",
+            "inference_backend": "flashinfer_cuda_graph",
+            "flashinfer_python_version": "0.6.15.post1",
+            "flashinfer_jit_cache_version": "0.6.15.post1+cu129",
+            "torch_version": "2.8.0+cu129",
+            "torch_cuda_version": "12.9",
+            "flashinfer_jit_disabled": true,
+            "flashinfer_cuda_graph_buckets": [2.0, 4.0, 8.0],
+            "max_concurrent": 1,
+            "num_step": 12
           }
         }
       ],
-      "launcher": "launchers/start_tts.ps1",
+      "launcher": "../start_tts.bat",
       "repair": {
         "allowed": true,
         "strategy": "start_if_down",

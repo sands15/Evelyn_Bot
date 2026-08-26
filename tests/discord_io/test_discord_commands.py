@@ -188,10 +188,13 @@ class DiscordCommandHelperTests(unittest.TestCase):
         admin = build_help_command_text(prefix="!", control_authorized=True)
 
         self.assertIn("- !상태 / !접두사", regular)
+        self.assertIn("- !마크상태", regular)
+        self.assertNotIn("!마크접속", regular)
         self.assertNotIn("!재시작", regular)
         self.assertIn("- !재시작 / !종료", admin)
+        self.assertIn("!마크접속 / !마크종료 / !마크목표 <목표>", admin)
 
-    def test_minecraft_connect_reply_reports_success_or_last_error(self) -> None:
+    def test_minecraft_connect_reply_reports_success_without_private_error(self) -> None:
         success = build_minecraft_connect_reply(
             {
                 "connected": True,
@@ -202,14 +205,17 @@ class DiscordCommandHelperTests(unittest.TestCase):
                 "objective_goal": "diamond",
             }
         )
-        failure = build_minecraft_connect_reply({"wait_last_error": "timeout"})
+        private_error = "PRIVATE_TOKEN C:\\private\\voyager.log"
+        failure = build_minecraft_connect_reply(
+            {"wait_last_error": private_error}
+        )
         position_only = build_minecraft_connect_reply(
             {"position": {"x": 1}}
         )
 
         self.assertIn("Voyager 기반 마인크래프트 자율 모드 시작 완료", success)
         self.assertIn("- goal: diamond", success)
-        self.assertIn("last_error=timeout", failure)
+        self.assertNotIn(private_error, failure)
         self.assertIn("접속 실패", position_only)
 
     def test_minecraft_status_text_summarizes_voyager_evaluation(self) -> None:
@@ -247,6 +253,10 @@ class DiscordCommandHelperTests(unittest.TestCase):
 
     def test_minecraft_goal_and_reset_replies(self) -> None:
         self.assertIn("마크목표 diamond", build_minecraft_goal_missing_reply())
+        self.assertIn(
+            "?마크목표 diamond",
+            build_minecraft_goal_missing_reply("?"),
+        )
         self.assertEqual(
             build_minecraft_goal_updated_reply(
                 "diamond",

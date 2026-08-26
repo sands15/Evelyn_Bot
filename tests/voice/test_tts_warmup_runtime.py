@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -17,9 +18,11 @@ from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps, warmup_tts_serv
 class FakeContent:
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
+        self.yielded = 0
 
     async def iter_chunked(self, _size: int):
         for chunk in self.chunks:
+            self.yielded += 1
             yield chunk
 
 
@@ -100,10 +103,11 @@ class TtsWarmupRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marks[-1], ("tts_warmup", "done", "health check only"))
         self.assertEqual(session.posts, [])
 
-    async def test_generation_posts_warmup_payload_and_marks_done_on_first_chunk(self) -> None:
+    async def test_generation_posts_warmup_payload_and_drains_response_before_done(self) -> None:
         marks: list[tuple[str, str, str]] = []
         logs: list[str] = []
-        session = FakeSession(health=FakeResponse(200), post=FakeResponse(200, chunks=[b"pcm"]))
+        response = FakeResponse(200, chunks=[b"pcm", b"tail"])
+        session = FakeSession(health=FakeResponse(200), post=response)
 
         await warmup_tts_server_from_runtime(
             deps=self.build_deps(session, generate="true", marks=marks, logs=logs)
@@ -112,8 +116,42 @@ class TtsWarmupRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.posts[0]["url"], "http://tts/v1/audio/speech")
         self.assertEqual(session.posts[0]["json"]["voice"], "voice")
         self.assertEqual(session.posts[0]["json"]["language"], "ko")
+        self.assertEqual(response.content.yielded, 2)
         self.assertIn(("tts_warmup", "done", ""), marks)
         self.assertIn("OmniVoice TTS 워밍업 완료", logs)
+
+    async def test_generation_zero_bytes_fails_closed(self) -> None:
+        marks: list[tuple[str, str, str]] = []
+        session = FakeSession(
+            health=FakeResponse(200),
+            post=FakeResponse(200, chunks=[b"", b""]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "^OmniVoice warmup failed$"):
+            await warmup_tts_server_from_runtime(
+                deps=self.build_deps(session, generate="true", marks=marks)
+            )
+
+        self.assertEqual(marks[-1], ("tts_warmup", "failed", "tts_warmup_failed"))
+        self.assertNotIn(("tts_warmup", "done", ""), marks)
+
+    async def test_generation_cancellation_propagates_without_marking_ready(self) -> None:
+        class CancellingContent:
+            async def iter_chunked(self, _size: int):
+                yield b"pcm"
+                raise asyncio.CancelledError
+
+        marks: list[tuple[str, str, str]] = []
+        response = FakeResponse(200, chunks=[])
+        response.content = CancellingContent()
+        session = FakeSession(health=FakeResponse(200), post=response)
+
+        with self.assertRaises(asyncio.CancelledError):
+            await warmup_tts_server_from_runtime(
+                deps=self.build_deps(session, generate="true", marks=marks)
+            )
+
+        self.assertNotIn(("tts_warmup", "done", ""), marks)
 
     async def test_health_failure_marks_failed_and_raises(self) -> None:
         private_error = "PRIVATE_TTS_HEALTH_BODY:/synthetic/server-token.json"

@@ -35,12 +35,48 @@ class FakeClock:
 
 
 class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def mindcraft_status(*, ready: bool) -> dict:
+        dependencies = {
+            "worldLeaseAuthorized": True,
+            "runnerAlive": True,
+            "telemetryFresh": True,
+            "minecraftConnected": True,
+            "taskContractReady": True,
+            "effectObserverReady": True,
+            "autonomyActive": ready,
+        }
+        return {
+            "runtime": "mindcraft",
+            "running": True,
+            "connected": True,
+            "minecraft_connected": True,
+            "telemetry_fresh": True,
+            "world_lease_authorized": True,
+            "functional_readiness": {
+                "schema": "minecraft_autonomy.readiness.v1",
+                "state": "ready" if ready else "blocked",
+                "ready": ready,
+                "blockers": [] if ready else ["autonomy_not_active"],
+                "dependencies": dependencies,
+                "taskContract": {
+                    "schema": "mindcraft.task-contract.v1",
+                    "goalManagerMode": "gated",
+                    "autonomyState": "active" if ready else "starting",
+                    "commandGate": "evelyn_goal_manager",
+                    "effectVerification": "explicit_postcondition",
+                },
+                "contentFree": True,
+            },
+        }
+
     def build(
         self,
         statuses: list[dict],
         *,
         start_status: dict | None = None,
         stop_status: dict | None = None,
+        ready_timeout_sec: float = 60.0,
     ):
         remaining = [dict(row) for row in statuses]
 
@@ -72,6 +108,7 @@ class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
             clean_text=str.strip,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
+            ready_timeout_sec=ready_timeout_sec,
         )
         return MinecraftModeComposition(deps), client, clock
 
@@ -83,6 +120,39 @@ class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
         result = await composition.wait_for_minecraft_ready(1)
 
         self.assertTrue(result["connected"])
+
+    async def test_default_wait_reaches_delayed_exact_mindcraft_ready(
+        self,
+    ) -> None:
+        blocked = self.mindcraft_status(ready=False)
+        ready = self.mindcraft_status(ready=True)
+        composition, client, clock = self.build(
+            [blocked] * 30 + [ready]
+        )
+
+        result = await composition.wait_for_minecraft_ready(1)
+
+        self.assertGreaterEqual(
+            composition.deps.ready_timeout_sec,
+            60.0,
+        )
+        self.assertTrue(result["functional_readiness"]["ready"])
+        self.assertEqual(client.status.await_count, 31)
+        self.assertEqual(clock.value, 30.0)
+
+    async def test_enable_rejects_connected_mindcraft_without_exact_ready(
+        self,
+    ) -> None:
+        composition, _, _ = self.build(
+            [self.mindcraft_status(ready=False)],
+            ready_timeout_sec=0.5,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_start_unverified",
+        ):
+            await composition.enable_minecraft_mode(1)
 
     async def test_wait_does_not_treat_position_alone_as_connection(self) -> None:
         composition, _, _ = self.build(

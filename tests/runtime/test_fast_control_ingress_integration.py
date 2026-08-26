@@ -69,6 +69,7 @@ class _JsonRequest:
 
 class _IngressOwner:
     enabled = True
+    session_key = "fast-control:control-page:owner"
 
     def __init__(self, claim: dict[str, object] | None = None) -> None:
         self.claim = claim or {
@@ -384,6 +385,36 @@ def _local_ack_runtime_patches(
         "should_suppress_tts_for_command": Mock(return_value=False),
         "should_queue_local_bridge_speech": Mock(return_value=False),
         "cached_fast_runtime_health": AsyncMock(return_value={}),
+    }
+    replacements.update(overrides)
+    return patch.multiple(fast_api, **replacements)
+
+
+def _background_control_page_runtime_patches(
+    owner,
+    task,
+    journal,
+    **overrides,
+):
+    journal.public_status.return_value = {}
+    replacements = {
+        "FAST_CONTROL_CONTINUITY_OWNER": owner,
+        "FAST_ACTION_RECOVERY_JOURNAL": journal,
+        "execute_explicit_memory_confirmation": Mock(
+            return_value=(False, "", None, "")
+        ),
+        "plan_fast_tool_request_for_turn": AsyncMock(return_value=None),
+        "resolve_pre_llm_reply": AsyncMock(return_value=None),
+        "prepare_tool_plan_background_action": Mock(return_value=None),
+        "prepare_registered_background_action": Mock(
+            return_value=(task, AsyncMock(return_value="완료"))
+        ),
+        "should_suppress_tts_for_command": Mock(return_value=False),
+        "should_queue_local_bridge_speech": Mock(return_value=False),
+        "cached_fast_runtime_health": AsyncMock(return_value={}),
+        "memory_exposure_guard": Mock(
+            side_effect=lambda *_args, **_kwargs: nullcontext()
+        ),
     }
     replacements.update(overrides)
     return patch.multiple(fast_api, **replacements)
@@ -2522,10 +2553,6 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             )
                         )
                         await asyncio.wait_for(partial_sent.wait(), timeout=2)
-                        response = await asyncio.wait_for(
-                            asyncio.shield(request_task),
-                            timeout=2,
-                        )
                         self.assertEqual(
                             turn.manager.abort(
                                 session_id=turn.session["sessionId"]
@@ -2536,6 +2563,10 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             hook.assert_not_called()
 
                         fail_stream.set()
+                        response = await asyncio.wait_for(
+                            asyncio.shield(request_task),
+                            timeout=2,
+                        )
                         body = await asyncio.wait_for(response.text(), timeout=2)
                         entry_id = fast_api.conversation_ingress_entry_id(
                             surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
@@ -2580,10 +2611,12 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for line in body.splitlines()
                 if line.strip()
             ]
-            self.assertTrue(any(event.get("type") == "delta" for event in events))
+            self.assertFalse(any(event.get("type") == "delta" for event in events))
             self.assertFalse(
-                any(event.get("type") in {"done", "error"} for event in events)
+                any(event.get("type") == "done" for event in events)
             )
+            error = next(event for event in events if event.get("type") == "error")
+            self.assertEqual(error["error"], "fast_control_stream_failed")
 
     async def test_local_voice_claim_failure_does_not_burn_token(
         self,
@@ -3217,11 +3250,21 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
         owner = _IngressOwner()
         action_ids: list[str] = []
 
-        def memory_command(_text, *, action_id, owner_scope):
+        def memory_command(
+            _text,
+            *,
+            action_id,
+            owner_scope,
+            reset_scope,
+        ):
             action_ids.append(str(action_id))
             self.assertEqual(
                 owner_scope,
                 fast_api.FAST_MEMORY_OWNER_SCOPE,
+            )
+            self.assertEqual(
+                reset_scope,
+                fast_api.FAST_MEMORY_RESET_SCOPE,
             )
             return True, "확인", None, ""
 
@@ -3255,10 +3298,11 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action_ids, ["stable-effect-id"])
         self.assertNotEqual(action_ids[0], owner.claim["turnId"])
 
-    async def test_partial_stream_failure_is_ambiguous_without_second_reply(
+    async def test_held_partial_stream_failure_delivers_one_fixed_error(
         self,
     ) -> None:
         owner = _IngressOwner()
+        commit_turn = Mock(return_value={"durable": True})
 
         async def broken_stream():
             yield "부분 응답"
@@ -3313,7 +3357,7 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     fast_api,
                     "commit_fast_control_turn",
-                    new=Mock(side_effect=AssertionError("must not commit")),
+                    new=commit_turn,
                 ),
             ):
                 response = await client.post(
@@ -3333,16 +3377,15 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
             for line in body.splitlines()
             if line.strip()
         ]
-        self.assertTrue(any(event.get("type") == "delta" for event in events))
-        self.assertFalse(any(event.get("type") == "error" for event in events))
+        self.assertFalse(any(event.get("type") == "delta" for event in events))
+        error = next(event for event in events if event.get("type") == "error")
+        self.assertEqual(error["error"], "fast_control_stream_failed")
         self.assertFalse(any(event.get("type") == "done" for event in events))
         self.assertIn(("inflight", owner.claim["entryId"]), owner.events)
-        self.assertIn(
-            ("ambiguous", "conversation_ingress_delivery_ambiguous"),
-            owner.events,
-        )
-        self.assertFalse(any(name == "succeeded" for name, _ in owner.events))
-        self.assertFalse(any(name == "bound" for name, _ in owner.events))
+        self.assertIn(("succeeded", owner.claim["entryId"]), owner.events)
+        self.assertIn(("bound", owner.claim["entryId"]), owner.events)
+        self.assertFalse(any(name == "ambiguous" for name, _ in owner.events))
+        commit_turn.assert_called_once()
 
     async def test_delivery_callbacks_separate_success_from_failure(self) -> None:
         calls: list[str] = []
@@ -3367,6 +3410,379 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "terminal",
             ],
         )
+
+    async def test_json_background_bind_failure_discards_exact_ingress(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            with (
+                _background_control_page_runtime_patches(
+                    owner,
+                    task,
+                    journal,
+                    launch_background_action=launch,
+                ),
+                patch.object(
+                    owner,
+                    "bind_ingress_response",
+                    side_effect=ConversationIngressRecoveryError(
+                        "conversation_ingress_recovery_unavailable"
+                    ),
+                ),
+            ):
+                response = await fast_api.chat_handler(
+                    _JsonRequest(
+                        {
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "json-bind-failure",
+                        }
+                    )
+                )
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="json-bind-failure",
+            )
+            self.assertEqual(response.status, 503)
+            self.assertIsNone(owner.ingress_record(entry_id))
+            self.assertTrue(
+                owner.claim_ingress(
+                    request_id="json-bind-failure",
+                    accepted_text="/minecraft connect",
+                )["shouldProcess"]
+            )
+
+        self.assertEqual(task.status, "failed")
+        journal.finish.assert_called_once_with(task.task_id)
+        launch.assert_not_called()
+
+    async def test_json_background_write_failure_discards_exact_ingress(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            with _background_control_page_runtime_patches(
+                owner,
+                task,
+                journal,
+                launch_background_action=launch,
+            ):
+                response = await fast_api.chat_handler(
+                    _JsonRequest(
+                        {
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "json-write-failure",
+                        }
+                    )
+                )
+                response._run_before_write()
+                response._run_after_write_failure(
+                    "conversation_ingress_delivery_disconnected"
+                )
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="json-write-failure",
+            )
+            self.assertIsNone(owner.ingress_record(entry_id))
+            self.assertTrue(
+                owner.claim_ingress(
+                    request_id="json-write-failure",
+                    accepted_text="/minecraft connect",
+                )["shouldProcess"]
+            )
+
+        self.assertEqual(task.status, "failed")
+        journal.finish.assert_called_once_with(task.task_id)
+        launch.assert_not_called()
+
+    async def test_json_background_nondurable_commit_interrupts_recovery(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            with _background_control_page_runtime_patches(
+                owner,
+                task,
+                journal,
+                launch_background_action=launch,
+                commit_fast_control_turn=Mock(
+                    return_value={"durable": False}
+                ),
+            ):
+                response = await fast_api.chat_handler(
+                    _JsonRequest(
+                        {
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "json-nondurable",
+                        }
+                    )
+                )
+                response._run_before_write()
+                response._run_after_write()
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="json-nondurable",
+            )
+            self.assertEqual(
+                owner.ingress_record(entry_id)["phase"],
+                "delivery_succeeded",
+            )
+
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.error, "background_action_not_started")
+        self.assertIn("작업을 시작하지 않았어", fast_api.CHAT_MESSAGES[-1]["text"])
+        journal.mark_interrupted.assert_called_once_with(task.task_id)
+        journal.finish.assert_not_called()
+        launch.assert_not_called()
+
+    async def test_stream_background_write_failure_discards_exact_ingress(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            app = web.Application()
+            app.router.add_post("/chat", fast_api.chat_stream_handler)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                with _background_control_page_runtime_patches(
+                    owner,
+                    task,
+                    journal,
+                    launch_background_action=launch,
+                    write_stream_event=AsyncMock(
+                        side_effect=ConnectionResetError("disconnected")
+                    ),
+                ):
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "stream-write-failure",
+                        },
+                    )
+                    await response.read()
+            finally:
+                await client.close()
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="stream-write-failure",
+            )
+            self.assertIsNone(owner.ingress_record(entry_id))
+            self.assertTrue(
+                owner.claim_ingress(
+                    request_id="stream-write-failure",
+                    accepted_text="/minecraft connect",
+                )["shouldProcess"]
+            )
+
+        self.assertEqual(task.status, "failed")
+        journal.finish.assert_called_once_with(task.task_id)
+        launch.assert_not_called()
+
+    async def test_stream_background_bind_failure_discards_exact_ingress(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            app = web.Application()
+            app.router.add_post("/chat", fast_api.chat_stream_handler)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                with (
+                    _background_control_page_runtime_patches(
+                        owner,
+                        task,
+                        journal,
+                        launch_background_action=launch,
+                    ),
+                    patch.object(
+                        owner,
+                        "bind_ingress_response",
+                        side_effect=ConversationIngressRecoveryError(
+                            "conversation_ingress_recovery_unavailable"
+                        ),
+                    ),
+                ):
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "stream-bind-failure",
+                        },
+                    )
+                    events = [
+                        json.loads(line)
+                        for line in (await response.text()).splitlines()
+                        if line.strip()
+                    ]
+            finally:
+                await client.close()
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="stream-bind-failure",
+            )
+            self.assertIsNone(owner.ingress_record(entry_id))
+            self.assertTrue(
+                owner.claim_ingress(
+                    request_id="stream-bind-failure",
+                    accepted_text="/minecraft connect",
+                )["shouldProcess"]
+            )
+
+        self.assertTrue(any(event["type"] == "sentence" for event in events))
+        self.assertFalse(any(event["type"] == "done" for event in events))
+        self.assertEqual(task.status, "failed")
+        journal.finish.assert_called_once_with(task.task_id)
+        launch.assert_not_called()
+
+    async def test_stream_background_nondurable_commit_interrupts_recovery(
+        self,
+    ) -> None:
+        fast_api.ACTION_COORDINATOR.clear()
+        task = fast_api.ACTION_COORDINATOR.start(
+            kind="minecraft_runtime",
+            source="control_page",
+            user_text="/minecraft connect",
+            start_reply="Minecraft 연결을 준비할게.",
+        )
+        journal = Mock()
+        launch = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = fast_api.FastControlContinuityOwner(
+                artifacts_root=Path(temporary),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            app = web.Application()
+            app.router.add_post("/chat", fast_api.chat_stream_handler)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                with _background_control_page_runtime_patches(
+                    owner,
+                    task,
+                    journal,
+                    launch_background_action=launch,
+                    commit_fast_control_turn=Mock(
+                        return_value={"durable": False}
+                    ),
+                ):
+                    response = await client.post(
+                        "/chat",
+                        json={
+                            "text": "/minecraft connect",
+                            "source": "control_page",
+                            "requestId": "stream-nondurable",
+                        },
+                    )
+                    events = [
+                        json.loads(line)
+                        for line in (await response.text()).splitlines()
+                        if line.strip()
+                    ]
+            finally:
+                await client.close()
+
+            entry_id = fast_api.conversation_ingress_entry_id(
+                surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
+                scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                source_delivery_id="stream-nondurable",
+            )
+            self.assertEqual(
+                owner.ingress_record(entry_id)["phase"],
+                "delivery_succeeded",
+            )
+
+        done = next(event for event in events if event["type"] == "done")
+        self.assertEqual(done["taskStatus"], "running")
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.error, "background_action_not_started")
+        self.assertIn("작업을 시작하지 않았어", fast_api.CHAT_MESSAGES[-1]["text"])
+        journal.mark_interrupted.assert_called_once_with(task.task_id)
+        journal.finish.assert_not_called()
+        launch.assert_not_called()
 
     async def test_local_bridge_json_waits_for_exact_played_ack(self) -> None:
         started_at = fast_api.time.time() - 1.0
@@ -3687,7 +4103,10 @@ class FastControlIngressIntegrationTests(unittest.IsolatedAsyncioTestCase):
         pending["context"] = SimpleNamespace(
             run=lambda callback, outcome: callback(outcome)
         )
-        owner = SimpleNamespace(ingress_record=lambda *_args, **_kwargs: None)
+        owner = SimpleNamespace(
+            session_key=fast_api.FAST_CONTROL_SESSION_KEY,
+            ingress_record=lambda *_args, **_kwargs: None,
+        )
         ack = {
             "schema": fast_api.LOCAL_BRIDGE_DELIVERY_ACK_SCHEMA,
             "bridgeInstanceId": bridge_id,

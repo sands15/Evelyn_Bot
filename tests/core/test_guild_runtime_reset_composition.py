@@ -19,6 +19,8 @@ from evelyn_core.guild_runtime_reset_composition import (  # noqa: E402
 from evelyn_core.guild_runtime_reset import (  # noqa: E402
     AUTONOMY_COGNITIVE_REFRESH_INFLIGHT,
     AUTONOMY_RUNTIME_ACTIVE,
+    MEMORY_BACKGROUND_WORK_INFLIGHT,
+    SEARCH_BACKGROUND_WORK_INFLIGHT,
 )
 
 
@@ -28,16 +30,36 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "guild_runtime_reset_composition = GuildRuntimeResetComposition("
         )
+        search_recovery_index = source.index(
+            "search_followup_recovery = SearchFollowupRecoveryJournal("
+        )
+        ingress_index = source.index(
+            "conversation_ingress_composition = "
+            "build_main_conversation_ingress_composition("
+        )
         continuity_index = source.index(
             "voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker("
         )
 
+        self.assertLess(search_recovery_index, ingress_index)
         self.assertLess(composition_index, continuity_index)
+        self.assertIn(
+            "print, search_followup_recovery.reset_guild,",
+            source,
+        )
         self.assertIn(
             "reset_guild_runtime_state = guild_runtime_reset_composition.reset_guild_runtime_state",
             source,
         )
+        self.assertIn(
+            "reset_conversation_ingress_guild=conversation_ingress_composition.reset_guild",
+            source,
+        )
         self.assertNotIn("reset_guild_runtime_state_from_runtime", source)
+        self.assertNotIn(
+            "reset_search_followup_recovery_guild=",
+            source,
+        )
 
     def test_composition_keeps_public_builder_and_reset_signatures(self) -> None:
         module = ast.parse(
@@ -84,11 +106,16 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
             events.append("flush")
             return {"state": "ready"}
 
+        def reset_ingress_guild(guild_id, reset_runtime_state):
+            events.append(f"ingress:{guild_id}")
+            reset_runtime_state()
+
         composition = GuildRuntimeResetComposition(
             SimpleNamespace(
                 reset_session_continuity_guild=reset_continuity_guild,
-                reset_search_followup_recovery_guild=lambda guild_id: events.append(
-                    f"search:{guild_id}"
+                reset_conversation_ingress_guild=reset_ingress_guild,
+                complete_conversation_ingress_guild_reset=(
+                    lambda guild_id: events.append(f"open:{guild_id}")
                 ),
             )
         )
@@ -96,6 +123,9 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
             return_value=SimpleNamespace(
                 autonomy_cognitive_refresh_tasks={},
                 autonomy_engines={},
+                background_search_tasks={},
+                background_memory_tasks={},
+                background_memory_vault_tasks={},
             )
         )
 
@@ -108,7 +138,7 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["revoke:7", "reset", "flush", "search:7"],
+            ["revoke:7", "ingress:7", "reset", "flush", "open:7"],
         )
 
     def test_live_refresh_fails_before_continuity_revocation(self) -> None:
@@ -126,6 +156,9 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
             return_value=SimpleNamespace(
                 autonomy_cognitive_refresh_tasks={7: refresh_task},
                 autonomy_engines={},
+                background_search_tasks={},
+                background_memory_tasks={},
+                background_memory_vault_tasks={},
             )
         )
 
@@ -152,6 +185,9 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         composition.build_guild_runtime_reset_deps = Mock(
             return_value=SimpleNamespace(
                 autonomy_cognitive_refresh_tasks={},
+                background_search_tasks={},
+                background_memory_tasks={},
+                background_memory_vault_tasks={},
                 autonomy_engines={
                     7: SimpleNamespace(
                         _task=autonomy_task,
@@ -173,6 +209,70 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         self.assertEqual(events, [])
         autonomy_task.cancel.assert_not_called()
 
+    def test_live_memory_work_fails_before_continuity_revocation(self) -> None:
+        events: list[str] = []
+        memory_task = Mock()
+        memory_task.done.return_value = False
+        composition = GuildRuntimeResetComposition(
+            SimpleNamespace(
+                reset_session_continuity_guild=(
+                    lambda *_args: events.append("revoke")
+                ),
+            )
+        )
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={},
+                autonomy_engines={},
+                background_search_tasks={},
+                background_memory_tasks={
+                    "guild:7:memory-writebehind:normal:1": memory_task,
+                },
+                background_memory_vault_tasks={},
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{MEMORY_BACKGROUND_WORK_INFLIGHT}$",
+        ):
+            composition.reset_guild_runtime_state(7)
+
+        self.assertEqual(events, [])
+        memory_task.cancel.assert_not_called()
+
+    def test_live_search_delivery_fails_before_continuity_revocation(self) -> None:
+        events: list[str] = []
+        search_task = Mock()
+        search_task.done.return_value = False
+        composition = GuildRuntimeResetComposition(
+            SimpleNamespace(
+                reset_session_continuity_guild=(
+                    lambda *_args: events.append("revoke")
+                ),
+            )
+        )
+        composition.build_guild_runtime_reset_deps = Mock(
+            return_value=SimpleNamespace(
+                autonomy_cognitive_refresh_tasks={},
+                autonomy_engines={},
+                background_search_tasks={
+                    "guild:7:search-recovery:opaque": search_task,
+                },
+                background_memory_tasks={},
+                background_memory_vault_tasks={},
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            f"^{SEARCH_BACKGROUND_WORK_INFLIGHT}$",
+        ):
+            composition.reset_guild_runtime_state(7)
+
+        self.assertEqual(events, [])
+        search_task.cancel.assert_not_called()
+
     def test_continuity_persistence_failure_fails_the_reset_command(self) -> None:
         autonomy_task = Mock()
         autonomy_task.done.return_value = True
@@ -185,13 +285,18 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
             SimpleNamespace(
                 reset_session_continuity_guild=lambda guild_id, callback: {
                     "state": "error",
-                    "lastErrorCode": "continuity_reset_not_durable",
+                    "lastErrorCode": (
+                        r"PRIVATE C:\secret\continuity-token"
+                    ),
                 }
             )
         )
         composition.build_guild_runtime_reset_deps = Mock(
             return_value=SimpleNamespace(
                 autonomy_cognitive_refresh_tasks={},
+                background_search_tasks={},
+                background_memory_tasks={},
+                background_memory_vault_tasks={},
                 autonomy_engines={
                     7: SimpleNamespace(
                         _task=autonomy_task,
@@ -203,10 +308,11 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "continuity_reset_not_durable",
-        ):
+            "^memory_guild_reset_durability_failed$",
+        ) as raised:
             composition.reset_guild_runtime_state(7)
 
+        self.assertNotIn("continuity-token", str(raised.exception))
         self.assertEqual(
             runtime_state.current_goal.summary,
             "must remain",

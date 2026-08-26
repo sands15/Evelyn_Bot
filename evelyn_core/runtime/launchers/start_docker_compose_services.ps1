@@ -130,7 +130,7 @@ if ($buildEnabled -and $normalizedServices -contains 'vision') {
     $pathSafeBuildServices += 'vision'
 }
 if ($normalizedServices -contains 'tts') {
-    $ttsImage = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+    $ttsImage = 'evelyn-omnivoice-tts:recipe-e8151492550b'
     & docker image inspect $ttsImage *> $null
     $ttsImageMissing = $LASTEXITCODE -ne 0
     if ($buildEnabled -or $ttsImageMissing) {

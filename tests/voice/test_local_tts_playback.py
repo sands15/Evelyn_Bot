@@ -19,6 +19,10 @@ from evelyn_core.local_tts_playback import (  # noqa: E402
     local_tts_tail_silence_bytes,
     normalize_output_device,
 )
+from evelyn_core.observability_metrics import (  # noqa: E402
+    VOICE_LATENCY_TRACE_METRICS_KEY,
+    VoiceLatencyTrace,
+)
 
 
 class FakeSource:
@@ -181,7 +185,12 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         self.assertEqual(FakeRawOutputStream.writes[:2], [b"first", b"second"])
 
     def test_manager_leases_first_playback_attempt_before_first_write(self) -> None:
-        metrics = {"marks": {}, "meta": {}}
+        trace = VoiceLatencyTrace()
+        metrics = {
+            "marks": {},
+            "meta": {},
+            VOICE_LATENCY_TRACE_METRICS_KEY: trace,
+        }
         attempt_markers_at_write: list[bool] = []
 
         class AttemptObservingStream(FakeRawOutputStream):
@@ -215,9 +224,18 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         self.assertEqual(attempt_markers_at_write, [True, True, True])
         self.assertEqual(callback_writes, [[b"first"]])
         self.assertEqual(FakeRawOutputStream.writes[:2], [b"first", b"second"])
+        self.assertIn(
+            "playback_first_write",
+            trace.public_summary()["markers_ms"],
+        )
 
     def test_manager_leases_attempt_before_partial_write_failure(self) -> None:
-        metrics = {"marks": {}, "meta": {}}
+        trace = VoiceLatencyTrace()
+        metrics = {
+            "marks": {},
+            "meta": {},
+            VOICE_LATENCY_TRACE_METRICS_KEY: trace,
+        }
         attempt_markers_at_write: list[bool] = []
 
         class PartialWriteFailureStream(FakeRawOutputStream):
@@ -258,6 +276,10 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         self.assertEqual(callback_count, 0)
         self.assertIs(metrics["meta"]["local_tts_playback_attempted"], True)
         self.assertEqual(manager.snapshot()["playCount"], 0)
+        self.assertNotIn(
+            "playback_first_write",
+            trace.public_summary()["markers_ms"],
+        )
 
     def test_playback_failure_state_and_log_do_not_expose_exception_detail(self) -> None:
         privacy_sentinel = "VOICE_PRIVACY_SENTINEL_LOCAL_TTS_TOKEN_URL"

@@ -23,7 +23,11 @@ from evelyn_core.host_supervisor import (  # noqa: E402
     VOICE_CAPTURE_STOP_SCHEMA,
 )
 import evelyn_core.host_supervisor as host_supervisor_module  # noqa: E402
-from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
+from evelyn_core.host_supervisor_client import (  # noqa: E402
+    HostSupervisorClient,
+    SUPERVISOR_REQUEST_SCHEMA,
+    discord_stop_attestation_is_authentic,
+)
 from evelyn_core.voice_capture_consent import (  # noqa: E402
     BRIDGE_STATUS_AUTH_SCOPE,
     SUPERVISOR_STOP_AUTH_SCOPE,
@@ -120,6 +124,9 @@ class HostSupervisorTests(unittest.TestCase):
         self.voice_capture_auth_token = (
             "voice-capture-test-auth-token-0123456789"
         )
+        self.workspace_mutation_auth_token = (
+            "workspace-mutation-test-auth-token-0123456789"
+        )
 
         def run(command, **kwargs):
             self.commands.append((command, kwargs))
@@ -137,6 +144,9 @@ class HostSupervisorTests(unittest.TestCase):
             process_owner=self.process_owner,
             bridge_lock_probe=lambda: True,
             voice_capture_auth_token=self.voice_capture_auth_token,
+            workspace_mutation_auth_token=(
+                self.workspace_mutation_auth_token
+            ),
         )
 
     def request(self, **overrides):
@@ -186,7 +196,12 @@ class HostSupervisorTests(unittest.TestCase):
             self.request(operation="apply", previewToken=token)
         )
         self.assertTrue(first["ok"])
-        self.assertEqual(self.commands[0][0][-1], "tts")
+        action_commands = [
+            command
+            for command, _options in self.commands
+            if command[:2] == ["docker", "compose"]
+        ]
+        self.assertEqual(action_commands[-1][-1], "tts")
         self.assertFalse(second["ok"])
         self.assertEqual(second["error"], "preview_token_reused")
 
@@ -194,8 +209,10 @@ class HostSupervisorTests(unittest.TestCase):
         credentials = {
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            "EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN": "mutation-secret",
             VOICE_CAPTURE_AUTH_ENV: self.voice_capture_auth_token,
             "DISCORD_BOT_TOKEN": "discord-secret",
+            "EVELYN_VOICE_INPUT_LEASE_TOKEN": "voice-lease-secret",
             "OPENAI_API_KEY": "model-secret",
         }
         with patch.dict(os.environ, credentials, clear=False):
@@ -217,15 +234,67 @@ class HostSupervisorTests(unittest.TestCase):
             self.voice_capture_auth_token,
         )
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", bridge_env)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", bridge_env)
         self.assertNotIn("DISCORD_BOT_TOKEN", bridge_env)
+        self.assertNotIn("EVELYN_VOICE_INPUT_LEASE_TOKEN", bridge_env)
         self.assertNotIn("OPENAI_API_KEY", bridge_env)
         self.assertEqual(discord_env["DISCORD_BOT_TOKEN"], "discord-secret")
+        self.assertEqual(
+            discord_env["EVELYN_VOICE_INPUT_LEASE_TOKEN"],
+            "voice-lease-secret",
+        )
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", discord_env)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", discord_env)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", discord_env)
         self.assertNotIn(VOICE_CAPTURE_AUTH_ENV, discord_env)
         self.assertNotIn("OPENAI_API_KEY", discord_env)
+        self.assertNotIn("EVELYN_VOICE_INPUT_LEASE_TOKEN", tts_env)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", tts_env)
         self.assertEqual(
             tts_env["DISCORD_BOT_TOKEN"],
+            "local-only-disabled",
+        )
+
+    def test_start_voyager_uses_only_fixed_isolated_services(self):
+        preview = self.supervisor.handle_request(
+            self.request(actionId="start_voyager")
+        )
+        applied = self.supervisor.handle_request(
+            self.request(
+                operation="apply",
+                actionId="start_voyager",
+                previewToken=preview["previewToken"],
+            )
+        )
+
+        self.assertTrue(applied["ok"], applied)
+        command, options = self.commands[-1]
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(
+                    self.supervisor.project_root
+                    / "docker-compose.fast-control.yml"
+                ),
+                "--profile",
+                "voyager",
+                "up",
+                "-d",
+                "--no-build",
+                "--no-deps",
+                "voyager",
+            ],
+        )
+        self.assertEqual(command.count("--profile"), 1)
+        self.assertIn("voyager", command)
+        self.assertNotIn("router_llm", command)
+        self.assertNotIn("minecraft_llm", command)
+        self.assertIn("--no-build", command)
+        self.assertEqual(
+            options["env"]["DISCORD_BOT_TOKEN"],
             "local-only-disabled",
         )
 
@@ -271,6 +340,133 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertNotIn(secret, repr(options["env"]))
         self.assertFalse(reused["ok"])
         self.assertEqual(reused["error"], "preview_token_reused")
+
+    def test_discord_stop_attestation_is_exact_host_signed_evidence(self):
+        claim_id = "voice-retire-" + "a" * 32
+        response = self.supervisor.handle_request(
+            self.request(
+                operation="attest",
+                actionId="stop_discord_bot",
+                claimId=claim_id,
+            )
+        )
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["status"], "stopped_verified")
+        attestation = response["attestation"]
+        self.assertTrue(
+            discord_stop_attestation_is_authentic(
+                attestation,
+                expected_host_instance_id=(
+                    self.supervisor.host_instance_id
+                ),
+                expected_request_id="request-1",
+                expected_claim_id=claim_id,
+                auth_token=self.workspace_mutation_auth_token,
+                not_before=self.clock(),
+                now=self.clock(),
+            )
+        )
+        command, options = self.commands[-1]
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "ps",
+                "--all",
+                "--filter",
+                "name=^/evelyn-discord-bot$",
+                "--format",
+                "{{.State}}",
+            ],
+        )
+        self.assertNotIn(
+            "EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN",
+            options["env"],
+        )
+
+    def test_discord_stop_attestation_rejects_running_or_forged_evidence(self):
+        def running(_command, **_kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout="running\n",
+                stderr="",
+            )
+
+        self.supervisor.run_command = running
+        claim_id = "voice-retire-" + "b" * 32
+        running_response = self.supervisor.handle_request(
+            self.request(
+                operation="attest",
+                actionId="stop_discord_bot",
+                claimId=claim_id,
+            )
+        )
+        self.assertFalse(running_response["ok"])
+        self.assertNotIn("attestation", running_response)
+
+        self.supervisor.run_command = lambda _command, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="", stderr="")
+        )
+        stopped_response = self.supervisor.handle_request(
+            self.request(
+                operation="attest",
+                actionId="stop_discord_bot",
+                claimId=claim_id,
+            )
+        )
+        forged = dict(stopped_response["attestation"])
+        forged["claimId"] = "voice-retire-" + "c" * 32
+        self.assertFalse(
+            discord_stop_attestation_is_authentic(
+                forged,
+                expected_host_instance_id=(
+                    self.supervisor.host_instance_id
+                ),
+                expected_request_id="request-1",
+                expected_claim_id=forged["claimId"],
+                auth_token=self.workspace_mutation_auth_token,
+                not_before=self.clock(),
+                now=self.clock(),
+            )
+        )
+
+    def test_plain_unsigned_stopped_response_cannot_authorize_retirement(self):
+        client = HostSupervisorClient(
+            root=Path(self.temp_dir.name),
+            attestation_auth_token=self.workspace_mutation_auth_token,
+        )
+        with (
+            patch.object(
+                client,
+                "status",
+                return_value={
+                    "available": True,
+                    "hostInstanceId": self.supervisor.host_instance_id,
+                    "workspaceMutationAuthReady": True,
+                },
+            ),
+            patch.object(
+                client,
+                "_request",
+                return_value={
+                    "ok": True,
+                    "status": "stopped",
+                    "requestId": "request-1",
+                },
+            ),
+        ):
+            result = client.attest_discord_stopped(
+                "voice-retire-" + "d" * 32
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "error": "discord_stop_attestation_unverified",
+            },
+        )
 
     def test_preview_token_expires_after_two_minutes(self):
         preview = self.supervisor.handle_request(self.request())
@@ -374,8 +570,10 @@ class HostSupervisorTests(unittest.TestCase):
         credentials = {
             "LOCAL_BRIDGE_STATUS_AUTH_TOKEN": "reporter-secret",
             "EVELYN_INTERNAL_CONTROL_TOKEN": "internal-secret",
+            "EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN": "mutation-secret",
             VOICE_CAPTURE_AUTH_ENV: self.voice_capture_auth_token,
             "DISCORD_BOT_TOKEN": "discord-secret",
+            "EVELYN_VOICE_INPUT_LEASE_TOKEN": "voice-lease-secret",
             "EVELYN_CODEX_CREDENTIALS_DIR": "C:\\secure-codex",
             "OPENAI_API_KEY": "model-secret",
         }
@@ -394,7 +592,9 @@ class HostSupervisorTests(unittest.TestCase):
         )
         self.assertNotIn("LOCAL_BRIDGE_STATUS_AUTH_TOKEN", environment)
         self.assertNotIn("EVELYN_INTERNAL_CONTROL_TOKEN", environment)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", environment)
         self.assertNotIn(VOICE_CAPTURE_AUTH_ENV, environment)
+        self.assertNotIn("EVELYN_VOICE_INPUT_LEASE_TOKEN", environment)
         self.assertNotIn("OPENAI_API_KEY", environment)
         self.assertIn(str(stop_script), command[-1])
         self.assertIn(str(start_script), command[-1])

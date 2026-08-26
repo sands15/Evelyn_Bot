@@ -9,6 +9,45 @@ from pathlib import Path
 from typing import Any
 
 
+BACKGROUND_MEMORY_TASKS: dict[str, asyncio.Task[Any]] = {}
+
+
+async def run_registered_memory_thread(
+    guild_id: int,
+    operation: Callable[..., Any],
+    /,
+    *args: Any,
+    task_kind: str,
+    **kwargs: Any,
+) -> Any:
+    worker = asyncio.create_task(
+        asyncio.to_thread(operation, *args, **kwargs)
+    )
+    task_key = (
+        f"guild:{guild_id}:memory-{task_kind}:{id(worker)}"
+    )
+    BACKGROUND_MEMORY_TASKS[task_key] = worker
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+            except Exception:
+                pass
+        if cancellation is not None:
+            try:
+                worker.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise cancellation
+        return worker.result()
+    finally:
+        if BACKGROUND_MEMORY_TASKS.get(task_key) is worker:
+            BACKGROUND_MEMORY_TASKS.pop(task_key, None)
+
+
 def _safe_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value

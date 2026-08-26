@@ -32,6 +32,7 @@ MAX_ATTEMPTS = 3
 REPORT_MAX_AGE_DAYS = 30
 REPORT_PRESERVE_NEWEST = 20
 EVENT_REORDER_GRACE_SEC = 2.0
+PLAYBACK_START_TIMEOUT_SEC = 30.0
 ALLOWED_SURFACES = ("local", "discord")
 TERMINAL_STATES = frozenset({"passed", "failed", "aborted"})
 LATENCY_WARNING_MS = {"local": 2500.0, "discord": 3000.0}
@@ -1947,6 +1948,8 @@ class VoiceValidationManager:
                 step["errors"].append(error_code[:120])
         if event_type in {"playback_completed", "playback_cancelled"}:
             step.setdefault("terminalEventObservedAt", self.now())
+        if event_type == "reply_final":
+            step.setdefault("replyFinalObservedAt", self.now())
         self._evaluate_step(step)
 
     @staticmethod
@@ -2050,6 +2053,14 @@ class VoiceValidationManager:
             self._fail_attempt(step, "conflicting_playback_terminal_events")
         elif stt_finals == 1 and not bool((step.get("match") or {}).get("matched")):
             self._fail_attempt(step, "stt_mismatch")
+        elif (
+            replies == 1
+            and started + completed + cancelled == 0
+            and self.now()
+            - float(step.get("replyFinalObservedAt") or self.now())
+            >= PLAYBACK_START_TIMEOUT_SEC
+        ):
+            self._fail_attempt(step, "playback_start_timeout")
         elif (
             completed + cancelled == 1
             and self.now() - float(step.get("terminalEventObservedAt") or self.now())
@@ -2252,6 +2263,7 @@ class VoiceValidationManager:
                 }
             )
             step.pop("terminalEventObservedAt", None)
+            step.pop("replyFinalObservedAt", None)
             step.pop("acceptedTurnId", None)
             step.pop("qualifiedTtsInterruptTurnId", None)
             if step.get("kind") == "silence":
@@ -2271,6 +2283,7 @@ class VoiceValidationManager:
                     }
                 )
                 rewind_source.pop("terminalEventObservedAt", None)
+                rewind_source.pop("replyFinalObservedAt", None)
                 rewind_source.pop("acceptedTurnId", None)
                 rewind_source.pop("qualifiedTtsInterruptTurnId", None)
                 self._session["_stepIndex"] = rewind_source_index
@@ -2293,6 +2306,7 @@ class VoiceValidationManager:
                         }
                     )
                     paired.pop("terminalEventObservedAt", None)
+                    paired.pop("replyFinalObservedAt", None)
                     paired.pop("acceptedTurnId", None)
                     paired.pop("qualifiedTtsInterruptTurnId", None)
             self._session["state"] = "running"

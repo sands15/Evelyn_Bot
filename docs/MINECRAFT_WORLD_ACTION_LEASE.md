@@ -1,7 +1,7 @@
 # Minecraft World-Action Lease
 
 Document status: **Current implementation contract**
-Last reviewed: 2026-08-09 KST
+Last reviewed: 2026-08-22 KST
 
 ## Purpose
 
@@ -41,7 +41,10 @@ Minecraft runner may start or accept a goal.
   the guarded lease snapshot and keeps it through stop or ensure-start. An
   endpoint may reuse only an already-acquired capability for this exact lock
   path; busy, unavailable, unacquired, or forged capabilities fail closed.
-- The default TTL is 1 hour; the maximum is 4 hours.
+- The default TTL is 1 hour; the maximum is 4 hours. A process-local lease is
+  active only while both its public wall-clock deadline and its same-process
+  monotonic deadline remain in the future. Expiry on either clock closes the
+  lease, including when the wall clock rolls backward.
 - A lease belongs to one guild/context and one issuing process nonce.
 - An owner-process restart never restores the previous lease.
 - Every status/proof consumer requires both `auditReady` and `statusReady` to
@@ -78,6 +81,12 @@ Minecraft runner may start or accept a goal.
 - Mindcraft and the legacy Voyager service reject `/start` and `/goal` unless
   the request proof exactly matches the active lease artifact and the
   process-rotated capability token.
+- The public status and proof schemas do not expose the monotonic deadline.
+  Instead, the existing same-host private secret binds the exact `leaseId` to
+  `expiresMonotonic`. Request admission and guarded lease loads both require
+  that private binding to match and remain unexpired, in addition to the wall
+  deadline, constant-time token comparison, current process nonce, and owner
+  claim.
 - The service treats a heartbeat older than 15 seconds as unauthorized and
   stops an active runner through its own guard loop. This is a service/status
   safety boundary, not an owner-lock takeover delay.
@@ -90,6 +99,13 @@ Minecraft runner may start or accept a goal.
   `manual_intervention_required` for operator review.
 - The owner independently reconciles startup, shutdown, lease expiry, status
   failure, and unexpected runner activity. Unknown status is fail-closed.
+- A successful world-enable await is not yet a committed connect. The owner
+  rechecks the same lease and both deadlines before `runtime_start_verified`;
+  status projection itself requires both deadlines, and the owner rechecks
+  again before returning final success. If the lease expires across those
+  awaits or commit steps, the owner records the applicable goal failure,
+  revokes the lease, performs a cancellation-resistant verified safety stop,
+  and returns authorization failure instead of committing the connection.
 - Stop is successful only when both the stop outcome marker and a fresh
   post-stop runtime status show no running or connected session.
 - Automatic stop retries are limited to three per ten minutes. Exhaustion is
@@ -120,6 +136,13 @@ owns the full action interval. It arms a non-restored, durable effect binding,
 starts the fixed food-recovery runner, and retains the lock until one of these
 terminal paths completes:
 
+While that exact binding is armed and the Agent ActionManager is executing,
+the periodic GoalManager update may refresh and publish its snapshot but must
+not consume a newly satisfied subgoal. The correlated action-result boundary
+alone consumes that transition and emits the bound content-free candidate;
+otherwise a successful inventory change can be lost between command execution
+and result recording.
+
 - A fresh, same-binding content-free candidate proves the exact false-to-true
   postcondition. The projector fsyncs `effect_verified`, the gateway stops the
   runner, persists the exact verified result, then releases the action lock.
@@ -130,6 +153,15 @@ terminal paths completes:
 - Exact cancellation disarms the binding, stops the runner, persists
   `cancelled/minecraft_action_cancelled`, then releases the retained lock. It
   never tries to reacquire its own action lock.
+
+Polling reads an exact correlated candidate before the no-candidate guard only
+so a candidate emitted at the same boundary as child shutdown is not lost. The
+projector still revalidates the same binding, lease, process identity, telemetry
+freshness and functional readiness before accepting it. When no candidate is
+present, the gateway rechecks those guards directly. A not-ready state is
+tolerated only before this action has observed readiness once; after the first
+ready observation, disconnected or stale readiness is terminal and follows the
+same verified-stop/disarm path instead of waiting for the full action timeout.
 
 If `stop()` raises, the child still reports alive, or process liveness cannot be
 verified, the gateway does not publish a terminal record and does not release
@@ -175,13 +207,19 @@ Owner shutdown first marks the owner as shutting down so no new action can be
 dispatched. It then performs cancellation-resistant cancellation of every
 known in-flight action before trying to acquire `world_action.lock` for final
 lease revocation and runtime cleanup. This ordering prevents waiting on a lock
-held by the very action being cancelled. If exact cancellation cannot be
+held by the very action being cancelled. Local and delegated executors capture
+the exact lease ID before dispatch and carry it through `execute_action`,
+`action`, and `cancel_action`; the owner compares it while holding its operation
+lock before any world effect. If exact cancellation cannot be
 verified, the owner uses bounded lock waiting for the known action, withholds
 delegation authority, crosses the stale-artifact fence when necessary, and
 safety-stops the runtime; it reports `minecraft_action_cancel_unverified` or a
 fixed lock error instead of an audited success. The remote delegate follows the
-same cancellation-first rule and falls back to authorized disconnect when its
-tracked action cannot be cancelled.
+same cancellation-first rule and falls back only to an authorized disconnect
+conditioned on the exact lease ID captured for its tracked action. Malformed
+records without that identity perform no network cleanup. A stale dispatch,
+cancel, or shutdown cleanup therefore cannot mutate or disconnect a same-guild
+replacement lease.
 
 ## Authorization entry points
 
@@ -192,15 +230,67 @@ tracked action cannot be cancelled.
 - The split Fast Control Bot API owns the lease. Its Control Page command
   surface can therefore connect, change a goal, and disconnect without
   competing with Discord.
+- An explicit Control Page or Discord connect may bootstrap an offline
+  Voyager service only after the owner has issued the exact world lease. A
+  Control Page goal without a matching active lease first enters the same
+  lease-bound `connect(goal=...)` path and may therefore bootstrap too. The
+  lease-bound HTTP `start()` asks the Windows Host Supervisor for the fixed
+  `start_voyager` action, waits up to the default 300-second `/health` bound,
+  and retries the same `/start` once. After that retry, the owner waits at
+  least the configurable `MINECRAFT_CONNECT_READY_TIMEOUT_SEC` bound, whose
+  exact minimum is 60 seconds. Mindcraft succeeds only when its exact typed
+  functional-readiness contract is ready; a bare `connected=true` is
+  insufficient. Direct
+  `set_goal()`, status, stop, action, and unowned start probes never bootstrap
+  services.
+- The fixed host action runs only `voyager` with `--no-build --no-deps`; it may
+  create or recreate that service but never starts or recreates the
+  core-managed `router_llm` or `minecraft_llm` prerequisites. It cannot accept
+  command, argv, path, environment, or service names from the caller. A
+  successful host action is not a successful Minecraft connection: the owner
+  still requires the existing physical connection outcome before reporting
+  success.
 - Discord uses `MINECRAFT_WORLD_LEASE_OWNER_URL` and the process-rotated token
   from the shared secrets mount. It polls public state and sends only typed
-  `connect`, `goal`, `disconnect`, `action`, `action_status`, and
+  `connect`, `connect_ack`, `goal`, `disconnect`, `action`, `action_status`, and
   `cancel_action` requests.
+- The delegated request defaults are 480 seconds for `connect`, 30 seconds for
+  `connect_ack`, `goal`, and `disconnect`, and 5 seconds for reads and other
+  operations. The owner-side direct `/goal` request also has a 30-second
+  default while ordinary service requests retain the 2.5-second bound. These
+  are wait bounds, not
+  evidence of connection success.
 - The remote delegate accepts an active cached lease only from an exact status
   with both readiness booleans true. A missing or invalid `leaseStatus`, an
-  error response without a valid authoritative status, transport failure, or
-  request cancellation immediately replaces any cached active state with an
-  inactive error state.
+  error response without a valid authoritative status, or transport failure
+  replaces any cached active state with an inactive error state. Delegated
+  `goal` carries that cached exact lease ID and the owner compares it inside
+  its operation lock before audit, goal mutation, or cleanup; the local Fast
+  Control goal path applies the same captured-ID check. Delegated `action` and
+  `cancel_action`, plus local executor execution and cancellation, keep that
+  same exact identity through the owner operation lock. A stale worker cannot
+  write a goal or run/cancel an action in a replacement lease. Graceful
+  `connect` and `goal` cancellation first collects the already-issued mutation,
+  then completes a shielded disconnect conditioned on the exact lease ID before
+  propagating cancellation. A transport/response failure or malformed typed
+  result uses the same exact compensation when that ID was already known. It
+  never blind-disconnects an unknown or replacement lease; failed compensation
+  remains inactive and unverified rather than claiming rollback.
+- A successful delegated connect registers an exact `(guildId, leaseId)`
+  pending ACK and a fixed 30-second Bot API watchdog before the response leaves
+  the owner. The remote delegate shields and collects its `connect_ack`; if
+  only the ACK response is lost, it accepts success only after an exact public
+  status read proves the same active lease and `delegatedConnectPending=false`.
+  Until ACK, same-guild non-disconnect mutations fail with
+  `minecraft_world_connect_ack_pending`. Explicit disconnect remains available
+  and clears the correlated pending record only as part of that mutation.
+- If ACK never arrives, the owner watchdog retries a disconnect conditioned on
+  the exact lease ID. A failed cleanup stays pending and is retried; a replaced
+  lease is never stopped by the stale watchdog. Remote cancellation or failure
+  before it learns a lease ID performs no blind disconnect and leaves the
+  owner-side pending path to finish. This bounds a delegated-worker hard-kill
+  before ACK without changing the 480-second remote connect upper bound or the
+  direct owner connect path.
 - The Windows Local I/O Bridge does not own the lease. Its old lazy-start queue
   remains fail-closed and tells the operator to use an authorized entry point.
 - Legacy `start_voyager_task.ps1` and `VOYAGER_AUTO_START` no longer start a
@@ -210,6 +300,7 @@ Internal delegation endpoints:
 
 - `GET /internal/minecraft-world-lease` exposes public lease state.
 - `POST /internal/minecraft-world-lease/connect`
+- `POST /internal/minecraft-world-lease/connect_ack`
 - `POST /internal/minecraft-world-lease/goal`
 - `POST /internal/minecraft-world-lease/disconnect`
 - `POST /internal/minecraft-world-lease/action`
@@ -289,8 +380,11 @@ The public status contains lease ID, guild/context ID, source, timestamps, and
 the process nonce used to reject stale requests. It does not expose the
 capability token or issuer reference. The local journal may store a normalized
 issuer reference for audit. The private token rotates on owner initialization
-and is shared only through the existing runtime secrets mount. No lease
-artifact stores the raw goal, arguments, transcript, or Minecraft chat.
+and is shared only through the existing runtime secrets mount. That private
+secret also stores only the exact active `leaseId` and its same-host
+`expiresMonotonic` deadline needed for admission and guard checks; neither field
+is added to public status or proof. No lease artifact stores the raw goal,
+arguments, transcript, or Minecraft chat.
 
 `status.json` exposes `auditReady` and `statusReady`, and authorization
 consumers accept the lease only when both values are exactly `true`. Each
@@ -321,7 +415,8 @@ authorization source; a new owner process overwrites it with
 
 ## Verification boundary
 
-Unit coverage includes lease issue, expiry, restart non-restore, competing-owner
+Unit coverage includes lease issue, dual-clock expiry under wall rollback,
+private-secret admission/guard expiry, restart non-restore, competing-owner
 rejection, process-lifetime exclusion, crash-lock release, validation-to-effect
 handoff serialization, adversarial owner refresh/status/release interleavings,
 stale runner cleanup, status failure,
@@ -335,11 +430,37 @@ ownership, replay rejection and restart fencing, projector transition guards,
 terminal runtime stop, cancellation-first local/remote shutdown, and the
 bounded known-action shutdown fallback.
 
-Live Docker/Minecraft verification is still required. A passing unit suite does
-not prove that Docker Desktop bind mounts preserve the required cross-container
-byte-range lock/POSIX `flock` coherence and crash release, or that container
-scheduling, shared-volume heartbeat propagation, Mindcraft child termination,
-and the real Microsoft-authenticated game session meet the timing contract.
+The current deferred-start and delegated-connect ACK increment passed the
+13-module broad set (418 tests), the complete Minecraft suite (242 tests, 11
+skips), and the latest ACK-focused set (61 tests). Python compilation and
+scoped diff checks also passed. These sets overlap and are not summed.
+
+The user-approved 2026-08-13 live run started only Bot API, Router LLM,
+Minecraft LLM, and Voyager beside the already-running survival/easy Java
+server. Both LLMs became healthy, Bot API source identity was verified, and
+Voyager HTTP health became ready. A real Control Page `/minecraft connect`
+issued a lease and ran as a background FastAction. The first attempt had no
+Microsoft credential before the 60-second readiness deadline; the fixed
+failure revoked the lease and verified runner stop. A one-time isolated helper
+then authenticated only the new profile (the old repository profile was not
+copied), and a second FastAction completed with one server join, fresh
+telemetry, exact functional readiness, and an authorized lease. Ten live
+safe-world samples remained connected/fresh/ready while the content-free
+survival-controller timestamp advanced; health stayed 20, hunger at least 15,
+hostiles and controller errors stayed zero, and the phase was
+`planner_control`. This proves authenticated connect and the non-intervention
+safe-state survival loop, not hostile, low-health, food-recovery, or real world
+effect behavior. The current source now gives Mineflayer a native `onMsaCode`
+callback, accepts only an exact bounded marker in the sidecar, and keeps the
+challenge in process memory. Only the Control Page state projection and its
+existing Minecraft status line receive the fixed login URL, validated code,
+and expiry. `/minecraft status`, chat continuity, TTS, health, observe, child
+runtime artifacts, and telemetry do not receive it. Expiry, verified connect,
+reset, child exit, and verified stop clear it. This authentication challenge is
+status-only: it never sets readiness, acknowledges a lease, extends a deadline,
+or changes the existing timeout/revoke/verified-stop behavior. A normal
+profile-bound first-login run has not yet exercised this new surface. Forced
+Discord-worker stop, goal/disconnect, and threat-response E2E also remain.
 No user-approved live run has yet proved that `minecraft:find_food_source`
 causes the real world to cross `food_reserve_ready`, publishes one matching
 effect, returns one verified outcome, and shuts the runner down under the same

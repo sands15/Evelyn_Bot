@@ -382,6 +382,61 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertIn("barge_in_stale_source", rejection_reasons)
         self.assertEqual(priority_size, 0)
 
+    def test_worker_rejects_barge_before_first_pcm_write_succeeds(self):
+        async def runner() -> tuple[list[str], list[str], list[str], int]:
+            bridge = make_active_voice_bridge()
+            cancelled: list[str] = []
+            self.assertTrue(
+                bridge.playback_controller.claim(
+                    "turn-a",
+                    lambda: cancelled.append("turn-a"),
+                )
+            )
+            bridge.active_turn_id = "turn-a"
+            bridge.active_validation = None
+            bridge._verify_barge_in_speaker = AsyncMock(
+                return_value=SimpleNamespace(
+                    matched=True,
+                    to_dict=lambda: {"status": "verified", "score": 0.9},
+                )
+            )
+            bridge._emit_validation = Mock()
+            meta = self.strong_meta()
+            meta["_bargeSource"] = {
+                "turnId": "turn-a",
+                "ownerId": "turn-a",
+                "ownerToken": bridge.playback_controller.owner_token,
+                "validationSessionId": None,
+                "validationStepId": None,
+                "validationAttempt": None,
+                "validationAttemptId": None,
+            }
+            await bridge.barge_in_queue.put((b"pcm", meta))
+            worker = asyncio.create_task(bridge._barge_in_worker())
+            await bridge.barge_in_queue.join()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            events = [
+                str(call.args[0])
+                for call in bridge._emit_validation.call_args_list
+                if call.args
+            ]
+            reasons = [
+                str(call.kwargs.get("reason") or "")
+                for call in bridge._emit_validation.call_args_list
+                if call.args and call.args[0] == "barge_in_rejected"
+            ]
+            return cancelled, events, reasons, bridge.priority_queue.qsize()
+
+        cancelled, events, rejection_reasons, priority_size = asyncio.run(
+            runner()
+        )
+
+        self.assertEqual(cancelled, [])
+        self.assertEqual(rejection_reasons, ["barge_in_playback_not_started"])
+        self.assertNotIn("barge_in_accepted", events)
+        self.assertEqual(priority_size, 0)
+
     def test_worker_rejects_rotated_validation_attempt_before_cancelling(self):
         async def runner() -> tuple[list[str], list[str], int]:
             bridge = make_active_voice_bridge()
@@ -555,7 +610,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertEqual(queued_meta["validationStepId"], "08-interrupt-a")
         self.assertEqual(queued_meta["validationAttemptId"], "interrupt-attempt-a")
 
-    def test_playback_owner_and_capture_source_publish_atomically(self):
+    def test_capture_source_is_published_only_after_playback_starts(self):
         class FakeMicCaptureService:
             instance = None
 
@@ -574,7 +629,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
             def start(self) -> bool:
                 return True
 
-        async def runner() -> tuple[dict, dict | None, object]:
+        async def runner() -> tuple[dict | None, dict, dict | None, object]:
             bridge = make_active_voice_bridge()
             with patch.object(
                 local_io_bridge,
@@ -613,6 +668,11 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 thread.join(timeout=1.0)
 
             owner_token = bridge.playback_controller.owner_token
+            bridge._mark_playback_started_once(
+                expected_owner_id=owner_id,
+                expected_owner_token=owner_token,
+            )
+            started_context = service.capture_context_provider()
             release_contexts: list[dict | None] = []
             release_threads: list[threading.Thread] = []
             original_release = bridge.playback_controller.release
@@ -638,15 +698,59 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 thread.join(timeout=1.0)
 
             assert claim_contexts
+            assert started_context is not None
             assert release_contexts
-            return dict(claim_contexts[0] or {}), release_contexts[0], owner_token
+            return (
+                claim_contexts[0],
+                dict(started_context),
+                release_contexts[0],
+                owner_token,
+            )
 
-        claim_context, release_context, owner_token = asyncio.run(runner())
-        source = dict(claim_context["_bargeSource"])
+        claim_context, started_context, release_context, owner_token = asyncio.run(
+            runner()
+        )
+        source = dict(started_context["_bargeSource"])
 
+        self.assertIsNone(claim_context)
         self.assertEqual(source["ownerId"], "turn-a")
         self.assertIs(source["ownerToken"], owner_token)
         self.assertIsNone(release_context)
+
+    def test_each_sentence_owner_needs_its_own_playback_receipt(self):
+        async def runner() -> tuple[object, object, dict | None, dict]:
+            bridge = make_active_voice_bridge()
+            bridge.active_turn_id = "turn-a"
+            bridge.active_turn_task = asyncio.current_task()
+
+            owner_a = bridge._claim_playback_owner()
+            token_a = bridge.playback_controller.owner_token
+            self.assertIsNotNone(token_a)
+            bridge._mark_playback_started_once(
+                expected_owner_id=owner_a,
+                expected_owner_token=token_a,
+            )
+            self.assertTrue(bridge.playback_started_for_turn)
+            self.assertTrue(bridge._release_playback_owner(owner_a))
+
+            owner_b = bridge._claim_playback_owner()
+            token_b = bridge.playback_controller.owner_token
+            self.assertIsNotNone(token_b)
+            before_second_write = bridge._barge_source_snapshot
+            bridge._mark_playback_started_once(
+                expected_owner_id=owner_b,
+                expected_owner_token=token_b,
+            )
+            after_second_write = dict(bridge._barge_source_snapshot or {})
+            return token_a, token_b, before_second_write, after_second_write
+
+        token_a, token_b, before_second_write, after_second_write = asyncio.run(
+            runner()
+        )
+
+        self.assertIsNot(token_a, token_b)
+        self.assertIsNone(before_second_write)
+        self.assertIs(after_second_write["ownerToken"], token_b)
 
     def test_barge_worker_records_causal_interrupt_without_synthetic_final(self):
         source = (
@@ -861,11 +965,16 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         async def runner() -> LocalIoBridge:
             bridge = make_active_voice_bridge()
             response = SimpleNamespace(content=OneChunkContent())
+            playback_owner = bridge._claim_playback_owner()
+            playback_owner_token = bridge.playback_controller.owner_token
+            self.assertIsNotNone(playback_owner_token)
             with patch.object(local_io_bridge, "sd", FakeSoundDevice()):
                 with self.assertRaisesRegex(RuntimeError, "validation_attempt_stale"):
                     await bridge._play_streaming_pcm_response(
                         response,
                         started_at=local_io_bridge.time.perf_counter(),
+                        playback_owner=playback_owner,
+                        playback_owner_token=playback_owner_token,
                     )
             return bridge
 
@@ -1058,7 +1167,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                     self.lines = iter(
                         (
                             b'{"type":"memory_boundary","memoryState":"not_used","memoryBoundary":null}\n',
-                            b'{"type":"delta","text":"hello"}\n',
+                            b'{"type":"sentence","text":"hello"}\n',
                         )
                     )
 
@@ -1123,7 +1232,8 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 self.assertTrue(
                     await asyncio.to_thread(write_started.wait, 1.0)
                 )
-                self.assertTrue(bridge.playback_started_for_turn)
+                self.assertFalse(bridge.playback_started_for_turn)
+                self.assertIsNone(bridge._barge_source_snapshot)
                 parent.cancel()
                 self.assertTrue(
                     await asyncio.to_thread(abort_called.wait, 1.0)
@@ -1253,6 +1363,8 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                             1.0,
                         )
                     )
+                    self.assertFalse(bridge.playback_started_for_turn)
+                    self.assertIsNone(bridge._barge_source_snapshot)
                     self.assertTrue(
                         bridge.playback_controller.request_cancel()
                     )
@@ -1297,7 +1409,7 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         self.assertTrue(aborted)
         self.assertTrue(writer_exited)
 
-    def test_stream_write_attempt_marks_playback_before_partial_write_failure(self):
+    def test_stream_write_failure_does_not_mark_playback_started(self):
         class FailingStream:
             def __enter__(self):
                 return self
@@ -1332,17 +1444,22 @@ class LocalBridgeBargeInTests(unittest.TestCase):
         async def runner() -> LocalIoBridge:
             bridge = make_active_voice_bridge()
             response = SimpleNamespace(content=OneChunkContent())
+            playback_owner = bridge._claim_playback_owner()
+            playback_owner_token = bridge.playback_controller.owner_token
+            self.assertIsNotNone(playback_owner_token)
             with patch.object(local_io_bridge, "sd", FakeSoundDevice()):
                 with self.assertRaisesRegex(RuntimeError, "partial output"):
                     await bridge._play_streaming_pcm_response(
                         response,
                         started_at=local_io_bridge.time.perf_counter(),
+                        playback_owner=playback_owner,
+                        playback_owner_token=playback_owner_token,
                     )
             return bridge
 
         bridge = asyncio.run(runner())
 
-        self.assertTrue(bridge.playback_started_for_turn)
+        self.assertFalse(bridge.playback_started_for_turn)
 
     def test_rotated_validation_attempt_blocks_local_device_write(self):
         class CountingStream:
@@ -1386,6 +1503,9 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                 "attemptId": "stale-attempt",
             }
             response = SimpleNamespace(content=OneChunkContent())
+            playback_owner = bridge._claim_playback_owner()
+            playback_owner_token = bridge.playback_controller.owner_token
+            self.assertIsNotNone(playback_owner_token)
             with (
                 patch.object(local_io_bridge, "sd", FakeSoundDevice()),
                 patch.object(
@@ -1398,6 +1518,8 @@ class LocalBridgeBargeInTests(unittest.TestCase):
                     await bridge._play_streaming_pcm_response(
                         response,
                         started_at=local_io_bridge.time.perf_counter(),
+                        playback_owner=playback_owner,
+                        playback_owner_token=playback_owner_token,
                     )
             return bridge
 

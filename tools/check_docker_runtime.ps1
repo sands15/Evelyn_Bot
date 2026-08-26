@@ -174,13 +174,39 @@ Invoke-RequiredHttp "Sub LLM" "http://127.0.0.1:9821/v1/models" {
 
 Invoke-RequiredHttp "TTS" "http://127.0.0.1:8880/health" {
     param($json, $content)
+    $flashinferCudaGraphBuckets = @($json.flashinfer_cuda_graph_buckets)
     return (
         $null -ne $json -and
         $json.status -eq "healthy" -and
         $json.ready -eq $true -and
         $json.model_loaded -eq $true -and
         $json.model_id -eq "k2-fsa/OmniVoice" -and
-        $json.model_revision -eq "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+        $json.model_revision -eq "c5fdb5ccb189668d56333f77ba2629f4cd7535f4" -and
+        $json.runtime_revision -ceq "omnivoice-0.1.5" -and
+        $json.flashinfer_revision -ceq "28bc0889d92110491d726a9c79f26a895db5a074" -and
+        $json.inference_backend -ceq "flashinfer_cuda_graph" -and
+        $json.flashinfer_python_version -ceq "0.6.15.post1" -and
+        $json.flashinfer_jit_cache_version -ceq "0.6.15.post1+cu129" -and
+        $json.torch_version -ceq "2.8.0+cu129" -and
+        $json.torch_cuda_version -ceq "12.9" -and
+        ($json.flashinfer_jit_disabled -is [bool]) -and
+        $json.flashinfer_jit_disabled -eq $true -and
+        (($json.max_concurrent -is [int]) -or
+            ($json.max_concurrent -is [long])) -and
+        $json.max_concurrent -eq 1 -and
+        (($json.num_step -is [int]) -or
+            ($json.num_step -is [long])) -and
+        $json.num_step -eq 12 -and
+        $flashinferCudaGraphBuckets.Count -eq 3 -and
+        (($flashinferCudaGraphBuckets[0] -is [decimal]) -or
+            ($flashinferCudaGraphBuckets[0] -is [double])) -and
+        $flashinferCudaGraphBuckets[0] -eq 2.0 -and
+        (($flashinferCudaGraphBuckets[1] -is [decimal]) -or
+            ($flashinferCudaGraphBuckets[1] -is [double])) -and
+        $flashinferCudaGraphBuckets[1] -eq 4.0 -and
+        (($flashinferCudaGraphBuckets[2] -is [decimal]) -or
+            ($flashinferCudaGraphBuckets[2] -is [double])) -and
+        $flashinferCudaGraphBuckets[2] -eq 8.0
     )
 } | Out-Null
 

@@ -1,0 +1,309 @@
+name: evelyn-main-latency-lab
+
+x-lab-common: &lab-common
+  restart: "no"
+  networks: [lab_internal]
+  labels:
+    ai.evelyn.owner: evelyn-main-latency-lab-v1
+    ai.evelyn.run-id: "${LAB_RUN_ID:?LAB_RUN_ID is required}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+services:
+  main_llm_lab:
+    <<: *lab-common
+    image: "${LAB_MAIN_LLM_IMAGE:-evelyn-fast-control-main_llm:latest}"
+    pull_policy: never
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      MAIN_LLM_BATCH_SIZE: "${LAB_MAIN_BATCH:?LAB_MAIN_BATCH is required}"
+      MAIN_LLM_UBATCH_SIZE: "${LAB_MAIN_UBATCH:?LAB_MAIN_UBATCH is required}"
+      MAIN_LLM_CACHE_RAM_MIB: "${LAB_MAIN_CACHE_RAM_MIB:?LAB_MAIN_CACHE_RAM_MIB is required}"
+      MAIN_LLM_CACHE_REUSE: "${LAB_MAIN_CACHE_REUSE:?LAB_MAIN_CACHE_REUSE is required}"
+      MAIN_LLM_CUDA_GRAPHS_ENABLED: "${LAB_MAIN_CUDA_GRAPH:?LAB_MAIN_CUDA_GRAPH is required}"
+      GGML_CUDA_GRAPH_OPT: "${LAB_MAIN_CUDA_GRAPH:?LAB_MAIN_CUDA_GRAPH is required}"
+      MAIN_LLM_SWA_FULL_ENABLED: "${LAB_MAIN_SWA_FULL:?LAB_MAIN_SWA_FULL is required}"
+      MAIN_LLM_MODEL_IDENTITY: "${LAB_MODEL_IDENTITY:?LAB_MODEL_IDENTITY is required}"
+      MAIN_LLM_SERVER_IDENTITY: "${LAB_SERVER_IDENTITY:?LAB_SERVER_IDENTITY is required}"
+    volumes:
+      - type: bind
+        source: "${LAB_LLAMA_CPP_DIR:?LAB_LLAMA_CPP_DIR is required}"
+        target: /llama
+        read_only: true
+      - type: bind
+        source: "${LAB_MAIN_LLM_BUILD_DIR:?LAB_MAIN_LLM_BUILD_DIR is required}"
+        target: /llama/build
+        read_only: true
+      - type: volume
+        source: main_llm_epoch_lab
+        target: /main-llm-epoch
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    command:
+      - bash
+      - -lc
+      - >-
+        set -e;
+        umask 077;
+        model_path=/llama/models/gemma4-12b-batiai-iq4xs/google-gemma-4-12B-it-IQ4_XS.gguf;
+        server_path=/llama/build/bin/llama-server;
+        runtime_template_args=(--reasoning off --reasoning-budget 0 --reasoning-format none --jinja --no-mmproj);
+        case "$${MAIN_LLM_SWA_FULL_ENABLED}" in
+        1) swa_full_args=(--swa-full) ;;
+        0) swa_full_args=() ;;
+        *) exit 64 ;;
+        esac;
+        runtime_argv=("$${server_path}"
+        -m "$${model_path}" --host 0.0.0.0 --port 9820 --flash-attn on -ngl 999
+        "$${swa_full_args[@]}"
+        -c 8192 -np 1 --batch-size "$${MAIN_LLM_BATCH_SIZE}"
+        --ubatch-size "$${MAIN_LLM_UBATCH_SIZE}" --cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}"
+        --cache-prompt --cache-reuse "$${MAIN_LLM_CACHE_REUSE}" --metrics
+        --repeat-last-n 256 --repeat-penalty 1.10 --presence-penalty 0.00
+        --frequency-penalty 0.20 "$${runtime_template_args[@]}");
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        case "$${MAIN_LLM_CUDA_GRAPHS_ENABLED}" in
+        1) unset GGML_CUDA_DISABLE_GRAPHS; graph_disable_state=absent ;;
+        0) export GGML_CUDA_DISABLE_GRAPHS=1; graph_disable_state=present ;;
+        *) exit 64 ;;
+        esac;
+        printf '%s' "$${MAIN_LLM_MODEL_IDENTITY}" | grep -Eq '^[0-9a-f]{64}$$';
+        printf '%s' "$${MAIN_LLM_SERVER_IDENTITY}" | grep -Eq '^[0-9a-f]{64}$$';
+        printf '%s\n' "$${MAIN_LLM_MODEL_IDENTITY}" > /main-llm-epoch/identity.tmp;
+        printf '%s\n' "$${MAIN_LLM_SERVER_IDENTITY}" > /main-llm-epoch/server-identity.tmp;
+        test "$$(wc -c < /main-llm-epoch/identity.tmp)" -eq 65;
+        test "$$(wc -c < /main-llm-epoch/server-identity.tmp)" -eq 65;
+        printf '%s\0' "GGML_CUDA_GRAPHS_ENABLED=$${MAIN_LLM_CUDA_GRAPHS_ENABLED}" "GGML_CUDA_DISABLE_GRAPHS=$${graph_disable_state}" "GGML_CUDA_GRAPH_OPT=$${GGML_CUDA_GRAPH_OPT}" "$${runtime_argv[@]}" |
+        sha256sum | awk '{print $$1}' > /main-llm-epoch/runtime-template-identity.tmp;
+        test "$$(wc -c < /main-llm-epoch/runtime-template-identity.tmp)" -eq 65;
+        sync /main-llm-epoch/identity.tmp;
+        sync /main-llm-epoch/server-identity.tmp;
+        sync /main-llm-epoch/runtime-template-identity.tmp;
+        mv -f /main-llm-epoch/identity.tmp /main-llm-epoch/identity;
+        mv -f /main-llm-epoch/server-identity.tmp /main-llm-epoch/server-identity;
+        mv -f /main-llm-epoch/runtime-template-identity.tmp /main-llm-epoch/runtime-template-identity;
+        cat /proc/sys/kernel/random/uuid > /main-llm-epoch/epoch.tmp;
+        sync /main-llm-epoch/epoch.tmp;
+        mv -f /main-llm-epoch/epoch.tmp /main-llm-epoch/epoch;
+        exec "$${runtime_argv[@]}"
+    healthcheck:
+      test: [CMD, bash, -lc, "cat < /dev/null > /dev/tcp/127.0.0.1/9820"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+      start_period: 20s
+
+  main_llm_gateway_lab:
+    <<: *lab-common
+    image: "${LAB_BOT_API_IMAGE:-evelyn-fast-control-bot_api:latest}"
+    pull_policy: never
+    environment:
+      EVELYN_RUNTIME_ROLE: main_llm_gateway
+      MAIN_LLM_GATEWAY_HOST: 0.0.0.0
+      MAIN_LLM_GATEWAY_PORT: "9819"
+      MAIN_LLM_ADMISSION_UPSTREAM_URL: http://main_llm_lab:9820/v1/chat/completions
+      MAIN_LLM_EPOCH_FILE: /main-llm-epoch/epoch
+      MAIN_LLM_FOREGROUND_RESERVATION_TTL_MS: "900"
+    depends_on:
+      main_llm_lab: {condition: service_healthy}
+    volumes:
+      - type: volume
+        source: main_llm_epoch_lab
+        target: /main-llm-epoch
+        read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m"]
+    command: [python, -m, evelyn_core.main_llm_admission_gateway, --host, 0.0.0.0, --port, "9819"]
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; p=json.loads(urllib.request.urlopen('http://127.0.0.1:9819/health',timeout=2).read()); raise SystemExit(0 if p.get('upstreamReady') is True else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tts_lab:
+    <<: *lab-common
+    image: "${LAB_TTS_IMAGE:-evelyn-omnivoice-tts:recipe-e8151492550b}"
+    pull_policy: never
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      OMNIVOICE_HOST: 0.0.0.0
+      OMNIVOICE_PORT: "8880"
+      OMNIVOICE_DEVICE: cuda
+      OMNIVOICE_MODEL_ID: k2-fsa/OmniVoice
+      OMNIVOICE_MODEL_REVISION: c5fdb5ccb189668d56333f77ba2629f4cd7535f4
+      OMNIVOICE_RUNTIME_REVISION: omnivoice-0.1.5
+      OMNIVOICE_FLASHINFER_REVISION: 28bc0889d92110491d726a9c79f26a895db5a074
+      OMNIVOICE_PROFILE_DIR: /home/ubuntu/app/profiles
+      OMNIVOICE_NUM_STEP: "12"
+      OMNIVOICE_MAX_CONCURRENT: "1"
+      OMNIVOICE_FLASHINFER_ENABLED: "true"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH: "true"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH_BUCKETS: "[2,4,8]"
+      OMNIVOICE_FLASHINFER_CUDA_GRAPH_OVERHEAD_BUDGET: "512"
+      OMNIVOICE_STREAM_STRATEGY: sentence
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - type: bind
+        source: "${LAB_OMNIVOICE_PROFILES_DIR:?LAB_OMNIVOICE_PROFILES_DIR is required}"
+        target: /home/ubuntu/app/profiles
+        read_only: true
+      - type: bind
+        source: "${LAB_OMNIVOICE_HUB_DIR:?LAB_OMNIVOICE_HUB_DIR is required}"
+        target: /home/ubuntu/.cache/huggingface/hub
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+      - /home/ubuntu/.cache/torch:rw,noexec,nosuid,nodev,size=64m
+      - /home/ubuntu/.cache/flashinfer:rw,noexec,nosuid,nodev,size=64m
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; p=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health',timeout=3).read()); raise SystemExit(0 if p.get('ready') is True and p.get('model_loaded') is True else 1)"]
+      interval: 3s
+      timeout: 5s
+      retries: 200
+      start_period: 30s
+
+  bot_api_lab:
+    <<: *lab-common
+    image: "${LAB_BOT_API_IMAGE:-evelyn-fast-control-bot_api:latest}"
+    pull_policy: never
+    environment:
+      EVELYN_RUNTIME_ROLE: bot_api
+      EVELYN_EXPECTED_SOURCE_REVISION: "${LAB_BOT_SOURCE_REVISION:?LAB_BOT_SOURCE_REVISION is required}"
+      EVELYN_FAST_BOOT: "1"
+      FAST_CONTROL_CONTINUITY_ENABLED: "true"
+      CROSS_SURFACE_CONTINUITY_ENABLED: "false"
+      LOCAL_ONLY: "true"
+      DISCORD_ENABLED: "false"
+      MINECRAFT_ENABLED: "false"
+      CONTROL_PAGE_HOST: 0.0.0.0
+      CONTROL_PAGE_PORT: "8798"
+      BOT_API_PORT: "8798"
+      MAIN_LLM_HOST: main_llm_gateway_lab
+      MAIN_LLM_PORT: "9819"
+      MAIN_LLM_URL: http://main_llm_gateway_lab:9819/v1/chat/completions
+      LLM_SERVER_URL: http://main_llm_gateway_lab:9819/v1/chat/completions
+      MAIN_LLM_ADMISSION_GATEWAY_URL: http://main_llm_gateway_lab:9819/v1/chat/completions
+      MAIN_LLM_ADMISSION_CLIENT_MODE: gateway
+      MAIN_LLM_IDENTITY_FILE: /main-llm-epoch/identity
+      MAIN_LLM_SERVER_IDENTITY_FILE: /main-llm-epoch/server-identity
+      MAIN_LLM_RUNTIME_TEMPLATE_IDENTITY_FILE: /main-llm-epoch/runtime-template-identity
+      MAIN_LLM_EPOCH_FILE: /main-llm-epoch/epoch
+      MAIN_LLM_PROMPT_ASSETS_EMBEDDED: "true"
+      MAIN_LLM_CHAT_TEMPLATE_CONFIG_ID: llama.cpp-embedded-default-v1
+      MAIN_LLM_REQUIRE_EXACT_PROMPT_ABI: "true"
+      OMNIVOICE_SERVER_URL: http://tts_lab:8880
+      TTS_HOST: tts_lab
+      STT_SERVICE_URL: http://127.0.0.1:9
+      VISION_SERVICE_URL: http://127.0.0.1:9
+      ROUTER_LLM_URL: http://127.0.0.1:9
+      SUMMARY_LLM_URL: http://127.0.0.1:9
+    depends_on:
+      main_llm_gateway_lab: {condition: service_healthy}
+      tts_lab: {condition: service_healthy}
+    volumes:
+      - type: volume
+        source: main_llm_epoch_lab
+        target: /main-llm-epoch
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /app/bot_memory:rw,noexec,nosuid,nodev,size=64m
+      - /app/bot_profiles:rw,noexec,nosuid,nodev,size=16m
+      - /app/guild_settings:rw,noexec,nosuid,nodev,size=16m
+      - /app/runtime_artifacts:rw,noexec,nosuid,nodev,size=32m
+      - /app/logs:rw,noexec,nosuid,nodev,size=32m
+      - /app/docs:rw,noexec,nosuid,nodev,size=16m
+    command: [python, -m, evelyn_core.fast_control_api]
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; p=json.loads(urllib.request.urlopen('http://127.0.0.1:8798/api/control-page/state',timeout=3).read()); r=p.get('runtime') or {}; s=r.get('services') or {}; w=r.get('mainWarmup') or {}; warm=w.get('ready') is True and (w.get('status') == 'not_managed' or (w.get('cacheProof') is True and w.get('promptAbiProductionMatch') is True and (w.get('promptAbiRequired') is not True or w.get('promptAbiExact') is True))); raise SystemExit(0 if s.get('mainReady') is True and s.get('sourceAligned') is True and warm else 1)"]
+      interval: 2s
+      timeout: 4s
+      retries: 60
+      start_period: 10s
+
+  lab_harness:
+    <<: *lab-common
+    profiles: [harness]
+    image: "${LAB_BOT_API_IMAGE:-evelyn-fast-control-bot_api:latest}"
+    pull_policy: never
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "${LAB_GPU_ID:-0}"
+      LAB_CHAT_URL: http://bot_api_lab:8798/api/control-page/chat-stream
+      LAB_STATE_URL: http://bot_api_lab:8798/api/control-page/state
+      LAB_TTS_URL: http://tts_lab:8880/v1/audio/speech
+      LAB_MAIN_DIRECT_URL: http://main_llm_gateway_lab:9819/v1/chat/completions
+      LAB_EXECUTION_MODE: "${LAB_EXECUTION_MODE:-e2e}"
+      LAB_CONDITION: "${LAB_CONDITION:-baseline}"
+      LAB_PHASE: "${LAB_PHASE:-warm}"
+      LAB_SAMPLE_COUNT: "${LAB_SAMPLE_COUNT:-1}"
+      LAB_EQUIVALENCE_KEY_HEX: "${LAB_EQUIVALENCE_KEY_HEX:-0000000000000000000000000000000000000000000000000000000000000000}"
+    depends_on:
+      bot_api_lab: {condition: service_healthy}
+    volumes:
+      - type: bind
+        source: "${LAB_TOOLS_DIR:?LAB_TOOLS_DIR is required}"
+        target: /lab/tools
+        read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m"]
+    command: [python, -I, /lab/tools/main_latency_lab_harness.py]
+
+  lab_focused_checks:
+    <<: *lab-common
+    profiles: [checks]
+    image: "${LAB_BOT_API_IMAGE:-evelyn-fast-control-bot_api:latest}"
+    pull_policy: never
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /app/runtime_artifacts:rw,noexec,nosuid,nodev,size=32m
+      - /app/logs:rw,noexec,nosuid,nodev,size=32m
+    command:
+      - python
+      - -m
+      - unittest
+      - -q
+      - tests.core.test_main_inference_contract
+      - tests.voice.test_tts_playback_contract
+      - tests.voice.test_voice_reply_side_effects
+      - tests.voice.test_streaming_tts_memory_handoff
+
+  lab_privacy_checks:
+    <<: *lab-common
+    profiles: [checks]
+    image: "${LAB_BOT_API_IMAGE:-evelyn-fast-control-bot_api:latest}"
+    pull_policy: never
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /app/runtime_artifacts:rw,noexec,nosuid,nodev,size=32m
+      - /app/logs:rw,noexec,nosuid,nodev,size=32m
+    command:
+      - python
+      - -m
+      - unittest
+      - -q
+      - tests.core.test_main_llm_memory_deletion_boundary
+      - tests.core.test_conversation_memory_exposure
+      - tests.runtime.test_fast_control_public_memory_projection
+      - tests.voice.test_streaming_tts_memory_handoff
+
+networks:
+  lab_internal:
+    internal: true
+    labels:
+      ai.evelyn.owner: evelyn-main-latency-lab-v1
+      ai.evelyn.run-id: "${LAB_RUN_ID:?LAB_RUN_ID is required}"
+
+volumes:
+  main_llm_epoch_lab:
+    labels:
+      ai.evelyn.owner: evelyn-main-latency-lab-v1
+      ai.evelyn.run-id: "${LAB_RUN_ID:?LAB_RUN_ID is required}"

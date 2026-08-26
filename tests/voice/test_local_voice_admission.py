@@ -238,6 +238,7 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
         self.assertEqual(issued["forwardText"], "이블린")
 
     def test_successful_consume_opens_bounded_followup(self) -> None:
+        self.assertFalse(self.manager.active_for_bridge(self.bridge_id))
         first = self.issue("이블린, 첫 질문", turn_id="turn-1")
         consumed = self.consume(first, turn_id="turn-1")
         followup = self.issue("두 번째 질문", turn_id="turn-2")
@@ -246,8 +247,11 @@ class LocalVoiceAdmissionTests(unittest.TestCase):
         self.assertTrue(followup["admitted"])
         self.assertEqual(followup["mode"], "followup")
         self.assertTrue(self.manager.public_status()["active"])
+        self.assertTrue(self.manager.active_for_bridge(self.bridge_id))
+        self.assertFalse(self.manager.active_for_bridge("bridge-other"))
 
         self.clock.advance(46)
+        self.assertFalse(self.manager.active_for_bridge(self.bridge_id))
         expired = self.issue("세 번째 질문", turn_id="turn-3")
         self.assertEqual(expired["reason"], "wake_word_required")
         self.assertFalse(self.manager.public_status()["active"])

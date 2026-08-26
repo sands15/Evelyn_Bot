@@ -126,6 +126,7 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 segment_id=9,
                 ingress_during_reply=True,
                 owner_user_id_on_ingress=42,
+                voice_ingress_epoch=3,
                 voice_listener_binding="listener-binding",
                 release_ingress_worker=release_ingress_worker,
             )
@@ -143,6 +144,7 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             segment_id=9,
             ingress_during_reply=True,
             owner_user_id_on_ingress=42,
+            voice_ingress_epoch=3,
             voice_listener_binding="listener-binding",
             release_ingress_worker=release_ingress_worker,
             deps=self.tokens["member_audio_pipeline"],

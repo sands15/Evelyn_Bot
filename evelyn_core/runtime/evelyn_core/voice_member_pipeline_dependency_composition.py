@@ -67,6 +67,10 @@ class VoiceMemberPipelineDependencyCompositionDeps:
     build_tts_interrupt_gate_deps: Callable[[], Any]
     build_stt_execution_deps: Callable[[], Any]
     build_transcript_finalize_deps: Callable[[], Any]
+    voice_ingress_epoch_is_current: Callable[[int, Any], bool]
+    transcribe_completed_audio: Callable[..., Any] | None = None
+    reserve_main_foreground: Callable[..., Any] | None = None
+    cancel_main_foreground: Callable[..., Any] | None = None
     log: Callable[..., Any] = print
 
 
@@ -100,6 +104,7 @@ class VoiceMemberPipelineDependencyComposition:
             active_conversation_awaiting_reply_sec=deps.active_conversation_awaiting_reply_sec,
             active_conversation_voice_sec=deps.active_conversation_voice_sec,
             canned_wake_reply=deps.canned_wake_reply,
+            voice_ingress_epoch_is_current=deps.voice_ingress_epoch_is_current,
         )
 
     def build_voice_transcript_reply_deps(self, guild: Any) -> VoiceTranscriptReplyDeps:
@@ -163,6 +168,10 @@ class VoiceMemberPipelineDependencyComposition:
             dispatch_voice_reply=dispatch_voice_reply_from_runtime,
             build_transcript_reply_deps=self.build_voice_transcript_reply_deps,
             build_reply_dispatch_deps=self.build_voice_reply_dispatch_deps,
+            voice_ingress_epoch_is_current=deps.voice_ingress_epoch_is_current,
+            transcribe_completed_audio=deps.transcribe_completed_audio,
+            reserve_main_foreground=deps.reserve_main_foreground,
+            cancel_main_foreground=deps.cancel_main_foreground,
         )
 
 __all__ = [

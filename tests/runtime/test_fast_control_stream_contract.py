@@ -63,6 +63,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self) -> None:
+        await fast_api._shutdown_minecraft_delegated_connects()
         pending = list(fast_api.BACKGROUND_ACTION_TASKS)
         for task in pending:
             task.cancel()
@@ -96,8 +97,22 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             "admissionToken": issued["admissionToken"],
         }
 
+    def ready_app(self, **kwargs) -> object:
+        app = fast_api.create_app(**kwargs)
+        app.cleanup_ctx.remove(fast_api.fast_main_llm_warmup_context)
+        app[fast_api.FAST_MAIN_LLM_WARMUP_STATE_KEY].update(
+            {
+                "status": "done",
+                "ready": True,
+                "cacheProof": True,
+                "promptAbiProductionMatch": True,
+                "verifiedAtMonotonic": fast_api.time.monotonic(),
+            }
+        )
+        return app
+
     async def post_stream(self, text: str) -> list[dict[str, object]]:
-        client = TestClient(TestServer(fast_api.create_app()))
+        client = TestClient(TestServer(self.ready_app()))
         await client.start_server()
         try:
             response = await client.post(
@@ -116,23 +131,48 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         class Owner:
             def __init__(self) -> None:
                 self.calls = []
+                self.active = False
 
             def delegation_token(self):
                 return "owner-secret"
 
             def status(self):
                 return {
-                    "state": "authorization_required",
-                    "active": False,
-                    "lease": None,
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": (
+                        "authorized"
+                        if self.active
+                        else "authorization_required"
+                    ),
+                    "active": self.active,
+                    "auditReady": True,
+                    "statusReady": True,
+                    "lease": (
+                        {
+                            "leaseId": "lease-1",
+                            "guildId": 7,
+                        }
+                        if self.active
+                        else None
+                    ),
                 }
 
             async def connect(self, guild_id, **kwargs):
                 self.calls.append((guild_id, kwargs))
+                self.active = True
                 return {
                     "connected": True,
                     "outcome_verified": True,
+                    "worldLease": {
+                        "leaseId": "lease-1",
+                        "guildId": guild_id,
+                    },
                 }
+
+            async def disconnect(self, guild_id):
+                self.calls.append(("disconnect", guild_id))
+                self.active = False
+                return {"connected": False}
 
         owner = Owner()
         with patch.object(
@@ -171,6 +211,23 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 authorized_payload = await authorized.json()
+                wrong_ack = await client.post(
+                    "/internal/minecraft-world-lease/connect_ack",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={"guildId": 7, "leaseId": "lease-wrong"},
+                )
+                exact_ack = await client.post(
+                    "/internal/minecraft-world-lease/connect_ack",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={"guildId": 7, "leaseId": "lease-1"},
+                )
+                exact_ack_payload = await exact_ack.json()
             finally:
                 await client.close()
 
@@ -178,11 +235,372 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("leaseStatus", unauthorized_payload)
         self.assertEqual(authorized.status, 200)
         self.assertTrue(authorized_payload["ok"])
+        self.assertEqual(wrong_ack.status, 409)
+        self.assertEqual(exact_ack.status, 200)
+        self.assertTrue(exact_ack_payload["result"]["acknowledged"])
         self.assertNotIn(
             "owner-secret",
             json.dumps(authorized_payload),
         )
         self.assertEqual(len(owner.calls), 1)
+
+    async def test_minecraft_connect_ack_timeout_disconnects_exact_lease(
+        self,
+    ) -> None:
+        class Owner:
+            active = False
+            disconnects = 0
+
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            def status(self):
+                return {
+                    "schema": "minecraft_world_lease.status.v1",
+                    "state": "authorized" if self.active else "idle",
+                    "active": self.active,
+                    "auditReady": True,
+                    "statusReady": True,
+                    "lease": (
+                        {"leaseId": "lease-1", "guildId": 7}
+                        if self.active
+                        else None
+                    ),
+                }
+
+            async def connect(self, _guild_id, **_kwargs):
+                self.active = True
+                return {
+                    "connected": True,
+                    "outcome_verified": True,
+                    "worldLease": {
+                        "leaseId": "lease-1",
+                        "guildId": 7,
+                    },
+                }
+
+            async def disconnect(self, _guild_id, **_kwargs):
+                self.disconnects += 1
+                self.active = False
+                return {"connected": False}
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ), patch.object(
+            fast_api,
+            "MINECRAFT_DELEGATED_CONNECT_ACK_TIMEOUT_SEC",
+            0.01,
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                self.assertEqual(response.status, 200)
+                await asyncio.sleep(0.03)
+            finally:
+                await client.close()
+
+        self.assertEqual(owner.disconnects, 1)
+        self.assertFalse(owner.active)
+
+    async def test_stale_exact_disconnect_keeps_newer_pending(self) -> None:
+        class Owner:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {
+                    "active": True,
+                    "lease": {"guildId": 7, "leaseId": "lease-new"},
+                }
+
+            async def disconnect(self, _guild_id, **kwargs):
+                self.kwargs = kwargs
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
+
+        owner = Owner()
+        never = asyncio.create_task(asyncio.Event().wait())
+        fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7] = {
+            "leaseId": "lease-new",
+            "disconnecting": False,
+            "task": never,
+        }
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/disconnect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={"guildId": 7, "leaseId": "lease-old"},
+                )
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            owner.kwargs,
+            {"expected_lease_id": "lease-old"},
+        )
+        self.assertEqual(
+            fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7]["leaseId"],
+            "lease-new",
+        )
+
+    async def test_malformed_exact_disconnect_has_no_pending_side_effect(
+        self,
+    ) -> None:
+        class Owner:
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {"active": False, "lease": None}
+
+        never = asyncio.create_task(asyncio.Event().wait())
+        fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7] = {
+            "leaseId": "lease-new",
+            "disconnecting": False,
+            "task": never,
+        }
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/disconnect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={"guildId": 7, "leaseId": None},
+                )
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7]["leaseId"],
+            "lease-new",
+        )
+
+    async def test_failed_matching_disconnect_keeps_watchdog_pending(
+        self,
+    ) -> None:
+        class Owner:
+            @staticmethod
+            def delegation_token():
+                return "owner-secret"
+
+            @staticmethod
+            def status():
+                return {
+                    "active": True,
+                    "lease": {"guildId": 7, "leaseId": "lease-1"},
+                }
+
+            @staticmethod
+            async def disconnect(_guild_id, **_kwargs):
+                raise RuntimeError("minecraft_stop_unverified")
+
+        never = asyncio.create_task(asyncio.Event().wait())
+        fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7] = {
+            "leaseId": "lease-1",
+            "disconnecting": False,
+            "task": never,
+        }
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            Owner(),
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/internal/minecraft-world-lease/disconnect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={"guildId": 7, "leaseId": "lease-1"},
+                )
+            finally:
+                await client.close()
+
+        self.assertEqual(response.status, 409)
+        self.assertFalse(
+            fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING[7][
+                "disconnecting"
+            ]
+        )
+
+    async def test_ack_watchdog_reconciles_after_disconnect_revokes_then_fails(
+        self,
+    ) -> None:
+        class Owner:
+            active = True
+            reconciles = 0
+
+            def status(self):
+                return {
+                    "active": self.active,
+                    "lease": (
+                        {"guildId": 7, "leaseId": "lease-1"}
+                        if self.active
+                        else None
+                    ),
+                }
+
+            async def disconnect(self, _guild_id, **_kwargs):
+                self.active = False
+                raise RuntimeError("minecraft_stop_unverified")
+
+            async def reconcile_once(self, **_kwargs):
+                self.reconciles += 1
+                if self.reconciles == 1:
+                    raise RuntimeError("transient_reconcile_failure")
+                return {"stopped": True}
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_DELEGATED_CONNECT_ACK_TIMEOUT_SEC",
+            0.01,
+        ):
+            fast_api._register_minecraft_delegated_connect(
+                owner,
+                guild_id=7,
+                lease_id="lease-1",
+            )
+            await asyncio.sleep(2.05)
+
+        self.assertEqual(owner.reconciles, 2)
+        self.assertNotIn(7, fast_api.MINECRAFT_DELEGATED_CONNECT_PENDING)
+
+    async def test_concurrent_same_guild_delegated_connect_calls_owner_once(
+        self,
+    ) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Owner:
+            calls = 0
+            active = False
+
+            def status(self):
+                return {
+                    "active": self.active,
+                    "lease": (
+                        {"guildId": 7, "leaseId": "lease-1"}
+                        if self.active
+                        else None
+                    ),
+                }
+
+            async def connect(self, _guild_id, **_kwargs):
+                self.calls += 1
+                started.set()
+                await release.wait()
+                self.active = True
+                return {
+                    "connected": True,
+                    "worldLease": {
+                        "guildId": 7,
+                        "leaseId": "lease-1",
+                    },
+                }
+
+        async def connect_once():
+            async with fast_api._minecraft_delegated_connect_lock(7):
+                return await fast_api._execute_minecraft_world_lease_mutation(
+                    action="connect",
+                    payload={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                    guild_id=7,
+                )
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            first = asyncio.create_task(connect_once())
+            await started.wait()
+            second = asyncio.create_task(connect_once())
+            release.set()
+            await first
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "minecraft_world_connect_ack_pending",
+            ):
+                await second
+
+        self.assertEqual(owner.calls, 1)
 
     async def test_minecraft_owner_mutation_error_returns_lease_status(
         self,
@@ -576,7 +994,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_voice_stream_missing_token_has_no_turn_side_effects(
         self,
     ) -> None:
-        client = TestClient(TestServer(fast_api.create_app()))
+        client = TestClient(TestServer(self.ready_app()))
         await client.start_server()
         try:
             before_actions = fast_api.ACTION_COORDINATOR.snapshot()
@@ -640,7 +1058,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             llm_calls += 1
             yield "한 번만 답했어."
 
-        client = TestClient(TestServer(fast_api.create_app()))
+        client = TestClient(TestServer(self.ready_app()))
         await client.start_server()
         try:
             with patch.object(
@@ -730,7 +1148,10 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         sentences = [event["text"] for event in events if event["type"] == "sentence"]
         done = next(event for event in events if event["type"] == "done")
-        self.assertEqual(sentences, [fast_api.enforce_action_reply_contract("확인해볼게.")])
+        self.assertEqual(
+            " ".join(sentences),
+            fast_api.enforce_action_reply_contract("확인해볼게."),
+        )
         self.assertNotIn("확인해볼게", str(done["reply"]))
         self.assertNotIn("기다려줘", str(done["reply"]))
 
@@ -755,7 +1176,44 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("확인해볼게", deltas)
         self.assertEqual(deltas, "마이크 입력은 꺼져 있어.")
 
-    async def test_stream_emits_safe_word_deltas_before_sentence_completion(self) -> None:
+    async def test_stream_projects_late_false_capability_claim_before_commit(
+        self,
+    ) -> None:
+        original_iter = fast_api.iter_main_llm_deltas
+
+        async def fake_iter(text: str, *, source: str):
+            yield "먼저 확인한 내용이야. 인터넷 검색은 사용할 수 "
+            yield "없어. 웹 검색도 지원되지 않아."
+
+        fast_api.iter_main_llm_deltas = fake_iter
+        try:
+            events = await self.post_stream("도구 상태를 말해줘")
+        finally:
+            fast_api.iter_main_llm_deltas = original_iter
+
+        sentences = [
+            str(event["text"])
+            for event in events
+            if event["type"] == "sentence"
+        ]
+        deltas = "".join(
+            str(event["text"])
+            for event in events
+            if event["type"] == "delta"
+        )
+        done = next(event for event in events if event["type"] == "done")
+
+        self.assertEqual(" ".join(sentences), done["reply"])
+        self.assertTrue(str(done["reply"]).startswith("먼저 확인한 내용이야."))
+        self.assertIn("웹 검색 도구는 연결돼 있어", str(done["reply"]))
+        self.assertEqual(
+            str(done["reply"]).count("웹 검색 도구는 연결돼 있어"),
+            1,
+        )
+        self.assertNotIn("사용할 수 없어", str(done["reply"]))
+        self.assertNotIn("사용할 수 없어", deltas)
+
+    async def test_stream_emits_delta_only_after_sentence_policy_completion(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas
 
         async def fake_iter(text: str, *, source: str):
@@ -771,7 +1229,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             fast_api.iter_main_llm_deltas = original_iter
 
         deltas = [str(event["text"]) for event in events if event["type"] == "delta"]
-        self.assertEqual(deltas, ["마이크 ", "입력은 ", "꺼져 ", "있어."])
+        self.assertEqual(deltas, ["마이크 입력은 꺼져 있어."])
         done = next(event for event in events if event["type"] == "done")
         self.assertIsNotNone(done["firstDeltaMs"])
 
@@ -782,6 +1240,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         class ContinuityOwner:
             enabled = True
+            session_key = fast_api.FAST_CONTROL_SESSION_KEY
 
             @staticmethod
             def claim_ingress(*, request_id, accepted_text):
@@ -791,7 +1250,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     "entryId": fast_api.conversation_ingress_entry_id(
                         surface=fast_api.FAST_CONTROL_INGRESS_SURFACE,
-                        scope=fast_api.FAST_CONTROL_SESSION_KEY,
+                        scope=ContinuityOwner.session_key,
                         source_delivery_id=request_id,
                     ),
                     "turnId": "journal-turn",
@@ -941,7 +1400,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                 "PRIVATE_MUST_NOT_SURVIVE"
             )
 
-        client = TestClient(TestServer(fast_api.create_app()))
+        client = TestClient(TestServer(self.ready_app()))
         await client.start_server()
         try:
             with patch.object(
@@ -995,7 +1454,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
                 "PRIVATE_STREAM_MUST_NOT_SURVIVE"
             )
 
-        client = TestClient(TestServer(fast_api.create_app()))
+        client = TestClient(TestServer(self.ready_app()))
         await client.start_server()
         try:
             with patch.object(
@@ -1159,6 +1618,19 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(event["type"] == "progress" for event in events))
         done = next(event for event in events if event["type"] == "done")
         self.assertIsNone(done["firstProgressMs"])
+        self.assertEqual(
+            done["latencyTrace"]["schema"],
+            "evelyn.voice-latency-trace.v1",
+        )
+        self.assertIn(
+            "speech_prefix_committed",
+            done["latencyTrace"]["markers_ms"],
+        )
+        self.assertIn(
+            "turn_completed",
+            done["latencyTrace"]["markers_ms"],
+        )
+        self.assertEqual(done["mainTiming"], {})
 
     async def test_explicit_memory_stream_returns_write_receipt_without_llm(self) -> None:
         receipt = {
@@ -1202,6 +1674,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             "기억해줘: 나는 조용한 밤을 좋아해",
             action_id=ANY,
             owner_scope=fast_api.FAST_MEMORY_OWNER_SCOPE,
+            reset_scope=fast_api.FAST_MEMORY_RESET_SCOPE,
         )
         planner.assert_not_awaited()
 
@@ -1241,7 +1714,9 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         fast_api.execute_web_research_plan = fake_runner
         try:
-            events = await self.post_stream("S T T 모델 교체 후보를 알아봐줘")
+            events = await self.post_stream(
+                "S T T 모델 교체 후보를 웹에서 검색해 비교해줘"
+            )
             pending = list(fast_api.BACKGROUND_ACTION_TASKS)
             if pending:
                 await asyncio.gather(*pending)
@@ -1268,7 +1743,9 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         fast_api.append_chat_message("assistant", "Evelyn", "현재 모델 상태는 확인할 수 있어.", source="test")
         fast_api.execute_web_research_plan = fake_runner
         try:
-            events = await self.post_stream("아니, 그거 찾아보라고")
+            events = await self.post_stream(
+                "아니, 그거 웹에서 검색해 비교하라고"
+            )
             pending = list(fast_api.BACKGROUND_ACTION_TASKS)
             if pending:
                 await asyncio.gather(*pending)
@@ -1282,33 +1759,61 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_minecraft_execution_command_uses_central_lease_owner(
         self,
     ) -> None:
-        connect = AsyncMock(
-            return_value={
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def connect_after_initial_reply(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return {
                 "connected": True,
                 "outcome_verified": True,
                 "outcome_code": "minecraft_connected",
             }
+
+        connect = AsyncMock(
+            side_effect=connect_after_initial_reply
         )
         with patch.object(
             fast_api.MINECRAFT_WORLD_LEASE_OWNER,
             "connect",
             new=connect,
         ):
-            events = await self.post_stream("마인크래프트에서 나무 캐줘")
+            events = await asyncio.wait_for(
+                self.post_stream("/minecraft connect"),
+                timeout=1,
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.assertEqual(
+                fast_api.ACTION_COORDINATOR.get("fast-action-1").status,
+                "running",
+            )
+            release.set()
+            pending = list(fast_api.BACKGROUND_ACTION_TASKS)
+            if pending:
+                await asyncio.gather(*pending)
 
         sentence = next(event for event in events if event["type"] == "sentence")
         done = next(event for event in events if event["type"] == "done")
         self.assertEqual(
             sentence["text"],
-            "Minecraft world-action lease를 발급했고 게임 연결까지 확인했어.",
+            "Minecraft 서비스를 준비하고 연결을 확인할게. 완료되면 알려줄게.",
         )
         self.assertEqual(done["reply"], sentence["text"])
-        self.assertIsNone(done["taskId"])
+        self.assertEqual(done["taskId"], "fast-action-1")
+        self.assertEqual(done["taskStatus"], "running")
+        self.assertEqual(
+            fast_api.ACTION_COORDINATOR.get("fast-action-1").status,
+            "completed",
+        )
+        self.assertIn(
+            "lease를 발급했고",
+            fast_api.CHAT_MESSAGES[-1]["text"],
+        )
         connect.assert_awaited_once_with(
             0,
             issuer_ref="fast_control:local_bridge",
             source="control_page",
-            goal="마인크래프트에서 나무 캐줘",
         )
 
 

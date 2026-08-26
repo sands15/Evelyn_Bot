@@ -27,6 +27,7 @@ from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_main_llm_request,
     build_fast_main_llm_messages,
 )
+from evelyn_core.context_pipeline import ContextPolicy, ToolUseDecision  # noqa: E402
 from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
 from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
 from evelyn_core.memory_prompt_policy import memory_deletion_boundary_from_position  # noqa: E402
@@ -50,6 +51,7 @@ from evelyn_core.explicit_memory_confirmation import (  # noqa: E402
 )
 from evelyn_core.memory_confirmation_contract import (  # noqa: E402
     memory_owner_scope,
+    memory_reset_scope,
 )
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
@@ -233,6 +235,7 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
                 f"내 개인 표식은 {canary}",
                 action_id="fast-owner-scope-action-771",
                 owner_scope=owner_a,
+                reset_scope=memory_reset_scope(77),
                 root=root,
             )
             with patch.object(
@@ -334,11 +337,29 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Weather Example", web.evidence)
         self.assertIn("Search tool result", context.system_context)
         self.assertIn("Today is rainy and cool", context.system_context)
+        self.assertIn("외부 인용 데이터", context.grounded_evidence_reply)
+        encoded = context.grounded_evidence_reply.split(
+            "evidencePreviewHex=", 1
+        )[1].rstrip(".")
+        rendered = json.loads(bytes.fromhex(encoded).decode("utf-8"))
+        self.assertEqual(rendered["cards"][0]["title"], "Weather Example")
 
     async def test_korean_research_request_executes_search_without_vision_false_positive(self) -> None:
+        policy = ContextPolicy.from_mapping(
+            {
+                "tool_plan_authoritative": True,
+                "tools": [
+                    {
+                        "tool": "web_current_info",
+                        "query": "STT 모델 후보",
+                    }
+                ],
+            }
+        )
         context = await build_fast_control_context(
             "STT 모델 후보를 알아봐줘",
             source="local_bridge",
+            context_policy=policy,
             runtime_health_provider=fake_runtime_health,
             search_provider=fake_search,
         )
@@ -348,10 +369,22 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vision_capture_or_watch", by_name)
 
     async def test_contextual_tool_text_can_ground_short_followup_search(self) -> None:
+        policy = ContextPolicy.from_mapping(
+            {
+                "tool_plan_authoritative": True,
+                "tools": [
+                    {
+                        "tool": "web_current_info",
+                        "query": "로컬 STT 모델 교체 후보 찾아봐",
+                    }
+                ],
+            }
+        )
         context = await build_fast_control_context(
             "그거 해줘",
             tool_user_text="로컬 STT 모델 교체 후보 찾아봐",
             source="local_bridge",
+            context_policy=policy,
             runtime_health_provider=fake_runtime_health,
             search_provider=fake_search,
         )
@@ -359,6 +392,49 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         web = next(item for item in context.tool_use_decisions if item.tool_name == "web_current_info")
         self.assertEqual(web.status, "executed")
         self.assertIn("로컬 STT 모델 교체 후보 찾아봐", context.search_context)
+
+    async def test_injected_authoritative_memory_plan_does_not_gain_web_tool(self) -> None:
+        calls = {"memory": 0, "search": 0}
+        memory_queries: list[str] = []
+
+        async def memory_provider(query: str) -> str:
+            calls["memory"] += 1
+            memory_queries.append(query)
+            return f"memory evidence for {query}"
+
+        async def search_provider(query: str) -> tuple[str, list[dict[str, str]]]:
+            calls["search"] += 1
+            return await fake_search(query)
+
+        plan = ContextPolicy(
+            needs_memory=True,
+            needs_search=False,
+            tool_plan_authoritative=True,
+            tool_requests=[
+                ToolUseDecision(
+                    tool_name="memory_recall",
+                    reason="router_plan",
+                    query="관련 기억",
+                    auto_allowed=True,
+                    required_before_answer=True,
+                )
+            ],
+        )
+
+        context = await build_fast_control_context(
+            "기억에서 찾아줘",
+            source="control_page",
+            context_policy=plan,
+            memory_provider=memory_provider,
+            search_provider=search_provider,
+        )
+
+        self.assertEqual(calls, {"memory": 1, "search": 0})
+        self.assertEqual(
+            [item.tool_name for item in context.tool_use_decisions],
+            ["memory_recall"],
+        )
+        self.assertEqual(memory_queries, ["관련 기억"])
 
     async def test_tool_diagnostic_executes_mounted_log_read_in_fast_context(self) -> None:
         context = await build_fast_control_context(
@@ -792,6 +868,23 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
             serialized_messages,
         )
 
+    async def test_context_ready_callback_precedes_prompt_return(self) -> None:
+        events: list[str] = []
+
+        request = await build_fast_main_llm_request(
+            base_system_prompt="base",
+            recent_messages=[],
+            user_text="hello",
+            final_user_text="answer",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            on_context_ready=lambda: events.append("context_done"),
+        )
+        events.append("prompt_returned")
+
+        self.assertEqual(events, ["context_done", "prompt_returned"])
+        self.assertEqual(request.messages[-1]["content"], "answer")
+
     async def test_fast_request_combines_prebuilt_and_recalled_exposure(self) -> None:
         existing_note = "opaque-" + ("c" * 64)
         recalled_note = "opaque-" + ("d" * 64)
@@ -1013,9 +1106,37 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
             vision_provider=forbidden_provider,
         )
 
+        local_file = next(
+            item
+            for item in context.tool_use_decisions
+            if item.tool_name == "local_file_or_log_read"
+        )
+        self.assertEqual(local_file.status, "needs_local_tool")
+        self.assertTrue(context.required_evidence_failure_reply)
+        self.assertIn("추측해서 답하지 않을게", context.required_evidence_failure_reply)
         self.assertFalse(called)
         self.assertEqual(context.vision_context, "")
         self.assertEqual(context.vision_evidence.reason_code, "not_requested")
+
+    async def test_empty_required_memory_is_a_deterministic_pre_llm_gate(self) -> None:
+        async def empty_memory(_query: str) -> str:
+            return ""
+
+        context = await build_fast_control_context(
+            "아까 대화에서 정한 내용을 기억에서 찾아줘",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=empty_memory,
+        )
+
+        memory = next(
+            item
+            for item in context.tool_use_decisions
+            if item.tool_name == "memory_recall"
+        )
+        self.assertEqual(memory.status, "executed_empty")
+        self.assertTrue(context.required_evidence_failure_reply)
+        self.assertIn("추측해서 답하지 않을게", context.required_evidence_failure_reply)
 
 
 if __name__ == "__main__":

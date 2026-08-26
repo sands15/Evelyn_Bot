@@ -16,6 +16,7 @@ from .context_pipeline import (
     build_basic_context_packet,
     build_conversation_state_context,
     build_context_policy_for_turn,
+    build_required_evidence_failure_reply,
     build_runtime_state_context,
     build_tool_use_decisions,
     has_unanswered_user_turn,
@@ -48,6 +49,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .main_inference_contract import PromptAbiIdentity, compile_main_prompt
 from .memory_confirmation_contract import memory_owner_scope
 from .memory_prompt_policy import (
     MEMORY_CONTEXT_USE_POLICY,
@@ -101,41 +103,9 @@ class FastControlContext:
 class FastMainLlmRequest:
     context: FastControlContext
     messages: list[dict[str, Any]]
+    prompt_abi: PromptAbiIdentity
     memory_deletion_position: MemoryDeletionPosition | None = None
     memory_exposure_position: MemoryExposurePosition | None = None
-
-
-def build_required_evidence_failure_reply(
-    decisions: list[ToolUseDecision],
-    *,
-    vision_evidence: VisionEvidence,
-) -> str:
-    failed_required = {
-        decision.tool_name
-        for decision in decisions
-        if decision.required_before_answer
-        and decision.status in {
-            "failed",
-            "failed_or_unavailable",
-            "executed_empty",
-        }
-    }
-    if "vision_ocr" in failed_required:
-        if vision_evidence.scene_available:
-            return (
-                "화면 캡처는 됐지만 이번에는 글자를 읽을 수 있는 근거를 얻지 못했어. "
-                "제목이나 버튼 이름은 추측하지 않을게."
-            )
-        return (
-            "이번에는 화면의 글자를 확인할 수 없었어. "
-            "제목이나 버튼 이름은 추측하지 않을게."
-        )
-    if "vision_capture_or_watch" in failed_required:
-        return (
-            "이번에는 화면을 확인할 수 없었어. "
-            "보이는 내용을 추측하지 않을게."
-        )
-    return ""
 
 
 def build_grounded_evidence_reply(
@@ -598,6 +568,7 @@ async def build_fast_control_context(
     source: str,
     memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
+    context_policy: ContextPolicy | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
     memory_provider: MemoryProvider | None = None,
@@ -607,12 +578,21 @@ async def build_fast_control_context(
 ) -> FastControlContext:
     reset_memory_deletion_outbound_position()
     decision_text = clean_text(tool_user_text) or user_text
-    policy = build_context_policy_for_turn(
+    policy = context_policy or build_context_policy_for_turn(
         user_text=decision_text,
         source=source,
         route="fast_control_api",
     )
     decisions = build_tool_use_decisions(decision_text, policy)
+    policy.tool_requests = decisions
+    if context_policy is None:
+        policy.needs_memory = any(
+            decision.tool_name == "memory_recall" for decision in decisions
+        )
+        policy.needs_runtime_state = any(
+            decision.tool_name in {"runtime_status", "local_file_or_log_read"}
+            for decision in decisions
+        )
     if any(decision.tool_name in {"vision_capture_or_watch", "vision_ocr"} for decision in decisions):
         policy.needs_vision = True
         policy.priority = "accuracy"
@@ -623,6 +603,7 @@ async def build_fast_control_context(
 
     provider = runtime_health_provider or default_runtime_health_provider
     search_context = ""
+    search_reply = ""
     memory_context = ""
     memory_receipt = {
         "schema": "memory.context-receipt.v1",
@@ -657,10 +638,14 @@ async def build_fast_control_context(
     ]
     if vision_decisions:
         run_ocr = any(decision.tool_name == "vision_ocr" for decision in vision_decisions)
+        vision_query = next(
+            (clean_text(decision.query) for decision in vision_decisions if clean_text(decision.query)),
+            decision_text,
+        )
         try:
             with memory_exposure_guard():
                 vision_result = await (vision_provider or request_host_vision)(
-                    decision_text,
+                    vision_query,
                     run_ocr=run_ocr,
                 )
             if not isinstance(vision_result, HostVisionResult):
@@ -739,7 +724,8 @@ async def build_fast_control_context(
                 decision.status = "failed"
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "local_file_or_log_read":
-            if not decision.auto_allowed and not is_mounted_log_read_request(decision_text):
+            tool_query = clean_text(decision.query) or decision_text
+            if not decision.auto_allowed and not is_mounted_log_read_request(tool_query):
                 decision.status = "needs_local_tool"
                 decision.evidence = (
                     "Fast Control-Page chat can inspect mounted Evelyn logs only; "
@@ -747,7 +733,7 @@ async def build_fast_control_context(
                 )
                 continue
             try:
-                log_context = await (log_provider or default_log_provider)(decision_text)
+                log_context = await (log_provider or default_log_provider)(tool_query)
                 decision.status = "executed" if clean_text(log_context) else "executed_empty"
                 decision.auto_allowed = True
                 decision.evidence = (
@@ -760,13 +746,18 @@ async def build_fast_control_context(
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "web_current_info":
             try:
-                from .search_tools import render_search_results_for_llm
+                from .search_tools import (
+                    render_search_results_for_llm,
+                    render_search_results_for_user,
+                )
 
+                tool_query = clean_text(decision.query) or decision_text
                 with memory_exposure_guard():
                     query, results = await (
                         search_provider or default_search_provider
-                    )(decision_text)
+                    )(tool_query)
                 search_context = render_search_results_for_llm(query, results)
+                search_reply = render_search_results_for_user(query, results)
                 decision.status = "executed" if results else "executed_empty"
                 decision.auto_allowed = True
                 decision.evidence = clean_text(search_context)[:1000]
@@ -777,15 +768,16 @@ async def build_fast_control_context(
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "memory_recall":
             try:
+                tool_query = clean_text(decision.query) or decision_text
                 if memory_provider is None:
                     memory_context, memory_receipt = (
                         await _default_memory_provider_result(
-                            decision_text,
+                            tool_query,
                             owner_scope=memory_owner_scope,
                         )
                     )
                 else:
-                    provider_result = await memory_provider(decision_text)
+                    provider_result = await memory_provider(tool_query)
                     if (
                         isinstance(provider_result, tuple)
                         and len(provider_result) == 2
@@ -857,16 +849,20 @@ async def build_fast_control_context(
                 "This tool is required before a verified answer, but it is not auto-executed in the fast control route."
             )
 
-    runtime_context = "\n".join(
-        part
-        for part in (
-            build_runtime_state_context(source=source, route="fast_control_api"),
-            build_fast_route_capability_context(),
-            local_bridge_context,
-            log_context,
+    runtime_context = ""
+    if policy.needs_runtime_state:
+        runtime_context = "\n".join(
+            part
+            for part in (
+                build_runtime_state_context(source=source, route="fast_control_api"),
+                build_fast_route_capability_context(),
+                local_bridge_context,
+                log_context,
+            )
+            if clean_text(part)
         )
-        if clean_text(part)
-    )
+    elif vision_decisions:
+        runtime_context = build_fast_route_capability_context()
     memory_grounding_state = validated_memory_grounding_state(
         memory_receipt,
         has_context=bool(clean_text(memory_context)),
@@ -944,11 +940,14 @@ async def build_fast_control_context(
         vision_evidence=vision_evidence,
         required_evidence_failure_reply=build_required_evidence_failure_reply(
             decisions,
-            vision_evidence=vision_evidence,
+            vision_scene_available=vision_evidence.scene_available,
         ),
-        grounded_evidence_reply=build_grounded_evidence_reply(
-            decision_text,
-            vision_result=vision_result,
+        grounded_evidence_reply=(
+            search_reply
+            or build_grounded_evidence_reply(
+                decision_text,
+                vision_result=vision_result,
+            )
         ),
     )
 
@@ -960,20 +959,25 @@ async def build_fast_main_llm_request(
     user_text: str,
     final_user_text: str,
     source: str,
+    model_name: str = "",
+    content_format: str = "plain",
     memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
+    context_policy: ContextPolicy | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
     memory_provider: MemoryProvider | None = None,
     log_provider: LogProvider | None = None,
     local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
     vision_provider: VisionProvider | None = None,
+    on_context_ready: Callable[[], Any] | None = None,
 ) -> FastMainLlmRequest:
     context = await build_fast_control_context(
         user_text,
         source=source,
         memory_owner_scope=memory_owner_scope,
         tool_user_text=tool_user_text,
+        context_policy=context_policy,
         runtime_health_provider=runtime_health_provider,
         search_provider=search_provider,
         memory_provider=memory_provider,
@@ -981,6 +985,8 @@ async def build_fast_main_llm_request(
         local_bridge_status_provider=local_bridge_status_provider,
         vision_provider=vision_provider,
     )
+    if on_context_ready is not None:
+        on_context_ready()
     context.unanswered_user_turn_context = has_unanswered_user_turn(
         recent_messages
     )
@@ -1001,8 +1007,8 @@ async def build_fast_main_llm_request(
         )
         if clean_text(part)
     )
-    return FastMainLlmRequest(
-        context=context,
+    compiled = compile_main_prompt(
+        model_name=model_name,
         messages=[
             {"role": "system", "content": system_content},
             *[
@@ -1010,8 +1016,15 @@ async def build_fast_main_llm_request(
                 for message in recent_messages
                 if isinstance(message, dict)
             ],
-            {"role": "user", "content": final_user_text},
         ],
+        final_user_text=final_user_text,
+        content_format=content_format,
+        stable_system_prefix=clean_text(base_system_prompt),
+    )
+    return FastMainLlmRequest(
+        context=context,
+        messages=compiled.wire_messages(),
+        prompt_abi=compiled.abi,
         memory_deletion_position=context.memory_deletion_position,
         memory_exposure_position=context.memory_exposure_position,
     )
@@ -1024,8 +1037,11 @@ async def build_fast_main_llm_messages(
     user_text: str,
     final_user_text: str,
     source: str,
+    model_name: str = "",
+    content_format: str = "plain",
     memory_owner_scope: str = FAST_LOCAL_MEMORY_OWNER_SCOPE,
     tool_user_text: str | None = None,
+    context_policy: ContextPolicy | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
     memory_provider: MemoryProvider | None = None,
@@ -1039,8 +1055,11 @@ async def build_fast_main_llm_messages(
         user_text=user_text,
         final_user_text=final_user_text,
         source=source,
+        model_name=model_name,
+        content_format=content_format,
         memory_owner_scope=memory_owner_scope,
         tool_user_text=tool_user_text,
+        context_policy=context_policy,
         runtime_health_provider=runtime_health_provider,
         search_provider=search_provider,
         memory_provider=memory_provider,

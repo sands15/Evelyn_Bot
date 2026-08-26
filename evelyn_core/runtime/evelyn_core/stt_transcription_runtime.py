@@ -22,9 +22,8 @@ class SttTranscriptionRuntimeDeps:
 
 
 def _text_for_log(value: Any, *, validation_bound: bool) -> Any:
-    if not validation_bound:
-        return value
-    return f"<validation-text chars={len(str(value or ''))}>"
+    label = "validation-text" if validation_bound else "transcript"
+    return f"<{label} chars={len(str(value or ''))}>"
 
 
 def transcribe_audio16k_from_runtime(
@@ -69,11 +68,7 @@ def transcribe_audio16k_from_runtime(
             )
             return text
         except Exception as exc:
-            error_detail = (
-                f"errorType={type(exc).__name__}"
-                if validation_bound
-                else repr(exc)
-            )
+            error_detail = f"errorType={type(exc).__name__}"
             deps.log(f"[STT REMOTE FAIL][{stage}] {error_detail}")
             if not deps.stt_service_fallback_local:
                 raise

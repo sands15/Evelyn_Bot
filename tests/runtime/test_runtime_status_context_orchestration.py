@@ -74,6 +74,20 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "cached")
         self.assertEqual(self.probes, [])
 
+    async def test_clock_rollback_invalidates_future_dated_cache(self) -> None:
+        state = RuntimeStatusContextState(
+            cache={"text": "stale-before-clock-rollback", "cached_at": 200.0}
+        )
+
+        result = await build_runtime_status_context_from_runtime(
+            deps=self.build_deps(),
+            state=state,
+        )
+
+        self.assertNotEqual(result, "stale-before-clock-rollback")
+        self.assertTrue(self.probes)
+        self.assertEqual(state.cache["cached_at"], 100.0)
+
     async def test_builds_service_gpu_oom_and_historical_error_context(self) -> None:
         self.down_labels = {"tts"}
         self.services = {"summary": "partial readiness", "botApiReady": False, "botApiReason": "starting"}

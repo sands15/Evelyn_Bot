@@ -22,6 +22,13 @@ class SttTextRuntimeDeps:
     partial_stt_cache: MutableMapping[str, dict[str, Any]]
 
 
+@dataclass(frozen=True, repr=False)
+class DeferredPartialTranscript:
+    partial_text: str
+    audio_hash: str
+    partial_samples: int
+
+
 def build_stt_text_runtime_deps(
     *,
     clean_text: Callable[[str], str],
@@ -101,6 +108,28 @@ def commit_stable_transcript_from_runtime(
     return committed
 
 
+def commit_deferred_partial_transcript_from_runtime(
+    session_key: str | None,
+    candidate: DeferredPartialTranscript,
+    *,
+    deps: SttTextRuntimeDeps,
+) -> tuple[str, str]:
+    partial_text = deps.clean_text(candidate.partial_text)
+    if candidate.audio_hash:
+        deps.partial_stt_cache[session_key or "__global__"] = {
+            "hash": candidate.audio_hash,
+            "partial_text": candidate.partial_text,
+            "samples": candidate.partial_samples,
+            "updated_at": time.monotonic(),
+        }
+    committed_text = commit_stable_transcript_from_runtime(
+        session_key,
+        new_partial_text=partial_text,
+        deps=deps,
+    )
+    return partial_text, committed_text
+
+
 def get_partial_transcript_from_runtime(
     session_key: str | None,
     audio16k: np.ndarray,
@@ -110,11 +139,14 @@ def get_partial_transcript_from_runtime(
     transcribe_audio16k_sync: Callable[..., str],
     deps: SttTextRuntimeDeps,
     validation_bound: bool = False,
-) -> tuple[str, str]:
+    defer_state_writes: bool = False,
+) -> tuple[str, str] | DeferredPartialTranscript:
     partial_audio = build_partial_stt_window_from_runtime(audio16k, sampling_rate=sampling_rate)
     partial_samples = int(partial_audio.size)
     min_partial_samples = max(1, int(float(sampling_rate) * 0.85))
     if partial_samples < min_partial_samples:
+        if defer_state_writes:
+            return DeferredPartialTranscript("", "", partial_samples)
         committed_text = deps.clean_text(deps.session_committed_stt_text.get(session_key or "", ""))
         return "", committed_text
 
@@ -123,6 +155,8 @@ def get_partial_transcript_from_runtime(
     cached = deps.partial_stt_cache.get(cache_key)
     if cached and cached.get("hash") == audio_hash:
         partial_text = deps.clean_text(str(cached.get("partial_text") or ""))
+        if defer_state_writes:
+            return DeferredPartialTranscript(partial_text, audio_hash, partial_samples)
         committed_text = commit_stable_transcript_from_runtime(
             session_key,
             new_partial_text=partial_text,
@@ -138,6 +172,8 @@ def get_partial_transcript_from_runtime(
     if validation_bound:
         transcribe_kwargs["validation_bound"] = True
     partial_text = transcribe_audio16k_sync(partial_audio, **transcribe_kwargs)
+    if defer_state_writes:
+        return DeferredPartialTranscript(partial_text, audio_hash, partial_samples)
     deps.partial_stt_cache[cache_key] = {
         "hash": audio_hash,
         "partial_text": partial_text,
@@ -336,11 +372,13 @@ def detect_wake_word_sync_from_runtime(
 
 
 __all__ = [
+    "DeferredPartialTranscript",
     "SttTextRuntimeDeps",
     "build_stt_text_runtime_deps",
     "build_partial_stt_window_from_runtime",
     "longest_common_prefix_text_from_runtime",
     "commit_stable_transcript_from_runtime",
+    "commit_deferred_partial_transcript_from_runtime",
     "get_partial_transcript_from_runtime",
     "score_stt_candidate_from_runtime",
     "choose_full_stt_candidate_from_runtime",

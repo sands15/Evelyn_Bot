@@ -7,6 +7,8 @@ from .text import clean_text
 
 def normalize_route_name(value: str) -> str:
     route = clean_text(value).lower()
+    if route in {"task", "task_executor", "task-executor"}:
+        return "task_executor"
     if route in {"subwait", "sub_wait", "wait", "fresh_sub", "fresh-sub"}:
         return "sub_wait"
     if route in {"subhint", "sub_hint", "hint", "cached_sub", "cached-sub"}:

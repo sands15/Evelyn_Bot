@@ -8,6 +8,11 @@ from .conversation_memory_exposure import (
     capture_combined_memory_exposure,
     filter_conversation_history_for_memory_exposure,
 )
+from .main_inference_contract import (
+    admitted_main_request,
+    main_admission_headers,
+    main_request_kind_from_payload,
+)
 from .memory_exposure import current_memory_exposure_position
 
 @dataclass(frozen=True)
@@ -69,7 +74,7 @@ async def generate_control_page_welcome_text_from_runtime(
         model_name=deps.model_name,
         messages=[],
         final_user_text=prompt,
-        source="control_page",
+        source="control_page_welcome",
         stream=False,
         content_format=deps.main_llm_chat_content_format,
         temperature=0.65,
@@ -80,7 +85,17 @@ async def generate_control_page_welcome_text_from_runtime(
     try:
         session = await deps.get_http_session()
         timeout = deps.client_timeout_factory(total=deps.welcome_llm_timeout_sec)
-        async with session.post(deps.llm_server_url, json=payload, timeout=timeout) as resp:
+        async with admitted_main_request(
+            lambda: session.post(
+                deps.llm_server_url,
+                json=payload,
+                headers=main_admission_headers(
+                    main_request_kind_from_payload(payload)
+                ),
+                timeout=timeout,
+            ),
+            kind=main_request_kind_from_payload(payload),
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError("control_page_welcome_failed")
             data = await resp.json()

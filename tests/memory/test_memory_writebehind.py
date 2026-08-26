@@ -1,8 +1,10 @@
 ﻿import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -12,15 +14,75 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.memory_writebehind import (  # noqa: E402
+    BACKGROUND_MEMORY_TASKS,
     append_memory_writebehind_event,
     mark_memory_writer_status,
     memory_writebehind_task_key,
+    run_registered_memory_thread,
     run_memory_writebehind_steps,
     should_replace_existing_memory_task,
+)
+from evelyn_core.guild_runtime_reset import (  # noqa: E402
+    MEMORY_BACKGROUND_WORK_INFLIGHT,
+    require_guild_runtime_reset_ready,
 )
 
 
 class MemoryWriteBehindTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_explicit_worker_blocks_reset_until_thread_finishes(
+        self,
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_write() -> None:
+            started.set()
+            if not release.wait(2.0):
+                raise TimeoutError("worker was not released")
+
+        task = asyncio.create_task(
+            run_registered_memory_thread(
+                7,
+                blocking_write,
+                task_kind="explicit-confirmation",
+            )
+        )
+        self.assertTrue(await asyncio.to_thread(started.wait, 1.0))
+        task.cancel()
+        await asyncio.sleep(0)
+        deps = SimpleNamespace(
+            autonomy_engines={},
+            autonomy_cognitive_refresh_tasks={},
+            background_search_tasks={},
+            background_memory_tasks=BACKGROUND_MEMORY_TASKS,
+            background_memory_vault_tasks={},
+        )
+
+        cancelled = False
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                f"^{MEMORY_BACKGROUND_WORK_INFLIGHT}$",
+            ):
+                require_guild_runtime_reset_ready(7, deps=deps)
+        finally:
+            release.set()
+            try:
+                await task
+            except asyncio.CancelledError:
+                cancelled = True
+        self.assertTrue(cancelled)
+        self.assertEqual(BACKGROUND_MEMORY_TASKS, {})
+        require_guild_runtime_reset_ready(7, deps=deps)
+
+    def test_main_reset_uses_the_registered_memory_task_map(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "background_memory_tasks = BACKGROUND_MEMORY_TASKS",
+            source,
+        )
+
     async def test_run_steps_marks_completed(self) -> None:
         payload: dict = {}
         calls: list[str] = []

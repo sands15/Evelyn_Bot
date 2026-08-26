@@ -11,6 +11,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .observability_metrics import voice_latency_trace_from_metrics
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ async def speak_answer_local_from_runtime(
                     "source_type": "LocalSpeakerOmniVoicePCMStream",
                     "output_mode": "local_speaker",
                 },
+                latency_trace=voice_latency_trace_from_metrics(metrics),
                 on_request_start=lambda: (
                     deps.mark_turn_stage(
                         metrics,
@@ -213,6 +215,7 @@ async def stream_local_tts_sentences_from_runtime(
                 "output_mode": "local_speaker",
                 "delivery_mode": "llm_sentence_stream",
             },
+            latency_trace=voice_latency_trace_from_metrics(metrics),
             on_request_start=lambda ci=chunk_index: (
                 deps.mark_turn_stage(metrics, "tts_request_start", event_name="local_tts_request_start", chunk_index=ci),
                 deps.log_voice_latency(metrics, "tts_request_logged", "Local TTS request start"),

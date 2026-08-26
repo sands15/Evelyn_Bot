@@ -11,6 +11,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore  # noqa: E402
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
 
 class RoomSpeakerActivityTests(unittest.TestCase):
@@ -21,6 +22,62 @@ class RoomSpeakerActivityTests(unittest.TestCase):
         self.assertEqual(store.room_owner_user_ids, {"room": 1})
         self.assertEqual(store.room_owner_until, {})
         self.assertEqual(store.recent_speaker_stats, {})
+
+    def test_restore_owners_uses_only_unique_latest_active_canonical_voice_session(self) -> None:
+        sessions = SessionStateStore.create_empty()
+        sessions.active_user_ids.update(
+            {
+                "guild:1:voice:2:user:3": 3,
+                "guild:1:voice:2:user:4": 4,
+                "guild:1:voice:5:user:6": 6,
+                "guild:1:voice:5:user:7": 7,
+                "guild:1:voice:none:user:8": 8,
+                "guild:01:voice:9:user:10": 10,
+                "guild:1:text:9:user:11": 11,
+                "guild:1:voice:10:user:12": 99,
+                "guild:1:voice:10:user:17": 17,
+                "guild:1:voice:11:user:13": 13,
+                "guild:1:voice:12:user:14": 14,
+                "guild:1:voice:12:user:15": 15,
+                "guild:1:voice:13:user:16": 16,
+            }
+        )
+        sessions.active_until.update(
+            {key: 140.0 for key in sessions.active_user_ids}
+        )
+        sessions.active_until["guild:1:voice:11:user:13"] = 99.0
+        sessions.last_active_at.update(
+            {
+                "guild:1:voice:2:user:3": 90.0,
+                "guild:1:voice:2:user:4": 95.0,
+                "guild:1:voice:5:user:6": 97.0,
+                "guild:1:voice:5:user:7": 97.0,
+                "guild:1:voice:none:user:8": 98.0,
+                "guild:01:voice:9:user:10": 98.0,
+                "guild:1:text:9:user:11": 98.0,
+                "guild:1:voice:10:user:12": 98.0,
+                "guild:1:voice:10:user:17": 90.0,
+                "guild:1:voice:11:user:13": 98.0,
+                "guild:1:voice:12:user:14": 94.0,
+                "guild:1:voice:12:user:15": 99.0,
+                "guild:1:voice:13:user:16": -40.0,
+            }
+        )
+        sessions.active_until["guild:1:voice:12:user:15"] = 99.5
+        sessions.active_user_ids.pop("guild:1:voice:12:user:15")
+        store = RoomSpeakerActivityStore({}, {"stale": 1}, {"stale": 999.0})
+
+        restored = store.restore_owners_from_sessions(sessions, now=100.0)
+
+        self.assertEqual(restored, 2)
+        self.assertEqual(
+            store.room_owner_user_ids,
+            {"guild:1:voice:2": 4, "guild:1:voice:13": 16},
+        )
+        self.assertEqual(
+            store.room_owner_until,
+            {"guild:1:voice:2": 140.0, "guild:1:voice:13": 140.0},
+        )
 
     def test_prune_removes_stale_speakers(self) -> None:
         stats = {

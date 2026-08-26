@@ -13,6 +13,8 @@ import {
 } from '/app/mindcraft/src/models/evelyn_planner.js';
 import { Prompter } from '/app/mindcraft/src/models/prompter.js';
 import { Agent } from '/app/mindcraft/src/agent/agent.js';
+import { ActionManager } from '/app/mindcraft/src/agent/action_manager.js';
+import { executeCommand } from '/app/mindcraft/src/agent/commands/index.js';
 import { handleDisconnection } from '/app/mindcraft/src/agent/connection_handler.js';
 import convoManager from '/app/mindcraft/src/agent/conversation.js';
 import { EvelynGoalManager } from '/app/mindcraft/src/agent/evelyn_goal_manager.js';
@@ -65,6 +67,133 @@ test('Agent error output excludes raw Mineflayer errors', () => {
     assert.match(source, /\[LoginGuard\] Connection Error: minecraft_runtime_error/);
     assert.equal(source.includes('${String(err)}'), false);
     assert.equal(source.includes("console.error('Error event!', err)"), false);
+});
+
+test('verified completion command stops self-prompting through the command registry', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-end-goal-command-'));
+    try {
+        let stopCalls = 0;
+        const agent = {
+            bot: {
+                evelynSurvivalState: {
+                    phase: 'escape_to_surface',
+                    cooldown_until: {},
+                },
+            },
+            self_prompter: {
+                stop: () => { stopCalls += 1; },
+            },
+        };
+        const manager = new EvelynGoalManager(agent, {
+            statePath: path.join(directory, 'state.json'),
+            mode: 'gated',
+            ultimateGoal: 'Defeat the Ender Dragon',
+        });
+        manager.state.ultimateGoalCompletedAt = Date.now() / 1000;
+        manager.state.autonomyState = 'completed';
+
+        const gate = manager.gateCommand('!endGoal', {autonomous: true});
+        assert.equal(gate.allowed, true);
+        assert.equal(await executeCommand(agent, '!endGoal'), 'Self-prompting stopped.');
+        assert.equal(stopCalls, 1);
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('generic action exception cannot arm dragon completion across a restart', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-dragon-exception-'));
+    const statePath = path.join(directory, 'state.json');
+    const originalError = console.error;
+    const makeBot = (listeners = {}) => {
+        const position = {
+            x: 0,
+            y: 64,
+            z: 0,
+            distanceTo: (other) => Math.hypot(other.x, other.y - 64, other.z),
+        };
+        return {
+            output: '',
+            interrupt_code: false,
+            entity: {position},
+            inventory: {items: () => []},
+            entities: {},
+            health: 20,
+            food: 20,
+            foodSaturation: 5,
+            game: {dimension: 'minecraft:the_end'},
+            time: {timeOfDay: 1000},
+            heldItem: null,
+            modes: {pause: () => { throw new Error('generic_action_exception'); }},
+            on: (event, callback) => { listeners[event] = callback; },
+            emit: () => {},
+        };
+    };
+    const makeAgent = (bot) => {
+        const agent = {
+            bot,
+            self_prompter: {isActive: () => true},
+            clearBotLogs: () => {
+                bot.output = '';
+                bot.interrupt_code = false;
+            },
+            requestInterrupt: () => { bot.interrupt_code = true; },
+            cleanKill: () => {},
+            isIdle() { return !this.actions.executing; },
+        };
+        agent.actions = new ActionManager(agent);
+        return agent;
+    };
+
+    console.error = () => {};
+    try {
+        const firstAgent = makeAgent(makeBot());
+        const first = new EvelynGoalManager(firstAgent, {
+            statePath,
+            mode: 'gated',
+            ultimateGoal: 'Defeat the Ender Dragon',
+        });
+        await first.initialize();
+        first.state.currentSubgoal = {
+            id: 'defeat_dragon',
+            kind: 'defeat',
+            target: 'ender_dragon',
+            quantity: 1,
+            success: {kind: 'entity_defeated', target: 'ender_dragon', count: 1},
+            actionBudget: 12,
+            attempts: 0,
+            allowedCommands: ['!attack'],
+            allowedTargets: ['ender_dragon'],
+            observationCounts: {},
+            observationStreak: 0,
+        };
+        const before = first.captureSnapshot();
+        const result = await executeCommand(firstAgent, '!attack("ender_dragon")');
+        const execution = await first.recordActionResult(
+            '!attack("ender_dragon")',
+            result,
+            before,
+            first.captureSnapshot(),
+            {autonomous: true},
+        );
+
+        assert.match(result, /!!Code threw exception!!/);
+
+        const listeners = {};
+        const restarted = new EvelynGoalManager(makeAgent(makeBot(listeners)), {
+            statePath,
+            mode: 'gated',
+            ultimateGoal: 'Defeat the Ender Dragon',
+        });
+        await restarted.initialize();
+        listeners.entityDead({name: 'ender_dragon'});
+        assert.equal(execution.failed, true);
+        assert.equal(first.state.lastDragonCombatAt, null);
+        assert.equal(restarted.state.ultimateGoalCompletedAt, null);
+    } finally {
+        console.error = originalError;
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
 });
 
 test('Agent player ingress is fail-closed without an allowlist', () => {

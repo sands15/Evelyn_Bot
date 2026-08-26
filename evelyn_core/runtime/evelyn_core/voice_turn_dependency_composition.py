@@ -53,6 +53,7 @@ class VoiceTurnDependencyCompositionDeps:
     apply_voice_ingress_dequeue_debug_meta: Callable[..., Any]
     enqueue_voice_ingress_item: Callable[..., Any]
     increment_voice_pipeline_counter: Callable[..., Any]
+    voice_ingress_epoch_is_current: Callable[[int, Any], bool]
     process_member_audio: Callable[..., Any]
     create_task: Callable[..., Any]
     ensure_startup_components_ready: Callable[..., Any]
@@ -64,11 +65,13 @@ class VoiceTurnDependencyCompositionDeps:
     next_segment_id: Callable[..., int]
     new_turn_id: Callable[..., str]
     validation_context_provider: Callable[..., dict[str, Any] | None]
+    capture_voice_ingress_epoch: Callable[[int], int]
     build_voice_ingress_item: Callable[..., Any]
     voice_ingress_queue_depth: Callable[[], int]
     schedule_voice_utterance_item: Callable[..., Any]
     monotonic: Callable[[], float]
     log: Callable[..., Any]
+    admit_search_followup_recovery: Callable[..., Any] | None = None
 
 
 class VoiceTurnDependencyComposition:
@@ -147,6 +150,7 @@ class VoiceTurnDependencyComposition:
             ),
             enqueue_voice_ingress_item=deps.enqueue_voice_ingress_item,
             increment_voice_pipeline_counter=deps.increment_voice_pipeline_counter,
+            voice_ingress_epoch_is_current=deps.voice_ingress_epoch_is_current,
             process_member_audio=deps.process_member_audio,
             create_task=deps.create_task,
             log=deps.log,
@@ -168,10 +172,14 @@ class VoiceTurnDependencyComposition:
             new_turn_id=deps.new_turn_id,
             room_state_snapshot=deps.room_state_snapshot,
             validation_context_provider=deps.validation_context_provider,
+            capture_voice_ingress_epoch=deps.capture_voice_ingress_epoch,
             build_voice_ingress_item=deps.build_voice_ingress_item,
             voice_ingress_queue_depth=deps.voice_ingress_queue_depth,
             schedule_voice_utterance_item=deps.schedule_voice_utterance_item,
             monotonic=deps.monotonic,
+            admit_search_followup_recovery=(
+                deps.admit_search_followup_recovery
+            ),
         )
 
 

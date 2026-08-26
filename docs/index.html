@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <link rel="stylesheet" href="./assets/evelyn-runtime-errors.css?v=20260731-continuity-commit-1">
   <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-3">
+  <link rel="stylesheet" href="./assets/evelyn-task-approval.css?v=20260820-task-approval-1">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2268,6 +2269,19 @@
         <div id="autonomyValidationMount" aria-live="polite"></div>
       </section>
 
+      <section class="task-approval-panel" aria-label="작업 변경 승인">
+        <div class="task-approval-head">
+          <div>
+            <strong>작업 변경 승인</strong>
+            <span class="task-approval-subtitle">파일 1개 · 전체 diff · 1회 승인 · 자동 재시도 없음</span>
+          </div>
+          <span class="task-approval-pill" id="taskApprovalStatePill" data-state="idle">idle</span>
+        </div>
+        <div id="taskApprovalMount" aria-live="polite">
+          <span class="task-approval-meta">승인이 필요한 작업 단계를 기다리는 중입니다.</span>
+        </div>
+      </section>
+
       <section class="ui-action-panel" aria-label="화면 행동 승인">
         <div class="ui-action-head">
           <div>
@@ -2475,7 +2489,7 @@
   <script src="./assets/vendor/live2d/live2dcubismcore-5.0.0.min.js"></script>
   <script src="./assets/vendor/live2d/untitled-pixi-live2d-engine-cubism-1.3.1.js?v=20260728-breath-triangle-2"></script>
   <script src="./assets/evelyn-avatar-director.js?v=20260727-avatar-director-3"></script>
-  <script src="./assets/evelyn-live2d.js?v=20260728-chest-warp-7"></script>
+  <script src="./assets/evelyn-live2d.js?v=20260813-tail-overlap-4"></script>
   <script src="./assets/evelyn-boot-progress.js"></script>
   <script>
     const root = document.documentElement;
@@ -3977,7 +3991,26 @@
             "preview_token_action_mismatch",
             "preview_token_expired",
             "preview_token_invalid",
-            "preview_token_reused"
+            "preview_token_reused",
+            "voice_capture_validation_context_not_allowed",
+            "voice_capture_consent_already_active",
+            "voice_capture_consent_recovery_required",
+            "voice_capture_confirm_token_expired",
+            "voice_capture_confirm_token_invalid",
+            "voice_capture_confirm_token_reused",
+            "voice_capture_confirm_token_stale",
+            "voice_capture_apply_not_pending",
+            "validation_session_active",
+            "validation_session_not_found",
+            "validation_session_not_running",
+            "validation_step_not_current",
+            "validation_step_not_found",
+            "validation_step_failed",
+            "validation_step_not_failed",
+            "validation_attempt_inflight",
+            "validation_attempt_revision_mismatch",
+            "playback_not_completed",
+            "attempt_budget_exhausted"
           ].includes(candidate)) {
             evelynErrorCode = candidate;
           }
@@ -3989,6 +4022,12 @@
             ? "다른 기억 조회나 삭제가 끝나는 중이야. 잠깐 뒤 다시 시도해줘."
             : evelynErrorCode === "host_supervisor_unavailable"
               ? "Host Supervisor가 꺼져 있어. start_local.bat --background로 Evelyn을 실행해줘."
+            : evelynErrorCode === "playback_not_completed"
+              ? "재생 시작·완료 증거가 아직 맞지 않아 확인하지 않았어. 최신 단계를 확인해줘."
+            : evelynErrorCode === "attempt_budget_exhausted"
+              ? "이 단계의 재시도 횟수를 모두 사용했어. 검증 세션을 다시 시작해줘."
+            : evelynErrorCode.startsWith("validation_") || evelynErrorCode.startsWith("voice_capture_")
+              ? "음성 검증 상태가 바뀌어서 요청을 적용하지 않았어. 최신 상태에서 다시 시도해줘."
             : `api_error:${response.status}`
         );
         apiError.evelynErrorCode = evelynErrorCode;
@@ -4106,10 +4145,34 @@
       ? voice.speaking
       : Boolean(localBridge.speaking);
     const chatMessages = state.chat && Array.isArray(state.chat.messages) ? state.chat.messages : [];
+    const taskApproval = state.actions && typeof state.actions.approval === "object"
+      ? state.actions.approval
+      : null;
+    window.EvelynTaskApprovalPublicState = taskApproval;
+    window.dispatchEvent(new CustomEvent("evelyn:task-approval-state", {
+      detail: { approval: taskApproval }
+    }));
     if (window.EvelynLive2D) {
       window.EvelynLive2D.setSpeaking(voiceSpeaking, latestAssistantChatText(chatMessages));
     }
     const minecraft = state.minecraft || {};
+    const minecraftAuth = minecraft.authChallenge && typeof minecraft.authChallenge === "object"
+      ? minecraft.authChallenge
+      : {};
+    const minecraftAuthCode = typeof minecraftAuth.userCode === "string"
+      ? minecraftAuth.userCode
+      : "";
+    const minecraftAuthExpiresAt = Number(minecraftAuth.expiresAt);
+    const minecraftAuthNow = Date.now() / 1000;
+    const minecraftAuthPending = (
+      minecraft.running === true
+      && minecraft.connected === false
+      && /^[A-Z0-9]{8}$/.test(minecraftAuthCode)
+      && minecraftAuth.verificationUrl === "https://www.microsoft.com/link"
+      && Number.isFinite(minecraftAuthExpiresAt)
+      && minecraftAuthExpiresAt > minecraftAuthNow
+      && minecraftAuthExpiresAt <= minecraftAuthNow + 1800
+    );
     const voicePipeline = runtime.voicePipeline || {};
     const bargeInContinuity = voicePipeline.bargeInContinuity || {};
     if (!preserveChatHistory && state.chat && Array.isArray(state.chat.messages)) {
@@ -4127,7 +4190,15 @@
       voiceBargeInContinuityLine.textContent = formatBargeInContinuitySummary(bargeInContinuity, { compact: true });
     }
     renderRuntimeRepairPreview(state);
-      if (minecraftStatusLine) minecraftStatusLine.textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
+      if (minecraftStatusLine) {
+        minecraftStatusLine.textContent = minecraftAuthPending
+          ? `Microsoft 로그인 ${minecraftAuthCode} · microsoft.com/link`
+          : minecraft.sessionActive
+            ? "연결됨"
+            : minecraft.running
+              ? "준비 중"
+              : "꺼짐";
+      }
       return preserveChatHistory;
     }
 
@@ -6343,6 +6414,7 @@
   <script src="./assets/evelyn-autonomy-validation.js?v=20260801-autonomy-p0-1"></script>
   <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
   <script src="./assets/evelyn-runtime-errors.js?v=20260731-continuity-commit-1"></script>
+  <script src="./assets/evelyn-task-approval.js?v=20260820-task-approval-1"></script>
   <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-3"></script>
 </body>
 </html>

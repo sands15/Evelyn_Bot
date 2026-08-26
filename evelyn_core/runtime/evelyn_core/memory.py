@@ -555,6 +555,8 @@ def normalize_cognitive_action(value: str) -> str:
         return "ask"
     if action in {"wait", "listen", "hold"}:
         return "wait"
+    if action in {"search_then_answer", "execute_task"}:
+        return action
     return "answer"
 
 

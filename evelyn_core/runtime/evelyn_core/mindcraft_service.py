@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import json
 import os
+import re
 import secrets
 import select
 import signal
@@ -116,6 +117,90 @@ MINDCRAFT_PROCESS_IDENTITY_PATH = (
 MINDCRAFT_PROCESS_IDENTITY_SCHEMA = (
     "mindcraft_runtime.process-identity.v1"
 )
+MINDCRAFT_CHILD_RUNTIME_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "mindcraft"
+    / "child_runtime.json"
+)
+MINDCRAFT_CHILD_RUNTIME_SCHEMA = "mindcraft_runtime.child-events.v1"
+_MINDCRAFT_CHILD_EVENT_LIMIT = 12
+_MINDCRAFT_CHILD_OUTPUT_READ_LIMIT = 4096
+_MINDCRAFT_AGENT_STABILITY_SEC = 3.0
+MICROSOFT_DEVICE_LOGIN_URL = "https://www.microsoft.com/link"
+_MINDCRAFT_MICROSOFT_DEVICE_CODE_MIN_TTL_SEC = 60
+_MINDCRAFT_MICROSOFT_DEVICE_CODE_MAX_TTL_SEC = 1800
+_MINDCRAFT_MICROSOFT_DEVICE_CODE_LINE_PATTERN = re.compile(
+    rb"\[EVELYN_MSA_DEVICE_CODE\] ([A-Z0-9]{8}) ([0-9]{1,4})\r?\n?"
+)
+_MINDCRAFT_CHILD_EVENT_CATEGORIES = frozenset(
+    {
+        "action_stop_timeout",
+        "child_exit",
+        "interrupt_plugin_not_ready",
+        "mineflayer_end",
+        "mineflayer_kicked",
+        "rapid_loop",
+        "spawn_event_failed",
+        "uncaught_exception",
+        "unhandled_rejection",
+    }
+)
+_MINDCRAFT_CHILD_SIGNAL_CODES = frozenset(
+    {
+        "other",
+        "SIGABRT",
+        "SIGBREAK",
+        "SIGHUP",
+        "SIGINT",
+        "SIGKILL",
+        "SIGPIPE",
+        "SIGQUIT",
+        "SIGSEGV",
+        "SIGTERM",
+        "SIGUSR1",
+        "SIGUSR2",
+    }
+)
+_MINDCRAFT_CHILD_FATAL_CATEGORIES = frozenset(
+    {
+        "child_exit",
+        "interrupt_plugin_not_ready",
+        "spawn_event_failed",
+        "uncaught_exception",
+        "unhandled_rejection",
+    }
+)
+_MINDCRAFT_CHILD_EXIT_PATTERN = re.compile(
+    rb"Agent process exited with code (-?\d+|null) and signal ([A-Z0-9]+|null)",
+    re.IGNORECASE,
+)
+_MINDCRAFT_CHILD_CATEGORY_MARKERS = (
+    ("spawn_event_failed", (b"error in spawn event",)),
+    ("interrupt_plugin_not_ready", (b"agent.requestinterrupt",)),
+    (
+        "unhandled_rejection",
+        (
+            b"unhandled rejection",
+            b"unhandledpromiserejection",
+            b"unhandledrejection",
+            b"node:internal/process/promises",
+        ),
+    ),
+    (
+        "uncaught_exception",
+        (b"uncaught exception", b"uncaughtexception"),
+    ),
+    (
+        "action_stop_timeout",
+        (b"code execution refused stop after 10 seconds",),
+    ),
+    (
+        "rapid_loop",
+        (b"infinite action loop detected", b"rapid action loop detected"),
+    ),
+    ("mineflayer_kicked", (b"[loginguard] kicked:",)),
+    ("mineflayer_end", (b"[loginguard] disconnected:",)),
+)
 _PROCESS_STOP_TIMEOUT_SEC = 5.0
 _FOOD_RECOVERY_GOAL = (
     "Restore and verify a safe reserve of at least three food items, then pause."
@@ -166,6 +251,188 @@ _MINDCRAFT_BLOCKED_COMMAND_CODES = frozenset(
         "slash_command_blocked",
     }
 )
+_MINDCRAFT_SURVIVAL_DECISION_CODES = frozenset(
+    {
+        "acquire_food",
+        "bootstrap_tools",
+        "eat_inventory_food",
+        "escape_to_surface",
+        "handle_hostile",
+        "planner_control",
+        "reassess",
+        "shelter_until_safe_dawn",
+    }
+)
+_MINDCRAFT_SURVIVAL_WAKE_CODES = frozenset(
+    {
+        "breath",
+        "fallback",
+        "health",
+        "hostile_band",
+        "hostile_gone",
+        "hostile_spawn",
+        "projectile",
+    }
+)
+_MINDCRAFT_SURVIVAL_REFLEX_CODES = frozenset({"hostile", "projectile"})
+_MINDCRAFT_SURVIVAL_BOOTSTRAP_PHASE_CODES = frozenset(
+    {
+        "candidate_search",
+        "candidate_reached",
+        "candidate_unreached",
+        "collect_started",
+        "collect_finished",
+        "no_candidates",
+        "interrupted",
+        "complete",
+    }
+)
+
+
+def _bounded_survival_latency_ms(value: Any) -> int | None:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 600_000
+    ):
+        return round(value)
+    return None
+
+
+def _bounded_survival_count(value: Any, maximum: int) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum:
+        return value
+    return None
+
+
+def _classify_mindcraft_child_output(
+    value: bytes | str,
+) -> tuple[str, int | None, str | None] | None:
+    """Classify one bounded output fragment without retaining its content."""
+
+    raw = (
+        value.encode("utf-8", errors="ignore")
+        if isinstance(value, str)
+        else value
+    )
+    match = _MINDCRAFT_CHILD_EXIT_PATTERN.search(raw)
+    if match is not None:
+        raw_exit_code = match.group(1).lower()
+        exit_code = None
+        if raw_exit_code != b"null":
+            candidate = int(raw_exit_code)
+            if -255 <= candidate <= 255:
+                exit_code = candidate
+        raw_signal = match.group(2).decode("ascii").upper()
+        signal_code = None
+        if raw_signal != "NULL":
+            signal_code = (
+                raw_signal
+                if raw_signal in _MINDCRAFT_CHILD_SIGNAL_CODES
+                else "other"
+            )
+        return "child_exit", exit_code, signal_code
+
+    lowered = raw.lower()
+    for category, markers in _MINDCRAFT_CHILD_CATEGORY_MARKERS:
+        if any(marker in lowered for marker in markers):
+            return category, None, None
+    return None
+
+
+def _parse_mindcraft_microsoft_device_code(
+    value: bytes | str,
+) -> tuple[str, int] | None:
+    if isinstance(value, str):
+        try:
+            raw = value.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+    else:
+        raw = value
+    match = _MINDCRAFT_MICROSOFT_DEVICE_CODE_LINE_PATTERN.fullmatch(raw)
+    if match is None:
+        return None
+    ttl_sec = int(match.group(2))
+    if not (
+        _MINDCRAFT_MICROSOFT_DEVICE_CODE_MIN_TTL_SEC
+        <= ttl_sec
+        <= _MINDCRAFT_MICROSOFT_DEVICE_CODE_MAX_TTL_SEC
+    ):
+        return None
+    return match.group(1).decode("ascii"), ttl_sec
+
+
+def _classify_mindcraft_child_returncode(
+    value: Any,
+) -> tuple[str, int | None, str | None] | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value >= 0:
+        return "child_exit", value if value <= 255 else None, None
+    try:
+        signal_code = signal.Signals(-value).name
+    except ValueError:
+        signal_code = "other"
+    if signal_code not in _MINDCRAFT_CHILD_SIGNAL_CODES:
+        signal_code = "other"
+    return "child_exit", None, signal_code
+
+
+def _project_mindcraft_child_runtime(payload: Any) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    raw_events = payload.get("events") if isinstance(payload, dict) else None
+    if isinstance(raw_events, list):
+        for raw_event in raw_events[-_MINDCRAFT_CHILD_EVENT_LIMIT:]:
+            if not isinstance(raw_event, dict):
+                continue
+            category = raw_event.get("category")
+            observed_at = raw_event.get("observed_at")
+            if (
+                not isinstance(category, str)
+                or category not in _MINDCRAFT_CHILD_EVENT_CATEGORIES
+                or isinstance(observed_at, bool)
+                or not isinstance(observed_at, (int, float))
+                or not 0 <= observed_at <= 100_000_000_000
+            ):
+                continue
+            exit_code: int | None = None
+            signal_code: str | None = None
+            if category == "child_exit":
+                candidate_exit_code = raw_event.get("exit_code")
+                if (
+                    isinstance(candidate_exit_code, int)
+                    and not isinstance(candidate_exit_code, bool)
+                    and -255 <= candidate_exit_code <= 255
+                ):
+                    exit_code = candidate_exit_code
+                candidate_signal = raw_event.get("signal")
+                if (
+                    isinstance(candidate_signal, str)
+                    and candidate_signal in _MINDCRAFT_CHILD_SIGNAL_CODES
+                ):
+                    signal_code = candidate_signal
+            events.append(
+                {
+                    "category": category,
+                    "observed_at": observed_at,
+                    "exit_code": exit_code,
+                    "signal": signal_code,
+                }
+            )
+    updated_at = payload.get("updated_at") if isinstance(payload, dict) else None
+    if (
+        isinstance(updated_at, bool)
+        or not isinstance(updated_at, (int, float))
+        or not 0 <= updated_at <= 100_000_000_000
+    ):
+        updated_at = events[-1]["observed_at"] if events else None
+    return {
+        "schema": MINDCRAFT_CHILD_RUNTIME_SCHEMA,
+        "events": events,
+        "updated_at": updated_at,
+        "content_free": True,
+    }
 
 
 def _project_mindcraft_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +458,7 @@ def _project_mindcraft_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
         value = _safe_action_code(payload.get(key), "")
         if value:
             projected[key] = value
-    for key in ("updated_at", "last_blocked_command_at"):
+    for key in ("updated_at", "connected_at", "last_blocked_command_at"):
         value = payload.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             projected[key] = value
@@ -277,6 +544,91 @@ def _project_mindcraft_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
                 else None
             ),
             "current_subgoal": {"id": subgoal_id} if subgoal_id else None,
+        }
+
+    survival = payload.get("survival_controller")
+    if isinstance(survival, dict) and survival.get("content_free") is True:
+        phase = survival.get("phase")
+        last_decision = survival.get("last_decision")
+        bootstrap_phase = survival.get("bootstrap_phase")
+        handoff_until = survival.get("recovery_handoff_until")
+        last_reflex_at = survival.get("last_reflex_at")
+        updated_at = survival.get("updated_at")
+        projected["survival_controller"] = {
+            "phase": phase if phase in _MINDCRAFT_SURVIVAL_DECISION_CODES else None,
+            "last_decision": (
+                last_decision
+                if last_decision in _MINDCRAFT_SURVIVAL_DECISION_CODES
+                else None
+            ),
+            "last_success": (
+                survival.get("last_success")
+                if isinstance(survival.get("last_success"), bool)
+                else None
+            ),
+            "shelter_success_count": _bounded_survival_count(
+                survival.get("shelter_success_count"), 9_007_199_254_740_991
+            ),
+            "last_error": (
+                "survival_action_failed"
+                if survival.get("last_error") == "survival_action_failed"
+                else None
+            ),
+            "recovery_progress": survival.get("recovery_progress") is True,
+            "recovery_handoff_until": (
+                handoff_until
+                if isinstance(handoff_until, (int, float))
+                and not isinstance(handoff_until, bool)
+                else 0
+            ),
+            "wake_reason": (
+                survival.get("wake_reason")
+                if survival.get("wake_reason") in _MINDCRAFT_SURVIVAL_WAKE_CODES
+                else None
+            ),
+            "wake_to_decision_ms": _bounded_survival_latency_ms(
+                survival.get("wake_to_decision_ms")
+            ),
+            "decision_to_action_ms": _bounded_survival_latency_ms(
+                survival.get("decision_to_action_ms")
+            ),
+            "reflex_reason": (
+                survival.get("reflex_reason")
+                if survival.get("reflex_reason")
+                in _MINDCRAFT_SURVIVAL_REFLEX_CODES
+                else None
+            ),
+            "reflex_to_action_ms": _bounded_survival_latency_ms(
+                survival.get("reflex_to_action_ms")
+            ),
+            "bootstrap_phase": (
+                bootstrap_phase
+                if bootstrap_phase in _MINDCRAFT_SURVIVAL_BOOTSTRAP_PHASE_CODES
+                else None
+            ),
+            "bootstrap_candidate_count": _bounded_survival_count(
+                survival.get("bootstrap_candidate_count"), 4
+            ),
+            "bootstrap_logs_before": _bounded_survival_count(
+                survival.get("bootstrap_logs_before"), 64
+            ),
+            "bootstrap_logs_after": _bounded_survival_count(
+                survival.get("bootstrap_logs_after"), 64
+            ),
+            "last_reflex_at": (
+                last_reflex_at
+                if isinstance(last_reflex_at, (int, float))
+                and not isinstance(last_reflex_at, bool)
+                and last_reflex_at >= 0
+                else None
+            ),
+            "updated_at": (
+                updated_at
+                if isinstance(updated_at, (int, float))
+                and not isinstance(updated_at, bool)
+                else None
+            ),
+            "content_free": True,
         }
     return projected
 
@@ -612,17 +964,61 @@ def _functional_readiness(
     }
 
 
+def _stable_minecraft_connection(
+    *,
+    running: bool,
+    telemetry_fresh: bool,
+    telemetry: dict[str, Any],
+    child_runtime: dict[str, Any],
+    now: float | None = None,
+) -> bool:
+    connected_at = telemetry.get("connected_at")
+    observed_at = time.time() if now is None else now
+    fatal_child_event = any(
+        isinstance(event, dict)
+        and event.get("category") in _MINDCRAFT_CHILD_FATAL_CATEGORIES
+        for event in child_runtime.get("events", [])
+    )
+    return bool(
+        running
+        and telemetry_fresh
+        and telemetry.get("connected") is True
+        and isinstance(connected_at, (int, float))
+        and not isinstance(connected_at, bool)
+        and 0 <= observed_at - float(connected_at)
+        and observed_at - float(connected_at) >= _MINDCRAFT_AGENT_STABILITY_SEC
+        and not fatal_child_event
+    )
+
+
 class MindcraftRuntime:
     def __init__(
         self,
         *,
         process_identity_path: Path | None = None,
+        child_runtime_path: Path | None = None,
     ) -> None:
-        self._process: subprocess.Popen[str] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
         self._lock = threading.RLock()
         self.process_identity_path = Path(
             process_identity_path or MINDCRAFT_PROCESS_IDENTITY_PATH
         )
+        self.child_runtime_path = Path(
+            child_runtime_path or MINDCRAFT_CHILD_RUNTIME_PATH
+        )
+        child_runtime = _project_mindcraft_child_runtime(
+            _read_json(self.child_runtime_path)
+        )
+        self._child_runtime_lock = threading.Lock()
+        self._child_runtime_events = list(child_runtime["events"])
+        self._child_runtime_updated_at = child_runtime["updated_at"]
+        self._child_runtime_write_lock = threading.Lock()
+        self._child_runtime_write_event = threading.Event()
+        self._child_runtime_writer_thread: threading.Thread | None = None
+        self._child_output_generation = 0
+        self._child_output_thread: threading.Thread | None = None
+        self._microsoft_auth_challenge: dict[str, Any] | None = None
+        self._microsoft_auth_challenge_deadline = 0.0
         self._process_birth_identity = ""
         self._started_at: float | None = None
         self._last_exit_code: int | None = None
@@ -637,6 +1033,222 @@ class MindcraftRuntime:
             _MINDCRAFT_CONFIG["MINDCRAFT_AUTO_RESTART_COOLDOWN_SEC"]
         )
         self._world_effect_binding: dict[str, Any] | None = None
+
+    def _child_runtime_payload_unlocked(self) -> dict[str, Any]:
+        return {
+            "schema": MINDCRAFT_CHILD_RUNTIME_SCHEMA,
+            "events": deepcopy(self._child_runtime_events),
+            "updated_at": self._child_runtime_updated_at,
+            "content_free": True,
+        }
+
+    def _flush_child_runtime(self) -> None:
+        with self._child_runtime_lock:
+            payload = self._child_runtime_payload_unlocked()
+        try:
+            with self._child_runtime_write_lock:
+                atomic_json_write(
+                    self.child_runtime_path,
+                    payload,
+                    attempts=1,
+                )
+        except OSError as exc:
+            self.runtime_errors.record("status_write_failed", exc)
+
+    def _write_child_runtime_events(self) -> None:
+        while True:
+            self._child_runtime_write_event.wait()
+            self._child_runtime_write_event.clear()
+            self._flush_child_runtime()
+
+    def _ensure_child_runtime_writer(self) -> None:
+        thread = self._child_runtime_writer_thread
+        if thread is not None and thread.is_alive():
+            return
+        thread = threading.Thread(
+            target=self._write_child_runtime_events,
+            name="mindcraft-child-runtime-writer",
+            daemon=True,
+        )
+        self._child_runtime_writer_thread = thread
+        thread.start()
+
+    def _reset_child_runtime(self) -> int:
+        with self._child_runtime_lock:
+            self._child_output_generation += 1
+            self._child_runtime_events = []
+            self._child_runtime_updated_at = time.time()
+            self._microsoft_auth_challenge = None
+            self._microsoft_auth_challenge_deadline = 0.0
+            generation = self._child_output_generation
+        self._flush_child_runtime()
+        return generation
+
+    def _record_child_runtime_event(
+        self,
+        generation: int,
+        category: str,
+        exit_code: int | None,
+        signal_code: str | None,
+    ) -> None:
+        observed_at = time.time()
+        event = _project_mindcraft_child_runtime(
+            {
+                "events": [
+                    {
+                        "category": category,
+                        "observed_at": observed_at,
+                        "exit_code": exit_code,
+                        "signal": signal_code,
+                    }
+                ]
+            }
+        )["events"]
+        if not event:
+            return
+        with self._child_runtime_lock:
+            if generation != self._child_output_generation:
+                return
+            self._child_runtime_events = (
+                self._child_runtime_events + event
+            )[-_MINDCRAFT_CHILD_EVENT_LIMIT:]
+            self._child_runtime_updated_at = observed_at
+        self._child_runtime_write_event.set()
+
+    def _child_runtime_snapshot(self) -> dict[str, Any]:
+        with self._child_runtime_lock:
+            return self._child_runtime_payload_unlocked()
+
+    def _clear_microsoft_auth_challenge(self) -> None:
+        with self._child_runtime_lock:
+            self._microsoft_auth_challenge = None
+            self._microsoft_auth_challenge_deadline = 0.0
+
+    def _record_microsoft_auth_challenge(
+        self,
+        generation: int,
+        user_code: str,
+        ttl_sec: int,
+    ) -> None:
+        observed_at = time.time()
+        deadline = time.monotonic() + ttl_sec
+        with self._child_runtime_lock:
+            if generation != self._child_output_generation:
+                return
+            self._microsoft_auth_challenge = {
+                "user_code": user_code,
+                "expires_at": observed_at + ttl_sec,
+            }
+            self._microsoft_auth_challenge_deadline = deadline
+
+    def _microsoft_auth_challenge_snapshot(
+        self,
+        *,
+        running: bool,
+        connected: bool,
+    ) -> dict[str, Any] | None:
+        with self._child_runtime_lock:
+            if (
+                not running
+                or connected
+                or self._microsoft_auth_challenge is None
+                or time.monotonic()
+                >= self._microsoft_auth_challenge_deadline
+            ):
+                self._microsoft_auth_challenge = None
+                self._microsoft_auth_challenge_deadline = 0.0
+                return None
+            return {
+                "state": "device_code_pending",
+                "user_code": self._microsoft_auth_challenge["user_code"],
+                "verification_url": MICROSOFT_DEVICE_LOGIN_URL,
+                "expires_at": self._microsoft_auth_challenge["expires_at"],
+            }
+
+    def _drain_child_output(
+        self,
+        process: subprocess.Popen[bytes],
+        generation: int,
+    ) -> None:
+        stream = process.stdout
+        if stream is None:
+            return
+        saw_child_exit = False
+        try:
+            while True:
+                fragment = stream.readline(_MINDCRAFT_CHILD_OUTPUT_READ_LIMIT)
+                if not fragment:
+                    break
+                auth_challenge = _parse_mindcraft_microsoft_device_code(
+                    fragment
+                )
+                if auth_challenge is not None:
+                    self._record_microsoft_auth_challenge(
+                        generation,
+                        *auth_challenge,
+                    )
+                classified = _classify_mindcraft_child_output(fragment)
+                if classified is not None:
+                    saw_child_exit = saw_child_exit or classified[0] == "child_exit"
+                    self._record_child_runtime_event(generation, *classified)
+        except (OSError, ValueError) as exc:
+            self.runtime_errors.record("mindcraft_log_close_failed", exc)
+        finally:
+            try:
+                stream.close()
+            except OSError as exc:
+                self.runtime_errors.record("mindcraft_log_close_failed", exc)
+            if not saw_child_exit:
+                return_code = process.poll()
+                if return_code is None:
+                    try:
+                        return_code = process.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        return_code = None
+                classified_exit = _classify_mindcraft_child_returncode(
+                    return_code
+                )
+                if classified_exit is not None:
+                    self._record_child_runtime_event(
+                        generation,
+                        *classified_exit,
+                    )
+            self._flush_child_runtime()
+            if self._child_output_thread is threading.current_thread():
+                self._child_output_thread = None
+
+    def _start_child_output_drain(
+        self,
+        process: subprocess.Popen[bytes],
+        generation: int,
+    ) -> None:
+        self._ensure_child_runtime_writer()
+        thread = threading.Thread(
+            target=self._drain_child_output,
+            args=(process, generation),
+            name="mindcraft-child-output-drain",
+            daemon=True,
+        )
+        self._child_output_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            self._child_output_thread = None
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            raise
+
+    def _retire_child_output_drain(self) -> None:
+        thread = self._child_output_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.25)
+        with self._child_runtime_lock:
+            self._child_output_generation += 1
+        if thread is not None and not thread.is_alive():
+            self._child_output_thread = None
 
     @staticmethod
     def _process_identity_payload(
@@ -724,7 +1336,7 @@ class MindcraftRuntime:
 
     def _record_live_process_identity(
         self,
-        process: subprocess.Popen[str],
+        process: subprocess.Popen[bytes],
     ) -> None:
         pid = int(process.pid)
         birth_identity: str | None = None
@@ -946,13 +1558,17 @@ class MindcraftRuntime:
                 )
                 raise
             try:
+                child_output_generation = self._reset_child_runtime()
                 self._process = subprocess.Popen(
                     ["node", "main.js"],
                     cwd=str(MINDCRAFT_ROOT),
                     env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                self._start_child_output_drain(
+                    self._process,
+                    child_output_generation,
                 )
             except Exception as exc:
                 self.runtime_errors.record("mindcraft_start_failed", exc)
@@ -979,6 +1595,7 @@ class MindcraftRuntime:
         if process is not None and process.poll() is not None:
             self._last_exit_code = process.returncode
             self._process = None
+            self._clear_microsoft_auth_challenge()
 
     def _ensure_process_running(self) -> None:
         if (
@@ -1081,6 +1698,8 @@ class MindcraftRuntime:
                     self._last_exit_code = process.poll()
                     if process.poll() is None:
                         raise RuntimeError("mindcraft_stop_unverified")
+                self._retire_child_output_drain()
+                self._clear_microsoft_auth_challenge()
                 # Publish the stopped identity before dropping the only local
                 # Popen handle.  Failure leaves that handle available for a
                 # cancellation retry and causes the gateway to retain its lock.
@@ -1165,7 +1784,17 @@ class MindcraftRuntime:
         telemetry = _read_mindcraft_status()
         updated_at = telemetry.get("updated_at")
         telemetry_fresh = isinstance(updated_at, (int, float)) and time.time() - float(updated_at) <= 10
-        connected = bool(running and telemetry_fresh and telemetry.get("connected"))
+        child_runtime = self._child_runtime_snapshot()
+        microsoft_auth = self._microsoft_auth_challenge_snapshot(
+            running=running,
+            connected=telemetry.get("connected") is True,
+        )
+        connected = _stable_minecraft_connection(
+            running=running,
+            telemetry_fresh=telemetry_fresh,
+            telemetry=telemetry,
+            child_runtime=child_runtime,
+        )
         goal = self.get_goal()
         observation = {
             "runtime": "mindcraft",
@@ -1257,6 +1886,12 @@ class MindcraftRuntime:
             "telemetry_fresh": telemetry_fresh,
             "updated_at": updated_at or self._started_at or time.time(),
             "runner_exit_code": self._last_exit_code,
+            "child_runtime": child_runtime,
+            **(
+                {"microsoft_auth": microsoft_auth}
+                if microsoft_auth is not None
+                else {}
+            ),
             "world_lease_authorized": world_lease_authorized,
             "world_lease_error_code": (
                 "" if world_lease_authorized
@@ -1382,6 +2017,7 @@ class MindcraftActionGateway:
         self._active_request: dict[str, Any] | None = None
         self._active_binding: dict[str, Any] | None = None
         self._active_deadline = 0.0
+        self._active_readiness_observed = False
         self._action_lock: MinecraftOwnerLock | None = None
         self._terminal_ready_current_process = False
         self._repeat_arm_admission = False
@@ -1704,6 +2340,7 @@ class MindcraftActionGateway:
         self._active_request = None
         self._active_binding = None
         self._active_deadline = 0.0
+        self._active_readiness_observed = False
         self._repeat_arm_admission = False
 
     def _quarantine_unverified_stop(self, code: str) -> None:
@@ -1881,6 +2518,7 @@ class MindcraftActionGateway:
             self._active_request = normalized
             self._active_binding = binding
             self._active_deadline = time.monotonic() + self.timeout_sec
+            self._active_readiness_observed = False
             repeat_admission = self._terminal_ready_current_process
             self._terminal_ready_current_process = False
             self._repeat_arm_admission = repeat_admission
@@ -1937,14 +2575,22 @@ class MindcraftActionGateway:
             candidate: Any = None
             if isinstance(goal_manager, dict):
                 candidate = goal_manager.get("postcondition_candidate")
-            if candidate is None:
-                return deepcopy(self._records[request["goalRunId"]])
-            observed = self.projector.observe(candidate)
-            if isinstance(observed, dict) and observed.get("verified") is True:
-                return self._terminal_verified()
-            return self._terminal_failure(
-                str((observed or {}).get("code") or "minecraft_action_effect_rejected")
-            )
+            if candidate is not None:
+                observed = self.projector.observe(candidate)
+                if isinstance(observed, dict) and observed.get("verified") is True:
+                    return self._terminal_verified()
+                return self._terminal_failure(
+                    str((observed or {}).get("code") or "minecraft_action_effect_rejected")
+                )
+            guard_error = self.projector.active_guard_error()
+            if not guard_error:
+                self._active_readiness_observed = True
+            elif (
+                self._active_readiness_observed
+                or guard_error != "minecraft_runtime_not_ready"
+            ):
+                return self._terminal_failure(guard_error)
+            return deepcopy(self._records[request["goalRunId"]])
 
     def get_status(self, goal_run_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -2085,8 +2731,11 @@ def _effect_guarded_readiness(
         and time.time() - float(updated_at) <= 10.0
     )
     running = STATE.process_alive()
-    connected = bool(
-        running and telemetry_fresh and telemetry.get("connected") is True
+    connected = _stable_minecraft_connection(
+        running=running,
+        telemetry_fresh=telemetry_fresh,
+        telemetry=telemetry,
+        child_runtime=STATE._child_runtime_snapshot(),
     )
     readiness = _functional_readiness(
         world_lease_authorized=True,

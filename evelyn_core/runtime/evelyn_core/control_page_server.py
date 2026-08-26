@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -94,6 +97,7 @@ from .runtime_repair import (
 from .runtime_services import load_service_manifest, manifest_to_dict
 from .storage_retention_report import read_storage_retention_report
 from .voice_capture_consent import (
+    HOST_LEASE_STALE_SEC as VOICE_CAPTURE_HOST_LEASE_STALE_SEC,
     SCOPE as VOICE_CAPTURE_CONSENT_SCOPE,
     VALIDATION_BINDING_SCHEMA as VOICE_CAPTURE_VALIDATION_BINDING_SCHEMA,
     attach_voice_capture_consent,
@@ -104,6 +108,10 @@ from .voice_validation import (
     SUITE_ID,
     get_voice_validation_manager,
     resolve_discord_validation_target,
+)
+from .workspace_task_tools import (
+    WORKSPACE_EDIT_MAX_PREVIEW_BYTES,
+    WorkspaceMutationHostClient,
 )
 
 
@@ -121,7 +129,15 @@ EVELYN_INTERNAL_CONTROL_TOKEN = os.getenv(
     "EVELYN_INTERNAL_CONTROL_TOKEN",
     "",
 ).strip()
+EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN = os.getenv(
+    "EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN",
+    "",
+).strip()
 PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "6.0"))
+TASK_APPROVAL_MUTATION_TIMEOUT_SEC = min(
+    20.0,
+    max(1.0, float(os.getenv("TASK_APPROVAL_MUTATION_TIMEOUT_SEC", "20.0"))),
+)
 MEMORY_MUTATION_ADMISSION_TIMEOUT_SEC = 2.0
 MEMORY_MUTATION_ADMISSION_RETRY_SEC = 0.05
 LOCAL_HELP_COMMANDS = {"/", "/help"}
@@ -175,6 +191,7 @@ VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC = max(
     0.25,
     float(os.getenv("VOICE_CAPTURE_CONSENT_MONITOR_INTERVAL_SEC", "1.0")),
 )
+VOICE_CAPTURE_POST_ACTIVATION_TIMEOUT_SEC = 10.0
 VOICE_CAPTURE_MIC_CONTROL_ACK_SCHEMA = "local_io_bridge.mic-control-ack.v1"
 
 
@@ -383,10 +400,17 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
     query = request.query_string
     url = f"{BOT_API_BASE}{path}" + (f"?{query}" if query else "")
     timeout = ClientTimeout(total=PROXY_TIMEOUT_SEC)
+    headers = {
+        EVELYN_INTERNAL_CONTROL_HEADER: EVELYN_INTERNAL_CONTROL_TOKEN,
+    }
     try:
         async with ClientSession(timeout=timeout) as session:
             if method == "POST":
-                async with session.post(url, json=body) as response:
+                async with session.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                ) as response:
                     text = await response.text()
                     handoff_present, expected_position = (
                         proxy_memory_handoff(
@@ -404,7 +428,7 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
                         expected_position=expected_position,
                         memory_handoff_present=handoff_present,
                     )
-            async with session.get(url) as response:
+            async with session.get(url, headers=headers) as response:
                 text = await response.text()
                 handoff_present, expected_position = proxy_memory_handoff(
                     path=path,
@@ -449,6 +473,151 @@ async def proxy_raw(request: web.Request, path: str) -> web.Response | None:
                 return web.Response(status=response.status, body=body, headers=headers)
     except Exception:
         return None
+
+
+async def _voice_input_retirement_bot_post(
+    path: str,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    timeout = ClientTimeout(total=PROXY_TIMEOUT_SEC)
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{BOT_API_BASE}{path}",
+                json=payload,
+                headers={
+                    EVELYN_INTERNAL_CONTROL_HEADER: (
+                        EVELYN_INTERNAL_CONTROL_TOKEN
+                    )
+                },
+            ) as response:
+                encoded = await response.content.read(8193)
+                if len(encoded) > 8192:
+                    raise ValueError("response_too_large")
+                body = json.loads(encoded.decode("utf-8"))
+                if not isinstance(body, dict):
+                    raise ValueError("response_invalid")
+                return response.status, body
+    except Exception as exc:
+        print(
+            "[CONTROL PAGE] voice_input_retirement_bot_unavailable "
+            f"path={path} errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return 503, {
+            "ok": False,
+            "error": "voice_input_lease_retirement_unavailable",
+        }
+
+
+async def _reconcile_stopped_discord_voice_input_owner() -> dict[str, Any]:
+    status, prepared = await _voice_input_retirement_bot_post(
+        "/internal/voice-input-lease/retirement/prepare",
+        {"source": "discord_voice"},
+    )
+    required = prepared.get("required")
+    if (
+        status != 200
+        or prepared.get("ok") is not True
+        or prepared.get("schema")
+        != "voice_input_lease.retirement-claim.v1"
+        or type(required) is not bool
+    ):
+        return {
+            "ok": False,
+            "error": "voice_input_lease_retirement_unavailable",
+            "httpStatus": 503,
+        }
+    if required is False:
+        if set(prepared) != {"ok", "schema", "required"}:
+            return {
+                "ok": False,
+                "error": "voice_input_lease_retirement_unavailable",
+                "httpStatus": 503,
+            }
+        return {"ok": True, "retired": False}
+    claim_id = str(prepared.get("claimId") or "")
+    if (
+        set(prepared)
+        != {"ok", "schema", "required", "claimId", "expiresAt"}
+        or re.fullmatch(r"voice-retire-[0-9a-f]{32}", claim_id)
+        is None
+        or isinstance(prepared.get("expiresAt"), bool)
+        or not isinstance(prepared.get("expiresAt"), (int, float))
+        or not math.isfinite(float(prepared["expiresAt"]))
+        or float(prepared["expiresAt"]) <= 0.0
+    ):
+        return {
+            "ok": False,
+            "error": "voice_input_lease_retirement_unavailable",
+            "httpStatus": 503,
+        }
+    try:
+        attested = await asyncio.to_thread(
+            HostSupervisorClient(
+                attestation_auth_token=(
+                    EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN
+                )
+            ).attest_discord_stopped,
+            claim_id,
+        )
+    except Exception:
+        attested = {
+            "ok": False,
+            "error": "discord_stop_attestation_unverified",
+        }
+    if (
+        not isinstance(attested, dict)
+        or set(attested)
+        != {
+            "ok",
+            "verified",
+            "hostInstanceId",
+            "requestId",
+            "claimId",
+        }
+        or attested.get("ok") is not True
+        or attested.get("verified") is not True
+        or attested.get("claimId") != claim_id
+    ):
+        return {
+            "ok": False,
+            "error": "voice_input_lease_retirement_unverified",
+            "httpStatus": 503,
+        }
+    completion_status, completed = (
+        await _voice_input_retirement_bot_post(
+            "/internal/voice-input-lease/retirement/complete",
+            {
+                "claimId": claim_id,
+                "hostInstanceId": str(
+                    attested.get("hostInstanceId") or ""
+                ),
+                "requestId": str(
+                    attested.get("requestId") or ""
+                ),
+            },
+        )
+    )
+    if (
+        completion_status != 200
+        or completed.get("ok") is not True
+        or completed.get("schema")
+        != "voice_input_lease.retirement-result.v1"
+        or type(completed.get("retired")) is not bool
+        or type(completed.get("alreadyReleased")) is not bool
+        or set(completed)
+        != {"ok", "schema", "retired", "alreadyReleased"}
+    ):
+        return {
+            "ok": False,
+            "error": "voice_input_lease_retirement_unverified",
+            "httpStatus": 503,
+        }
+    return {
+        "ok": True,
+        "retired": completed["retired"],
+    }
 
 
 async def request_local_bridge_mic_control(
@@ -500,36 +669,68 @@ async def request_local_bridge_mic_control(
                         "enableFence": enable_fence,
                     }
                 )
-            async with session.post(
-                url,
-                json=request_payload,
-                headers=headers,
-            ) as response:
-                try:
-                    payload = await response.json(content_type=None)
-                except Exception:
-                    payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
-                payload.pop("detail", None)
-                if payload.get("error"):
-                    payload["error"] = public_error_code(
-                        payload.get("error"),
-                        fallback="mic_control_failed",
-                    )
-                local_bridge = payload.get("localBridge")
-                if isinstance(local_bridge, dict):
-                    raw_error = local_bridge.get("lastError")
-                    if raw_error:
-                        local_bridge["lastError"] = public_error_code(
-                            raw_error,
-                            fallback="local_bridge_failed",
+            async def post_control() -> dict[str, Any]:
+                async with session.post(
+                    url,
+                    json=request_payload,
+                    headers=headers,
+                ) as response:
+                    try:
+                        result = await response.json(
+                            content_type=None
                         )
-                payload.setdefault("httpStatus", response.status)
-                if response.status >= 400:
-                    payload["ok"] = False
-                    payload.setdefault("error", f"mic_control_http_{response.status}")
-                return payload
+                    except Exception:
+                        result = {}
+                    if not isinstance(result, dict):
+                        result = {}
+                    result.pop("detail", None)
+                    if result.get("error"):
+                        result["error"] = public_error_code(
+                            result.get("error"),
+                            fallback="mic_control_failed",
+                        )
+                    local_bridge = result.get("localBridge")
+                    if isinstance(local_bridge, dict):
+                        raw_error = local_bridge.get("lastError")
+                        if raw_error:
+                            local_bridge["lastError"] = (
+                                public_error_code(
+                                    raw_error,
+                                    fallback="local_bridge_failed",
+                                )
+                            )
+                    result.setdefault("httpStatus", response.status)
+                    if response.status >= 400:
+                        result["ok"] = False
+                        result.setdefault(
+                            "error",
+                            f"mic_control_http_{response.status}",
+                        )
+                    return result
+
+            result = await post_control()
+            if (
+                enabled
+                and result.get("error")
+                == "voice_input_lease_conflict"
+            ):
+                retirement = (
+                    await _reconcile_stopped_discord_voice_input_owner()
+                )
+                if retirement.get("ok") is True:
+                    return await post_control()
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": str(
+                        retirement.get("error")
+                        or "voice_input_lease_retirement_unverified"
+                    ),
+                    "httpStatus": int(
+                        retirement.get("httpStatus") or 503
+                    ),
+                }
+            return result
     except Exception as exc:
         print(
             "[CONTROL PAGE] mic_control_proxy_failed "
@@ -1390,6 +1591,24 @@ async def discord_mode_apply_handler(request: web.Request) -> web.StreamResponse
             {"ok": False, "enabled": enabled, "error": error},
             status=status,
         )
+    if not enabled:
+        retirement = await _reconcile_stopped_discord_voice_input_owner()
+        if retirement.get("ok") is not True:
+            CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
+            return json_response(
+                {
+                    "schema": "discord_mode.transition.v1",
+                    "ok": False,
+                    "enabled": False,
+                    "state": "stopped_unreconciled",
+                    "error": str(
+                        retirement.get("error")
+                        or "voice_input_lease_retirement_unverified"
+                    ),
+                    "automaticRetry": False,
+                },
+                status=int(retirement.get("httpStatus") or 503),
+            )
     CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
     return json_response(
         {
@@ -1551,7 +1770,7 @@ def _voice_capture_mic_disabled_ack(control: Any) -> bool:
     return _voice_capture_mic_control_ack(control, enabled=False)
 
 
-async def _await_voice_capture_task(task: asyncio.Task[Any]) -> Any:
+async def _await_shielded_task(task: asyncio.Task[Any]) -> Any:
     cancellation: asyncio.CancelledError | None = None
     while not task.done():
         try:
@@ -1573,7 +1792,7 @@ async def _run_voice_capture_manager_call(
     **kwargs: Any,
 ) -> Any:
     task = asyncio.create_task(asyncio.to_thread(callback, *args, **kwargs))
-    return await _await_voice_capture_task(task)
+    return await _await_shielded_task(task)
 
 
 async def _publish_voice_capture_host_lease(manager: Any) -> dict[str, Any]:
@@ -1769,14 +1988,41 @@ async def _reconcile_voice_capture_consent_locked(
     app: web.Application,
     *,
     validation_session: dict[str, Any] | None = None,
+    capabilities: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manager = get_voice_capture_consent_manager()
     if validation_session is None:
         validation_session = get_voice_validation_manager().snapshot()
+    consent = manager.status()
     reason = manager.revocation_reason(
         validation_session=validation_session,
         include_interrupted_enabling=True,
     )
+    local = (
+        capabilities.get("voiceLocal")
+        if isinstance(capabilities, dict)
+        else None
+    )
+    blocker_codes = {
+        str(item.get("code") or "")
+        for item in (local.get("blockers") or [])
+        if isinstance(item, dict)
+    } if isinstance(local, dict) else set()
+    activated_at = consent.get("activatedAt")
+    active_long_enough = bool(
+        isinstance(activated_at, (int, float))
+        and not isinstance(activated_at, bool)
+        and time.time() - float(activated_at)
+        >= VOICE_CAPTURE_HOST_LEASE_STALE_SEC
+    )
+    if (
+        not reason
+        and consent.get("state") == "active"
+        and active_long_enough
+        and blocker_codes
+        & {"local_mic_disabled", "local_mic_capture_not_ready"}
+    ):
+        reason = "voice_capture_runtime_stopped"
     if reason:
         return await _revoke_voice_capture_consent_locked(app, reason=reason)
     return {"ok": True, "consent": manager.status(), "controlApplied": False}
@@ -1869,7 +2115,7 @@ async def _voice_capture_consent_context(app: web.Application):
             ),
             name="voice-capture-consent-shutdown-cleanup",
         )
-        await _await_voice_capture_task(cleanup_task)
+        await _await_shielded_task(cleanup_task)
 
 
 async def _voice_capture_owner_context(_: web.Application):
@@ -2037,8 +2283,13 @@ async def voice_capture_consent_apply_handler(
                     status=503,
                 )
 
+            phase = "active_lease_projection"
+            await _publish_voice_capture_host_lease(manager)
             phase = "post_activation"
-            health = await cached_runtime_health(force=True)
+            health = await asyncio.wait_for(
+                cached_runtime_health(force=True),
+                timeout=VOICE_CAPTURE_POST_ACTIVATION_TIMEOUT_SEC,
+            )
             capabilities = _voice_capabilities_with_capture_consent(health)
             validation_manager = get_voice_validation_manager()
             validation = validation_manager.snapshot(capabilities=capabilities)
@@ -2065,6 +2316,7 @@ async def voice_capture_consent_apply_handler(
                 )
                 if not bound.get("ok"):
                     raise RuntimeError("voice_capture_validation_bind_failed")
+                await _publish_voice_capture_host_lease(manager)
                 validation = validation_manager.snapshot(capabilities=capabilities)
                 if not (
                     validation.get("state") == "running"
@@ -2093,7 +2345,7 @@ async def voice_capture_consent_apply_handler(
                 name="voice-capture-consent-cancel-cleanup",
             )
             try:
-                await _await_voice_capture_task(cleanup_task)
+                await _await_shielded_task(cleanup_task)
             except Exception as cleanup_exc:
                 print(
                     "[CONTROL PAGE] voice_consent_cancel_cleanup_failed "
@@ -2163,6 +2415,11 @@ async def voice_validation_handler(request: web.Request) -> web.StreamResponse:
         cleanup = await _reconcile_voice_capture_consent_locked(
             request.app,
             validation_session=session,
+            capabilities=(
+                health.get("capabilities")
+                if isinstance(health, dict)
+                else None
+            ),
         )
         session["capabilities"] = _voice_capabilities_with_capture_consent(health)
         if not cleanup.get("ok"):
@@ -2269,6 +2526,8 @@ async def voice_validation_start_handler(request: web.Request) -> web.StreamResp
                         manager.bind_validation_session,
                         str(session.get("sessionId") or ""),
                     )
+                    if bound.get("ok"):
+                        await _publish_voice_capture_host_lease(manager)
                 except Exception:
                     bound = {
                         "ok": False,
@@ -2703,6 +2962,546 @@ async def autonomy_validation_abort_handler(
         )
     result = get_autonomy_validation_manager().abort(session_id=session_id)
     return json_response(result, status=200 if result.get("ok") else 409)
+
+
+_TASK_APPROVAL_IDENTIFIER = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z"
+)
+_TASK_APPROVAL_SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+_TASK_APPROVAL_CONFIRM_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+_TASK_APPROVAL_HTTP_MAX_BYTES = 8192
+# ``web.json_response`` may expand one UTF-8 input byte to as many as six
+# JSON bytes (for example a control character becomes ``\u00xx``). Keep the
+# transport bounded while still carrying every Host-accepted full diff.
+_TASK_APPROVAL_BOT_RESPONSE_MAX_BYTES = 8 * WORKSPACE_EDIT_MAX_PREVIEW_BYTES
+_TASK_APPROVAL_PREVIEW_RESPONSE_KEYS = frozenset(
+    {
+        "ok",
+        "schema",
+        "preview",
+        "confirmToken",
+        "confirmExpiresAt",
+    }
+)
+_TASK_APPROVAL_PREVIEW_KEYS = frozenset(
+    {
+        "schema",
+        "taskId",
+        "approvalId",
+        "step",
+        "maxSteps",
+        "tool",
+        "effect",
+        "path",
+        "mode",
+        "baseSha256",
+        "candidateSha256",
+        "diffSha256",
+        "previewDigest",
+        "fullDiff",
+        "diffTruncated",
+        "dirtyStatus",
+        "gitStatus",
+        "tracked",
+        "dirtyBaseAcknowledgementRequired",
+        "bytes",
+        "requiresExplicitConfirmation",
+        "automaticRetry",
+    }
+)
+_TASK_APPROVAL_DIRTY_STATES = frozenset(
+    {"modified", "staged", "modified_and_staged", "untracked", "deleted"}
+)
+
+
+def _task_approval_identifier(value: Any) -> str:
+    normalized = str(value or "")
+    return normalized if _TASK_APPROVAL_IDENTIFIER.fullmatch(normalized) else ""
+
+
+def _task_approval_public_preview_response(
+    value: Any,
+    *,
+    task_id: str,
+    approval_id: str,
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != _TASK_APPROVAL_PREVIEW_RESPONSE_KEYS
+        or value.get("ok") is not True
+        or value.get("schema") != "task_approval.preview-response.v1"
+    ):
+        return None
+    preview = value.get("preview")
+    if not isinstance(preview, dict) or set(preview) != _TASK_APPROVAL_PREVIEW_KEYS:
+        return None
+    full_diff = preview.get("fullDiff")
+    base_sha = str(preview.get("baseSha256") or "")
+    candidate_sha = str(preview.get("candidateSha256") or "")
+    diff_sha = str(preview.get("diffSha256") or "")
+    preview_digest = str(preview.get("previewDigest") or "")
+    dirty_status = str(preview.get("dirtyStatus") or "")
+    dirty_required = preview.get("dirtyBaseAcknowledgementRequired")
+    git_status = preview.get("gitStatus")
+    path = preview.get("path")
+    confirm_token = value.get("confirmToken")
+    try:
+        step = int(preview.get("step"))
+        max_steps = int(preview.get("maxSteps"))
+        byte_count = int(preview.get("bytes"))
+        confirm_expires_at = float(value.get("confirmExpiresAt"))
+        full_diff_bytes = (
+            full_diff.encode("utf-8") if isinstance(full_diff, str) else b""
+        )
+        git_status_bytes = (
+            git_status.encode("utf-8") if isinstance(git_status, str) else b""
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    dirty_values = _TASK_APPROVAL_DIRTY_STATES | {"clean", "absent"}
+    if (
+        preview.get("schema") != "task_approval.preview.v1"
+        or preview.get("taskId") != task_id
+        or preview.get("approvalId") != approval_id
+        or preview.get("tool") != "workspace_edit"
+        or preview.get("mode") not in {"create", "replace"}
+        or type(preview.get("step")) is not int
+        or type(preview.get("maxSteps")) is not int
+        or not 1 <= step <= max_steps <= 10
+        or not isinstance(path, str)
+        or not path
+        or len(path) > 512
+        or "\x00" in path
+        or not (base_sha == "ABSENT" or _TASK_APPROVAL_SHA256.fullmatch(base_sha))
+        or _TASK_APPROVAL_SHA256.fullmatch(candidate_sha) is None
+        or _TASK_APPROVAL_SHA256.fullmatch(diff_sha) is None
+        or _TASK_APPROVAL_SHA256.fullmatch(preview_digest) is None
+        or not isinstance(full_diff, str)
+        or not full_diff
+        or len(full_diff_bytes) > WORKSPACE_EDIT_MAX_PREVIEW_BYTES
+        or hashlib.sha256(full_diff_bytes).hexdigest() != diff_sha
+        or preview.get("diffTruncated") is not False
+        or dirty_status not in dirty_values
+        or type(preview.get("tracked")) is not bool
+        or type(dirty_required) is not bool
+        or (dirty_status in _TASK_APPROVAL_DIRTY_STATES) is not dirty_required
+        or not isinstance(git_status, str)
+        or len(git_status_bytes) > 4096
+        or "\r" in git_status
+        or "\n" in git_status
+        or type(preview.get("bytes")) is not int
+        or byte_count < 0
+        or preview.get("requiresExplicitConfirmation") is not True
+        or preview.get("automaticRetry") is not False
+        or not isinstance(confirm_token, str)
+        or _TASK_APPROVAL_CONFIRM_TOKEN.fullmatch(confirm_token) is None
+        or type(value.get("confirmExpiresAt")) not in {int, float}
+        or not math.isfinite(confirm_expires_at)
+        or not 0.0 < confirm_expires_at <= 8.64e12
+    ):
+        return None
+    if preview["mode"] == "create":
+        if base_sha != "ABSENT" or dirty_status != "absent" or preview["tracked"]:
+            return None
+    elif base_sha == "ABSENT" or dirty_status in {"absent", "deleted"}:
+        return None
+    return {
+        "ok": True,
+        "schema": "task_approval.preview-response.v1",
+        "preview": {
+            "schema": "task_approval.preview.v1",
+            "taskId": task_id,
+            "approvalId": approval_id,
+            "step": step,
+            "maxSteps": max_steps,
+            "tool": "workspace_edit",
+            "effect": "UTF-8 파일 1개 생성 또는 교체",
+            "path": path,
+            "mode": preview["mode"],
+            "baseSha256": base_sha,
+            "candidateSha256": candidate_sha,
+            "diffSha256": diff_sha,
+            "previewDigest": preview_digest,
+            "fullDiff": full_diff,
+            "diffTruncated": False,
+            "dirtyStatus": dirty_status,
+            "gitStatus": git_status,
+            "tracked": preview["tracked"],
+            "dirtyBaseAcknowledgementRequired": dirty_required,
+            "bytes": byte_count,
+            "requiresExplicitConfirmation": True,
+            "automaticRetry": False,
+        },
+        "confirmToken": confirm_token,
+        "confirmExpiresAt": confirm_expires_at,
+    }
+
+
+async def _task_approval_json(
+    request: web.Request,
+    *,
+    exact_fields: frozenset[str],
+) -> tuple[dict[str, Any] | None, web.Response | None]:
+    if (
+        request.content_length is not None
+        and request.content_length > _TASK_APPROVAL_HTTP_MAX_BYTES
+    ):
+        return None, json_response(
+            {"ok": False, "error": "task_approval_request_too_large"},
+            status=413,
+        )
+    try:
+        encoded = await request.read()
+        if len(encoded) > _TASK_APPROVAL_HTTP_MAX_BYTES:
+            raise ValueError("payload_too_large")
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return None, json_response(
+            {"ok": False, "error": "task_approval_request_invalid"},
+            status=400,
+        )
+    if not isinstance(payload, dict) or set(payload) != set(exact_fields):
+        return None, json_response(
+            {"ok": False, "error": "task_approval_request_invalid"},
+            status=400,
+        )
+    if not _task_approval_identifier(payload.get("taskId")) or not (
+        _task_approval_identifier(payload.get("approvalId"))
+    ):
+        return None, json_response(
+            {"ok": False, "error": "task_approval_request_invalid"},
+            status=400,
+        )
+    return payload, None
+
+
+async def _task_approval_bot_post(
+    path: str,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    timeout = ClientTimeout(total=PROXY_TIMEOUT_SEC)
+    headers = {
+        EVELYN_INTERNAL_CONTROL_HEADER: EVELYN_INTERNAL_CONTROL_TOKEN,
+    }
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{BOT_API_BASE}{path}",
+                json=payload,
+                headers=headers,
+            ) as response:
+                if (
+                    response.content_length is not None
+                    and response.content_length
+                    > _TASK_APPROVAL_BOT_RESPONSE_MAX_BYTES
+                ):
+                    return 502, {
+                        "ok": False,
+                        "error": "task_approval_bot_response_invalid",
+                    }
+                encoded = await response.content.read(
+                    _TASK_APPROVAL_BOT_RESPONSE_MAX_BYTES + 1
+                )
+                if len(encoded) > _TASK_APPROVAL_BOT_RESPONSE_MAX_BYTES:
+                    return 502, {
+                        "ok": False,
+                        "error": "task_approval_bot_response_invalid",
+                    }
+                try:
+                    body = json.loads(encoded.decode("utf-8"))
+                except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                    body = None
+                if not isinstance(body, dict):
+                    return 502, {
+                        "ok": False,
+                        "error": "task_approval_bot_response_invalid",
+                    }
+                return response.status, body
+    except Exception as exc:
+        print(
+            "[CONTROL PAGE] task_approval_bot_unavailable "
+            f"path={path} errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return 503, {
+            "ok": False,
+            "error": "task_approval_bot_unavailable",
+        }
+
+
+def _task_approval_public_error(
+    status: int,
+    payload: dict[str, Any],
+) -> web.Response:
+    allowed = {
+        "task_approval_not_found",
+        "task_approval_preview_denied",
+        "task_approval_claim_denied",
+        "task_approval_cancel_denied",
+        "task_approval_bot_unavailable",
+        "task_approval_bot_response_invalid",
+    }
+    error = str(payload.get("error") or "")
+    return json_response(
+        {
+            "ok": False,
+            "error": error if error in allowed else "task_approval_denied",
+            "automaticRetry": False,
+        },
+        status=status if 400 <= status <= 599 else 409,
+    )
+
+
+async def task_approval_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _task_approval_json(
+        request,
+        exact_fields=frozenset({"taskId", "approvalId"}),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    status, result = await _task_approval_bot_post(
+        "/internal/task-approval/preview",
+        payload,
+    )
+    if status != 200 or result.get("ok") is not True:
+        return _task_approval_public_error(status, result)
+    public_result = _task_approval_public_preview_response(
+        result,
+        task_id=payload["taskId"],
+        approval_id=payload["approvalId"],
+    )
+    if public_result is None:
+        return _task_approval_public_error(
+            502,
+            {
+                "ok": False,
+                "error": "task_approval_bot_response_invalid",
+            },
+        )
+    return json_response(public_result)
+
+
+async def task_approval_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _task_approval_json(
+        request,
+        exact_fields=frozenset(
+            {
+                "taskId",
+                "approvalId",
+                "confirmToken",
+                "userConfirmed",
+                "dirtyBaseAcknowledged",
+            }
+        ),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    if (
+        payload.get("userConfirmed") is not True
+        or type(payload.get("dirtyBaseAcknowledged")) is not bool
+        or not isinstance(payload.get("confirmToken"), str)
+        or not 32 <= len(payload["confirmToken"]) <= 256
+    ):
+        return json_response(
+            {"ok": False, "error": "task_approval_explicit_confirmation_required"},
+            status=400,
+        )
+    status, claimed = await _task_approval_bot_post(
+        "/internal/task-approval/claim",
+        payload,
+    )
+    if status != 200 or claimed.get("ok") is not True:
+        return _task_approval_public_error(status, claimed)
+    claim = claimed.get("claim")
+    grant_expires_at = claim.get("grantExpiresAt") if isinstance(claim, dict) else None
+    if (
+        not isinstance(claim, dict)
+        or type(grant_expires_at) not in {int, float}
+        or not math.isfinite(float(grant_expires_at))
+        or float(grant_expires_at) <= 0.0
+    ):
+        return json_response(
+            {
+                "ok": False,
+                "error": "task_approval_claim_response_invalid",
+                "automaticRetry": False,
+            },
+            status=503,
+        )
+    async def complete_claim() -> tuple[int, dict[str, Any]]:
+        if time.time() >= float(grant_expires_at):
+            mutation_result = {
+                "attempted": False,
+                "executed": False,
+                "observed": True,
+                "verified": True,
+                "outcome": "blocked",
+                "code": "task_grant_expired",
+                "summary": "Task grant expired before workspace mutation dispatch.",
+                "evidence": {},
+            }
+        else:
+            try:
+                mutation_client = WorkspaceMutationHostClient(
+                    timeout_sec=TASK_APPROVAL_MUTATION_TIMEOUT_SEC,
+                    auth_token=EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN,
+                )
+                mutation_result = await asyncio.to_thread(
+                    mutation_client.apply,
+                    claim,
+                )
+            except Exception:
+                mutation_result = {
+                    "attempted": True,
+                    "executed": False,
+                    "observed": False,
+                    "verified": False,
+                    "outcome": "outcome_unverified",
+                    "code": "workspace_edit_apply_outcome_unverified",
+                    "summary": "Workspace edit outcome is unverified.",
+                    "evidence": {},
+                }
+        return await _task_approval_bot_post(
+            "/internal/task-approval/complete",
+            {
+                "taskId": payload["taskId"],
+                "approvalId": payload["approvalId"],
+                "claimId": str(claim.get("claimId") or ""),
+                "result": mutation_result,
+            },
+        )
+
+    lifecycle = asyncio.create_task(
+        complete_claim(),
+        name="task-approval-apply-completion",
+    )
+    completion_status, completion = await _await_shielded_task(lifecycle)
+    if completion_status != 200 or completion.get("ok") is not True:
+        return json_response(
+            {
+                "ok": False,
+                "error": "task_approval_completion_uncertain",
+                "automaticRetry": False,
+            },
+            status=503,
+        )
+    return json_response(
+        {
+            "ok": True,
+            "schema": "task_approval.apply-accepted.v1",
+            "state": "resuming",
+            "taskId": payload["taskId"],
+            "approvalId": payload["approvalId"],
+            "automaticRetry": False,
+        },
+        status=202,
+    )
+
+
+async def task_approval_cancel_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    payload, error_response = await _task_approval_json(
+        request,
+        exact_fields=frozenset({"taskId", "approvalId"}),
+    )
+    if error_response is not None:
+        return error_response
+    assert payload is not None
+    status, cancelled = await _task_approval_bot_post(
+        "/internal/task-approval/cancel",
+        payload,
+    )
+    if status != 200 or cancelled.get("ok") is not True:
+        return _task_approval_public_error(status, cancelled)
+    claim = cancelled.get("claim")
+    if not isinstance(claim, dict):
+        return json_response(
+            {
+                "ok": False,
+                "error": "task_approval_cancel_response_invalid",
+                "automaticRetry": False,
+            },
+            status=503,
+        )
+    async def complete_cancel_claim() -> tuple[dict[str, Any], int, dict[str, Any]]:
+        try:
+            mutation_client = WorkspaceMutationHostClient(
+                timeout_sec=TASK_APPROVAL_MUTATION_TIMEOUT_SEC,
+                auth_token=EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN,
+            )
+            mutation_result = await asyncio.to_thread(
+                mutation_client.cancel,
+                claim,
+            )
+        except Exception:
+            mutation_result = {
+                "attempted": True,
+                "executed": False,
+                "observed": False,
+                "verified": False,
+                "outcome": "outcome_unverified",
+                "code": "workspace_edit_cancel_outcome_unverified",
+                "summary": "Workspace edit cancellation outcome is unverified.",
+                "evidence": {},
+            }
+        completion_status, completion = await _task_approval_bot_post(
+            "/internal/task-approval/cancel-complete",
+            {
+                "taskId": payload["taskId"],
+                "approvalId": payload["approvalId"],
+                "claimId": str(claim.get("claimId") or ""),
+                "result": mutation_result,
+            },
+        )
+        return mutation_result, completion_status, completion
+
+    lifecycle = asyncio.create_task(
+        complete_cancel_claim(),
+        name="task-approval-cancel-completion",
+    )
+    mutation_result, completion_status, completion = await _await_shielded_task(
+        lifecycle
+    )
+    if completion_status != 200 or completion.get("ok") is not True:
+        return json_response(
+            {
+                "ok": False,
+                "error": "task_approval_cancel_completion_uncertain",
+                "automaticRetry": False,
+            },
+            status=503,
+        )
+    if (
+        mutation_result.get("verified") is not True
+        or mutation_result.get("outcome") != "succeeded"
+        or mutation_result.get("code") != "workspace_edit_stage_cancelled"
+        or completion.get("state") != "cancelled"
+    ):
+        return json_response(
+            {
+                "ok": False,
+                "error": "task_approval_cancel_outcome_unverified",
+                "automaticRetry": False,
+            },
+            status=503,
+        )
+    return json_response(
+        {
+            "ok": True,
+            "schema": "task_approval.cancelled.v1",
+            "state": "cancelled",
+            "taskId": payload["taskId"],
+            "approvalId": payload["approvalId"],
+            "automaticRetry": False,
+        }
+    )
 
 
 async def ui_action_status_handler(
@@ -3626,6 +4425,18 @@ def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
         "/api/control-page/autonomy-validation/abort",
         autonomy_validation_abort_handler,
     )
+    app.router.add_post(
+        "/api/control-page/task-approval/preview",
+        task_approval_preview_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/task-approval/apply",
+        task_approval_apply_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/task-approval/cancel",
+        task_approval_cancel_handler,
+    )
     app.router.add_get(
         "/api/control-page/ui-action",
         ui_action_status_handler,
@@ -3843,6 +4654,18 @@ def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
     app.router.add_options(
         "/api/control-page/autonomy-validation/abort",
         autonomy_validation_abort_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/task-approval/preview",
+        task_approval_preview_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/task-approval/apply",
+        task_approval_apply_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/task-approval/cancel",
+        task_approval_cancel_handler,
     )
     app.router.add_options(
         "/api/control-page/ui-action/targets",

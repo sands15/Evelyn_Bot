@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
+from .voice_ingress_runtime import advance_voice_ingress_epoch
+
 
 AUTONOMY_COGNITIVE_REFRESH_INFLIGHT = "autonomy_cognitive_refresh_inflight"
 AUTONOMY_RUNTIME_ACTIVE = "autonomy_runtime_active"
+MEMORY_BACKGROUND_WORK_INFLIGHT = "memory_background_work_inflight"
+SEARCH_BACKGROUND_WORK_INFLIGHT = "search_background_work_inflight"
 
 
 @dataclass(frozen=True)
@@ -25,17 +29,22 @@ class GuildRuntimeResetDeps:
     room_last_voice_utterance_for_merge: MutableMapping[str, Any]
     session_partial_stt_text: MutableMapping[str, Any]
     session_committed_stt_text: MutableMapping[str, Any]
+    partial_stt_cache: MutableMapping[str, Any]
+    session_speculative_policies: MutableMapping[str, Any]
     session_bad_audio_counts: MutableMapping[str, Any]
     room_owner_user_ids: MutableMapping[str, Any]
     room_owner_until: MutableMapping[str, Any]
     room_reply_in_progress: MutableMapping[str, Any]
     room_last_voice_reply_at: MutableMapping[str, Any]
+    voice_ingress_epochs: MutableMapping[int, int]
     turn_scope_registry: Any
     session_locks: MutableMapping[str, Any]
     background_search_tasks: MutableMapping[str, Any]
     clear_tts_playback_tracking: Callable[..., Any]
     tts_playback_tracker: Any
     memory_locks: MutableMapping[int, Any]
+    background_memory_tasks: MutableMapping[str, Any]
+    background_memory_vault_tasks: MutableMapping[int, Any]
     cognitive_locks: MutableMapping[int, Any]
     background_cognitive_tasks: MutableMapping[str, Any]
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
@@ -60,17 +69,22 @@ def build_guild_runtime_reset_deps(
     room_last_voice_utterance_for_merge: MutableMapping[str, Any],
     session_partial_stt_text: MutableMapping[str, Any],
     session_committed_stt_text: MutableMapping[str, Any],
+    partial_stt_cache: MutableMapping[str, Any],
+    session_speculative_policies: MutableMapping[str, Any],
     session_bad_audio_counts: MutableMapping[str, Any],
     room_owner_user_ids: MutableMapping[str, Any],
     room_owner_until: MutableMapping[str, Any],
     room_reply_in_progress: MutableMapping[str, Any],
     room_last_voice_reply_at: MutableMapping[str, Any],
+    voice_ingress_epochs: MutableMapping[int, int],
     turn_scope_registry: Any,
     session_locks: MutableMapping[str, Any],
     background_search_tasks: MutableMapping[str, Any],
     clear_tts_playback_tracking: Callable[..., Any],
     tts_playback_tracker: Any,
     memory_locks: MutableMapping[int, Any],
+    background_memory_tasks: MutableMapping[str, Any],
+    background_memory_vault_tasks: MutableMapping[int, Any],
     cognitive_locks: MutableMapping[int, Any],
     background_cognitive_tasks: MutableMapping[str, Any],
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any],
@@ -93,17 +107,22 @@ def build_guild_runtime_reset_deps(
         room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
+        partial_stt_cache=partial_stt_cache,
+        session_speculative_policies=session_speculative_policies,
         session_bad_audio_counts=session_bad_audio_counts,
         room_owner_user_ids=room_owner_user_ids,
         room_owner_until=room_owner_until,
         room_reply_in_progress=room_reply_in_progress,
         room_last_voice_reply_at=room_last_voice_reply_at,
+        voice_ingress_epochs=voice_ingress_epochs,
         turn_scope_registry=turn_scope_registry,
         session_locks=session_locks,
         background_search_tasks=background_search_tasks,
         clear_tts_playback_tracking=clear_tts_playback_tracking,
         tts_playback_tracker=tts_playback_tracker,
         memory_locks=memory_locks,
+        background_memory_tasks=background_memory_tasks,
+        background_memory_vault_tasks=background_memory_vault_tasks,
         cognitive_locks=cognitive_locks,
         background_cognitive_tasks=background_cognitive_tasks,
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
@@ -121,6 +140,13 @@ def _has_prefix(value: Any, prefix: str) -> bool:
     return isinstance(value, str) and value.startswith(prefix)
 
 
+def _task_is_done(task: Any) -> bool:
+    try:
+        return task is None or task.done()
+    except Exception:
+        return False
+
+
 def _drop_prefixed(mapping: MutableMapping[str, Any], prefix: str) -> None:
     for key in [key for key in mapping if _has_prefix(key, prefix)]:
         mapping.pop(key, None)
@@ -131,16 +157,13 @@ def require_guild_runtime_reset_ready(
     *,
     deps: GuildRuntimeResetDeps,
 ) -> None:
+    prefix = f"guild:{guild_id}:"
     engine = deps.autonomy_engines.get(guild_id)
     if engine is not None:
         task = getattr(engine, "_task", None)
         state = getattr(engine, "state", None)
-        try:
-            task_done = task is None or task.done()
-        except Exception:
-            task_done = False
         if (
-            not task_done
+            not _task_is_done(task)
             or state is None
             or bool(getattr(state, "enabled", False))
             or str(getattr(state, "status", ""))
@@ -148,16 +171,26 @@ def require_guild_runtime_reset_ready(
         ):
             raise RuntimeError(AUTONOMY_RUNTIME_ACTIVE)
     refresh_task = deps.autonomy_cognitive_refresh_tasks.get(guild_id)
-    try:
-        refresh_done = refresh_task is None or refresh_task.done()
-    except Exception:
-        refresh_done = False
-    if not refresh_done:
+    if not _task_is_done(refresh_task):
         raise RuntimeError(AUTONOMY_COGNITIVE_REFRESH_INFLIGHT)
+    if any(
+        _has_prefix(key, prefix) and not _task_is_done(task)
+        for key, task in deps.background_search_tasks.items()
+    ):
+        raise RuntimeError(SEARCH_BACKGROUND_WORK_INFLIGHT)
+    if any(
+        _has_prefix(key, prefix) and not _task_is_done(task)
+        for key, task in deps.background_memory_tasks.items()
+    ) or any(
+        not _task_is_done(task)
+        for task in deps.background_memory_vault_tasks.values()
+    ):
+        raise RuntimeError(MEMORY_BACKGROUND_WORK_INFLIGHT)
 
 
 def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeResetDeps) -> None:
     require_guild_runtime_reset_ready(guild_id, deps=deps)
+    advance_voice_ingress_epoch(deps.voice_ingress_epochs, guild_id)
     engine = deps.autonomy_engines.get(guild_id)
     if engine is not None:
         state = engine.state
@@ -192,6 +225,8 @@ def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeR
         deps.session_last_stt_text,
         deps.session_partial_stt_text,
         deps.session_committed_stt_text,
+        deps.partial_stt_cache,
+        deps.session_speculative_policies,
         deps.session_bad_audio_counts,
     ):
         _drop_prefixed(mapping, prefix)
@@ -218,6 +253,8 @@ def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeR
         guild_id=guild_id,
     )
     deps.memory_locks.pop(guild_id, None)
+    _drop_prefixed(deps.background_memory_tasks, prefix)
+    deps.background_memory_vault_tasks.pop(guild_id, None)
     deps.cognitive_locks.pop(guild_id, None)
     for key, task in list(deps.background_cognitive_tasks.items()):
         if _has_prefix(key, prefix):

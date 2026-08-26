@@ -57,9 +57,8 @@ def finalize_voice_transcript_from_runtime(
     validation_bound = bool(meta.get("validation_attempt_id"))
 
     def log_text(value: Any) -> Any:
-        if not validation_bound:
-            return value
-        return f"<validation-text chars={len(str(value or ''))}>"
+        label = "validation-text" if validation_bound else "transcript"
+        return f"<{label} chars={len(str(value or ''))}>"
 
     final_transcript = deps.build_final_transcript_flow(
         text=text,

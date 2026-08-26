@@ -116,6 +116,7 @@ class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_privilege_looking_header_is_not_forwarded_and_source_is_forced(
         self,
     ) -> None:
+        server_token = "server-controlled-internal-token-000000000000"
         received: list[dict[str, object]] = []
 
         async def bot_chat(request: web.Request) -> web.Response:
@@ -124,6 +125,9 @@ class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     "body": await request.json(),
                     "admissionHeader": request.headers.get(
                         "X-Evelyn-Local-Voice-Admission"
+                    ),
+                    "internalHeader": request.headers.get(
+                        control_page_server.EVELYN_INTERNAL_CONTROL_HEADER
                     ),
                 }
             )
@@ -147,12 +151,19 @@ class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 control_page_server,
                 "BOT_API_BASE",
                 f"http://127.0.0.1:{backend_port}",
+            ), patch.object(
+                control_page_server,
+                "EVELYN_INTERNAL_CONTROL_TOKEN",
+                server_token,
             ):
                 response = await client.post(
                     "/api/control-page/chat",
                     headers=self._headers(
                         **{
-                            "X-Evelyn-Local-Voice-Admission": "browser-forged-token"
+                            "X-Evelyn-Local-Voice-Admission": "browser-forged-token",
+                            control_page_server.EVELYN_INTERNAL_CONTROL_HEADER: (
+                                "browser-forged-internal-token"
+                            ),
                         }
                     ),
                     json={"text": "일반 브라우저 요청"},
@@ -170,6 +181,7 @@ class ControlPageChatSourceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             {"text": "일반 브라우저 요청", "source": "control_page"},
         )
         self.assertIsNone(received[0]["admissionHeader"])
+        self.assertEqual(received[0]["internalHeader"], server_token)
 
 
 if __name__ == "__main__":

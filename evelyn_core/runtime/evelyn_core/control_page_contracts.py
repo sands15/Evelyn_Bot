@@ -101,6 +101,8 @@ def build_fast_control_default_commands() -> list[dict[str, str]]:
     return [
         {"command": "/help", "template": "/help", "summary": "사용 가능한 명령 보기", "visibility": "always", "group": "기본"},
         {"command": "/status", "template": "/status", "summary": "이블린 핵심 서비스 상태 보기", "visibility": "always", "group": "기본"},
+        {"command": "/작업 <목표>", "template": "/작업 ", "summary": "단계별 실행·검증 작업 시작", "visibility": "always", "group": "작업"},
+        {"command": "/작업취소 <task-id>", "template": "/작업취소 ", "summary": "실행 중인 정확한 작업 중단", "visibility": "always", "group": "작업"},
         {"command": "/remember <fact>", "template": "/remember ", "summary": "현재 요청을 근거로 새 기억 저장", "visibility": "always", "group": "기억"},
         {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
         {"command": "/obsidian", "template": "/obsidian", "summary": "Obsidian 메모리 저장소 열기", "visibility": "always", "group": "페이지"},

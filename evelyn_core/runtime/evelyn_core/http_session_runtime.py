@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 
@@ -21,6 +22,15 @@ class HttpSessionProvider:
             client_session_factory=self._client_session_factory,
         )
         return self._session
+
+    async def close(self) -> None:
+        session = self._session
+        self._session = None
+        if session is None or getattr(session, "closed", False):
+            return
+        result = session.close()
+        if inspect.isawaitable(result):
+            await result
 
 
 def ensure_http_session_from_runtime(

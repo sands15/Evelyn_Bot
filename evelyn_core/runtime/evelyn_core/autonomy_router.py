@@ -20,11 +20,11 @@ class DefaultAutonomyExecutor:
         self,
         *,
         observe_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
-        send_followup_fn: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        send_followup_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         summarize_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         check_status_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         summarize_recent_context_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
-        maybe_ping_user_fn: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        maybe_ping_user_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         refresh_cognitive_state_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.observe_fn = observe_fn
@@ -63,6 +63,22 @@ class DefaultAutonomyExecutor:
             "verified": False,
         }
 
+    @staticmethod
+    async def _call_delivery_callback(
+        callback: Callable[..., Awaitable[dict[str, Any]]],
+        text: str,
+        *,
+        context: AutonomyExecutionContext | None,
+    ) -> dict[str, Any]:
+        try:
+            inspect.signature(callback).bind(
+                text,
+                context=context,
+            )
+        except (TypeError, ValueError):
+            return await callback(text)
+        return await callback(text, context=context)
+
     async def connect(self) -> None:
         return None
 
@@ -93,7 +109,11 @@ class DefaultAutonomyExecutor:
         if action == "send_followup":
             text = clean_text(str(step.get("text", "")))
             if self.send_followup_fn is not None and text:
-                result = await self.send_followup_fn(text)
+                result = await self._call_delivery_callback(
+                    self.send_followup_fn,
+                    text,
+                    context=context,
+                )
                 if isinstance(result, dict):
                     return self._finalize_callback_result(
                         result,
@@ -139,7 +159,11 @@ class DefaultAutonomyExecutor:
         if action == "maybe_ping_user":
             text = clean_text(str(step.get("text", ""))) or "지금 확인이 필요해 보여."
             if self.maybe_ping_user_fn is not None:
-                result = await self.maybe_ping_user_fn(text)
+                result = await self._call_delivery_callback(
+                    self.maybe_ping_user_fn,
+                    text,
+                    context=context,
+                )
                 if isinstance(result, dict):
                     return self._finalize_callback_result(
                         result,

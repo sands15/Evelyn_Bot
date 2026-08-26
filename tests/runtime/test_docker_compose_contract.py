@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unittest
 from pathlib import Path
@@ -7,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
+GPU1_BENCHMARK_COMPOSE = REPO_ROOT / "docker-compose.gpu1-benchmark.yml"
 CONTINUITY_AUTH_COMPOSE = (
     REPO_ROOT / "docker-compose.continuity-auth.yml"
 )
@@ -21,9 +24,268 @@ RUNTIME_LIFECYCLE_COMPOSITION = (
 )
 CHECK_SCRIPT = REPO_ROOT / "tools" / "check_docker_runtime.ps1"
 LAUNCHERS = REPO_ROOT / "evelyn_core" / "runtime" / "launchers"
+OMNIVOICE_RECIPE_COMPONENTS = (
+    DOCKER_DIR / "Dockerfile.omnivoice",
+    DOCKER_DIR / "omnivoice_evelyn.patch",
+    DOCKER_DIR / "omnivoice_source.sha256",
+    DOCKER_DIR / "omnivoice_model.sha256",
+    DOCKER_DIR / "run_omnivoice.sh",
+    DOCKER_DIR / "omnivoice-server.LICENSE",
+)
+
+
+def _omnivoice_recipe_tag() -> str:
+    records = "".join(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+        f"{path.relative_to(REPO_ROOT).as_posix()}\n"
+        for path in OMNIVOICE_RECIPE_COMPONENTS
+    )
+    return f"recipe-{hashlib.sha256(records.encode('utf-8')).hexdigest()[:12]}"
 
 
 class DockerComposeContractTests(unittest.TestCase):
+    def test_main_llm_enables_prefill_and_prompt_cache_tuning(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        main_llm = source.split("\n  main_llm:\n", 1)[1].split(
+            "\n  minecraft_llm:",
+            1,
+        )[0]
+        launcher = (LAUNCHERS / "run_main_llm.sh").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+        for expected in (
+            'MAIN_LLM_CUDA_GRAPHS_ENABLED: "${MAIN_LLM_CUDA_GRAPHS_ENABLED:-1}"',
+            'GGML_CUDA_GRAPH_OPT: "${MAIN_LLM_CUDA_GRAPH_OPT:-1}"',
+            'MAIN_LLM_SWA_FULL_ENABLED: "${MAIN_LLM_SWA_FULL_ENABLED:-1}"',
+            '1) swa_full_args=(--swa-full) ;;',
+            '0) swa_full_args=() ;;',
+            '0) export GGML_CUDA_DISABLE_GRAPHS=1; graph_disable_state=present ;;',
+            '1) unset GGML_CUDA_DISABLE_GRAPHS; graph_disable_state=absent ;;',
+            "GGML_CUDA_DISABLE_GRAPHS=%s\\0",
+            '--batch-size "$${MAIN_LLM_BATCH_SIZE}"',
+            '--ubatch-size "$${MAIN_LLM_UBATCH_SIZE}"',
+            '--cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}"',
+            "--cache-prompt",
+            '--cache-reuse "$${MAIN_LLM_CACHE_REUSE}"',
+        ):
+            self.assertIn(expected, main_llm)
+        for expected in (
+            'MAIN_LLM_CUDA_GRAPHS_ENABLED="${MAIN_LLM_CUDA_GRAPHS_ENABLED:-1}"',
+            'export GGML_CUDA_GRAPH_OPT="$MAIN_LLM_CUDA_GRAPH_OPT"',
+            'MAIN_LLM_SWA_FULL_ENABLED="${MAIN_LLM_SWA_FULL_ENABLED:-1}"',
+            'MAIN_LLM_BUILD_DIR="${MAIN_LLM_BUILD_DIR:-$LLAMA_DIR/build-sm120-v1}"',
+            'MAIN_LLM_UBATCH_SIZE="${MAIN_LLM_UBATCH_SIZE:-2048}"',
+            'exec "$main_llm_server"',
+            '1) swa_full_args=(--swa-full) ;;',
+            '"${swa_full_args[@]}"',
+            '0) export GGML_CUDA_DISABLE_GRAPHS=1 ;;',
+            '1) unset GGML_CUDA_DISABLE_GRAPHS ;;',
+            '--batch-size "$MAIN_LLM_BATCH_SIZE"',
+            '--ubatch-size "$MAIN_LLM_UBATCH_SIZE"',
+            '--cache-ram "$MAIN_LLM_CACHE_RAM_MIB"',
+        ):
+            self.assertIn(expected, launcher)
+        self.assertNotIn('eval "$VENV_ACT"', launcher)
+        self.assertIn("MAIN_LLM_UBATCH_SIZE=2048", env_example)
+        self.assertIn("MAIN_LLM_SWA_FULL_ENABLED=1", env_example)
+
+    def test_main_and_gateway_are_unprofiled_core_dependencies(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        main_llm = source.split("\n  main_llm:\n", 1)[1].split(
+            "\n  router_llm:", 1
+        )[0]
+        gateway = source.split("\n  main_llm_gateway:\n", 1)[1].split(
+            "\n  tts:", 1
+        )[0]
+
+        self.assertNotIn("profiles:", main_llm)
+        self.assertNotIn("profiles:", gateway)
+
+    def test_realtime_and_ingress_gpu_lanes_have_explicit_defaults(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        main_llm = source.split("\n  main_llm:\n", 1)[1].split("\n  router_llm:", 1)[0]
+        tts = source.split("\n  tts:\n", 1)[1].split("\n  voxcpm_fallback:", 1)[0]
+        stt = source.split("\n  stt:\n", 1)[1].split("\n  codex_gateway:", 1)[0]
+
+        for service in (main_llm, tts):
+            self.assertIn(
+                'NVIDIA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"',
+                service,
+            )
+            self.assertIn(
+                'CUDA_VISIBLE_DEVICES: "${EVELYN_REALTIME_GPU_ID:-0}"',
+                service,
+            )
+        self.assertIn(
+            'NVIDIA_VISIBLE_DEVICES: "${EVELYN_INGRESS_GPU_ID:-1}"',
+            stt,
+        )
+        self.assertIn(
+            'CUDA_VISIBLE_DEVICES: "${EVELYN_INGRESS_GPU_ID:-1}"',
+            stt,
+        )
+
+    def test_main_warmup_is_bound_to_server_epoch(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        bot_api = source.split("  bot_api:\n", 1)[1].split(
+            "\n  control_page:",
+            1,
+        )[0]
+        main_llm = source.split("\n  main_llm:\n", 1)[1].split(
+            "\n  router_llm:",
+            1,
+        )[0]
+        self.assertIn('MAIN_LLM_EPOCH_FILE: "/main-llm-epoch/epoch"', bot_api)
+        self.assertIn("- main_llm_epoch:/main-llm-epoch:ro", bot_api)
+        self.assertIn("- main_llm_epoch:/main-llm-epoch", main_llm)
+        self.assertIn("cat /proc/sys/kernel/random/uuid", main_llm)
+        self.assertIn("mv -f /main-llm-epoch/epoch.tmp", main_llm)
+        self.assertIn("\n  main_llm_epoch:\n", source)
+
+    def test_prompt_abi_is_owned_by_the_exact_main_runtime(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        bot_api = source.split("  bot_api:\n", 1)[1].split(
+            "\n  control_page:",
+            1,
+        )[0]
+        control_page = source.split("\n  control_page:\n", 1)[1].split(
+            "\n  discord_bot:",
+            1,
+        )[0]
+        discord_bot = source.split("\n  discord_bot:\n", 1)[1].split(
+            "\n  main_llm:",
+            1,
+        )[0]
+        main_llm = source.split("\n  main_llm:\n", 1)[1].split(
+            "\n  router_llm:",
+            1,
+        )[0]
+        router_llm = source.split("\n  router_llm:\n", 1)[1].split(
+            "\n  minecraft_llm:", 1
+        )[0]
+        minecraft_llm = source.split("\n  minecraft_llm:\n", 1)[1].split(
+            "\n  sub_llm:", 1
+        )[0]
+        sub_llm = source.split("\n  sub_llm:\n", 1)[1].split("\n  tts:", 1)[0]
+
+        for consumer in (bot_api, control_page, discord_bot):
+            self.assertIn(
+                'MAIN_LLM_SERVER_IDENTITY_FILE: "/main-llm-epoch/server-identity"',
+                consumer,
+            )
+            self.assertIn(
+                'MAIN_LLM_RUNTIME_TEMPLATE_IDENTITY_FILE: "/main-llm-epoch/runtime-template-identity"',
+                consumer,
+            )
+            self.assertIn("- main_llm_epoch:/main-llm-epoch:ro", consumer)
+
+        self.assertIn("server_path=/llama/build/bin/llama-server", main_llm)
+        self.assertIn(
+            "runtime_template_args=(--reasoning off --reasoning-budget 0 "
+            "--reasoning-format none --jinja --no-mmproj)",
+            main_llm,
+        )
+        self.assertIn(
+            "printf '%s\\0' \"$${server_args[@]}\"",
+            main_llm,
+        )
+        self.assertIn(
+            "evelyn.llama-server-runtime.v1",
+            main_llm,
+        )
+        self.assertIn("ldd \"$${server_path}\"", main_llm)
+        self.assertIn("-name '*.so*'", main_llm)
+        self.assertIn(
+            "${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama:ro",
+            main_llm,
+        )
+        self.assertIn(
+            "${EVELYN_MAIN_LLM_BUILD_DIR:-${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}/build-sm120-v1}:/llama/build:ro",
+            main_llm,
+        )
+        self.assertEqual(source.count("EVELYN_MAIN_LLM_BUILD_DIR"), 1)
+        self.assertIn(
+            'MAIN_LLM_UBATCH_SIZE: "${MAIN_LLM_UBATCH_SIZE:-2048}"',
+            main_llm,
+        )
+        self.assertIn(
+            "grep -Eq '^CMAKE_CUDA_ARCHITECTURES:[^=]+=120a-real$$' "
+            "/llama/build/CMakeCache.txt",
+            main_llm,
+        )
+        for gpu1_service in (router_llm, minecraft_llm, sub_llm):
+            self.assertNotIn("EVELYN_MAIN_LLM_BUILD_DIR", gpu1_service)
+        llama_dockerfile = (DOCKER_DIR / "Dockerfile.llama").read_text(
+            encoding="utf-8"
+        )
+        self.assertTrue(
+            llama_dockerfile.startswith(
+                "FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04@sha256:"
+                "6d2a0dabc50c3bf14d27fc66822b6b1f94a325807ace17bd1997762307790587\n"
+            )
+        )
+        self.assertIn('exec "$${server_path}" "$${server_args[@]}"', main_llm)
+        self.assertIn('"$${runtime_template_args[@]}"', main_llm)
+
+    def test_workspace_mutation_capability_is_control_page_only(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        bot_api = source.split("  bot_api:\n", 1)[1].split("\n  control_page:", 1)[0]
+        control_page = source.split("  control_page:\n", 1)[1].split("\n  discord_bot:", 1)[0]
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split("\n  main_llm:", 1)[0]
+
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", bot_api)
+        self.assertIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", control_page)
+        self.assertNotIn("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN", discord_bot)
+        self.assertEqual(source.count("EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN"), 2)
+
+    def test_workspace_sandbox_capability_is_bot_api_only(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        bot_api = source.split("  bot_api:\n", 1)[1].split("\n  control_page:", 1)[0]
+        control_page = source.split("  control_page:\n", 1)[1].split("\n  discord_bot:", 1)[0]
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split("\n  main_llm:", 1)[0]
+
+        self.assertIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", bot_api)
+        self.assertNotIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", control_page)
+        self.assertNotIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", discord_bot)
+        self.assertEqual(source.count("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN"), 2)
+
+    def test_gpu1_benchmark_override_exposes_qwen_only_for_diagnostics(self) -> None:
+        source = GPU1_BENCHMARK_COMPOSE.read_text(encoding="utf-8")
+
+        self.assertEqual(source.count("  stt:\n"), 1)
+        self.assertNotIn("main_llm:", source)
+        self.assertEqual(source.count("  minecraft_llm:\n"), 1)
+        self.assertIn('"127.0.0.1:9823:9823"', source)
+        self.assertIn('NVIDIA_VISIBLE_DEVICES: "1"', source)
+        self.assertIn('CUDA_VISIBLE_DEVICES: "1"', source)
+
+    def test_production_python_qwen_access_is_broker_owned(self) -> None:
+        runtime_root = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core"
+        direct = []
+        for path in runtime_root.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            if "minecraft_llm:9823" in source or "127.0.0.1:9823" in source:
+                direct.append(path.name)
+        self.assertEqual(direct, ["mindcraft_llm_broker.py"])
+        bridge = (runtime_root / "local_io_bridge.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "http://127.0.0.1:8798/internal/mindcraft-llm/health",
+            bridge,
+        )
+        self.assertNotIn("127.0.0.1:9823", bridge)
+
+    def test_bot_and_discord_use_bounded_specialist_timeout(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            source.count(
+                'SPECIALIST_LLM_TIMEOUT_SEC: "${SPECIALIST_LLM_TIMEOUT_SEC:-6}"'
+            ),
+            2,
+        )
+
     def test_memory_integrity_override_is_bot_api_only_and_external(
         self,
     ) -> None:
@@ -111,6 +373,7 @@ class DockerComposeContractTests(unittest.TestCase):
         )[0]
         self.assertIn("stop_signal: SIGINT", discord_bot)
         self.assertIn("stop_grace_period: 30s", discord_bot)
+        self.assertIn('TTS_WARMUP_GENERATE_ENABLED: "true"', discord_bot)
 
     def test_app_images_are_built_and_started_with_one_source_revision(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
@@ -146,6 +409,43 @@ class DockerComposeContractTests(unittest.TestCase):
                 dockerfile,
             )
 
+        vision_runtime = source.split("  vision_runtime:\n", 1)[1].split(
+            "\n  vision:\n",
+            1,
+        )[0]
+        vision_ingress = source.split("  vision:\n", 1)[1].split("\nnetworks:", 1)[0]
+        for section in (vision_runtime, vision_ingress):
+            self.assertIn(
+                'EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"',
+                section,
+            )
+
+    def test_source_revision_arg_follows_expensive_dependency_layers(self) -> None:
+        for name, dependency_marker in (
+            ("Dockerfile.bot-api", "pip install --no-cache-dir"),
+            ("Dockerfile.control-page", "pip install --no-cache-dir"),
+            ("Dockerfile.vision", "pip install -r /tmp/requirements.vision.txt"),
+        ):
+            with self.subTest(dockerfile=name):
+                dockerfile = (DOCKER_DIR / name).read_text(encoding="utf-8")
+                self.assertGreater(
+                    dockerfile.index("ARG EVELYN_SOURCE_REVISION=unversioned"),
+                    dockerfile.index(dependency_marker),
+                )
+                self.assertIn(
+                    "ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}",
+                    dockerfile,
+                )
+
+        vision_ingress = (DOCKER_DIR / "Dockerfile.vision-ingress").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ARG EVELYN_SOURCE_REVISION=unversioned", vision_ingress)
+        self.assertIn(
+            "ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}",
+            vision_ingress,
+        )
+
     def test_cross_surface_scope_is_wired_to_both_checkpoint_readers(
         self,
     ) -> None:
@@ -176,7 +476,10 @@ class DockerComposeContractTests(unittest.TestCase):
     def test_docker_services_use_internal_service_urls_for_core_dependencies(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 
-        self.assertIn("LLM_SERVER_URL: \"http://main_llm:9820/v1/chat/completions\"", source)
+        self.assertIn(
+            'LLM_SERVER_URL: "http://main_llm_gateway:9819/v1/chat/completions"',
+            source,
+        )
         self.assertIn("ROUTER_LLM_URL: \"http://router_llm:9822/v1/chat/completions\"", source)
         self.assertIn("SUMMARY_LLM_URL: \"http://sub_llm:9821/v1/chat/completions\"", source)
         self.assertIn("OMNIVOICE_SERVER_URL: \"http://tts:8880\"", source)
@@ -210,15 +513,49 @@ class DockerComposeContractTests(unittest.TestCase):
         entrypoint = (DOCKER_DIR / "run_omnivoice.sh").read_text(
             encoding="utf-8"
         )
+        service_manifest = json.loads(
+            (
+                REPO_ROOT
+                / "evelyn_core"
+                / "runtime"
+                / "service_manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        tts_service = next(
+            item for item in service_manifest["services"] if item["id"] == "tts"
+        )
+        tts_health_contract = next(
+            check["expect_json"]
+            for check in tts_service["checks"]
+            if check["kind"] == "http"
+        )
 
         self.assertIn('profiles: ["tts"]', tts)
-        self.assertIn("image: evelyn-omnivoice-tts:recipe-7cfc51e96088", tts)
+        recipe_tag = _omnivoice_recipe_tag()
+        self.assertEqual(recipe_tag, "recipe-e8151492550b")
+        self.assertIn(f"image: evelyn-omnivoice-tts:{recipe_tag}", tts)
         self.assertIn("pull_policy: never", tts)
         self.assertIn("dockerfile: docker/Dockerfile.omnivoice", tts)
         self.assertIn("omnivoice_source:", tts)
         self.assertIn('OMNIVOICE_MODEL_ID: "k2-fsa/OmniVoice"', tts)
         self.assertIn(
             'OMNIVOICE_MODEL_REVISION: "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"',
+            tts,
+        )
+        self.assertIn(
+            'OMNIVOICE_RUNTIME_REVISION: "omnivoice-0.1.5"',
+            tts,
+        )
+        self.assertIn(
+            'OMNIVOICE_FLASHINFER_REVISION: "28bc0889d92110491d726a9c79f26a895db5a074"',
+            tts,
+        )
+        self.assertIn('OMNIVOICE_NUM_STEP: "12"', tts)
+        self.assertIn('OMNIVOICE_MAX_CONCURRENT: "1"', tts)
+        self.assertIn('OMNIVOICE_FLASHINFER_ENABLED: "true"', tts)
+        self.assertIn('OMNIVOICE_FLASHINFER_CUDA_GRAPH: "true"', tts)
+        self.assertIn(
+            'OMNIVOICE_FLASHINFER_CUDA_GRAPH_BUCKETS: "[2,4,8]"',
             tts,
         )
         self.assertIn('OMNIVOICE_STREAM_STRATEGY: "sentence"', tts)
@@ -232,6 +569,41 @@ class DockerComposeContractTests(unittest.TestCase):
             "payload.get('model_revision') == 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'",
             tts,
         )
+        self.assertIn(
+            "payload.get('runtime_revision') == 'omnivoice-0.1.5'",
+            tts,
+        )
+        self.assertIn(
+            "payload.get('flashinfer_revision') == '28bc0889d92110491d726a9c79f26a895db5a074'",
+            tts,
+        )
+        self.assertIn(
+            "payload.get('inference_backend') == 'flashinfer_cuda_graph'",
+            tts,
+        )
+        self.assertIn(
+            "payload.get('flashinfer_python_version') == '0.6.15.post1'",
+            tts,
+        )
+        self.assertIn(
+            "payload.get('flashinfer_jit_cache_version') == '0.6.15.post1+cu129'",
+            tts,
+        )
+        self.assertIn("payload.get('torch_version') == '2.8.0+cu129'", tts)
+        self.assertIn("payload.get('torch_cuda_version') == '12.9'", tts)
+        self.assertIn("payload.get('flashinfer_jit_disabled') is True", tts)
+        self.assertIn(
+            "all(type(value) is float for value in payload.get('flashinfer_cuda_graph_buckets'))",
+            tts,
+        )
+        self.assertIn(
+            "payload.get('flashinfer_cuda_graph_buckets') == [2.0, 4.0, 8.0]",
+            tts,
+        )
+        self.assertIn("type(payload.get('max_concurrent')) is int", tts)
+        self.assertIn("payload.get('max_concurrent') == 1", tts)
+        self.assertIn("type(payload.get('num_step')) is int", tts)
+        self.assertIn("payload.get('num_step') == 12", tts)
         self.assertIn('max-size: "10m"', tts)
         self.assertIn('max-file: "3"', tts)
         self.assertNotIn("VOXCPM_", tts)
@@ -258,6 +630,52 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("${PATH}", dockerfile)
         self.assertIn("${LD_LIBRARY_PATH}", dockerfile)
         self.assertNotIn("git+https://", dockerfile)
+        self.assertIn(
+            "OMNIVOICE_RUNTIME_REVISION=omnivoice-0.1.5",
+            dockerfile,
+        )
+        self.assertIn(
+            "OMNIVOICE_FLASHINFER_REVISION=28bc0889d92110491d726a9c79f26a895db5a074",
+            dockerfile,
+        )
+        self.assertNotIn("ARG OMNIVOICE_FLASHINFER_REVISION", dockerfile)
+        self.assertIn('"omnivoice==0.1.5"', dockerfile)
+        self.assertIn('"transformers==5.8.1"', dockerfile)
+        self.assertIn('"accelerate==1.13.0"', dockerfile)
+        self.assertIn("FLASHINFER_DISABLE_JIT=1", dockerfile)
+        self.assertIn(
+            "FROM nvidia/cuda:12.9.2-base-ubuntu22.04@sha256:8cd34c18c70fcb862f9829e7a2a04597feeb5f5d221904c77610b60c78c00ba4",
+            dockerfile,
+        )
+        self.assertIn("libnpp-12-9=12.4.1.87-1", dockerfile)
+        self.assertIn("libpython3.10", dockerfile)
+        self.assertIn("torch==2.8.0+cu129", dockerfile)
+        self.assertIn("torchaudio==2.8.0+cu129", dockerfile)
+        self.assertIn("torchcodec==0.7.0+cu129", dockerfile)
+        self.assertIn(
+            "28bc0889d92110491d726a9c79f26a895db5a074/omnivoice/models/omnivoice_flashinfer.py",
+            dockerfile,
+        )
+        self.assertIn(
+            "7568e042e614b890b2e3fffa8296a2c9a44fdc1a95bc748063facf307cd3cdb1",
+            dockerfile,
+        )
+        self.assertIn("/licenses/OmniVoice.LICENSE", dockerfile)
+        self.assertIn("flashinfer_python-0.6.15.post1", dockerfile)
+        self.assertIn(
+            "f2419fd2b77c2705816e8d0a31c784c6456b17f373f8494b5cfc3bdf434d5c44",
+            dockerfile,
+        )
+        self.assertIn("flashinfer_cubin-0.6.15.post1", dockerfile)
+        self.assertIn(
+            "25cfd305afa1f34baa2f419bca35db58c369c534ee1961662e83d9fe858ce021",
+            dockerfile,
+        )
+        self.assertIn("flashinfer_jit_cache-0.6.15.post1%2Bcu129", dockerfile)
+        self.assertIn(
+            "d8f8c4c42945bb687d176e8e05dc732b5eb72ce610acb2b219c7f2c03fcfaa51",
+            dockerfile,
+        )
         self.assertEqual(len(source_manifest.splitlines()), 20)
         self.assertEqual(len(model_manifest.splitlines()), 13)
         self.assertTrue((DOCKER_DIR / "omnivoice-server.LICENSE").is_file())
@@ -272,6 +690,8 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertEqual(privacy_patch.count('detail="Synthesis failed"'), 2)
         self.assertIn('-                    "detail": exc.errors(),', privacy_patch)
         self.assertIn("OMNIVOICE_MODEL_REVISION", entrypoint)
+        self.assertIn("OMNIVOICE_RUNTIME_REVISION", entrypoint)
+        self.assertIn("OMNIVOICE_FLASHINFER_REVISION", entrypoint)
         self.assertIn(
             'expected_model_revision="c5fdb5ccb189668d56333f77ba2629f4cd7535f4"',
             entrypoint,
@@ -281,10 +701,59 @@ class DockerComposeContractTests(unittest.TestCase):
             entrypoint,
         )
         self.assertIn(
+            '"${OMNIVOICE_RUNTIME_REVISION:-}" != "${expected_runtime_revision}"',
+            entrypoint,
+        )
+        self.assertIn(
+            '"${OMNIVOICE_FLASHINFER_REVISION:-}" != "${expected_flashinfer_revision}"',
+            entrypoint,
+        )
+        for expected in (
+            '"${FLASHINFER_DISABLE_JIT:-}" != "1"',
+            '"${OMNIVOICE_MAX_CONCURRENT:-}" != "1"',
+            '"${OMNIVOICE_NUM_STEP:-}" != "12"',
+            '"${OMNIVOICE_FLASHINFER_ENABLED:-}" != "true"',
+            '"${OMNIVOICE_FLASHINFER_CUDA_GRAPH:-}" != "true"',
+            '"${OMNIVOICE_FLASHINFER_CUDA_GRAPH_BUCKETS:-}" != "[2,4,8]"',
+            '"${OMNIVOICE_FLASHINFER_CUDA_GRAPH_OVERHEAD_BUDGET:-}" != "512"',
+        ):
+            self.assertIn(expected, entrypoint)
+        self.assertIn(
             "sha256sum --check --strict /opt/omnivoice-server/omnivoice_model.sha256",
             entrypoint,
         )
         self.assertIn("exit 78", entrypoint)
+        self.assertEqual(tts_service["launcher"], "../start_tts.bat")
+        self.assertEqual(
+            tts_health_contract,
+            {
+                "status": "healthy",
+                "ready": True,
+                "model_loaded": True,
+                "model_id": "k2-fsa/OmniVoice",
+                "model_revision": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+                "runtime_revision": "omnivoice-0.1.5",
+                "flashinfer_revision": "28bc0889d92110491d726a9c79f26a895db5a074",
+                "inference_backend": "flashinfer_cuda_graph",
+                "flashinfer_python_version": "0.6.15.post1",
+                "flashinfer_jit_cache_version": "0.6.15.post1+cu129",
+                "torch_version": "2.8.0+cu129",
+                "torch_cuda_version": "12.9",
+                "flashinfer_jit_disabled": True,
+                "flashinfer_cuda_graph_buckets": [2.0, 4.0, 8.0],
+                "max_concurrent": 1,
+                "num_step": 12,
+            },
+        )
+        self.assertIs(type(tts_health_contract["flashinfer_jit_disabled"]), bool)
+        self.assertIs(type(tts_health_contract["max_concurrent"]), int)
+        self.assertIs(type(tts_health_contract["num_step"]), int)
+        self.assertTrue(
+            all(
+                type(value) is float
+                for value in tts_health_contract["flashinfer_cuda_graph_buckets"]
+            )
+        )
 
         local_bridge = (
             REPO_ROOT
@@ -314,9 +783,15 @@ class DockerComposeContractTests(unittest.TestCase):
 
     def test_evelyn_containers_do_not_auto_start_with_docker_desktop(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split(
+            "\n  main_llm:",
+            1,
+        )[0]
 
         self.assertNotIn("restart: unless-stopped", source)
         self.assertNotIn("restart: always", source)
+        self.assertIn('restart: "on-failure:3"', discord_bot)
+        self.assertEqual(source.count('restart: "on-failure:3"'), 1)
         self.assertEqual(source.count('restart: "no"'), 14)
 
     def test_bot_api_stop_budget_exceeds_artifact_fence_grace(self) -> None:
@@ -328,8 +803,8 @@ class DockerComposeContractTests(unittest.TestCase):
 
         match = re.search(r"stop_grace_period: (\d+)s", bot_api)
         self.assertIsNotNone(match)
-        self.assertGreater(int(match.group(1)), 31 + 10)
-        self.assertEqual(int(match.group(1)), 60)
+        self.assertGreater(int(match.group(1)), 120)
+        self.assertEqual(int(match.group(1)), 130)
 
     def test_mindcraft_persists_microsoft_account_profile_cache(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
@@ -363,11 +838,11 @@ class DockerComposeContractTests(unittest.TestCase):
             1,
         )[0]
         voyager = source.split("  voyager:\n", 1)[1].split("\nvolumes:", 1)[0]
-        minecraft_llm = source.split("  minecraft_llm:\n", 1)[1].split("\n  sub_llm:", 1)[0]
+        minecraft_llm = source.split("\n  minecraft_llm:\n", 1)[1].split("\n  sub_llm:", 1)[0]
 
         self.assertIn('profiles: ["llm", "voyager"]', source)
         self.assertIn('container_name: evelyn-minecraft-llm', minecraft_llm)
-        self.assertIn('profiles: ["voyager"]', minecraft_llm)
+        self.assertIn('profiles: ["llm", "voyager"]', minecraft_llm)
         self.assertIn('/llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf', minecraft_llm)
         self.assertIn('-c 6144', minecraft_llm)
         self.assertIn('-np 1', minecraft_llm)
@@ -378,11 +853,37 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('LLAMA_CHAT_TEMPLATE_KWARGS: \'{"enable_thinking":false}\'', minecraft_llm)
         self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', bot_api)
         self.assertIn('MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"', bot_api)
+        self.assertIn(
+            'MINECRAFT_CONNECT_READY_TIMEOUT_SEC: "${MINECRAFT_CONNECT_READY_TIMEOUT_SEC:-60}"',
+            bot_api,
+        )
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split("\n  main_llm:", 1)[0]
+        self.assertNotIn("MINDCRAFT_LOCAL_LLM_URL", discord_bot)
+        self.assertIn(
+            'MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"',
+            discord_bot,
+        )
+        self.assertIn(
+            'MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"',
+            discord_bot,
+        )
+        self.assertIn(
+            '- mindcraft_llm_broker_token:/mindcraft-llm-broker:ro',
+            discord_bot,
+        )
+        self.assertIn('MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"', discord_bot)
+        self.assertIn('minecraft_llm:\n        condition: service_healthy', discord_bot)
         self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', bot_api)
         self.assertIn('MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"', bot_api)
         self.assertIn('MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"', bot_api)
+        self.assertIn('MINDCRAFT_QWEN_EPOCH_FILE: "/qwen-admission/epoch"', bot_api)
+        self.assertIn(
+            'MINDCRAFT_LLM_BROKER_URL: "http://127.0.0.1:8798/internal/mindcraft-llm"',
+            bot_api,
+        )
         self.assertIn('- mindcraft_llm_broker_token:/mindcraft-llm-broker', bot_api)
         self.assertNotIn('mindcraft_llm_broker_token:/mindcraft-llm-broker:ro', bot_api)
+        self.assertIn('- qwen_admission_epoch:/qwen-admission:ro', bot_api)
         self.assertIn('MINDCRAFT_LLM_BROKER_URL: "http://bot_api:8798/internal/mindcraft-llm"', voyager)
         self.assertIn('MINDCRAFT_LLM_BROKER_TOKEN_FILE: "/mindcraft-llm-broker/token"', voyager)
         self.assertIn('- mindcraft_llm_broker_token:/mindcraft-llm-broker:ro', voyager)
@@ -396,7 +897,32 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('bot_api:\n        condition: service_healthy', voyager)
         self.assertIn('minecraft_llm:', voyager)
         self.assertIn('router_llm:', voyager)
+        self.assertEqual(
+            source.count(
+                'MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"'
+            ),
+            1,
+        )
+        self.assertIn(
+            "networks:\n      - default\n      - main_llm_admission\n      - qwen_admission",
+            bot_api,
+        )
+        self.assertIn("expose:\n      - \"9823\"", minecraft_llm)
+        self.assertIn("networks:\n      - qwen_admission", minecraft_llm)
+        self.assertIn('- qwen_admission_epoch:/qwen-admission', minecraft_llm)
+        self.assertIn(
+            "depends_on:\n      bot_api:\n        condition: service_started\n        restart: true",
+            minecraft_llm,
+        )
+        self.assertNotIn("condition: service_healthy", minecraft_llm.split("command:", 1)[0])
+        self.assertIn("set -e;", minecraft_llm)
+        self.assertIn("cat /proc/sys/kernel/random/uuid > /qwen-admission/epoch.tmp", minecraft_llm)
+        self.assertIn("sync /qwen-admission/epoch.tmp", minecraft_llm)
+        self.assertIn("mv -f /qwen-admission/epoch.tmp /qwen-admission/epoch", minecraft_llm)
+        self.assertNotIn('"127.0.0.1:9823:9823"', minecraft_llm)
+        self.assertIn("qwen_admission:\n    internal: true", source)
         self.assertIn('\n  mindcraft_llm_broker_token:\n', source)
+        self.assertIn('\n  qwen_admission_epoch:\n', source)
         self.assertIn("GET /health HTTP/1.0", minecraft_llm)
         router_llm = source.split("  router_llm:\n", 1)[1].split("\n  minecraft_llm:", 1)[0]
         self.assertIn("GET /health HTTP/1.0", router_llm)
@@ -408,8 +934,10 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertIn("FROM node:22-bookworm-slim", dockerfile)
         self.assertIn("sed -i 's/\\r$//'", dockerfile)
+        self.assertIn("src/agent/commands/index.js", dockerfile)
         self.assertIn("external/mindcraft", dockerfile)
         self.assertIn("patch -p1", dockerfile)
+        self.assertIn("      main.js \\", dockerfile)
         self.assertIn('"mineflayer": "4.37.1"', package)
         self.assertIn("profilesFolder", patch)
         self.assertIn("MINDCRAFT_ENABLE_SKIN_COMMANDS", patch)
@@ -575,6 +1103,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertNotIn("C:/Users/Admin", source)
         for variable in (
             "EVELYN_LLAMA_CPP_DIR",
+            "EVELYN_MAIN_LLM_BUILD_DIR",
             "EVELYN_OMNIVOICE_SERVER_DIR",
             "EVELYN_OMNIVOICE_PROFILES_DIR",
             "EVELYN_HUGGINGFACE_CACHE_DIR",
@@ -635,7 +1164,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('"127.0.0.1:8891:8891"', vision_ingress)
         self.assertNotIn("volumes:", vision_ingress)
         self.assertIn(
-            "networks:\n  vision_isolated:\n    internal: true",
+            "  vision_isolated:\n    internal: true",
             source,
         )
 
@@ -670,7 +1199,7 @@ class DockerComposeContractTests(unittest.TestCase):
             "& docker image inspect $ttsImage *> $null",
             docker_helper,
         )
-        self.assertIn("evelyn-omnivoice-tts:recipe-7cfc51e96088", docker_helper)
+        self.assertIn(f"evelyn-omnivoice-tts:{_omnivoice_recipe_tag()}", docker_helper)
         self.assertIn("if ($buildEnabled -or $ttsImageMissing)", docker_helper)
         self.assertIn("build_local_docker_images.ps1", docker_helper)
         self.assertIn("-Services $pathSafeBuildServices", docker_helper)

@@ -151,11 +151,15 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
         )
         restart_source = function_source(
             path,
-            "restart_bot_process",
+            "_restart_bot_process_owned",
+        )
+        restart_launcher_source = function_source(
+            path,
+            "_build_restart_launcher",
         )
         shutdown_source = function_source(
             path,
-            "shutdown_bot_process",
+            "_shutdown_bot_process_owned",
         )
 
         self.assertIn(
@@ -167,14 +171,18 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
                 "shutdown_minecraft_world_lease"
             ),
             restart_source.index(
-                "launch_runtime_restart_sequence"
+                "launch_and_exit()"
             ),
+        )
+        self.assertIn(
+            "launch_runtime_restart_sequence",
+            restart_launcher_source,
         )
         self.assertLess(
             shutdown_source.index(
                 "shutdown_minecraft_world_lease"
             ),
-            shutdown_source.index("exit_process"),
+            shutdown_source.index("finish(0)"),
         )
 
     def test_split_runtime_uses_bot_api_as_single_owner(self) -> None:

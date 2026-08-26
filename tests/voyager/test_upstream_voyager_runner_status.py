@@ -22,7 +22,27 @@ from evelyn_core import upstream_voyager_runner as runner  # noqa: E402
 
 
 class UpstreamVoyagerRunnerStatusTests(unittest.TestCase):
-    def test_local_action_backend_never_selects_codex_gateway(self) -> None:
+    def test_legacy_action_backend_defaults_disabled_without_qwen_claim(self) -> None:
+        config = (
+            RUNTIME_ROOT / "evelyn_core" / "config.py"
+        ).read_text(encoding="utf-8")
+        service = (
+            RUNTIME_ROOT / "evelyn_core" / "voyager_service.py"
+        ).read_text(encoding="utf-8")
+        environment = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'VOYAGER_ACTION_BACKEND = os.getenv("VOYAGER_ACTION_BACKEND", "disabled")',
+            config,
+        )
+        self.assertIn("VOYAGER_ACTION_BACKEND=disabled", environment)
+        self.assertNotIn("MINDCRAFT_LOCAL_MODEL", service)
+        self.assertIn(
+            'os.environ.get("VOYAGER_ACTION_BACKEND", "disabled")',
+            service,
+        )
+
+    def test_legacy_local_action_backend_fails_closed_without_broker_adapter(self) -> None:
         captured: dict[str, object] = {}
 
         class FakeVoyager:
@@ -32,21 +52,15 @@ class UpstreamVoyagerRunnerStatusTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"voyager": SimpleNamespace(Voyager=FakeVoyager)}),
             patch.object(runner, "VOYAGER_ACTION_BACKEND", "local"),
-            patch.object(runner, "MINDCRAFT_LOCAL_MODEL", "local-model"),
-            patch.object(
-                runner,
-                "MINDCRAFT_LOCAL_LLM_URL",
-                "http://127.0.0.1:9823/v1/chat/completions",
-            ),
             patch.object(runner, "inspect_resume_checkpoint", return_value={}),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^legacy_voyager_local_qwen_unbrokered$",
+            ),
         ):
             runner.build_voyager("survive")
 
-        self.assertEqual(captured["action_agent_model_name"], "local-model")
-        self.assertEqual(
-            captured["action_agent_llm_url"],
-            "http://127.0.0.1:9823/v1/chat/completions",
-        )
+        self.assertEqual(captured, {})
 
     def test_derive_last_success_prefers_explicit_top_level_value(self) -> None:
         self.assertFalse(

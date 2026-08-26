@@ -287,12 +287,18 @@ ACCEPTED_VOICE_RECOVERY_PROCESS = textwrap.dedent(
     """
     import json
     import sys
+    import time
     from pathlib import Path
 
+    from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
     from evelyn_core.session_continuity import (
         SessionContinuityCheckpoint,
     )
     from evelyn_core.session_memory_state import SessionStateStore
+    from evelyn_core.voice_reply_gate_runtime import (
+        VoiceReplyGateRuntimeDeps,
+        should_reply_to_voice_from_runtime,
+    )
 
     root = Path(sys.argv[1])
     session_key = "guild:7:voice:8:user:42"
@@ -304,12 +310,84 @@ ACCEPTED_VOICE_RECOVERY_PROCESS = textwrap.dedent(
         system_prompt="new process system prompt",
     )
     status = manager.restore()
+    now_monotonic = time.monotonic()
+    room_session_key = "guild:7:voice:8"
+    room_store = RoomSpeakerActivityStore.create_empty()
+    restored_room_owner_count = room_store.restore_owners_from_sessions(
+        store,
+        now=now_monotonic,
+    )
+
+    def room_state_snapshot(key):
+        return {
+            "owner_user_id": room_store.room_owner_user_ids.get(key),
+            "active_speaker_user_id": None,
+        }
+
+    def is_room_owner_active(key, user_id):
+        return (
+            room_store.room_owner_user_ids.get(key) == user_id
+            and room_store.room_owner_until.get(key, 0.0)
+            > now_monotonic
+        )
+
+    gate_deps = VoiceReplyGateRuntimeDeps(
+        session_state_snapshot=store.snapshot,
+        room_state_snapshot=room_state_snapshot,
+        is_room_owner_active=is_room_owner_active,
+        is_session_active_for_user=lambda key, user_id: (
+            store.is_active_for_user(
+                key,
+                user_id,
+                now_monotonic=now_monotonic,
+            )
+        ),
+        tts_input_suppression_reason=lambda **_kwargs: None,
+        room_last_voice_reply_at={},
+        post_tts_ignore_sec=0.0,
+        reply_cooldown_sec=0.0,
+        normalize_voice_text=lambda text: " ".join(
+            str(text or "").strip().lower().split()
+        ),
+        contains_wake_word=lambda _text: False,
+        looks_like_brief_filler_text=lambda _text: False,
+        looks_like_repetitive_noise_text=lambda _text: False,
+        is_similar=lambda _left, _right: False,
+        min_text_len=1,
+        monotonic=lambda: now_monotonic,
+    )
+    owner_gate = should_reply_to_voice_from_runtime(
+        guild_id=7,
+        text="응 계속해",
+        session_key=session_key,
+        room_session_key=room_session_key,
+        user_id=42,
+        deps=gate_deps,
+    )
+    other_gate = should_reply_to_voice_from_runtime(
+        guild_id=7,
+        text="응 계속해",
+        session_key="guild:7:voice:8:user:43",
+        room_session_key=room_session_key,
+        user_id=43,
+        deps=gate_deps,
+    )
     history = store.histories.get(session_key, [])
     print(json.dumps({
         "status": status.get("state"),
         "history": history,
         "turnId": store.turn_ids.get(session_key),
         "replyStarted": (root / "reply_started.marker").exists(),
+        "restoredRoomOwnerCount": restored_room_owner_count,
+        "roomOwnerUserId": room_store.room_owner_user_ids.get(
+            room_session_key
+        ),
+        "roomOwnerRemainingSec": (
+            room_store.room_owner_until.get(room_session_key, 0.0)
+            - now_monotonic
+        ),
+        "ownerGate": owner_gate,
+        "otherGate": other_gate,
     }, ensure_ascii=False))
     """
 )
@@ -325,6 +403,33 @@ class SessionContinuityRestartTests(unittest.TestCase):
             if item
         )
         return environment
+
+    def test_main_hydrates_room_owner_before_ingress_activation(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        restore_at = source.index("session_continuity_checkpoint.restore()")
+        owner_at = source.index(
+            "room_speaker_activity_store.restore_owners_from_sessions("
+            "session_state_store)"
+        )
+        ingress_at = source.index(
+            "conversation_ingress_composition.activate_after_continuity_restore()"
+        )
+
+        self.assertLess(restore_at, owner_at)
+        self.assertLess(owner_at, ingress_at)
+
+        bootstrap_at = source.index(
+            "session_continuity_checkpoint.flush(force=True)",
+            ingress_at,
+        )
+        run_at = source.index("bot.run(DISCORD_BOT_TOKEN)")
+        self.assertLess(ingress_at, bootstrap_at)
+        self.assertLess(bootstrap_at, run_at)
+        self.assertIn(
+            '_ingress_restore_status.get("ownerReady") is True',
+            source[ingress_at:run_at],
+        )
 
     def test_periodic_checkpoint_restores_after_ungraceful_exit(
         self,
@@ -535,6 +640,11 @@ class SessionContinuityRestartTests(unittest.TestCase):
             "turn-accepted-before-crash",
         )
         self.assertFalse(result["replyStarted"])
+        self.assertEqual(result["restoredRoomOwnerCount"], 1)
+        self.assertEqual(result["roomOwnerUserId"], 42)
+        self.assertGreater(result["roomOwnerRemainingSec"], 0.0)
+        self.assertEqual(result["ownerGate"], [True, "ok", "owner_followup"])
+        self.assertFalse(result["otherGate"][0])
 
 
 if __name__ == "__main__":

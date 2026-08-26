@@ -45,6 +45,13 @@ const MOVE_AWAY_FAILURE_THRESHOLD = 3;
 const SEARCH_FAILURE_RELOCATION_THRESHOLD = 2;
 const SEARCH_FAILURE_RELOCATION_HARD_THRESHOLD = 1;
 const LOG_STALL_FOOD_PRIORITY_TRIGGER = 2;
+const FOOD_GOAL_RETRY_BACKOFF_SECONDS = 30;
+const FOOD_GOAL_RETRY_BACKOFF_REASONS = new Set([
+    'action_budget_exhausted',
+    'repeated_irrelevant_commands',
+]);
+const CRITICAL_FOOD_RECOVERY_HUNGER = 10;
+const CRITICAL_FOOD_RECOVERY_HEALTH = 10;
 const FOOD_SEARCH_FAILURE_RELOCATION_THRESHOLD = Math.max(
     2,
     Number(process.env.MINDCRAFT_FOOD_SEARCH_FAILURE_RELOCATION_THRESHOLD || 4)
@@ -65,7 +72,7 @@ const PROGRESSION_TARGET = /(?:^#|log$|stem$|hyphae$|planks$|^stick$|crafting_ta
 const TARGET_PREREQUISITES = {
     '#food': [
         'wheat', 'hay_block', 'sweet_berry_bush', 'melon', 'melon_slice',
-        'cow', 'pig', 'sheep', 'chicken', 'rabbit', 'cod', 'salmon'
+        'cow', 'pig', 'sheep'
     ],
     '#pickaxes': [
         'oak_log', '#logs', '#planks', 'stick', 'crafting_table', 'cobblestone',
@@ -121,10 +128,50 @@ function recoveryFailureCount(state) {
 }
 
 function hasActionableHostile(state) {
-    if (Array.isArray(state?.hostiles) && state.hostiles.some((hostile) => hostile && hostile.actionable === true)) {
+    const snapshot = state?.snapshot || state;
+    if (Array.isArray(snapshot?.hostiles) && snapshot.hostiles.some((hostile) => hostile && hostile.actionable === true)) {
         return true;
     }
-    return Number(state?.hostileCount || 0) > 0;
+    return Number(snapshot?.hostileCount || 0) > 0;
+}
+
+function criticalFoodRecovery(state) {
+    const hunger = Number(state?.snapshot?.hunger ?? 20);
+    const health = Number(state?.snapshot?.health ?? 20);
+    return (
+        !state?.snapshot?.foodName &&
+        (
+            (Number.isFinite(hunger) && hunger <= CRITICAL_FOOD_RECOVERY_HUNGER) ||
+            (Number.isFinite(health) && health <= CRITICAL_FOOD_RECOVERY_HEALTH)
+        )
+    );
+}
+
+function acquireFoodRecoveryOwnsPlanner(state, currentActionLabel = '') {
+    const phase = String(state?.phase || '').toLowerCase();
+    const activelyExecuting = (
+        state?.active === true ||
+        state?.inFlight === true ||
+        state?.in_flight === true ||
+        currentActionLabel === 'mode:evelyn_survival'
+    );
+    if (phase === 'acquire_food' && (activelyExecuting || criticalFoodRecovery(state))) return true;
+    const cooldownUntil = normalizeEpochSeconds(state?.cooldown_until?.acquire_food);
+    return criticalFoodRecovery(state) && Number.isFinite(cooldownUntil) && cooldownUntil > nowSeconds();
+}
+
+function foodGoalRetryBackoffActive(state, at = nowSeconds()) {
+    return (state?.blockedSubgoals || []).some((entry) => {
+        if (
+            entry?.signature !== 'obtain:#food' ||
+            !FOOD_GOAL_RETRY_BACKOFF_REASONS.has(entry?.reason)
+        ) {
+            return false;
+        }
+        const blockedAt = normalizeEpochSeconds(entry.blockedAt);
+        const age = at - blockedAt;
+        return Number.isFinite(blockedAt) && age >= 0 && age < FOOD_GOAL_RETRY_BACKOFF_SECONDS;
+    });
 }
 
 function needsFoodResupply(snapshot) {
@@ -143,7 +190,8 @@ function countRecentLogRecoveryFailures(state) {
     }).length;
 }
 
-function shouldBypassSurvivalRecoveryGate(state, snapshot) {
+function shouldBypassSurvivalRecoveryGate(state, snapshot, currentActionLabel = '') {
+    if (acquireFoodRecoveryOwnsPlanner(state, currentActionLabel)) return false;
     const failureCount = recoveryFailureCount(state);
     if (
         !Number.isFinite(failureCount) ||
@@ -298,11 +346,14 @@ function normalizeWorldEffectBinding(options = {}) {
 }
 
 function survivalRecoveryPhase(phase) {
-    return ['escape_to_surface', 'handle_hostile'].includes(String(phase || '').toLowerCase());
+    return ['acquire_food', 'escape_to_surface', 'handle_hostile'].includes(String(phase || '').toLowerCase());
 }
 
-function survivalRecoveryActive(state) {
+function survivalRecoveryActive(state, currentActionLabel = '') {
     const recoveryPhase = String(state?.phase || '').toLowerCase();
+    if (recoveryPhase === 'acquire_food') {
+        return acquireFoodRecoveryOwnsPlanner(state, currentActionLabel);
+    }
     const isRecoveryPhase = survivalRecoveryPhase(recoveryPhase);
     const failureCount = Number(state?.failures?.[recoveryPhase] || 0);
     const maxFailureCount = Math.max(
@@ -326,7 +377,7 @@ function survivalRecoveryActive(state) {
         return false;
     }
     const cooldownUntil = state?.cooldown_until || {};
-    return (
+    return acquireFoodRecoveryOwnsPlanner(state, currentActionLabel) || (
         Number.isFinite(Number(cooldownUntil.escape_to_surface)) &&
         normalizeEpochSeconds(cooldownUntil.escape_to_surface) > now
     ) || (
@@ -515,7 +566,8 @@ export function foodRecoveryCandidate(snapshot) {
     const inventory = snapshot?.inventory || {};
     const food = inventoryCountForTarget(inventory, '#food');
     const hunger = Number(snapshot?.hunger ?? 20);
-    if (food >= 3 || hunger > 14) return null;
+    const health = Number(snapshot?.health ?? 20);
+    if (food >= 3 || (hunger > 14 && health > CRITICAL_FOOD_RECOVERY_HEALTH)) return null;
 
     const wheat = Math.max(0, Number(inventory.wheat || 0));
     const breadRecipes = Math.floor(wheat / 3);
@@ -781,6 +833,9 @@ function candidateScore(candidate, snapshot, state) {
         return Number.NEGATIVE_INFINITY;
     }
     const signature = `${candidate.kind}:${candidate.target}`;
+    if (signature === 'obtain:#food' && foodGoalRetryBackoffActive(state)) {
+        return Number.NEGATIVE_INFINITY;
+    }
     const recentBlocks = (state.blockedSubgoals || [])
         .filter((entry) => entry.reason !== 'preempted_by_survival_priority')
         .slice(-6);
@@ -831,7 +886,7 @@ function relocationSearchFailureThreshold(current) {
 }
 
 function resultFailed(result) {
-    return /(?:could not|can't\b|cannot\b|failed|invalid|not enough|missing the following|no [^\n]* nearby|path (?:not found|failed|timed out)|pathfinding stopped|desired goal was not reached)/i
+    return /(?:!!code threw exception!!|could not|can't\b|cannot\b|failed|invalid|not enough|missing the following|no [^\n]* nearby|path (?:not found|failed|timed out)|pathfinding stopped|desired goal was not reached)/i
         .test(String(result || ''));
 }
 
@@ -915,6 +970,7 @@ export class EvelynGoalManager {
                 ...restored,
                 mode: this.mode,
                 ultimateGoal: this.ultimateGoal,
+                lastDragonCombatAt: null,
                 currentSubgoal: contentFreeCurrentSubgoal(restored.currentSubgoal),
                 recentActions: [],
                 lastExecution: contentFreeExecution(saved.lastExecution),
@@ -1129,7 +1185,10 @@ export class EvelynGoalManager {
         const world = snapshot || this.captureSnapshot();
         if (kind === 'food') {
             if (
-                Number(world?.hunger || 20) > 14 ||
+                (
+                    Number(world?.hunger ?? 20) > 14 &&
+                    Number(world?.health ?? 20) > CRITICAL_FOOD_RECOVERY_HEALTH
+                ) ||
                 inventoryCountForTarget(world?.inventory, '#food') >= 3
             ) return;
         } else if (minimumKitStatus(world).ready) {
@@ -1142,6 +1201,11 @@ export class EvelynGoalManager {
             ? minimumKitCandidate({...world, hunger: Math.min(Number(world?.hunger ?? 20), 14)})
             : minimumKitCandidate(world);
         if (!candidate) return;
+        if (
+            candidate.kind === 'obtain' &&
+            candidate.target === '#food' &&
+            foodGoalRetryBackoffActive(this.state)
+        ) return;
         if (
             this.state.currentSubgoal?.target === candidate.target &&
             this.state.currentSubgoal?.success?.target === candidate.success?.target
@@ -1210,6 +1274,16 @@ export class EvelynGoalManager {
             if (priorityCandidate) {
                 rawCandidates.push(priorityCandidate);
                 this.state.priorityRequest = null;
+            } else if (snapshot?.dimension === 'overworld') {
+                const recentFailures = new Set(
+                    this.state.blockedSubgoals
+                        .filter((entry) => entry.reason !== 'preempted_by_survival_priority')
+                        .slice(-6)
+                        .map((entry) => entry.signature)
+                );
+                rawCandidates.push(...fallbackCandidates(snapshot, this.state).filter(
+                    (candidate) => !recentFailures.has(`${candidate.kind}:${candidate.target}`)
+                ));
             }
             try {
                 const proposer = this.agent?.prompter?.chat_model?.proposeSubgoals;
@@ -1324,19 +1398,23 @@ export class EvelynGoalManager {
 
     gateCommand(command, {autonomous = false} = {}) {
         if (this.mode === 'off' || !autonomous) return {allowed: true, relevant: true, reason: 'not_autonomous'};
-        if (this.state.autonomyState !== 'active') {
+        const name = commandName(command);
+        const verifiedEnd = name === '!endGoal' && Boolean(this.state.ultimateGoalCompletedAt);
+        if (this.state.autonomyState !== 'active' && !verifiedEnd) {
             return {
                 allowed: false,
                 relevant: false,
                 reason: 'autonomy_not_active',
             };
         }
-        const name = commandName(command);
         const current = this.state.currentSubgoal;
-        const survivalRecovery = survivalRecoveryActive(this.agent?.bot?.evelynSurvivalState);
+        const survivalState = this.agent?.bot?.evelynSurvivalState;
+        const currentActionLabel = this.agent?.actions?.currentActionLabel || '';
+        const survivalRecovery = survivalRecoveryActive(survivalState, currentActionLabel);
         const bypassSurvivalRecoveryGate = shouldBypassSurvivalRecoveryGate(
-            this.agent?.bot?.evelynSurvivalState,
-            this.lastSnapshot
+            survivalState,
+            this.lastSnapshot,
+            currentActionLabel
         );
         const blockSurvivalRecovery = survivalRecovery && !bypassSurvivalRecoveryGate;
         const actionableHostiles = (this.lastSnapshot?.hostilesNearby || [])
@@ -1350,6 +1428,7 @@ export class EvelynGoalManager {
         let hardReject = false;
         if (
             blockSurvivalRecovery &&
+            !verifiedEnd &&
             name &&
             !OBSERVATION_COMMANDS.has(name) &&
             name !== '!consume'
@@ -1359,6 +1438,7 @@ export class EvelynGoalManager {
             reason = 'survival_recovery_owns_movement';
         } else if (
             unsafeUnarmed &&
+            !verifiedEnd &&
             !blockSurvivalRecovery &&
             name &&
             !SAFETY_COMMANDS.has(name) &&
@@ -1371,7 +1451,6 @@ export class EvelynGoalManager {
             relevant = false;
             reason = 'missing_command_name';
         } else if (AUTONOMY_CONTROL_COMMANDS.has(name)) {
-            const verifiedEnd = name === '!endGoal' && Boolean(this.state.ultimateGoalCompletedAt);
             relevant = verifiedEnd;
             hardReject = !verifiedEnd;
             reason = verifiedEnd
@@ -1481,13 +1560,6 @@ export class EvelynGoalManager {
             this.state.manualPauseReason = null;
         }
         const commandTarget = firstStringArgument(command);
-        if (
-            autonomous &&
-            name === '!attack' &&
-            commandTarget === 'ender_dragon'
-        ) {
-            this.state.lastDragonCombatAt = Date.now();
-        }
         const changed = worldStateChanged(before, after);
         const current = this.state.currentSubgoal;
         const related = Boolean(
@@ -1519,6 +1591,15 @@ export class EvelynGoalManager {
             : resultFailed(result) || (
                 !hasResultText && (ACTION_COMMANDS.has(name) || SAFETY_COMMANDS.has(name))
             );
+        const dragonAttackSucceeded = (
+            autonomous &&
+            name === '!attack' &&
+            commandTarget === 'ender_dragon' &&
+            !failed
+        );
+        if (dragonAttackSucceeded) {
+            this.state.lastDragonCombatAt = Date.now();
+        }
         const beforeMeasure = current ? predicateMeasure(current.success, before) : null;
         const afterMeasure = current ? predicateMeasure(current.success, after) : null;
         const beforeSatisfied = current
@@ -1530,6 +1611,14 @@ export class EvelynGoalManager {
         const goalProgress = current
             ? predicateProgressMade(current.success, before, after)
             : false;
+        const dragonDefeatAdvanced = Boolean(
+            dragonAttackSucceeded &&
+            current?.success?.kind === 'entity_defeated' &&
+            current.success.target === 'ender_dragon' &&
+            Number.isFinite(beforeMeasure) &&
+            Number.isFinite(afterMeasure) &&
+            afterMeasure > beforeMeasure
+        );
         if (current && autonomous && OBSERVATION_COMMANDS.has(name)) {
             const key = name;
             current.observationStreak = Number(current.observationStreak || 0) + 1;
@@ -1634,6 +1723,11 @@ export class EvelynGoalManager {
         this.state.recentActions = this.state.recentActions.slice(-20);
         this.lastSnapshot = after;
         const predicateCompleted = this.verifyCurrentSubgoal(after);
+        if (dragonDefeatAdvanced && predicateCompleted) {
+            this.state.ultimateGoalCompletedAt = nowSeconds();
+            this.state.autonomyState = 'completed';
+            console.log('[Evelyn Goal] ultimate goal verified: ender dragon defeated after active combat');
+        }
         const postconditionCandidatePublished = this.publishPostconditionCandidate({
             current,
             execution,
@@ -1665,7 +1759,12 @@ export class EvelynGoalManager {
         if (this.mode === 'off' || now - this.lastUpdateAt < 1000) return;
         this.lastUpdateAt = now;
         const snapshot = this.captureSnapshot();
-        const changed = this.verifyCurrentSubgoal(snapshot);
+        const boundActionExecuting = Boolean(
+            this.worldEffectBinding && this.agent?.actions?.executing === true
+        );
+        const changed = boundActionExecuting
+            ? false
+            : this.verifyCurrentSubgoal(snapshot);
         this.lastSnapshot = snapshot;
         const selfPrompter = this.agent?.self_prompter;
         const mayResume = (

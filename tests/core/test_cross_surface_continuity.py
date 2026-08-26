@@ -35,6 +35,10 @@ from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     memory_receipt_ref_from_receipt,
     unattributed_memory_receipt_ref,
 )
+from evelyn_core.fast_control_continuity import (  # noqa: E402
+    FastControlContinuityOwner,
+    bound_fast_control_session_key,
+)
 
 
 NOTE_A = "concept-0123456789abcdef"
@@ -415,6 +419,39 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         )
         self.assertEqual(self.read().state, "rejected")
 
+    def test_unfinished_reset_marker_survives_wall_clock_rollback(
+        self,
+    ) -> None:
+        self.clock.wall = 1300.0
+        self.clock.mono = 300.0
+        self.write_checkpoint()
+        self.clock.wall = 1100.0
+        manager = SessionContinuityCheckpoint(
+            store=SessionStateStore.create_empty(),
+            checkpoint_path=self.root / "active.json",
+            status_path=self.root / "status.json",
+            system_prompt="secret system prompt",
+            max_age_sec=900.0,
+            wall_time=self.clock.wall_time,
+            monotonic=self.clock.monotonic,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "reset interrupted"):
+            manager.reset_guild(
+                7,
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("reset interrupted")
+                ),
+            )
+
+        self.clock.wall = 1300.0
+        snapshot = self.read(guild_id=7, user_id=9)
+
+        self.assertTrue(snapshot.verified)
+        self.assertEqual(snapshot.session_count, 0)
+        self.assertEqual(snapshot.messages, ())
+        self.assertEqual(snapshot.selected_activity_at, 1100.0)
+
     def test_empty_head_is_verified_as_content_free_reset_boundary(
         self,
     ) -> None:
@@ -538,7 +575,10 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         self.write_checkpoint(
             root=fast_root,
             sessions=[(
-                "fast-control:control-page:owner",
+                bound_fast_control_session_key(
+                    guild_id=7,
+                    user_id=9,
+                ),
                 "Fast 새 질문",
                 "Fast 새 답",
             )],
@@ -709,7 +749,10 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             root=fast_root,
             sessions=[
                 (
-                    "fast-control:control-page:owner",
+                    bound_fast_control_session_key(
+                        guild_id=7,
+                        user_id=9,
+                    ),
                     "컨트롤 질문",
                     "컨트롤 답",
                 )
@@ -830,6 +873,118 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
         self.assertFalse(last_merge["policy"]["persisted"])
         self.assertTrue(last_merge["policy"]["readOnly"])
 
+    def test_fast_checkpoint_from_previous_principal_is_not_merged(
+        self,
+    ) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        owner_for_a = FastControlContinuityOwner(
+            artifacts_root=artifacts,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            monotonic=self.clock.monotonic,
+            principal_guild_id=7,
+            principal_user_id=9,
+            log=lambda *_args, **_kwargs: None,
+        )
+        self.assertEqual(
+            owner_for_a.session_key,
+            bound_fast_control_session_key(
+                guild_id=7,
+                user_id=9,
+            ),
+        )
+        owner_for_a.record_completed_turn(
+            "A의 비공개 질문",
+            "A의 비공개 답",
+        )
+        private_artifact = (
+            artifacts
+            / "fast_control_continuity"
+            / "active.json"
+        ).read_text(encoding="utf-8")
+        public_status = json.dumps(
+            owner_for_a.status(),
+            ensure_ascii=False,
+        )
+        for raw_principal in ("guild:7", "user:9"):
+            self.assertNotIn(raw_principal, private_artifact)
+            self.assertNotIn(raw_principal, public_status)
+        bridge_for_a = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        self.assertIn(
+            "A의 비공개 질문",
+            [
+                row["content"]
+                for row in bridge_for_a.merge_for_main(
+                    [{"role": "system", "content": "system"}],
+                    session_key="guild:7:text:8:user:9",
+                    current_user_text="A의 현재 질문",
+                )
+            ],
+        )
+
+        bridge_for_b = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=70,
+                user_id=90,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        local = [{"role": "system", "content": "system"}]
+
+        merged = bridge_for_b.merge_for_main(
+            local,
+            session_key="guild:70:text:80:user:90",
+            current_user_text="B의 현재 질문",
+        )
+
+        self.assertEqual(merged, local)
+
+    def test_legacy_unbound_fast_checkpoint_is_fail_closed(self) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        self.write_checkpoint(
+            root=artifacts / "fast_control_continuity",
+            sessions=[
+                (
+                    "fast-control:control-page:owner",
+                    "소유자를 모르는 질문",
+                    "소유자를 모르는 답",
+                )
+            ],
+        )
+        bridge = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        local = [{"role": "system", "content": "system"}]
+
+        outcome = bridge.merge_for_main_observed(
+            local,
+            session_key="guild:7:text:8:user:9",
+            current_user_text="현재 질문",
+        )
+
+        self.assertEqual(list(outcome.messages), local)
+        self.assertEqual(outcome.evidence["state"], "rejected")
+        self.assertEqual(
+            outcome.evidence["reasonCode"],
+            "cross_owner_rejected",
+        )
+
     def test_newer_empty_owner_boundary_does_not_resurrect_other_owner(
         self,
     ) -> None:
@@ -889,6 +1044,149 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             "local_reset_boundary_newer",
         )
 
+    def test_reset_boundary_survives_first_new_local_turn(self) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        main_root = artifacts / "conversation_continuity"
+        fast_root = artifacts / "fast_control_continuity"
+        self.write_checkpoint(
+            root=fast_root,
+            sessions=[
+                (
+                    bound_fast_control_session_key(
+                        guild_id=7,
+                        user_id=9,
+                    ),
+                    "삭제 전 Fast 질문",
+                    "삭제 전 Fast 답",
+                )
+            ],
+        )
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
+        self.write_empty_boundary(root=main_root)
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
+        self.write_checkpoint(
+            root=main_root,
+            sessions=[
+                (
+                    "guild:7:text:8:user:9",
+                    "reset 뒤 새 질문",
+                    "reset 뒤 새 답",
+                )
+            ],
+        )
+        checkpoint = json.loads(
+            (main_root / "active.json").read_text(encoding="utf-8")
+        )
+        head = json.loads(
+            (main_root / "checkpoint_head.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(checkpoint["resetBoundaryAt"], 1001.0)
+        self.assertEqual(
+            checkpoint["checkpointHash"],
+            _checkpoint_hash(checkpoint),
+        )
+        self.assertEqual(
+            head["checkpointHash"],
+            checkpoint["checkpointHash"],
+        )
+        bridge = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        local = [
+            {"role": "user", "content": "reset 뒤 새 질문"},
+            {"role": "assistant", "content": "reset 뒤 새 답"},
+        ]
+
+        outcome = bridge.merge_for_main_observed(
+            local,
+            session_key="guild:7:text:8:user:9",
+            current_user_text="reset 뒤 후속 질문",
+        )
+
+        self.assertEqual(list(outcome.messages), local)
+        self.assertEqual(
+            outcome.evidence["state"],
+            "reset_boundary",
+        )
+        self.assertEqual(
+            outcome.evidence["reasonCode"],
+            "local_reset_boundary_newer",
+        )
+
+    def test_same_principal_cross_activity_after_reset_can_merge(
+        self,
+    ) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        main_root = artifacts / "conversation_continuity"
+        fast_root = artifacts / "fast_control_continuity"
+        self.write_empty_boundary(root=main_root)
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
+        self.write_checkpoint(
+            root=main_root,
+            sessions=[
+                (
+                    "guild:7:text:8:user:9",
+                    "reset 뒤 Main 질문",
+                    "reset 뒤 Main 답",
+                )
+            ],
+        )
+        self.clock.wall += 1.0
+        self.clock.mono += 1.0
+        self.write_checkpoint(
+            root=fast_root,
+            sessions=[
+                (
+                    bound_fast_control_session_key(
+                        guild_id=7,
+                        user_id=9,
+                    ),
+                    "reset 뒤 Fast 질문",
+                    "reset 뒤 Fast 답",
+                )
+            ],
+        )
+        bridge = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+
+        outcome = bridge.merge_for_main_observed(
+            [
+                {"role": "user", "content": "reset 뒤 Main 질문"},
+                {"role": "assistant", "content": "reset 뒤 Main 답"},
+            ],
+            session_key="guild:7:text:8:user:9",
+            current_user_text="현재 질문",
+        )
+
+        self.assertEqual(outcome.evidence["state"], "merged")
+        self.assertEqual(
+            [row["content"] for row in outcome.messages],
+            [
+                "reset 뒤 Main 질문",
+                "reset 뒤 Main 답",
+                "reset 뒤 Fast 질문",
+                "reset 뒤 Fast 답",
+            ],
+        )
+
     def test_rejected_local_owner_blocks_valid_cross_context(
         self,
     ) -> None:
@@ -910,7 +1208,10 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             root=fast_root,
             sessions=[
                 (
-                    "fast-control:control-page:owner",
+                    bound_fast_control_session_key(
+                        guild_id=7,
+                        user_id=9,
+                    ),
                     "주입되면 안 되는 질문",
                     "주입되면 안 되는 답",
                 )

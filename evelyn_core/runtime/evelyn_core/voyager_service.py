@@ -1240,8 +1240,8 @@ class UpstreamDirectBridge:
             "agent_models": {
                 "action": (
                     os.environ.get("VOYAGER_CODEX_MODEL")
-                    if os.environ.get("VOYAGER_ACTION_BACKEND", "local").lower() == "codex-gateway"
-                    else os.environ.get("MINDCRAFT_LOCAL_MODEL", "Qwen3-14B-Q4_K_M.gguf")
+                    if os.environ.get("VOYAGER_ACTION_BACKEND", "disabled").lower() == "codex-gateway"
+                    else None
                 ),
                 "curriculum": os.environ.get("VOYAGER_CURRICULUM_MODEL_NAME") or None,
                 "critic": os.environ.get("VOYAGER_CRITIC_MODEL_NAME") or None,
@@ -1249,8 +1249,8 @@ class UpstreamDirectBridge:
             },
             "curriculum_last_llm_task": None,
             "codex_gateway": {
-                "enabled": os.environ.get("VOYAGER_ACTION_BACKEND", "local").lower() == "codex-gateway",
-                "backend": os.environ.get("VOYAGER_ACTION_BACKEND", "local"),
+                "enabled": os.environ.get("VOYAGER_ACTION_BACKEND", "disabled").lower() == "codex-gateway",
+                "backend": os.environ.get("VOYAGER_ACTION_BACKEND", "disabled"),
                 "url": os.environ.get("VOYAGER_CODEX_GATEWAY_URL") or None,
                 "model": os.environ.get("VOYAGER_CODEX_MODEL") or None,
             },

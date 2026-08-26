@@ -1,16 +1,407 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-08-09 KST
-Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increment
+Last reviewed: 2026-08-24 KST
+Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
+
+## 2026-08-20~21 bounded LLM task loop
+
+- `/task|/작업 <목표>`는 Router0 fast policy에서 `task_executor` registered skill로 들어가며 Core
+  text/voice는 검증된 completed task evidence를 도구별 deterministic typed finalizer로 표시하고 noncompleted는 fixed typed
+  outcome으로 끝낸다. read-only/search와 verified workspace mutation 모두 Main 자유문을 terminal claim 권한으로 쓰지
+  않는다. Fast Control은 같은 loop를 background FastAction으로 실행하고
+  `/작업취소 <task-id>`로 exact task를 취소한다.
+- 실제 route가 `task_executor`이면 router preface·일반 short-circuit와 specialist 실행을 모두 건너뛰고 registered
+  task skill만 호출한다. completed 주장은 exact top-level/observation schema, step/model count와 마지막
+  verified-success evidence를 통과해야 하며, 결과가 `None`·빈 문자열·사용자 입력 echo이거나 이 계약이 맞지 않으면
+  fixed `TASK_LOOP_INVALID_RESULT`로 닫고 Main을 호출하지 않는다. 유효한 completed는 tool별 exact evidence key/type/count,
+  생산자와 같은 size·truncation 계약 및 goal-bound args를 다시 확인한 뒤에만 fixed bounded outcome을 반환한다.
+  verified mutation은 적용 receipt와 동일 path/SHA post-read가 맞을 때만 완료한다. preface나
+  `needs_main_llm:false`, worker summary, 대화 history가 finalizer를 대신하지 못한다.
+- 기본 task는 최대 6 task-step·120초다. 해석·도구 선택이 필요한 단계는 Qwen worker가 typed tool JSON을
+  하나씩 제안한다. closed exact `workspace_read`의 initial path, receipt가 유일하게 결박한 same-SHA
+  continuation과 post-apply verification read는 runtime이 worker 호출 없이 typed decision으로 실행한다.
+  이 transition도 같은 step budget, TurnScope cancellation, grant와 signed Host receipt 검증을 통과한다.
+  worker/tool await는 각각 6초/20초이며 executed-but-unverified는 `uncertain` terminal이라 자동 재시도하지 않는다.
+- worker admission 직전과 worker/runtime-bound decision 반환 직후, `workspace_test`, edit stage와 automatic
+  tool executor 진입 직전에 wall grant expiry와 monotonic task budget을 다시 검사한다. 만료 decision은
+  executor 0회로 typed terminal에 닫힌다. pending exact stage의 bounded cancel은 권한 축소 cleanup이므로
+  deadline 뒤에도 실행한다.
+- Bot API의 authenticated Mindcraft broker가 task worker, 일반 specialist와 Mindcraft의 모든 production Qwen
+  요청을 capacity-one FIFO로 소유한다. active 1개와 최대 3개 waiter를 허용하고 queue deadline은 enqueue부터,
+  kind별 inference deadline은 실제 slot grant부터 계산한다. queued disconnect는 POST 전에 빠지고, in-flight caller가
+  취소·timeout되어도 upstream EOF까지 slot을 유지해 late result를 다른 request에 전달하지 않는다. grant 직전에도
+  deadline·disconnect·abandon·poison을 다시 검사한다. Router는 별도 모델이라 이 owner 밖에 남는다.
+- transport timeout·ClientError나 EOF를 확인하지 못한 응답은 owner를 poison하고 Qwen epoch가 바뀌기 전에는
+  복구하지 않는다. POST 직전 durable marker에 Qwen boot epoch를 기록하고 bounded full EOF에서는 HTTP/JSON/content
+  semantic 성공 여부와 무관하게 지운다. full EOF 뒤 semantic 실패는 그 invocation만 실패시킨다. Compose는 explicit Bot restart/update에
+  Qwen restart를 결합하며, crash 뒤 stale marker는 새 epoch와 content-free Qwen health가 모두 확인되어야 제거된다.
+  broker health도 mounted epoch의 missing/corrupt 상태와 active marker epoch 불일치를 upstream probe 전에 503으로
+  닫고 probe 전후 epoch·owner를 재확인한다. Qwen boot command는 epoch 기록 실패 시 model server를 시작하지 않는다.
+  graceful shutdown은 새 admission을 먼저 닫고 최대 120초 자연 drain하며 container/launcher stop budget은 130초다.
+- Python/Node client는 request ID와 exact memory receipt, bounded frame/trailing/ACK body를 검사하고 consumer parse 뒤에만
+  `delivered` ACK한다. Qwen과 Router 양쪽의 server-side final memory guard가 실패하면 ACK도 503으로 닫힌다. 이 admission·cancel·restart
+  경계는 offline deterministic test로 확인했지만 실제 GPU 동시 부하와 crash-recovery는 아직 live 검증하지 않았다.
+- goal completion은 LLM의 문장이나 `success_criteria`만 믿지 않는다. read-only 완료는 closed single-operation
+  grammar와 exact path/query/scope/recursive args 및 latest model-visible typed receipt를 요구하고,
+  list/search/diff는 `truncated:false`여야 한다. `workspace_read`는 UTF-8 byte offset 0부터 EOF까지 같은 path,
+  full-file SHA와 byte count가 이어지는 연속 청크만 허용하고, 보이는 content를 다시 합친 SHA까지 일치해야
+  완료한다. 내부 공백을 포함한 path/query/quoted literal은 원문 그대로 결박한다. exact quoted-content edit만
+  목표에 적힌 path·old/new literal과 적용 뒤 같은 경로 candidate SHA read가 모두 맞을 때 완료한다.
+  noncompleted Core/Fast 결과는 Main이나 worker 자유문장으로 성공 승격하지 않고 fixed typed outcome으로 전달한다.
+- completed runtime/read/list/search/diff/web evidence와 일반 검색 card는 deterministic renderer가 canonical JSON UTF-8의
+  bounded hex prefix, 원본·preview byte 수와 truncation 상태로 표시한다. 이 evidence는 display sanitizer가 바꾸거나
+  OmniVoice/model tag로 해석할 수 없고, spoken text는 evidence 없는 고정 요약으로 분리한다. 검색 실패·0건·결과 있음은
+  Voice JSON/SSE에서 서로 다른 상태로 전달하며, search-capable SSE는 typed resolution 전 모델 delta를 TTS로 보내지 않는다.
+  semantic `review|summarize|explain|compare`는 raw read/diff/search receipt만으로 완료하지 않는다.
+- 자동 권한은 authenticated Control Page의 allowed source tree list/search/read/exact-file diff,
+  runtime status, goal에서 exact query를 추출할 수 있는 closed single-operation public web search에 한정된다.
+  모델이 다른 query를 만들거나 compound/negated command이면 provider 호출 전에 차단한다. private/runtime roots, symlink/junction/reparse,
+  broad diff와 cross-tool workspace→web egress는 차단한다. 다른 surface의 workspace access와 모든
+  edit/test는 coarse grant로 자동 실행하지 않는다. `workspace_edit`는 Control Page exact approval로만 적용되고,
+  `workspace_test`는 runtime이 만든 behavioral candidate와 Host의 exact stage binding이 있을 때만 격리 실행된다.
+- Host Supervisor task queue protocol v2는 `LOCAL_BRIDGE_STATUS_AUTH_TOKEN`을 직렬화하지 않고 request/response
+  domain-separated HMAC에만 사용한다. 현재 boot instance, task/grant/action/step/surface/tool/args hash,
+  도구별 bounded TTL과 one-shot replay state를 검증한다. 이 queue는 bounded read-only 요청과 signed edit
+  staging·candidate test를 처리하고, 실제 apply는 별도 Control Page↔Host mutation HMAC queue만 사용한다.
+  read는 한 번에 최대 2KiB를 요청하되 evidence 자체와 JSON-string transport가 각각 3,999자를 넘지 않도록
+  UTF-8 경계에서 더 줄인다. 다음 요청은 runtime이 exact path/offset/2KiB/expected full SHA로 강제한다.
+  기본 6 task-step 예산에서는 deterministic terminal transition을 남겨야 하므로 최대 5개 read 청크,
+  escaping이 적을 때 약 10KiB까지
+  전체 읽기를 완료할 수 있고 그보다 길면 성공 대신 bounded terminal로 끝난다. v1 Host와는 protocol mismatch로
+  fail-closed하므로 이 변경을 반영하려면 Host 재시작이 필요하다.
+  list/search/diff는 capacity-one worker에서 실행해 Host supervision loop를 막지 않으며, skipped/oversized/unreadable
+  search와 untracked/불완전 diff는 `truncated:true`라 완료 권한이 없다. diff의 complete 기준은 tracked path의
+  `HEAD→worktree`다.
+- 단일 UTF-8 file create/replace는 별도 Host mutation HMAC과 generation 아래 먼저 stage된다. task manager는
+  한 pending/한 mutation attempt만 허용하고 full diff, base/candidate SHA-256, preview digest, exact git status,
+  target identity와 dirty-base 확인을 30초 single-use token에 묶는다. Control Page claim→Host apply→Bot complete가
+  끝나면 기다리던 같은 coroutine이 receipt를 받아 재개한다. exact quoted-content edit만 뒤의 same-path read SHA가
+  candidate와 같을 때 goal을 완료한다. behavioral edit는 적용과 SHA 재확인 뒤에도 즉시
+  `uncertain/workspace_behavior_outcome_unverified`로 끝나며 자동 재시도나 해결 완료 주장이 없다. approval cancel은
+  manager prepare→exact Host stage cancel→manager complete의 2단계 결과 확인 뒤에만 waiter를 `cancelled`로 깨운다.
+  Host 결과의 approval/stage/instance binding이 맞지 않으면 `uncertain`이다. direct `/작업취소`는 exact asyncio task
+  intent가 있을 때만 FastAction을 `cancelled`로 기록하며, 서버성 cancellation은 `failed/background_action_cancelled`와
+  recovery-required를 유지한다. approved apply 뒤 `resuming` effect barrier는 same-path read와 terminal 기록이 끝날 때까지
+  exact task에 남고 background terminal cleanup만 해제한다. apply/cancel 결과를 이미 확인 중인 task는 raw coroutine
+  cancel로 경쟁시키지 않는다.
+- worker가 mode와 일치하는 단일 `create|replace` envelope를 반환하면 그 exact inner args만 풀고,
+  `{path, content}`는 기존 파일을 덮어쓰지 못하는 create args로만 정규화한다. 이 외 malformed edit args는
+  sandbox-required behavioral edit로 분류하지 않고 typed `task_worker_workspace_edit_args_invalid` observation으로
+  worker에 돌려주며 Host tool은 호출하지 않는다.
+- behavioral candidate test는 frozen Git-tracked manifest와 exact candidate overlay만 project-scoped snapshot에
+  복사해 fixed Bot API image에서 `python_unittest` runner로 실행한다. container는 network/IPC none, read-only,
+  uid 65534, cap-drop/no-new-privileges, bounded PID/memory/CPU/tmpfs/log/time을 사용하고 Host capacity-one worker가
+  main supervision loop 밖에서 소유한다. 실패한 target은 revised candidate에서도 모두 다시 실행해야 한다.
+- arbitrary candidate가 같은 Python interpreter의 종료 코드를 흉내낼 수 있으므로 test pass/fail은
+  `semanticVerified:false`인 후보 선택·승인 보조 관측일 뿐 behavioral completion 권한이 아니다. full diff 승인 UI도
+  이 한계를 표시한다. active harness/authority/evaluator와 sandbox runner 자체는 task edit에서 차단한다.
+- Host는 fixed image inspect+isolation canary, signed sandbox request/result, exact stage/tree digest와 apply 직전 base/candidate
+  tree 재검사를 요구한다. container create 응답 유실, response write 실패, cancel/test race와 hard crash는 exact container
+  cleanup 및 project-owned snapshot marker-last purge로 fail-closed한다. literal/behavioral stage 모두 원 action binding으로
+  폐기한다.
+- pre-consume literal apply가 verified failure를 반환해도 task loop는 exact pending stage를 Host에서 폐기하기 전
+  pending binding을 지우지 않는다. behavioral apply의 raw `success|succeeded` alias는 모두 exact path/SHA와
+  `semanticVerified:false` fence를 통과해야 한다. apply completion claim은 유효한 complete 뒤에만 제거하므로 잘못된
+  late complete가 진행 중인 cancel claim을 없애지 못한다.
+- Windows workspace read/stage/apply는 project root부터 target parent까지 directory handle을 no-reparse로 열어
+  final path와 directory identity를 확인하고 작업 종료까지 유지한다. 이 pin이 열리지 않거나 ancestor가 바뀌면
+  fail-closed하며, 작업 중 ancestor rename/write/delete/reparse 교체를 허용하지 않는다. replace는 non-default
+  NTFS stream을 fail-closed하고 conditional exchange가 밀어낸 base의 identity와 SHA를 검증한다. 외부 저장이
+  끼거나 cleanup이 불확실하면 보존한 backup과 `workspace_edit_recovery_required`를 남기고 성공을 반환하지 않는다.
+  public state에는 locator만, preview에는 strict allowlist만 내보낸다.
+- detached clean source snapshot의 공식 lightweight launcher로 source-gated Bot API·Control Page와 Windows
+  Host Supervisor를 기동했다. Browser exact long-read는 3개 same-SHA 청크와 task-worker model call 0회로 completed했고,
+  exact create는 full diff/base `ABSENT`/candidate SHA 확인→30초 one-use approval→Host apply→same-path read→Main
+  응답을 완료했다. 적용 파일 SHA는 preview candidate SHA와 일치했다. Host generation 회전이 남긴
+  `stop.request` 때문에 replacement가 즉시 종료되는 live 실패도 재현해 old process 종료 확인 뒤 marker를
+  제거하도록 수정하고 공식 launcher success를 다시 확인했다. behavioral candidate-test/apply, 만료·dirty-save·
+  중간 변경과 Qwen burst/epoch recovery의 live E2E, Discord/voice E2E는 아직 미검증이다.
+- task goal은 outer whitespace만 제외하고 4,000자까지 그대로 보존한다. 4,001자 이상은 tail을 잘라 다른
+  목표로 재결박하지 않고 parser, direct loop와 restored worker state에서 모두 `task_goal_empty`로 fail-closed한다.
+  approval claim 뒤 minimum deadline이 지난 late Host completion은 candidate SHA가 맞아도
+  `uncertain/outcome_unverified`로 waiter를 깨우며 `approved/resuming`으로 승격하지 않는다.
+
+## 2026-08-22 async effect boundary hardening
+
+- conversation ingress의 restart recovery와 same-process phase transition은 wall clock rollback에도
+  `createdAt|updatedAt <= logical time <= expiresAt`을 유지한다. continuity restore는 저장된
+  `expiresAt`과 원래 발급 창을 hard cap으로 사용해 더 긴 reader 설정이 checkpoint나 row를 연장하지 못한다.
+- process-local autonomy grant와 Minecraft world lease는 wall·monotonic deadline이 모두 살아 있어야 한다.
+  공개 world proof/status 형식은 유지하고 private same-host secret에 exact lease ID·monotonic 만료를 결박했으며,
+  executor connect와 world enable await 뒤 commit 직전 만료는 disconnect·lease revoke·verified stop으로 닫는다.
+- Discord playback started/completed/qualified receipt는 exact current source의 0이 아닌 첫 frame이 실제
+  packet send에 성공한 뒤에만 발급된다. source read, `play()`/after callback, 무음·unread source, UDP send
+  실패는 성공이 아니다. inherited base connect가 끝난 뒤 custom setup 중 취소돼도 base disconnect와
+  exact-self cleanup을 drain하고 replacement registry와 최초 cancellation을 보존한다.
+- 최신 canonical `python -m pytest -q`는 4,106 passed, 22 skipped, 1 warning, subtests 1,142로 offline
+  통과했다. production Python compile과 scoped whitespace 검사도 통과했다. warning은 기존 `audioop`
+  deprecation이며, live Discord·마이크·스피커·Minecraft·Docker·GPU·STT 서비스는 실행하지 않았다.
+
+## 2026-08-22 owner/currentness follow-up
+
+- Fast Control checkpoint와 ingress scope는 configured guild/user의 opaque SHA-256 principal key를 사용한다.
+  cross-surface reader는 그 exact key만 선택하며 legacy fixed key와 다른 principal artifact는 fail-closed한다.
+  checkpoint·status에는 raw guild/user가 없다.
+- verified empty head의 `updatedAt`은 hashed `resetBoundaryAt`으로 다음 active checkpoint까지 전달된다. 따라서
+  첫 post-reset local turn 뒤에도 boundary 이전 cross 문맥은 부활하지 않고, boundary 이후 같은 principal의
+  새 cross activity는 정상 병합된다.
+- required speaker verification은 exact boolean `matched=True`만 TTS interrupt를 허용하고, 정책 자체가
+  적용되지 않은 `status=skipped`만 예외다. Local Bridge는 status 게시 await 뒤 no-key batch STT 직전에도
+  captured admission epoch를 재검사해 restart/shutdown/mic invalidation 뒤 PCM을 모델에 보내지 않는다.
+- Local mic OFF는 physical `applied + captureStopped` ACK만으로 성공하지 않는다. 현재 local input lease의
+  durable release receipt까지 정확해야 하며 실패·손상 receipt는 고정 503 `voice_input_lease_unavailable`이다.
+- Python 3.12에서 streaming playback 테스트 fake가 event loop를 동기 점유하던 교착은 실제 Discord
+  AudioPlayer처럼 worker thread가 source를 소비하도록 교정했다. production queue 의미는 바꾸지 않았고 audible·
+  zero PCM 모두 실제 packet receipt 경계를 통과한다.
+
+## 2026-08-22 harness evidence/currentness follow-up
+
+- Main/Fast의 required tool evidence는 exact `executed`만 통과한다. `planned`, `needs_local_tool`,
+  `executed_empty`, `executed_withheld`, `failed`, `failed_or_unavailable` 등은 고정 답변으로 terminalize하고 모델을
+  호출하지 않는다. 선택 evidence의 degraded 동작은 유지하며 web과 task는 등록된 executor가 다음 단계를 소유한다.
+- runtime status cache는 현재 시각보다 미래인 `cached_at`을 fresh로 인정하지 않는다. Local voice consent apply는
+  physical mic ON 뒤 health 재확인을 10초로 제한하고, timeout/실패 시 기존 recovery가 mic OFF와 503을 확정한다.
+- task goal은 허용된 4,000자 전체가 worker state까지 보존되고 grant는 `now >= expiresAt`에서 실행 전 만료된다.
+  FastAction coordinator는 running task를 history cap 때문에 제거하지 않으며, runner가 cancel을 삼킨 뒤 반환하면
+  성공/취소가 아니라 `failed/background_action_cancel_outcome_unverified`로 닫아 자동 재시도를 금지한다.
+- autonomy outcome audit callback은 exact `True` 또는 `recorded:true`만 성공이다. `None`이나 예외는 grant를 폐기하고
+  engine을 중단하며 cursor를 유지한다. Minecraft disconnect/cancel 뒤 늦은 원 action 결과는 stale이고, 검증 실패로
+  inflight binding이 남은 executor는 exact cleanup 전 reconnect할 수 없다.
+- batch memory writebehind 교체 시 취소를 무시하고 살아 있는 predecessor는 `memory-drain` alias로 실제 종료까지
+  registry에 남아 guild reset을 `memory_background_work_inflight`로 막는다.
+- 합친 핵심 회귀는 316 passed, subtests 223, canonical 전체는 4,106 passed, 22 skipped, 1 warning,
+  subtests 1,142였다. 변경 production 11개 compile과 scoped `git diff --check`도 통과했다. 실제 service/device는
+  실행하지 않았다.
+
+## 2026-08-22 holistic harness acceptance seam
+
+- `VoiceTurnOrchestrator`는 route context, short-circuit, registered route와 Main await가 반환된 직후 exact
+  `TurnScope`를 다시 검사한다. adapter가 cancel intent를 삼키거나 owner가 교체돼도 stale answer/evidence를
+  다음 route 또는 completion에 넘기지 않는다. 이미 실제 delivery effect를 소유한 await는 기존 delivery
+  finalizer 의미를 유지한다.
+- behavioral workspace candidate 뒤 worker가 wrong tool, malformed `workspace_test.targets`, 누락된 bound
+  targets 또는 exact invalid JSON을 내면 tool을 실행하지 않고 typed observation을 다음 worker state에 넣는다.
+  candidate는 bounded budget 동안 유지하며 exhaustion에서 exact stage를 한 번 폐기한다. arbitrary worker
+  `ValueError`, transport와 timeout은 기존 terminal 의미를 유지한다.
+- Discord autonomy follow-up은 send 정상 반환 뒤 cancellation이 와도 continuity finalizer를 drain한다.
+  engine은 verified outcome audit, cursor와 state를 persist한 다음 원래 cancellation을 재전파하므로 같은
+  follow-up을 restart 뒤 다시 보내지 않는다. durable `[autonomy]` pair는 그 이전 search promise만 해소하고,
+  이후 새 promise·partial/unattributed pair는 pending으로 남는다.
+- autonomy cycle/executor의 사용자 가시 오류도 current canonical Discord text session과 reply slot을 사용해
+  `[autonomy:error]` + assistant receipt를 history/continuity에 한 번 남긴다. 이 내부 marker는 recent user나
+  search completion으로 사용하지 않으며 send/commit 실패가 재귀 오류 알림을 만들지 않는다.
+- 테스트가 설치된 real `numpy|aiohttp`를 import하기 전에 불완전 fake를 `sys.modules`에 남기던 10개 경계를
+  real import 우선/fallback-only로 바꿨다. 기존 50 ms wall timing test의 flake도 단독 반복 RED 뒤 의미를
+  유지한 500 ms outer budget으로 안정화했다.
+- 통합 broad는 1,074 passed, 5 skipped, subtests 357, canonical 전체는 4,120 passed, 22 skipped,
+  1 warning, subtests 1,146이었다. production/test compile과 scoped whitespace 검사가 통과했고 실제 Discord,
+  마이크·스피커, Minecraft, Docker/GPU/STT는 실행하지 않았다.
+
+## 2026-08-22 continuity commit late-result ownership
+
+- 취소된 오래된 async commit worker가 같은 session의 최신 성공 뒤 실패하면 디스크에는 최신 turn이 남지만
+  process state와 `completedTurnCommit.last*`를 `error/false`로 덮던 race를 deterministic RED로 재현했다.
+- public sync/async entry가 worker 실행 전에 내부 epoch를 예약한다. 같은 session의 더 최신 **성공**만 stale
+  attempt를 supersede하며, 다른 session의 성공이나 더 최신 실패는 기존 유효 commit을 막지 않는다.
+- stale attempt는 현재 checkpoint/head를 anchor한 뒤 rollback, keyed authenticity와 external replay 구조를
+  검증한다. callback-free exact target은 durable receipt로 coalesce할 수 있지만 stale `before_commit` callback은
+  실행하지 않는다. 정상 superseded 실패는 누적 failure만 남기고 최신 `last*` health를 보존하며 실제
+  corruption/auth failure는 계속 `error`다.
+- race 6개와 실제 continuity/autonomy/Control Page/Discord 호출 경로 148개, subtests 21개가 통과했다.
+  canonical 전체는 4,126 passed, 22 skipped, 1 warning, subtests 1,146이었다. `py_compile`과 scoped
+  `git diff --check`도 통과했다. 이 검증 시점에는 live filesystem stall이나 외부 서비스를 실행하지 않았고 bare
+  `to_thread` writer의 영구 정지가 남아 있었다. 이 제한은 아래 completed-turn artifact process 구현으로
+  해소됐으며, 명령 기반 terminal lifecycle은 별도 경계로 분리했다.
+
+## 2026-08-22 command terminal lifecycle bounded recovery
+
+- restart, bot shutdown, stack/local scheduled shutdown은 한 terminal owner를 공유하고 요청 시 동기 claim한다.
+  Discord terminal 확인문은 전송 성공 뒤 command continuity 기록 전에 owner를 arm하며 full-stack helper도
+  확인문 전달 뒤 실행한다. Timer thread 생성 뒤 `start()`가 실패한 경우도 해당 timer를 취소하고 claim을 rollback한다.
+- 기본 20초 hard watchdog과 1초 앞선 restart soft launcher는 non-daemon이다. flush, cleanup, scheduler,
+  launcher나 logger가 멈춰도 launcher와 exit는 각각 exact once이며 event loop 종료가 watchdog을 버리지 못한다.
+  host fallback은 `main.py`와 현재 mode env를 사용하고 batch를 Python으로 실행하지 않는다.
+- Docker `discord_bot`은 Windows launcher를 건너뛰고 composition 생성 뒤 최소 10초 admission을 cancellation으로
+  우회하지 않은 다음 exit 75를 낸다. Compose는 이 서비스에만 `on-failure:3`을 적용한다. shutdown은 exit 0이다.
+- 이 fail-stop 자체는 flush 성공이나 writer 중단 증거가 아니다. 당시 일반
+  `commit_completed_turn_async()`의 bare `to_thread` 영구 정지는 남아 있었고, 다음 절의 artifact process가
+  후속으로 해소했다. 이 절에서는 source/offline 회귀만 수행했으며 실제 Docker restart, Discord,
+  unreleased filesystem flush는 실행하지 않았다.
+- 최종 집중 회귀는 167 passed와 subtests 33, runtime 전체는 1,107 passed, 4 skipped와 subtests 417이었다.
+  canonical 전체는 4,159 passed, 22 skipped, 1 warning과 subtests 1,146이었다. warning은 기존 `audioop`
+  deprecation이며 production/test `py_compile`과 scoped `git diff --check`도 통과했다.
+
+## 2026-08-22 completed-turn artifact process와 journal-only recovery
+
+- Main/Fast Control의 completed-turn checkpoint, continuity authenticity, Discord/Fast ingress와 FastAction의
+  production 기본 artifact I/O는 `durable_artifact_process.py`의 shared warm child로 실행된다. parent는
+  request deadline에서 멈춘 child를 terminate/kill/wait하며, reap 전에는 replacement를 시작하지 않는다.
+  이후 살아 있는 current worker 또는 replacement worker로 exact temporary cleanup과 disk-first reconciliation을
+  수행한다. parent hard-exit, warm PID 재사용, pre/post-replace stall, bounded read retry, credential 환경
+  격리와 relative-path 거부를 결정론적으로 검증했다.
+- Discord `delivery_succeeded` restart는 journal terminal marker를 checkpoint보다 먼저 쓰며, marker-only
+  crash는 exact active/empty/fresh predecessor에서 한 번만 recommit한다. checkpoint 뒤 journal completion
+  crash는 generation을 더 올리지 않는다. 같은 turn ID의 conflicting tail, 잘못된 receipt generation과
+  keyed fresh missing-head는 fail-closed하고 speculative store를 되돌린다. Main은 ingress reconciliation 뒤
+  truly pristine state만 empty bootstrap한다.
+- write outcome이 불명확해진 ingress/FastAction journal은 다음 mutation 전에 journal/head/external anchor를
+  authoritative reload한다. transient read/write failure는 재시도할 수 있지만 validated hash/schema/auth
+  conflict는 닫힌다. completed-turn은 content-free in-flight count/stall age/deadline status 게시를 먼저
+  best-effort로 시도하고, Runtime Errors와 public Runtime Health는 마지막으로 성공한 status의 허용 필드만
+  투영한다.
+- 관련 통합 묶음은 439 passed, 1 skipped, subtests 57, journal/Discord 묶음은 115 passed, subtests 3이었다.
+  canonical `python -m pytest -q`는 4,188 passed, 22 skipped, 1 warning, subtests 1,149로 172.82초에
+  통과했다. warning은 기존 `audioop` deprecation이다. source compile도 통과했다. 실제 Discord,
+  filesystem/antivirus, Docker, microphone, Minecraft, GPU/STT 서비스는 실행하지 않았다.
+
+## 2026-08-23 task/voice boundary verification
+
+- swallowed worker cancellation, raw external `Task.cancel()`, remaining-zero와 authorize 뒤 grant expiry는
+  tool executor 진입 0회로 닫혔다. workspace stage/test executor가 cancellation을 삼켜 failed·invalid
+  receipt를 반환해도 정규화 전에 cancellation을 재전파하며, stage 반환 뒤 deadline이 끝나면 approval에
+  진입하지 않고 exact pending stage cleanup만 수행한다. task-loop 전체는 91 passed, subtests 127이었다.
+- voice lease/local API/Fast API 묶음은 152 passed, subtests 21이었다. pre/post-replace·read stall,
+  event-loop 생존, cancellation drain, heartbeat epoch와 stale ON/OFF race를 포함한다.
+- `VoiceInputLeaseManager`의 load/commit은 completed-turn과 같은 shared warm killable artifact child와
+  bounded deadline을 쓴다. pre-replace stall은 kill/reap 뒤 실패 폐쇄하고 post-replace outcome-unknown은
+  canonical disk를 exact 재확인한다. unreadable canonical owner는 `blocked`로 latch해 overwrite를 막는다.
+- Bot API lease I/O는 event loop 밖에서 실행하고 cancellation에도 bounded call을 shield-drain한다. Local
+  status 전체 수락, Local HTTP ON/OFF, 채팅 mic OFF, Discord acquire/release, retirement와 failed-ON cleanup은
+  같은 loop transition lock으로 직렬화한다. physical ACK wait는 lock 밖이라 heartbeat가 완료할 수 있다.
+- direct Main `local_mic`과 Discord voice는 accepted exact user-only turn의 durable receipt 뒤에만
+  owner·TurnScope·LLM/TTS를 시작한다. Control Page 일반 text도 같은 선행 durability를 사용하고 성공 시
+  exact `complete_turn_id`에 assistant만 붙인다. LLM 실패 fresh restore는 `[system, user]`, 성공 restore는
+  `[system, user, assistant]`이며 current user는 Main payload에 한 번만 들어간다. caller cancellation은
+  physical continuity commit이 끝날 때까지 session lock을 유지한 뒤 재전파한다.
+- client STT timeout/cancellation은 caller terminal을 유지하되 blocking physical thread가 실제 반환할
+  때까지 shared inference lock을 보유한다. 따라서 late physical inference와 successor 호출은 겹치지 않는다.
+- production compile과 최종 canonical `python -m pytest -q`는 4,209 passed, 22 skipped, 1 warning,
+  subtests 1,151로 통과했다. 독립 Control Page continuity 리뷰에서도 추가 P1/P2 finding은 없었다. warning은
+  기존 `audioop` deprecation이며 실제 Discord, filesystem/antivirus, Docker, microphone, Minecraft,
+  GPU/STT 서비스는 실행하지 않았다.
+
+## 2026-08-24 harness external-effect와 recovery boundary
+
+- task approval wire v2는 exact task/stage/path/SHA와 유한 TTL을 결박한다. worker·stage·test·tool 반환 뒤와
+  effect 직전에 cancellation, wall expiry, monotonic deadline과 guild epoch를 다시 검사한다. STT caller가
+  반복 취소돼도 physical worker와 cleanup을 끝까지 drain하고 shared lock을 실제 물리 수명까지 유지한다.
+- Discord command, text search follow-up과 assistant autonomy 전송은 기존 ingress recovery journal에서
+  `claim -> bind -> delivery_inflight -> physical send -> delivery_succeeded -> canonical -> complete`를
+  분리한다. timeout/cancellation의 원격 수락 여부가 모호하면 successor effect를 막고 자동 재전송하지 않는다.
+- search restart adoption은 pre-send generation baseline, exact receipt와 source/delivery pair뿐 아니라 source
+  message를 exact reply/reference한 유일한 bot-authored same-content message를 요구한다. 최초 recovery가
+  끝나기 전 Discord text/voice ingress와 voice worker·Control Page·Local mic 시작은 fail-closed한다.
+- autonomy는 durable `delivery_inflight` 뒤 physical send task 생성 직전에 original grant/action/run을 다시
+  확인한다. evidence allowlist와 strict verifier가 `verified`를 재계산하며, post-effect memory integrity 오류도
+  exact outcome audit와 state/cursor/ping fence를 먼저 내구화한 뒤 fixed-type 오류로 재전파한다.
+- focused 묶음은 task/STT 257, command 160, search/app/voice 150, autonomy/ingress 191 passed였다. production
+  compile과 `main.py` 2,498줄 구조 경계를 통과했고 최종 canonical은 4,284 passed, 22 skipped, 1 warning,
+  subtests 1,182로 224.40초에 통과했다. warning은 기존 `audioop` deprecation이다. 이 canonical 회귀
+  자체에서는 실제 Discord gateway, filesystem/antivirus, Docker, microphone, Minecraft와 GPU/STT
+  서비스를 실행하지 않았다.
+- 같은 날 STT를 아예 우회한 Bot API→Main→OmniVoice first-PCM live benchmark는 1 cold, 3 warmup,
+  10 measured로 오류 0이었다. warm p50/p95는 첫 delta 353.8/415.7ms, 첫 문장 374.2/435.8ms,
+  TTS first PCM 427.6/446.2ms, 합산 post-STT first PCM 804.0/873.5ms였고 cold 합산은 2,545.9ms였다.
+  입력·continuity는 임시 volume으로 격리했다. OS speaker/Control Page proxy/Discord는 포함하지 않아 실제
+  사용자 청취 E2E가 아니라 core service 경계다.
+
+## 2026-08-25 OmniVoice FlashInfer CUDA 12.9 live 적용
+
+- 현재 target은 `evelyn-omnivoice-tts:recipe-e8151492550b`이다. pinned CUDA 12.9.2 base,
+  `libnpp-12-9=12.4.1.87-1`, Torch/Torchaudio 2.8.0+cu129, TorchCodec 0.7.0+cu129,
+  FlashInfer Python/Cubin 0.6.15.post1과 JIT cache +cu129를 사용한다. OmniVoice 0.1.5와 고정 model
+  revision, 검증된 FlashInfer module commit은 유지한다.
+- CUDA 12.8 recipe는 RTX 3090에서 동작했지만 FlashInfer 0.6.15의 실제 SM12 normalization 경로가
+  CUDA 12.9 이상을 요구해 RTX 5090 warmup에서 실패했다. CUDA 12.9 recipe image
+  `sha256:ec6efba2dbcd9c79a3d0666d801f635d54cab4ea4a35272d669f0ab23e27a5ae`는
+  RTX 5090 `(12, 0)`에서 model load와 health를 통과했다.
+- live health는 `flashinfer_cuda_graph`, JIT off, 2/4/8초 bucket, concurrency 1과 12-step을 확인했고
+  host/container GPU UUID도 일치했다. sentence streaming은 유지하며 blockwise는 비활성이다.
+- STT를 제외한 1 cold, 3 discarded warmup, 10 measured 결과 warm p50/p95는 first delta
+  `589.5/688.9ms`, first sentence `637.7/732.4ms`, TTS first PCM `193.3/215.4ms`, 합산
+  `818.2/947.9ms`였고 cold 합산은 `1,717.0ms`였다. report는
+  `runtime_artifacts/validation/post_stt_latency/report-flashinfer-12step-gpu0-cu129.json`이다.
+- 기존 16-step 결과보다 TTS 구간은 크게 줄었지만 현재 합산의 주 구간은 LLM first sentence까지다.
+  실제 speaker/Discord와 사용자 청취 품질, 8초 초과 eager fallback, 장기 VRAM soak는 남아 있다.
+
+## 2026-08-25 Main LLM latency source checkpoint
+
+- `evelyn.voice-latency-trace.v1`은 accepted turn의 request부터 admission slot, prompt, raw/safe token,
+  speech commit, TTS first PCM, playback first write와 completion까지 18개의 bounded monotonic stage를
+  content-free하게 기록한다. llama.cpp의 allowlisted numeric queue/prompt/cache/prefill/generation timing만
+  별도 receipt에 포함하고 원문, prompt, 경로와 음성 식별자는 넣지 않는다.
+- 공용 Prompt ABI v2는 model hash뿐 아니라 llama-server와 local/shared-library closure, 실제 server argv와
+  CUDA graph env, embedded tokenizer/chat template, canonical prompt wire를 exact identity로 묶는다. Main
+  warmup은 서로 다른 두 suffix를 terminal까지 drain하고 second-suffix cache hit, typed timing/finish reason과
+  atomic backend epoch가 모두 맞아야 readiness를 연다. Fast와 Core/Discord는 production의
+  `clean_text` canonical prefix로 기대 Prompt ABI를 별도 계산하며 불일치는 HTTP 전에 닫는다. Bot readiness는
+  cache proof와 `productionPromptMatch=true`를 함께 요구하고 TTL 안에서 proactive proof refresh도 수행한다.
+- 모든 production Main surface는 별도 `main_llm_gateway`의 realtime-first 단일 owner를 거친다. Core/Discord와
+  Local→Fast 음성은 accepted turn에만 content-free ticket을 준비하고, 실제 첫 REALTIME Main admission
+  경계에서 stale ticket을 같은 capture generation/backend epoch로 재발급한다. BACKGROUND는 예약을 만들지
+  않으며 malformed/network binding은 fail-closed, typed reservation rejection만 plain REALTIME 한 번으로
+  fallback한다.
+- Main gateway의 upstream header/stream await는 하나의 cancel-safe polling fence에서 operation을 끝까지
+  수거하고 EOF 뒤 중복 read를 만들지 않는다. Qwen broker는 queue 대기와 inference clock을 분리하고,
+  slot·durable marker claim 뒤부터 검증된 upstream 결과까지에만 inference 예산을 적용한다. 2026-08-27
+  timeout 뒤 REALTIME successor와 queue 뒤 Qwen successor 회귀, 관련 묶음 및 canonical
+  `4,573 passed, 22 skipped, 1,391 subtests passed`가 통과했다.
+- `SpeechCommitGate`를 Core/Fast/Local streaming 경로가 공유한다. generation fence와 final-prefix equality를
+  만족한 irreversible chunk만 TTS에 넘기며 준비된 TTS와 playback은 같은 owner 아래 bounded overlap한다.
+- `tools/main_latency_optimizer_loop.py --run-owned-lab`은 local proposer가 allowlisted 숫자 설정만 제안하고
+  최대 12회 aggregate feedback을 받는 고정 loop다. runner는 immutable image와 baseline/source/model/GPU/
+  corpus/harness identity, internal-only Docker network, read-only input, repeated ABBA, restart→readiness와
+  readiness 이후 first-response 분리 측정, finalist 1,000-turn soak, cache/GPU PID/privacy/quality/resource
+  gate를 사용한다. proposer는 shell, 파일, Docker, evaluator와 production 권한을 받지 않는다.
+- runner/worker는 POSIX process group 또는 Windows KillOnClose Job으로 자식 tree를 소유한다. host-wide
+  campaign lock과 startup/terminal global reconciliation은 exact owner Docker object와 owned temp directory가
+  stable zero가 될 때까지 다음 run을 막고, 불확실 cleanup은 `CLEANUP_REQUIRED`로 종료한다.
+- production lifecycle contract는 candidate/run/evaluation-bound external observer receipt와
+  evaluator/lifecycle capability를 분리한다. coordinator는 사실값 인자를 받지 않고 worker가 고정 source를
+  읽은 opaque receipt만 검증한다. 선택적 SQLite journal은 observation one-shot consumption과 state/head
+  CAS를 영속화해 재시작 뒤 replay와 accepted/rollback fork를 차단한다. public bootstrap에는 observer
+  adapter가 없으므로 현재 자동 loop는 production을 바꾸지 않고 `awaiting_approval`에서 fail-close한다.
+- 기존 llama.cpp build의 CUDA library에는 RTX 5090 native cubin이 없고 `sm_52` PTX만 있었다. first-use
+  PTX JIT와 일치한 약 11.3초 first-resident tail을 제거하기 위해 기존 build를 보존한 CUDA 12.9.2
+  `120a-real` side-by-side build를 만들었다. 정적 검증은 cubin target이 `sm_120a` 하나이고 PTX가 없으며
+  server version/commit identity가 고정됐음을 확인했다.
+- `docker/Dockerfile.llama`는 pinned CUDA 12.9.2 runtime base를 사용한다. optional
+  `EVELYN_MAIN_LLM_BUILD_DIR`은 llama.cpp root 아래에서 검증된 build만 Main/GPU0의 `/llama/build`에
+  read-only overlay하고 Router/Sub 등 GPU1 LLM build는 그대로 둔다. fixed lab은 선택 build의 containment,
+  reparse-free boundary, server binary와 content identity를 검증한다. 설정하지 않으면 기존 `build`를 쓴다.
+- 실제 TTS 합성 readiness 정정 뒤 native SM120/SWA1 graph-off와 graph-on fixed E2E가 모두 status
+  `completed`, strict cache `33/33`, validity failure `0`, clean cleanup을 통과했다. graph-off answer first-PCM
+  first-after-warmup/resident p50/p95/idle은 `314.0/253.1/298.7/324.7ms`, graph-on은
+  `294.6/207.7/262.6/228.8ms`였다. graph-on resident TTFT는
+  `57.938/36.931/39.619/39.586/14.415ms`, TTS first PCM은 `92.8/92.0/92.6/91.7/93.1ms`였다.
+- 독립 graph-on도 status `completed`, cache `33/33`, validity failure `0`, clean cleanup이었다.
+  first-after-warmup answer first PCM은 `278.8ms`, resident p50/p95는 answer first PCM
+  `205.8/259.0ms`, TTFT `38.602/56.366ms`, safe commit `111.896/165.704ms`, TTS first PCM
+  `91.8/93.3ms`였다. idle answer first PCM은 `387.8ms`로 첫 graph-on run의 `228.8ms`보다 변동했다.
+- 최신 backend exact-payload TTFT graph-off cold/capture/resident/idle은
+  `284.942/20.167/20.165/210.148ms`, graph-on은 `320.215/14.411/16.286/122.597ms`였다. 전체 answer
+  PCM 기준으로 graph-on이 first-after-warmup, resident p95와 idle을 모두 낮췄다.
+- Compose source 기본 GPU 역할은 GPU0 Main+TTS, GPU1 STT다. local Main 기본 설정으로 batch `2048`, ubatch
+  `2048`, cache reuse `256`, cache RAM `8192MiB`, CUDA graph `1`, full-SWA `1`, native SM120 Main build를
+  source 기본값으로 승격했다. launcher와 Compose는 Main build가 exact `120a-real`이 아니거나 없으면 시작 전에
+  닫고 일반 build로 fallback하지 않는다. GPU1 Router/Minecraft/Sub LLM은 기존 multi-architecture build를 유지한다.
+- 2026-08-27 finalist Attempt 7은 graph-off/on warm `200×2`, restart-ready `30×2`, ABBA macro-block
+  `20`, soak `1,000`을 완주했다. fresh-process verifier는 `verified`, evaluator는
+  `eligible/candidate_passed/passed`였다. warm first-PCM p50/p95/p99는 graph-off
+  `238.7/260.7/290.1ms`, graph-on `201.85/219.1/239.8ms`이고, paired p95 delta의 95% CI는
+  `[-45.7,-26.7]ms`, effect size는 `-3.0166`이다. output equivalence `200/200`, 오류·품질·안전·cache
+  failure 0, GPU 최소 여유 `9,886/9,768MiB`, exact-owned cleanup `0/0/0`, Docker `OFF→OFF`, production
+  OFF와 signed host restoration을 독립 검증했다. 이는 Main→TTS-ready fixed harness 승격 근거이며,
+  microphone, speaker/Discord first-write와 실제 청취를 포함한 전체 음성 SLO 완료를 뜻하지 않는다.
 
 ## Source state
 
 - 전체 프로젝트 감사의 즉시 항목을 별도 안정화 브랜치에서 처리 중이다.
 - `main.py` 분해는 목표 범위에 도달했다.
-  - 현재 2,500줄이며 원래 목표 범위인 1,500~2,500줄 안에 들어왔다.
+  - 현재 2,498줄이며 원래 목표 범위인 1,500~2,500줄 안에 들어왔다.
   - top-level/nested 함수 정의, `global`/`nonlocal`, dependency-builder 함수 정의는 모두 0개다.
   - 기능 구현, 판정, 상태 mutation은 owner runtime/composition 모듈에 있고 `main.py`는 설정 import,
     객체 생성, 명시적 typed dependency wiring, Discord 등록, runtime 진입을 담당한다.
@@ -189,7 +580,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     제외한다. raw legacy artifact와 generation-0 anchor는 보존하되 history는
     자동 투영하지 않고 새 실제 turn만 다음 v2 generation으로 잇는다.
     verifier는 설정된 scope의 선택 session 활동시각으로 Main/Fast ordering,
-    stale, guild revocation과 reset을 판정한다. 다른 Main session의 후속 commit은
+    stale과 완료된 reset을 판정한다. 미완료 guild revocation marker는 timestamp
+    비교 없이 exact guild row를 제외하므로 벽시계 역행 뒤에도 Main restore와
+    Fast/Main cross-surface merge가 철회 전 문맥을 되살리지 않는다. 다른 Main session의 후속 commit은
     오래된 대상 session을 최신으로 만들지 못하며, 선택 대상의 누락·손상된 활동
     metadata는 cross-surface에서 fail-closed한다. 이 내부 시각은 public status에
     노출하지 않는다.
@@ -544,7 +937,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
     prefix와 exception type만 남긴다. proactive open-question promotion과 background
     vault maintenance 실패 로그의 예외 detail도 `errorType=<exception-type>`만 남긴다.
     background cognitive refresh 실패 로그도 session key·reason·예외 메시지를 제외하고
-    fixed prefix와 exception type만 남긴다.
+    fixed prefix와 exception type만 남긴다. Cognitive-state action·latency 로그 역시
+    질문·검색 의도·reason·session scope key·예외 메시지를 제외하고 fixed action/scope,
+    문자 수, latency와 exception type만 남긴다.
   - owner 없는 self-identity review queue copy의 user/assistant 원문은 사람 검토·export에
     남기되 self-identity runtime-state section이 soft tone hint로 읽지 않는다. renderer는
     reviewed identity profile만 사용하고 pending candidate를 자동 승격하지 않는다. 같은
@@ -1894,8 +2289,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   idle에서만 유지된다. idle ON 뒤 Discord-only 세션, bound identity/state 유실과
   confirm/retry/abort의 모호한 I/O 예외는 모두 즉시 exact OFF로 전환한다.
   Supervisor의 Docker 복구는 `--no-deps`와 credential-scoped 환경을 사용한다.
-  Local Bridge 하위 프로세스는 credential을 받지 않으며, 전체 재시작은 exit 75를
-  받은 Supervisor가 필요한 Discord/Codex 설정만 짧은 handoff에 전달한다.
+  Local Bridge 하위 프로세스는 credential을 받지 않으며, Windows Local Bridge 전체 재시작은 exit 75를
+  받은 Host Supervisor가 필요한 Discord/Codex 설정만 짧은 handoff에 전달한다.
   이는 source/mock 증거이며 실제 마이크·스피커·Discord는 실행하지 않았다.
   current source에서는 Control Page가 manager 생성·상태 읽기 전에 stable
   `voice_capture_consent/owner_claim.lock`의 process-lifetime OS lock을 획득한다.
@@ -1955,6 +2350,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   phase/disposition, process 여부와 journal generation을 exact 검증한다. durable
   reservation token은 verified flag, reservation ref와 ingress turn도 exact해야 한다.
   issue 전·reservation 직전·직후와 claim 직전에 capture-consent fence를 다시 검사한다.
+  이 fence는 발화 flush 뒤 정상적으로 false가 되는 VAD `captureActive`가 아니라 mic ON,
+  capture-ready/not-stopped, current watchdog·lease/state digest를 검증한다.
   철회 race에서는 exact reservation과 live capability를 revoke하며 revocation write를
   증명하지 못하면 content-free 503으로 닫는다.
   ingress turn과 reservation reference의 v2 proof에는 발급 capture fence digest가
@@ -2182,8 +2579,9 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   `Qwen3-14B-Q4_K_M.gguf`, embedding은 local hash다. 전략 subgoal, router,
   recovery와 utility도 `MINDCRAFT_CODEX_ENABLED=false`일 때 local 경로를 유지한다.
 - 기본 `voyager` Compose profile과 launcher에서 Codex dependency, token mount와
-  credential preflight를 제거했다. legacy Voyager runner도 backend 기본값 `local`을
-  따르며 Python client는 HTTP health나 spawn 전에 반환한다.
+  credential preflight를 제거했다. 당시 legacy Voyager runner 기본값은 `local`이었지만
+  2026-08-21 `disabled`로 대체했고, explicit legacy local backend도 direct Qwen을 열지 않고
+  fail-closed한다.
 - Mindcraft Codex adapter는 enable gate를 token read·fetch보다 먼저 검사하고,
   classifier 실패는 exact `ignore`로 닫는다. 2026-08-09 history 경계가 free-text
   summary와 raw archive 자체를 제거한 현재 상태는 다음 절에 기록한다.
@@ -2392,8 +2790,8 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   user tail을 user-only history로 만든 뒤 durable continuity receipt를 요구한다. receipt가
   반환되기 전에는 room owner·TurnScope·LLM·TTS·playback을 시작하지 않는다. commit 실패는
   고정 `conversation_continuity_commit_failed`와 예외 type만 남기고 downstream 실행 없이
-  닫는다. Local mic은 이 Main checkpoint를 중복 사용하지 않고 기존 Fast ingress owner를
-  유지한다.
+  닫는다. direct Main `local_mic`도 Fast ingress를 거치지 않으므로 같은 exact source-turn
+  user-only checkpoint를 사용한다. 별도 Local Bridge/Fast ingress 경로의 checkpoint owner는 유지한다.
 - Main prompt projection은 durable precommit 표식, current turn ID, exact trailing user
   content가 모두 일치할 때만 저장된 현재 user row 한 개를 복사본에서 제거한다. 따라서
   durable history는 보존하면서 같은 현재 질문을 LLM payload에는 한 번만 넣고, stale turn이나
@@ -2652,3 +3050,520 @@ Source branch: `codex/omnivoice-tts-cutover`, memory provenance hardening increm
   원래 예외를 재전파한다. 집중 61개와 CI-equivalent 전체 3,342개(skip 22), Python 구문·
   diff check가 통과했다. 검증은 offline이며 실제 Discord·Minecraft·heartbeat·Control Page를
   기동하지 않았다.
+
+## 2026-08-13 Local voice validation progress and consent state fences
+
+- validation-bound STT가 admission에서 거절되거나 너무 짧으면 더 이상 current attempt를
+  `pending`에 두지 않고 fixed error event로 실패시켜 같은 단계 retry를 허용한다. 일반
+  no-wake/ambient drop은 기존처럼 조용히 버린다.
+- consent active commit과 validation bind 뒤 host lease를 즉시 다시 게시해 다음 1초 heartbeat
+  전의 정상 발화를 stale fence 409로 거부하던 창을 없앴다. watchdog 물리 stop은 같은 lease
+  heartbeat만으로 authorized가 되지 않으며, 검증된 새 explicit ON에서만 latch를 해제한다.
+  fresh validation GET이 active consent와 4초 이상 지속된 physical-off blocker를 함께 보면
+  OFF/revoke 후 consent action을 다시 연다.
+- Control Page의 listening 표시는 순간 VAD `captureActive`가 아니라 current Bridge의
+  `ready && captureReady`를 사용한다. 음성 검증 UI는 POST와 consent/repair action을 한 번에
+  하나만 실행하고, mutation/신규 poll 뒤 늦게 도착한 GET을 버리며, backend와 같은
+  playback-started/completed·nonfailed·one-shot 조건에서만 청취 확인을 허용한다. 409/400의
+  allowlisted voice code는 고정 안내로 표시하고 mutation 실패 뒤 canonical session을 다시 읽는다.
+  `reply_final` 뒤 30초 동안 playback event가 하나도 없으면 세션 TTL까지 pending으로 두지 않고
+  `playback_start_timeout`으로 현재 attempt를 실패시켜 단계 retry를 연다.
+- 변경 영향·인접 모듈 414개(skip 1)가 통과했다. 검증은 offline source/test이며 실행 중 Control Page,
+  Bot API, Local Bridge, 마이크·스피커·Docker를 기동하거나 교체하지 않았다.
+
+## 2026-08-13 Live2D tail root-driven overlapping action
+
+- 기존 idle tail은 root를 ±8.8도로 독립 왕복시키고 뒤 6개 분절이 앞 각도의
+  78~82%를 상속해, 위상 굽힘보다 전체 피벗이 약 3배 강한 그네 동작이었다.
+- 참고 영상을 직접 확인해 root의 primary arc, 관절별 overlapping delay, 반전 뒤 tip inertia,
+  S↔7 실루엣 교대를 기준으로 삼았다. root만 ±6.5도로 구동하고 뒤 6개 absolute heading은
+  앞 heading을 spring으로 지연 추종한다. idle에서는 동일 7개 관절에 먼저 쓰인 native
+  physics 출력과 끝으로 커지는 인접 heading 차이를 weight 1로 blend해 custom motion이 실제 최종값이 되며,
+  speaking fade에서는 weight 0의 native Body/Breath physics로 부드럽게 돌아간다.
+- 초기 follower는 올바른 구조여도 주기가 약 14초이고 tip 반전이 약 1.5초 늦어 참고 영상보다
+  느렸다. phase 속도뿐 아니라 spring을 `scale²`, damping을 `scale`로 함께 3.75배 시간 압축해
+  normalized overlap을 유지하면서 동작만 빠르게 했다. 고정 60 Hz 회귀는 주기 3.4~4.1초,
+  root→tip 반전 0.3~0.5초, S·7 구간과 heading/local clamp를 함께 고정한다.
+- 실행 중 8799가 `tail-overlap-4`를 로드한 상태의 actual model을 8.5초 샘플링한 결과
+  주기 3.721초, heading 반전 지연은 root→tip
+  `[0, 0.063, 0.119, 0.180, 0.259, 0.339, 0.400]`초였고 browser error는 0이었다.
+  위치·vertex·drawable render order는 변경하지 않았다. 전체 꼬리 노출 여부는 별도 model asset
+  과제이며 이번 움직임 수식의 완료 조건으로 섞지 않는다. Live2D asset 17개와 전체 UI 191개가
+  통과했고 사용자 최종 시각 튜닝은 남아 있다.
+
+## 2026-08-13 Lease-bound Minecraft service bootstrap
+
+- Control Page의 explicit `connect|goal`은 더 이상 최대 수분의 기동·연결 await로 6초 public
+  proxy를 붙잡지 않는다. 초기 작업 응답과 continuity가 전달된 뒤 기존 FastAction이 실행되고,
+  성공·실패 follow-up은 같은 task ID로 기록된다. validation voice에서는 이 command/tool 경계를
+  계속 호출하지 않는다.
+- 이미 관리 중인 Minecraft HTTP runtime의 lease-bound `start()`가 첫 `/start`에서 service
+  offline을 확인한 경우에만 Windows Host Supervisor의 fixed `start_voyager` preview/apply를
+  호출한다. action argv는 `voyager` 하나와 `--no-build --no-deps`로 고정된다. Voyager는 필요하면
+  생성·재생성하지만 core가 관리하는 `router_llm`과 `minecraft_llm` prerequisite는 기동하거나
+  재생성하지 않는다. `/health`가 true가 된 뒤 같은 proof의 `/start`를 정확히 한 번 재시도하며,
+  최종 성공은 기존 physical connection verification이 소유한다.
+- direct `set_goal()`, status/stop/action과 proof 없는 start는 서비스를 기동하지 않는다. 다만
+  matching active lease가 없는 Fast Control goal은 새 lease의 `connect(goal=...)` 경로이므로
+  bootstrap될 수 있다. Local Bridge의 폐기된 command queue는 authorization-required로
+  fail-closed하며 이를 launcher Runtime Error로 오분류하거나 raw exception/path를 heartbeat에
+  저장하지 않는다.
+- functional-readiness 대기는 설정으로 늘릴 수 있지만 exact minimum은 60초다. 기본 시간 상한은
+  service health 대기 300초, Discord delegated connect 480초, delegated `connect_ack`/goal/disconnect와
+  owner-side direct `/goal` 30초, 그 밖의 owner-side service request 2.5초다. timeout은 성공 증거가
+  아니며 최종 결과는 lease owner의 기존 verified outcome으로만 판정한다.
+- graceful delegated `connect|goal` 취소는 이미 보낸 mutation의 응답을 먼저 회수한 뒤 캡처한
+  exact lease ID 조건부 `disconnect`를 완료하고 취소를 재전파한다. transport/response 유실과 typed
+  result 손상도 ID가 알려진 경우에만 같은 보상을 거치며 unknown/replacement lease는 blind-disconnect하지
+  않는다. delegated goal과 Fast Control local goal은 status에서 캡처한 exact lease ID를 owner operation
+  lock 안에서 검증한 뒤에만 goal/audit effect를 시작한다. local/delegated autonomy action도 dispatch 전에
+  같은 ID를 캡처해 executor→delegation→owner lock까지 전달하고, cancel·uncertain response·shutdown fallback은
+  그 action ID의 lease만 정리한다. ID 없는 손상 record는 network cleanup도 시작하지 않는다. 성공 delegated
+  connect는 응답 전 exact
+  `(guildId, leaseId)` pending ACK와 30초 Bot API watchdog을 등록한다. remote ACK는 caller 취소에도
+  shield/collect하며, ACK 응답만 유실되면 exact public status가 같은 active lease와
+  `delegatedConnectPending=false`를 증명할 때만 성공으로 수렴한다. ACK 전 same-guild 비-disconnect
+  mutation은 거부하고 explicit disconnect는 mutation과 함께 pending을 정리한다.
+- ACK가 없거나 정리가 실패하면 watchdog은 exact lease ID를 조건으로 disconnect를 재시도한다.
+  lease가 교체되면 stale watchdog은 새 lease를 정지하지 않으며, remote가 lease ID를 알기 전
+  취소·실패하면 blind disconnect하지 않고 owner 경계에 맡긴다. 따라서 delegated-worker의
+  ACK 이전 hard-kill은 source에서 bounded cleanup으로 닫혔고, direct owner connect와 480초 remote
+  request upper bound는 바뀌지 않았다.
+- 빈 `/minecraft goal`은 실행 없이 고정 사용법을 반환한다. Discord 도움말은 실제 guild-prefix
+  `마크접속|마크상태|마크종료|마크목표`를 표시하고, 존재하지 않는 Discord slash 안내는
+  `minecraft-connect` prefix 명령으로 교정했다. no-argument command의 추가 인자도 더 이상
+  버리고 실행하지 않는다.
+- 서로 겹쳐 합산하지 않는 broad 13개 모듈 418개, 전체 Minecraft 253개(skip 11), ACK-focused
+  61개와 Python compile·scoped diff check가 통과했다.
+- 2026-08-13 사용자 승인 live run에서 기존 survival/easy Java 서버를 재사용하고 `bot_api`,
+  `router_llm`, `minecraft_llm`, `voyager` 네 컨테이너만 기동했다. 두 LLM은 healthy, Bot API
+  source identity는 verified, Voyager HTTP health는 ready였고 다른 Evelyn 컨테이너는 시작하지
+  않았다. 첫 `/minecraft connect`는 빈 새 `bot_profiles` 때문에 60초 뒤 fixed failure로 끝났고
+  lease revoke와 runner stop이 verified됐다. 이후 일회성 격리 helper가 새 profile에만 Microsoft
+  device-code 인증을 완료했고, 예전 `C:\Evelyn\bot_profiles`는 복사하거나 사용하지 않았다.
+  두 번째 `/minecraft connect`(`fast-action-2`)는 completed가 됐으며 서버 join 1회,
+  `connected=true`, fresh telemetry, exact functional readiness, authorized lease를 확인했다.
+- authenticated safe-world 관찰에서 `survival_controller.updated_at`이 두 시점과 추가 10개 sample
+  동안 계속 증가했다. 10개 모두 connected/fresh/ready였고 health 20, hunger 15 이상, hostile 0,
+  controller error 0, phase `planner_control`이었다. 위험이 없는 상태에서 생존 모드가 불필요한
+  행동을 만들지 않고 제어를 넘기는 live 경계까지 증명했다. 네 Minecraft 전용 컨테이너는 실행
+  상태로 유지했다.
+- 첫 Microsoft device-code는 native `onMsaCode`가 code와 bounded TTL만 exact marker로 내보내고,
+  sidecar가 이를 process memory에서만 보관한다. 엄격히 검증된 challenge는 실행 중·미연결·만료 전
+  Control Page state와 기존 Minecraft 상태 한 줄에만 투영된다. 일반 `/minecraft status` reply와
+  chat continuity·TTS·health·observe·child artifact·telemetry에는 코드를 넣지 않으며 만료, 연결,
+  reset, child exit와 verified stop 때 제거한다. challenge는 readiness/lease ACK/timeout을 바꾸지 않는다.
+  core/Fast/UI 집중 40개, Fast 95개, UI 35개와 최종 CI-equivalent 3,642개(skip 22)가 통과했다.
+  정상 profile-bound 첫 로그인 surface와 실제 hostile/저체력/식량 부족 반응, forced Discord-worker
+  stop, goal/disconnect와 world-effect E2E는 별도 사용자 승인 세션에서 검증해야 한다.
+- live 전 source 감사로 passive mob hostile 오인, `self_preservation` 뒤 survival 평가 순서,
+  nested hostile ownership, content-free survival status projection을 수정했다. planner recovery
+  single-flight 순서와 Docker CRLF patch 입력도 고쳤다. `tests/mindcraft` 28개,
+  `tests/minecraft` 243개(skip 11), Docker Compose 계약 24개, goal-manager 30개,
+  survival-mode 35개와 실제 Voyager image build-time suite가 통과했다.
+
+## 2026-08-13 Mindcraft 빠른 생존 판단과 검증형 전투 경험
+
+- 기존 `self_preservation`이 용암·화재·익사·치명 피해의 유일 P0 소유자다. Evelyn P1은
+  health/food, breath, hostile spawn, 18·8·4m band crossing/gone event를 coalesce하고,
+  stationary hostile 대비 150ms cached-hostile fallback을 사용한다. 일반 event는 flag만 남기지만
+  8블록 안의 actionable hostile은 full snapshot·LLM 없이 최대 1.2초의 bounded direct-sprint reflex를
+  시작할 수 있다. full tactic과 검증은 기존 직렬 runner의 single-flight 경로로 돌아간다.
+- public survival projection은 고정 wake enum과 bounded `wake_to_decision_ms`,
+  `decision_to_action_ms`만 추가로 공개한다. 좌표·entity·snapshot은 계속 projection 밖이다.
+- 식량 회복은 허기 14~11에서 idle-only, 10 이하에서 planner action을 선점하며, 소지 음식 없이
+  health 10 이하이면 hunger와 무관하게 같은 critical recovery를 선점한다. source 탐색은 적이 없고
+  지상·비수중일 때만 허용하며, 소지 음식도 적·수중이 없을 때 기존 monitored 경로로 먹는다. 안전한
+  지하 섭취는 유지한다. 성숙 작물과 성체 `cow|pig|sheep`만 사용하고 안전 경로로 최대 32블록 안의
+  먹잇감에 접근한다. 이동·수확·
+  사냥·조리·섭취는 100ms마다 disconnect/수중/알려진 이름 또는 Mineflayer `type=hostile`/health
+  하락을 확인하며 timeout 때 끝나지 않은 작업 Promise를 기다리지 않는다. 실제 hunger 또는 안전식량
+  증가만 성공·진전으로 인정한다. 주변 source가 없으면 30초 planner search handoff를 주고, 같은
+  `#food` 실패의 즉시 재삽입과 고정 3초 선점 loop는 bounded backoff로 막는다.
+- 전투는 기존 custom-PvP의 cooldown/critical/strafe/tap을 유지하고 shield-close preset은 방패를
+  off-hand에 장착한다. 250ms마다 preset과 terrain/health/장비 안전 문맥을 다시 계산해 달라지면
+  공격을 멈추고 P1 판단으로 돌아간다. 누적 health 하락과 실제 실행한 preset의 성공·실패·사망만
+  typed episode 증거로 쓰고 fallback·timeout·interrupt·인프라 실패는 학습에서 제외한다. episode는
+  최대 256개를 원자적 비동기 JSON으로 저장하며 정상 disconnect와 SIGINT/SIGTERM에서 load 뒤 bounded
+  flush한다. 같은 Minecraft 1.21.11/custom-PvP 1.7.16에서 검증 성공 2회 후에만 전술을 승격하고
+  연속 실패·사망 2회면 격리하며 새 검증 성공 2회 뒤에만 복귀한다. 경험은 base flee를 fight로
+  올리거나 water/unknown/crowd/boss hard fence를 넘지 못한다.
+- 회피 controller는 모든 immediate threat의 거리·원거리 LOS cover를 함께 점수화하고, forced sprint
+  직선 구간의 머리·발·지지·hazard와 한 블록 높이 변화를 bounded 검사한다. recovery reflex는 2.5초
+  heading을 유지하되 더 안전한 경로에는 양보한다. `evelynMovementOwner`가 활성인 동안 idle cleanup과
+  `self_preservation`은 control state를 지우지 않는다. 무장 없음·다중 적·원거리 적의 tactical flee는
+  P0 reflex 뒤에도 18블록 안전 반경까지 같은 direct recovery sprint를 유지한다.
+- Goal Manager는 Overworld의 routine fallback을 먼저 쓰되 최근 비선점 실패 6개와 같은 후보는
+  건너뛴다. 후보 없음·비 Overworld·실패 recovery는 기존 subgoal Qwen 경로를 유지한다.
+  Compose 배포값은 mode runner의 `MINDCRAFT_MODE_INTERVAL_MS=100`과 ActionManager의
+  `MINDCRAFT_INTERRUPT_POLL_MS=100`이며 self-prompt cooldown은 300ms다. 전자는 직렬 mode update
+  간격이고 후자는 `requestInterrupt()` 뒤 현재 cooperative promise의 종료 여부를 다시 확인하는
+  주기일 뿐 강제 취소나 100ms 이내 중단을 보장하지 않는다. 자율 self-prompt의 command docs만 현재
+  subgoal allowlist로 제한하며 사용자 턴은 전체 정상 명령을 유지한다. 매 prompt `$STATS`에서는
+  wildcard nearby-block scan을 제거하고 명시적 `!nearbyBlocks`의 기존 전체 관측 의미는 유지한다.
+- ActionManager의 mode takeover는 `requestInterrupt()` 뒤 최대 1.2초만 cooperative 종료를 기다리고,
+  끝나지 않으면 새 action을 `busy`로 거부해 child를 죽이지 않는다. 명시적 process stop의 10초
+  최외곽 fallback은 유지한다. 종료는 idempotent fence를 세운 뒤 `bot.quit`/`bot.end`로 연결을 먼저
+  닫고 combat-history load와 writer flush를 기다린 다음 process를 끝낸다. SIGKILL 중 마지막 episode는
+  여전히 보장하지 않는다.
+- child stdout/stderr는 bounded PIPE reader가 계속 비우되 원문은 즉시 폐기한다. public artifact에는
+  고정 category와 exit code/signal/timestamp만 최대 12개 남긴다. readiness는 spawn 이후 3초 연속 연결과
+  현재 generation의 fatal child event 부재를 추가로 요구한다.
+- 최종 `evelyn-fast-control-voyager:latest` image
+  `sha256:f039c6808dd926afb7d1d8de3650670b69a1cfd4572a6bc0d085e9e65a0fc999`는 planner 32개와
+  통합 combat/experience/escape/goal/survival 129개, 합계 Node 161개 및 patch/lint/combat/latency
+  smoke를 통과했다. Python Mindcraft 계약 31개, Compose config, source↔container 핵심 파일 hash와
+  scoped syntax/diff check도 통과했다. 컨테이너는 해당 image로 healthy이며 bot은
+  `running=false`, `connected=false`, world lease 비활성 상태다.
+- 사용자 승인 live에서 hunger wake→decision 71ms, hostile band wake→decision 58ms와 이후
+  `handle_hostile` decision→action 0ms 표본을 확인했다. movement lease 수정 뒤 direct reflex가 근접
+  다중 위협에서 피해 없이 안전 반경 근처까지 거리를 넓힌 표본도 있었다. 그러나 뒤의 tactical
+  pathfinder 전환이 추격을 다시 허용해 피해와 사망 표본이 발생했고, 이를 continuous direct recovery
+  sprint로 수정했다. 마지막 bounded run은 actionable hostile가 투영되지 않아 이 tactical 수정의
+  action→effect를 live 검증하지 못했고, 종료 중 추가 피해를 막는 disconnect-first 순서도 offline
+  verifier만 통과했다. health-critical food recovery는 동일 최종 image의 몹 spawning을 끈 별도 무위협 fixture에서
+  health 10, hunger 15, safe food 0을 만든 뒤 `acquire_food → food_crop_verified`, 두 번의
+  `inventory_food_verified`, hunger 15→20과 health 10 유지로 action→effect를 검증했다. fixture bot의
+  Docker stop은 20초 안에 끝나지 않아 exit 137로 강제 종료됐으며 OOM은 아니었다. 임시 서버·컨테이너·
+  artifact는 제거했다. 운영 월드의 최종 상태가 치명적 저체력이므로 재접속하지 않았다. 운영 월드
+  식량 획득, 장기
+  생존률, p50/p95, restart 뒤 경험 승격·격리는 아직 live evidence가 아니다.
+
+## 2026-08-13 Speed-first unified LLM turn plan
+
+- Core Router의 `tools[]`, context flags와 `specialist`는 공용 `ContextPolicy`와
+  `RouteDecision`으로 정규화된다. top-level 계획만 있고 nested policy가 없어도 계획을
+  버리지 않는다. obvious direct/continue와 명시적 safe command는 zero-Router fast path를
+  유지하고, 그 외 semantic voice는 Router를 호출한다. 일반적인 `찾아줘/알아봐`만으로는
+  web route를 강제하지 않는다.
+- Main은 유일한 user-facing finalizer다. Qwen3-14B Q4와 registered skill은 bounded
+  untrusted evidence만 반환하고, memory/runtime/tool/Minecraft/vision packet 중 허용된
+  section을 낮은 권한 data로 공유한다. Qwen은 `deep_reasoning|minecraft_planning` 선택 시만
+  1회 실행하고 6초 실패 시 Main 단독으로 degrade한다. Fast background research와 runtime
+  investigation도 Qwen evidence 뒤 Main 1회를 사용한다.
+- 정상 호출 예산은 direct Router 0/Main 1, semantic Router 1/optional Qwen 1/Main 1,
+  registered search tool/Main 1이다. search의 intermediate Main summary, empty-stream의
+  Router/context 재실행, cached state의 pre-Main cognitive refresh, Main 직전 runtime/
+  Minecraft 재관측과 non-Minecraft skill의 Minecraft 관측을 제거했다.
+- Router 승인 없는 promised-search escalation은 외부 요청을 보내지 않는다. 검색·Qwen·
+  skill evidence는 system instruction으로 승격하지 않고 필드·전체 길이를 제한한다.
+  Main 합성 실패도 raw 검색/runtime evidence 대신 content-free 실패로 닫는다. benchmark에는
+  tool query/reason/evidence 및 allowlist 밖 status를 남기지 않는다.
+- 관련 Core/Fast/voice/runtime/memory 회귀 403개가 통과했다. 2026-08-13 당시 RTX 3090의
+  관측 free VRAM은 17,646 MiB이고 Qwen GGUF는 8.38 GiB라 정적 용량상 적재 가능했지만
+  9823 service는 실행하지 않았다. 이후 2026-08-16 live latency와 GPU1 overlap 근거는
+  아래 concurrency benchmark 절에 기록한다. 응답 품질 평가는 별도 과제다.
+
+## 2026-08-16 GPU1 Qwen specialist + STT concurrency benchmark
+
+- `tools/gpu1_latency_benchmark.py`는 fixed 1,773자 Fast Main prompt, Qwen specialist
+  256-token 요청과 repository의 1.64초 PCM16 STT fixture를 같은 barrier에서 시작하고,
+  physical GPU1의 used/free/total memory와 utilization을 기본 50ms마다 수집한다.
+  1 warmup + 5 measured iteration의 raw timing/GPU sample과 p95를
+  `evelyn.gpu1-latency-budget.v1` atomic report로 쓴다. prompt는 hash만, audio는 PCM hash와
+  duration/sample count만 남기며 raw/base64 audio와 transcript는 report에 넣지 않는다.
+- 기본 예산은 Fast Main TTFT p95 1,000ms, Qwen timeout 0 및 성공 p95 6,000ms,
+  STT endpoint-to-final p95 1,200ms, physical GPU1 free memory 최소 2,048MiB, request/GPU
+  sampling error 0이다. 5개 미만 표본도 실패다.
+- `docker-compose.gpu1-benchmark.yml`은 승인된 benchmark에서만 STT를 GPU0에서 physical
+  GPU1으로 옮긴다. normal Compose 배치는 변경하지 않았다. source/offline 집중 검증은
+  통과했고 runtime 872개(skip 4), voice 716개(skip 5), hygiene 8개가 모두 통과했다. core
+  전체는 842개 중 836개 통과·skip 1이며 이번 변경과 무관한 기존 dirty-tree source-boundary
+  assertion 5개가 남았다.
+- 2026-08-16 사용자 승인 뒤 Main GPU0, Qwen specialist+STT physical GPU1으로 실제
+  1 warmup+5 measured overlap을 실행했다. Fast Main TTFT p95 422.6ms, Qwen 성공 p95
+  2,233.2ms/timeout 0, STT endpoint-to-final p95 626.1ms, GPU1 peak used 14,039MiB/min
+  free 10,284MiB/peak utilization 98%, GPU sample 102와 request/GPU error 0으로 pass report를
+  만들었다. 테스트 컨테이너와 Docker Desktop은 종료했고 GPU1 사용량은 0MiB로 복귀했다.
+- 처음 추가했던 fresh receipt 기반 Qwen/Discord/Local admission은 운영 중 초과를 감지하지
+  못하고 normal STT GPU0 배치까지 강등하는 정적 결합이라 사용자 지시로 제거했다. Compose,
+  Windows launcher와 runtime call path는 report를 읽지 않는다. 요청별 Qwen 6초 timeout과 기존
+  STT 오류 fallback은 유지한다. 제거 후 집중 106개와 Fast Control/voice composition 인접
+  115개, Python 구문과 merged Compose parse가 통과했으며 Docker/GPU service는 다시 실행하지 않았다. 실행 계약과 report 경로는
+  [[GPU1_CONCURRENCY_BENCHMARK]]가 소유한다.
+
+## 2026-08-21 Main LLM TTFT source optimization
+
+- Fast Main의 고정 system prefix를 계약 문구를 유지한 채 1,773자에서 938자로 줄였다. startup
+  warmup은 voice/Discord의 `SYSTEM_PROMPT`와 Fast Control의 실제 고정 prefix를 각각
+  `cache_prompt=true`로 요청한다.
+- voice/local prompt는 저장 history를 지우지 않고 첫 system message와 최근 non-system 8개만
+  모델에 보낸다. memory/runtime context는 정책 또는 tool decision이 요구한 턴에만 붙이며,
+  screen evidence 턴의 capability contract는 유지한다. Fast Control의 Main HTTP 연결은 process
+  수명 동안 재사용하고 cleanup에서 닫는다.
+- llama.cpp Main launcher와 Compose는 `GGML_CUDA_GRAPH_OPT=1`, batch 2048, ubatch 1024,
+  prompt-cache RAM 8192 MiB, cache reuse 256을 명시한다. benchmark는 서버의 processed/cached
+  prompt token, `prompt_ms`, prefill/prediction throughput과 cache-hit ratio를 client TTFT와 함께
+  기록한다.
+- 관련 Core/Fast/voice/runtime/Compose/benchmark 회귀 251개와 production Python compile,
+  scoped whitespace 검사가 통과했다. Docker/GPU/마이크/Discord는 실행하지 않았으므로 실제
+  TTFT 개선폭과 ubatch 1024의 target-GPU 이득은 아직 live A/B 근거가 없다.
+
+## 2026-08-14 Minecraft 공개 자산 재사용과 20-cell 전투 matrix
+
+- 공식 공개 구현을 비교한 결과, 현재 `@nxg-org/mineflayer-custom-pvp@1.7.16`보다 검증된
+  Mineflayer-native drop-in 전투기는 찾지 못했다. custom-PvP를 1:1 actuator로 유지하고 이미
+  함께 로드되는 `mineflayer-tracker`의 도달시간 기준 투사체 정보를 P0 방어에 연결했다. 이미
+  off-hand에 든 방패는 즉시 사용하고, 방패가 없으면 기존 corridor·hazard·cover 검사를 통과한
+  회피를 시작한다. live arrow 단독 effect는 아직 별도 검증하지 않았다.
+- Odyssey/Voyager는 low-level kill wrapper 대신 위협·장비 조합 커리큘럼과 검증 성공 뒤 skill을
+  승격하는 패턴만 채택했다. `tools/voyager/combat_matrix.py`는 격리 Minecraft 1.21.11 서버에서
+  single zombie, single skeleton, zombie+skeleton, three zombies, creeper를 무방어/방어와 낮/밤으로
+  교차한 20개 cell을 fresh runtime/history로 자동 실행한다. production 정지, exact image/version,
+  arena/loadout/time/tagged count, terminal episode와 owned cleanup을 fail-closed 검증한다.
+- 첫 full run은 5/20이었다. evaluator의 외부 안정 관측과 실제 100ms controller가 달랐고, 전술
+  도주가 18m 첫 crossing에서 controls를 끄면서 추격 hostile가 즉시 재진입했다. 전술 도주는
+  24m 여유를 먼저 확보한 뒤 18m 밖 연속 2초를 같은 movement lease에서 확인하고, 재진입하면
+  재회피하도록 수정했다. 연속 P0 reflex는 각 1,250ms 상한을 따로 검사하고 총시간을 P1 지연에서
+  제외한다. 안전하게 사라진 creeper만 flee의 hostile-count 감소를 허용한다.
+- 최종 live matrix report
+  `runtime_artifacts/validation/combat_matrix_batch_full3_pass_20of20_20260814/report.json`은 20/20,
+  infrastructure failure 0, death 0, cleanup verified다. 관측 P0 event→control은 0~1ms, P0 뒤 P1
+  판단은 11~90ms, decision→action은 0~1ms였다. 전체 기록 피해는 약 4.76 health, cell 최대 2였고
+  three-zombie 네 cell은 모두 피해 0으로 성공했다. 전용 컨테이너와 25565/25573 listener는 종료 뒤
+  0개였다. 운영 Minecraft는 시작하거나 재접속하지 않았다.
+- 최신 `evelyn-fast-control-voyager:latest`
+  `sha256:499dbe8634c1df82bf922ea370ab1856288cf06a4bf153145e98799a28a5d50b`는 planner 32개와 통합
+  combat/experience/escape/goal/survival 149개, 합계 Node 181개 및 lint/combat/latency verifier를
+  통과했다. Python Mindcraft 계약 31개와 matrix 22개, 합계 53개도 통과했다.
+- 이 결과는 roofed arena의 고정 20개 전투·도주 effect 증거다. 자연 채집·식량 고갈·대피소·여러
+  day/night·희귀 지형·disconnect/restart 경험 승격을 포함한 장기 생존률이나 통계적 p95는 아니다.
+
+## 2026-08-14 Minecraft 투사체·저체력 근접전·20분 자연 생존
+
+- actual 1.21.11 arrow-only smoke는 hostile 0인 상태에서 projectile P0를 0ms에 시작하고 이미 든
+  방패로 blocked damage 30을 확인했다. health damage·death·runtime error는 0이고 owned cleanup도
+  통과했다. 근거는
+  `runtime_artifacts/validation/combat_matrix_batch_projectile6_pass_20260814/report.json`이다.
+- 근접 hostile P0가 반복돼 full tactical P1을 굶기던 경합은 단일 pending handoff와 50ms keeper로
+  닫았다. P1 callback 입장 전에는 정확히 하나의 bounded P0 또는 재검사 timer를 유지하고, 실제
+  ActionManager의 callback 없는 busy 결과·projectile 경합·disconnect에서도 stale handoff를 남기지
+  않는다. 저체력 emergency melee가 입장한 뒤 legacy `self_preservation`의 일반 `moveAway(20)`가
+  중단시키던 충돌은 `mode:evelyn_survival`의 `handle_hostile` 동안 그 branch만 억제했다. 화재·용암·
+  익사·낙하 블록 branch는 이전 우선순위를 유지한다.
+- 체력 10·무갑옷·iron sword·단일 좀비 격리 smoke는 P0 0ms, 첫 reflex 1,100ms, P1 잔여 11ms,
+  action admission 0ms 뒤 `melee`를 4,508ms에 verified success로 끝냈다. P1 피해·사망·남은 hostile은
+  모두 0이며 cleanup도 통과했다. evaluator는 고정된 P0 episode 수 다음 첫 episode만 P1에 귀속해,
+  뒤이은 P0 death가 P1 preset을 덮지 않는다. 근거는
+  `runtime_artifacts/validation/combat_matrix_emergency_zombie_pass_20260814_201635/report.json`이다.
+- 최신 `evelyn-fast-control-voyager:latest`
+  `sha256:d7808a72b10cb2e1fe97347db89ec4558f6b7aa0399d14f07b8565ade368c14d`는 planner 32개,
+  통합 Node 183개와 runtime-lint/combat/latency verifier를 통과했다. combat-matrix와 long-soak
+  Python 회귀는 60개가 통과했다.
+- normal difficulty, natural time/weather/mob spawning/regeneration을 유지한 fresh-world 1,200초 soak는
+  1,086/1,086 connected-fresh sample, 최저 health/hunger 20, death·critical·runtime error 0으로 통과했다.
+  120초 안에 실제 이동 424cm, log 6개, wooden pickaxe 제작·인벤토리 후조건을 확인했고 종료 뒤
+  container·Java·port cleanup도 검증했다. 근거는
+  `runtime_artifacts/validation/long_survival_soak_pass_20260814_203758/report.json`이다.
+- 이 soak에서는 shelter가 한 번 실패했고 dirt 채굴·획득·사용, 전투와 식량 recovery 노출은 0이었다.
+  당시 vertical 23m·actionable false인 hostile가 decision admission에는 제외되지만 shelter 내부 raw
+  24m guard에는 포함되는 판정 불일치가 `shelter_context_unsafe`의 가장 강한 원인이다. 상세 verification은
+  public artifact에서 제거돼 exact terminal code는 확증하지 못했다. 따라서 20분 자연 안정 유지와
+  자율 bootstrap은 live 증거지만 shelter success, 식량 고갈 회복, 여러 day/night, restart 뒤 경험
+  유지와 운영 lease/Discord functional-readiness E2E는 아니다.
+
+## 2026-08-15 Minecraft 길찾기 호출·복구 업그레이드
+
+- `mineflayer-pathfinder` dependency는 유지했다. 일반 이동은 공간적으로 분리된 최대 4개 block
+  후보를 `GoalCompositeAny`로 평가하고, entity는 `GoalFollow`로 추적하며 실제 도착 거리로 성공을
+  판정한다. 비파괴 preview의 `partial`은 실패로 버리지 않고, 실제 `NoPath|Timeout`일 때만 파괴
+  허용 movement를 한 번 재시도한다.
+- shelter는 반경 8의 bounded 유효 plan 전체를 하나의 composite goal로 전달하고 실제 도착 후보를
+  현장에서 다시 검증한다. path helper는 같은 goal의 `stuck` 두 번째 발생에서 중단하고 timer와
+  listener를 정리한다. projectile/escape controller가 새 goal을 세운 경우 이전 path cleanup은 그
+  goal을 정지하거나 지우지 않는다. 먹잇감 접근의 false resolve도 사냥 성공으로 진행하지 않는다.
+- pathfinder의 빈 success는 현재 block 또는 pathfinder의 한 칸 위 시작점이 goal일 때만 성공으로
+  처리하며 core `stateGoal`도 같은 규칙으로 정리한다. navigation/pathfinder 회귀 20개와 전체
+  survival-mode 84개가 통과했고 Docker build에 두 navigation test를 gate로 추가했다. 전체 11개
+  overlay patch chain은 clean apply됐다.
+- 실제 지형에서 추가로 드러난 제작 결과 정착, 작업대 배치, bootstrap 재개, 후보 cluster 회전,
+  비파괴 접근, drop near→exact 회수, 수직 줄기 batch의 block-first 처리와 무효 dig 재시도를 같은
+  patch chain 안에서 닫았다. 전술 도주는 직선 corridor가 없으면 같은 lease에서 pathfinder로 fallback하고,
+  near/critical 전환에서는 안전 corridor가 생기는 즉시 sprint로 재승격한다. 식량 action은 actionable+LOS
+  24m monitor와 full-hunger reserve 보유 계약을 사용한다.
+- 최종 image gate는 combat+survival 217개, navigation+pathfinder 44개, planner 32개를 통과했다.
+  격리 navigation matrix는 4/4 cell에서 통나무 3개·곡괭이·death/error 0·cleanup을 확인했다.
+  fresh-world natural soak는 1,200.5초, death/runtime error/critical 0, 최저 health/hunger 17,
+  최종 health 20·hunger 17, verified goal 5·stuck 0으로 통과했다. 근거는 각각
+  `runtime_artifacts/validation/navigation_matrix/report.json`과
+  `runtime_artifacts/validation/long_survival_soak/report.json`이다. 운영 Minecraft는 재접속하지 않았다.
+
+## 2026-08-16 Minecraft shelter/restart bounded 검증
+
+- `tools/voyager/shelter_restart_scenario.py`는 운영 25565와 `evelyn-mindcraft`를 fail-closed guard하고,
+  전용 25575·새 world·단일 owned container에서 shelter dirt 18개, 두 night→day cycle, SIGTERM exit 0,
+  같은 runtime의 combat-experience exact prefix와 restart 뒤 새 verified append를 순서대로 판정한다.
+- 첫 fresh 실행은 `shelter_site_unbuildable`을 재현했다. bounded shelter site 검색을 반경 8에서 후보가
+  없을 때 한 번만 16으로 넓힌 뒤 해당 code는 사라졌다. 승인된 한 차례 full 재실행에서는
+  `shelter_return_failed` 뒤 `shelter_gather_timeout`, dirt 0, navigation partial/timeout 고착이 확인됐다.
+  저장된 fresh world를 offline으로 읽으면 최종 위치 64블록 내 dirt/grass가 46,973개이고 최근접은
+  1.22블록이므로 재료 부재가 아니라 일반 수집기의 단일 경로 고착이다.
+- shelter는 보이고 닿으며 `safeToBreak`인 dirt/grass를 먼저 한 개씩 수집하고 매번 inventory 증가를
+  검증하도록 최소 수정했다. 추가 승인 run은 첫 shelter window에서 composite 후보 이동 `NoPath`가
+  4회 발생했고, 첫 night→day cycle 1회 뒤 676.5초에 evaluator가 `scenario_infrastructure_error`로
+  종료됐다. 세 server query가 모두 끝난 뒤 monitor 갱신만 누락된 실행 순서와 파일 timestamp로
+  Windows atomic report 교체 `OSError`를 확정했다. cleanup은 통과했다.
+- composite `NoPath` 뒤 가까운 유효 shelter site 최대 4개를 exact goal로 재시도하고, atomic report
+  교체의 `PermissionError`만 50ms 간격 최대 3회 재시도하도록 최소 수정했다. combat/survival 221개,
+  navigation/pathfinder 44개, Voyager 도구 80개와 19 subtests, lint/combat/latency 및 Docker image
+  build gate가 통과했다. 최신 image는
+  `sha256:52d0012ccabbc9fbc4289fea988870484086e3969b3f48e310293f054a212ef1`이다.
+- 후속 live telemetry는 1.21.11 `findBlocks`의 positionless palette probe를 위치 검사로 거부해 일반
+  수집 후보가 0이 되던 경로, collect/return pathfinder가 dirt 18개를 scaffolding으로 소비하던 경로,
+  채굴 item을 따라 구덩이에 내려간 뒤 재료가 있어도 shelter center로 복귀하지 못하던 경로를 각각
+  확정했다. palette probe에는 이름 검사만 적용하고, shelter 전용 movement는 scaffolding/tower를 끄며,
+  각 direct collect 뒤 같은 center로 복귀하도록 최소 수정했다. verified dawn exit만 증가시키는
+  process-lifetime `shelter_success_count`와 content-free gather failure subtype도 evaluator에 투영한다.
+- Docker SIGTERM은 PID 1 launcher에만 도착하고 실제 agent child의 경험 flush를 호출하지 않아 5초와
+  15초 모두 SIGKILL/exit 137이 됐다. launcher가 기존 `Mindcraft.shutdown()`을 SIGTERM/SIGINT에서 한 번만
+  호출하도록 연결한 뒤 isolated stop은 2,264ms, agent checkpoint와 child/container exit 0으로 통과했다.
+- 의도적으로 두 번 만든 husk combat가 다음 natural cycle의 health/food 상태를 오염시키지 않도록 각
+  controlled encounter에 iron sword와 cooked beef 2개만 명시적으로 제공한다. 한 개 fixture의 두 full
+  run은 recovery 뒤 food search로 shelter를 이탈해 두 번째 밤 death를 재현했고, 두 개 fixture는 실제
+  `eat_inventory_food`와 기존 enclosure 재사용을 거쳐 조건을 낮추지 않고 통과했다.
+- 최종 content-free report `runtime_artifacts/validation/shelter_restart_scenario/report.json`은 1,961.2초,
+  seed 5,031,407, shelter dirt 사용 36, 자연 night→day 2회, SIGTERM graceful restart, combat-experience
+  prefix 1 보존과 post-restart 9 append, connected-fresh coverage 1.0, death/runtime error 0, final
+  health/hunger 17.17/15, cleanup verified, `passed=true`다. 운영 25565와 `evelyn-mindcraft`는 전 과정에서
+  닫혀 있었다. 최종 image `sha256:73121f284152ca4cd5223b98101de0e2ee38ad395b033577625e200bbb550ad2`는
+  Node combat/survival 227개, navigation 44개와 lint/combat/latency gate를 통과했다.
+- GoalManager의 실제 dragon kill 순서는 awaited `!attack(kill=true)` 안에서 `entityDead`가 먼저
+  발생하고 그 뒤 action result가 기록된다. 성공한 autonomous exact dragon attack의 before→after
+  defeated count가 증가하고 현재 predicate가 완료됐을 때 result 경계에서도 ultimate completion을
+  latch해 이 순서의 누락을 닫았다. 기존 event-after-result 경로와 failed/cancelled latch 차단은
+  유지한다. ActionManager의 고정 generic-exception marker도 실패로 분류해 combat latch를 무장하지
+  않으며, completed 상태에서는 verified exact `!endGoal`만 gate를 통과해 SelfPrompter를 한 번 멈춘다.
+  GoalManager 40개와 실제 registry를 포함한 planner 34개가 통과했다. live dragon combat은 실행하지 않았다.
+- lease-bound food action에서 아이템 증가 뒤 command 반환 전 periodic `update()`가 subgoal을 먼저
+  완료 처리해 world-effect candidate를 잃던 순서를 재현했다. exact binding이 있고 ActionManager가
+  실행 중일 때만 passive predicate 소비를 미루며 snapshot 갱신·publish와 일반 autonomy 동작은 유지한다.
+  action result가 같은 false→true 전이를 단일 소유해 gateway timeout의 false failure를 막는다.
+- gateway poll은 same-binding candidate를 먼저 읽되 projector가 exact lease·binding·process·telemetry
+  freshness·functional readiness를 다시 검증한다. candidate가 없으면 active guard를 직접 재확인하며,
+  action이 readiness를 한 번 관측한 뒤 disconnect/stale이 되면 180초 timeout까지 `running`으로 두지 않고
+  fixed failure→binding disarm→verified runner stop→lock release로 끝낸다. 첫 readiness 전 startup만 기존처럼
+  bounded 대기한다.
+
+## 2026-08-16 음성 restart·listener·local-memory 연속성
+
+- checkpoint restore 직후 canonical voice-user session 전체에서 room별 유일한 최신 활동을 먼저
+  선택하고 exact user binding과 미만료 TTL을 만족할 때만 process-local room owner를 복구한다.
+  만료·불일치 최신 row와 동률은 이전 owner를 되살리지 않으며, hard-exit 회귀는 wake 없는 owner
+  follow-up만 `owner_followup`으로 수락하고 다른 사용자를 거부한다.
+- 저장 음성 채널의 `on_ready` 복원은 fixed transient 실패만 generation-fenced 3회×0.5초 재시도한다.
+  receive/decrypt/utterance task의 예상 밖 종료는 exact listener generation을 정리하고 input lease를
+  해제한 뒤 같은 guild/channel/client의 단일 owner task가 replacement generation까지 합쳐 최대
+  3회만 재무장한다. explicit stop·stale task는 재무장하지 않는다.
+- self voice-state의 외부 채널 이동이 listener를 명시적으로 정리한 뒤 첫 exact-target ensure에서
+  transient 실패해도 같은 guild/client/channel fence 안에서 최대 3회×0.5초 재시도한다. 더 최신
+  이동은 stale retry를 중단하고 persistent 실패는 bounded error로 끝낸다.
+- non-resumable Discord READY가 live voice registry를 비운 뒤 replacement가 등록돼도 늦게 종료되는
+  orphan client는 current registry owner가 `self`일 때만 inherited key cleanup을 수행한다. 그렇지
+  않으면 자기 listener task·sink·decoder·queue와 input lease만 정리해 replacement를 보존한다.
+- Discord voice-server 내부 재연결은 새 WebSocket을 handshake 전에 custom gateway에 bind한다.
+  UDP socket identity가 같아도 non-resume session이면 이전 SSRC·DAVE map, decoder/utterance queue와
+  listener lease를 정리하고 기존 bounded rearm 경계에서 fresh key/session을 적용한다. 이전 socket의
+  늦은 JSON/binary frame은 exact socket identity가 아니면 새 상태를 바꾸지 않는다.
+- Main direct local-speaker의 synthetic guild `0`은 memory owner validator에서 계속 거부한다.
+  대신 write와 recall에 Fast/Control Page와 같은 startup-fixed canonical owner를 명시 전달하며,
+  configured 양수 guild/user가 완전할 때만 두 surface가 같은 principal을 쓴다. token은 request
+  repr·metrics·checkpoint에 투영하지 않는다.
+- guild 기억 초기화는 대상 guild의 normal/batch writebehind와 모든 guild의 live vault maintenance가
+  끝나기 전에는 durable revocation이나 runtime 삭제를 시작하지 않는다. normal writebehind는 scope가
+  먼저 해제돼도 content-free guild task key로 완료까지 남고, 취소된 vault outer task는 실제
+  `to_thread` worker를 shield/drain한 뒤 cancellation을 재전파하므로 worker가 전역 index를 쓰는 동안
+  reset admission이 열리지 않는다.
+- text/voice의 명시적 `/remember`도 실제 worker가 끝날 때까지 같은 reset task registry에 남는다.
+  새 explicit note는 owner와 별도의 opaque guild/local reset scope를 저장한다. durable reset marker
+  안에서 exact guild scope의 전역 vault note를 기존 tombstone 삭제 계약으로 제거하고 다른 guild/local
+  note를 보존한다. canonical binding은 renamed·tag/contract 손상보다 우선하며 invalid UTF-8과 nonlocal
+  scope-less legacy는 mutation 전에 fail-closed한다. 삭제 뒤 새 process recall에서도 target note가
+  보이지 않음을 검증했다.
+  Discord text ingress reset은 exact guild의 durable journal 모든 phase를 제거하고 epoch를 올린다.
+  claim 뒤 history·followup·TurnScope 등록까지 같은 reset lock에서 current epoch를 확인하며, crash 뒤에는
+  checkpoint가 없어도 unfinished ledger를 먼저 replay한다. active marker는 wall-clock 역행과 무관하게
+  owner restore와 read-only cross-surface reader 양쪽에서 해당 guild 전체 복원을 막고 다른 guild와
+  local ingress/session은 보존한다.
+- search-followup recovery purge도 persistent vault/ingress/runtime reset과 같은 live+startup callback에
+  들어간다. marker 직후 target guild를 닫고 runtime task·TurnScope·history와 ingress epoch를 먼저
+  정리한다. journal 부분 write는 ordinary mutation을 차단한 `error/write_failed`로 유지하고 reset
+  재시도만 authoritative reload·one-generation roll-forward를 수행한다. 반복 transient 실패 뒤에도
+  같은 process의 다음 reset이 수렴하며 structural 손상은 fail-closed한다. continuity flush/finalize까지
+  성공한 뒤에만 exact guild를 다시 열고, 실패 응답은 private cause 없이 fixed code로 제한한다.
+  일반·복구 search task와 same-session 교체 전 task는 guild-prefixed owner/drain key로 실제 종료까지
+  남으므로 Discord send await 중 reset은 mutation 전에 `search_background_work_inflight`로 닫힌다.
+- Discord `자율시작`은 admission guild epoch를 route await 뒤 grant 직전과 executor connect 뒤 runtime
+  commit 직전에 재검증한다. same-guild reset으로 stale하면 disconnect·grant revoke 후 고정 재시도 답변을
+  내며 enabled state나 autonomy loop/world effect를 만들지 않는다. 다른 guild reset은 영향을 주지 않는다.
+- reset mutation은 target guild voice-ingress epoch를 먼저 증가시키고 target partial-STT cache와
+  speculative policy를 지운다. 이전 epoch의 queue/buffer, startup wait, partial/full/wake STT와
+  speaker verification/TTS interrupt는 raw debug 저장·bad-audio 재생성·accepted-turn checkpoint 전에
+  fail-closed한다. blocking partial worker는 shared state를 쓰지 않고 event loop 복귀 후 exact current일
+  때만 cache/partial/committed/speculative state를 동기 commit한다. local synthetic guild `0`은 epoch
+  조회에서 유효하고 reset increment는 양수 guild만 받는다.
+- Local Bridge mic ON은 start thread를 cancellation 뒤에도 수거한 다음 exact service stop과 physical OFF를
+  검증한다. 실패하면 desired/revision은 보존한 fixed failed state를 내고 stop 검증 실패는 fail-safe exit로
+  닫으므로 OFF 응답 뒤 late start가 캡처를 되살리지 않는다.
+- Discord input lease의 첫 acquire가 server commit 뒤 취소되거나 응답이 불명확해도 shield/drain 뒤 exact
+  lease를 release하고 cancellation을 재전파한다. 마지막 token release가 commit 전·후에 취소돼도 단일
+  idempotent retry가 server owner를 비워 Local Mic acquire를 다시 열며, 이미 listener가 있는 중복 acquire와
+  고정 conflict/unauthorized 거부는 현재 lease를 해제하거나 추측성 cleanup을 만들지 않는다.
+- Discord I/O 157개, 전체 voice 744개(skip 5), memory 312개(skip 1), ingress/reset focused 104개가
+  각 offline 묶음에서 통과했다.
+  실제 Discord gateway/audio 장치, process crash/restart와 Local mic 실사용은 실행하지 않았다.
+- 이 증분과 memory reset/vault worker·Minecraft readiness/dragon event-order, voice lease/reconnect/mic
+  rollback, cognitive privacy를 포함한 CI-equivalent 전체 3,710개(skip 22)가 실패 없이 통과했다.
+
+## 2026-08-17 취소 재생·자동 기억 reset·dragon restart 인과
+
+- Discord single-source TTS가 `vc.play()` 뒤 callback을 기다리는 동안 TurnScope/guild reset으로
+  취소되면 exact current source일 때만 `vc.stop()`을 호출하고 cancellation을 재전파한다. replacement
+  source는 보존한다. 전체 voice 748개(skip 5)와 reset/Discord 인접 74개가 offline 통과했다.
+- automatic daily는 `daily/guild-<id>/<date>.md`, deterministic episode는
+  `episodes/guild-<id>/...`, semantic note는 guild-prefixed storage key로 분리하며 모두 같은 opaque
+  reset scope와 exact source reference를 쓴다. reset은 same-scope derivation graph를 leaf-first로
+  tombstone하고 explicit/automatic/semantic/recognized legacy target만 삭제한다. 혼합 shared daily,
+  extra/cross-guild reference, unknown legacy/local file, scope/path 재결박과 invalid UTF-8은 mutation 전에
+  닫는다. raw/legacy tree는 `st_dev/st_ino`·SHA-256 snapshot과 각 unlink 직전 identity를 재검증하고
+  broad recursive delete를 쓰지 않는다. partial tombstone 뒤 repair/retry, restart recall/index/cache,
+  다른 guild/local 보존과 late injection 회귀를 포함해 memory 336개(skip 1), focused 44개,
+  reset/Discord 61개와 독립 86개가 통과했다.
+- 성공했지만 nonterminal인 autonomous dragon attack의 `lastDragonCombatAt`은 child restart에서
+  복원하지 않는다. 검증된 ultimate completion은 계속 durable하며, completed 상태의 verified
+  `!endGoal`만 survival recovery와 unsafe-unarmed gate를 지나 SelfPrompter를 정확히 한 번 멈춘다.
+  GoalManager 42개와 actual registry 회귀가 통과했다. live Discord/audio/Minecraft는 실행하지 않았다.
+
+## 2026-08-15 단일 음성 입력 owner와 상태형 한국어 ASR
+
+- Bot API는 `runtime_artifacts/voice_input_lease/owner.json`의 opaque owner state로 Local Mic과
+  Discord voice 중 하나만 캡처하도록 중재한다. Local ON은 consent/fence 검증 뒤 control publish 전에
+  lease를 얻고 exact OFF revision/action의 `applied + captureStopped` ACK 뒤에만 해제한다. Discord는
+  lease 뒤에만 `listen()`하며 receive/decrypt/utterance task 종료 뒤 해제한다. channel move/rearm은
+  process-global refcount로 소유권을 이어 간다. same-instance inactive 관측, 인증·persist·release 실패,
+  stale/unknown owner는 새 source를 열지 않는다.
+- STT 서비스는 `Qwen3ASRModel.LLM` 한 개를 상주시켜 기존 batch endpoint와 bounded
+  `start/chunk/finish/cancel` 세션을 함께 제공한다. 세션은 raw 16 kHz PCM16, 순번, 최대 30초,
+  60초 TTL, 최대 4개와 process-global inference lock을 사용한다. cancel된 lock waiter는 모델 호출 전
+  live session identity를 다시 확인하고, finish는 추론 완료 전 capacity slot을 반납하지 않는다.
+- Local Mic은 capture-time 16 kHz mono PCM16을 최대 500ms 단위로 background worker에 보내고,
+  non-empty·stable-prefix-consistent final만 기존 Local admission에 전달한다. 오류·충돌·backlog는
+  기존 batch를 최대 한 번 사용하며 stale epoch와 거절된 barge-in은 stream/future를 폐기한다.
+- Discord는 현재 endpoint 뒤 완성 PCM을 resident 모델의 batch endpoint에 정확히 한 번 보내 정상
+  경로의 중복 wake/after-the-fact partial/full/rescore를 없앴다. transport 손상 표식이 있으면 기존
+  독립 wake confirm을 유지한다. packet-time Opus decode는 아직 구현하지 않아 Discord capture-time
+  partial은 현재 상태가 아니며, true session streaming은 Local capture-time 경로에만 있다.
+- 2026-08-21 Local playback owner claim은 더 이상 barge-in source를 게시하지 않는다. exact owner/token의
+  실제 첫 PCM write가 성공한 뒤에만 source를 게시하므로 blocked/failed write와 다음 sentence의 새 token은
+  이전 turn 단위 playback 상태로 positive interrupt를 만들지 못한다.
+- Local과 buffered STT runtime은 remote start 중 취소돼도 blocking start 결과를 수거하고 반환된 stream ID를
+  bounded cancel한다. Local start 응답에 유효한 ID가 있으나 sampling/profile/sequence 계약이 틀린 경우도
+  state 생성 전에 해당 session을 cancel한다.
+- client batch STT의 caller timeout/cancellation 뒤에도 이미 시작한 blocking thread가 반환할 때까지 shared
+  inference lock을 유지하고 done callback에서만 해제한다. physical client가 영구 정지하면 lock도
+  fail-closed로 남으며 실제 network/driver/GPU hard stall은 live 검증 전이다.
+- ordinary STT/wake/final 관측은 transcript 대신 chars, latency, 고정 reason/error type만 남긴다.
+  `STT_FULL_RESCORING_ENABLED` 기본값은 false이며 Local streaming과 Discord single-final 재사용은
+  각각 `LOCAL_BRIDGE_STT_STREAMING_ENABLED=false`, `STT_STREAMING_ENABLED=false`로 rollback할 수 있다.
+- Docker source는 `vllm==0.14.0`, Torch/Torchaudio 2.9.1+cu128과 0.35 GPU memory budget으로 옮겼다.
+  이는 source·offline test 상태이며 STT image build/model load, 실제 GPU, Discord gateway와 마이크는
+  시작하거나 검증하지 않았다.

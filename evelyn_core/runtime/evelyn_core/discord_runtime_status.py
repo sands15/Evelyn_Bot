@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .paths import get_runtime_artifacts_root
 from .runtime_error_observability import RuntimeErrorCounter
 from .runtime_source_identity import runtime_source_identity
+from .voice_input_lease import discord_voice_input_instance_id
 from .voice_validation import emit_silence_liveness_event
 
 
@@ -52,6 +53,7 @@ class DiscordRuntimeStatus:
         conversation_ingress_recovery_status: (
             Callable[[], dict[str, Any]] | None
         ) = None,
+        instance_id: str | None = None,
     ) -> None:
         self.gateway_ready = gateway_ready
         self.bot_guilds = bot_guilds
@@ -67,6 +69,7 @@ class DiscordRuntimeStatus:
         self.conversation_ingress_recovery_status = (
             conversation_ingress_recovery_status
         )
+        self.instance_id = instance_id or discord_voice_input_instance_id()
         self.started_at = self.now()
         self.task: asyncio.Task[Any] | None = None
         self.last_error = ""
@@ -201,6 +204,7 @@ class DiscordRuntimeStatus:
                 )
         return {
             "schema": DISCORD_STATUS_SCHEMA,
+            "instanceId": self.instance_id,
             "heartbeatAt": self.now(),
             "startedAt": self.started_at,
             "pid": os.getpid(),

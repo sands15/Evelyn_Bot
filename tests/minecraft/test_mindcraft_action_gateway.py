@@ -96,6 +96,9 @@ class FakeRuntime:
     def process_alive(self) -> bool:
         return self.alive
 
+    def _child_runtime_snapshot(self) -> dict:
+        return mindcraft_service._project_mindcraft_child_runtime({})
+
     def restart_for_action(
         self,
         *,
@@ -130,6 +133,7 @@ class FakeProjector:
         self.candidates: list[dict] = []
         self.disarms: list[str] = []
         self.verified = True
+        self.guard_error = ""
 
     def status(self) -> dict:
         return {
@@ -152,6 +156,9 @@ class FakeProjector:
     def disarm(self, reason: str) -> dict:
         self.disarms.append(reason)
         return {"accepted": True}
+
+    def active_guard_error(self) -> str:
+        return self.guard_error
 
 
 class FakeRequest:
@@ -352,6 +359,7 @@ class MindcraftActionGatewayTests(unittest.TestCase):
         )
         ready_telemetry = {
             "updated_at": time.time(),
+            "connected_at": time.time() - 3.1,
             "connected": True,
             "task_contract": {
                 "schema": "mindcraft.task-contract.v1",
@@ -445,6 +453,80 @@ class MindcraftActionGatewayTests(unittest.TestCase):
             self.assertTrue(self.runtime.alive)
             self.assertEqual(real_projector.status()["state"], "armed")
             real_gateway.cancel(second)
+
+    def test_running_action_fails_when_ready_telemetry_becomes_stale(
+        self,
+    ) -> None:
+        real_projector = MindcraftWorldEffectProjector(
+            status_path=self.root / "stale-effect-status.json",
+            events_dir=self.events_dir,
+            validate_guarded_lease=mindcraft_service._effect_guarded_lease,
+            validate_readiness=mindcraft_service._effect_guarded_readiness,
+        )
+        real_gateway = mindcraft_service.MindcraftActionGateway(
+            runtime=self.runtime,
+            projector=real_projector,
+            status_path=self.root / "stale-action-status.json",
+            timeout_sec=30.0,
+        )
+        telemetry = {
+            "updated_at": time.time(),
+            "connected_at": time.time() - 3.1,
+            "connected": True,
+            "task_contract": {
+                "schema": "mindcraft.task-contract.v1",
+                "ready": True,
+                "goal_manager_mode": "gated",
+                "command_gate": "evelyn_goal_manager",
+                "effect_verification": "explicit_postcondition",
+            },
+            "goal_manager": {
+                "mode": "gated",
+                "autonomy_state": "active",
+                "manual_pause_reason": "",
+                "postcondition_candidate": None,
+            },
+        }
+        self.telemetry_path.write_text(
+            json.dumps(telemetry),
+            encoding="utf-8",
+        )
+        request = bound_request(
+            goal_run_id="goal-run-stale",
+            action_run_id="action-run-stale",
+        )
+        action_lock = self.lock()
+        with (
+            patch.object(mindcraft_service, "ACTION_GATEWAY", real_gateway),
+            patch.object(mindcraft_service, "STATE", self.runtime),
+        ):
+            try:
+                real_gateway.dispatch(
+                    request,
+                    action_lock=action_lock,
+                    preflight_status=ready_status(),
+                )
+                self.assertEqual(real_gateway.poll()["status"], "running")
+
+                telemetry["updated_at"] = time.time() - 11.0
+                self.telemetry_path.write_text(
+                    json.dumps(telemetry),
+                    encoding="utf-8",
+                )
+                failed = real_gateway.poll()
+
+                self.assertEqual(failed["status"], "failed")
+                self.assertEqual(
+                    failed["errorCode"],
+                    "minecraft_runtime_not_ready",
+                )
+                self.assertEqual(self.runtime.stop_count, 1)
+                self.assertFalse(self.runtime.alive)
+                self.assertFalse(action_lock.acquired)
+                self.assertEqual(real_projector.status()["state"], "idle")
+            finally:
+                if action_lock.acquired:
+                    real_gateway.cancel(request)
 
     def test_restart_fails_inflight_and_requires_new_ready_request(self) -> None:
         first = bound_request()
@@ -823,6 +905,7 @@ class MindcraftActionRuntimeBoundaryTests(unittest.TestCase):
         }
         telemetry = {
             "updated_at": time.time(),
+            "connected_at": time.time() - 3.1,
             "connected": True,
             "task_contract": {
                 "schema": "mindcraft.task-contract.v1",
@@ -843,6 +926,9 @@ class MindcraftActionRuntimeBoundaryTests(unittest.TestCase):
         gateway.repeat_arm_admitted.return_value = False
         state = Mock()
         state.process_alive.return_value = True
+        state._child_runtime_snapshot.return_value = (
+            mindcraft_service._project_mindcraft_child_runtime({})
+        )
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(

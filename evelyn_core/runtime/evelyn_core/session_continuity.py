@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .continuity_commit_contract import (
     CONTINUITY_COMMIT_METRICS_SCHEMA,
     CONTINUITY_STATUS_SCHEMA,
+    require_durable_continuity_receipt,
 )
 from .continuity_authenticity import (
     CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
@@ -27,7 +28,12 @@ from .continuity_authenticity import (
 from .conversation_memory_receipt import (
     sanitize_memory_receipt_ref,
 )
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import (
+    atomic_json_write,
+    durable_artifact_process_scope,
+    read_bounded_text,
+    unlink_regular_artifact,
+)
 from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
 
@@ -65,6 +71,7 @@ DEFAULT_MAX_GUILD_REVOCATIONS = 256
 DEFAULT_COMMIT_LATENCY_WARNING_MS = 100.0
 DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES = 20
 DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT = 256
+DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC = 5.0
 SESSION_CONTINUITY_CHAIN_GENESIS = "0" * 64
 _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_SPEAKERS = frozenset({"user", "assistant"})
@@ -243,6 +250,7 @@ class SessionContinuityCheckpoint:
         wall_time: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         commit_latency_clock: Callable[[], float] = time.perf_counter,
+        commit_stall_clock: Callable[[], float] = time.monotonic,
         commit_latency_warning_ms: float = (
             DEFAULT_COMMIT_LATENCY_WARNING_MS
         ),
@@ -254,6 +262,10 @@ class SessionContinuityCheckpoint:
         ),
         authenticity: ContinuityAuthenticity | None = None,
         authenticity_scope: str = CONTINUITY_AUTH_SCOPE_MAIN,
+        artifact_process: Any | None = None,
+        commit_artifact_deadline_sec: float = (
+            DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC
+        ),
         log: Callable[[str], Any] | None = None,
     ) -> None:
         self.store = store
@@ -279,6 +291,7 @@ class SessionContinuityCheckpoint:
         self.wall_time = wall_time
         self.monotonic = monotonic
         self.commit_latency_clock = commit_latency_clock
+        self.commit_stall_clock = commit_stall_clock
         self.commit_latency_warning_ms = max(
             1.0,
             _finite_float(
@@ -298,15 +311,23 @@ class SessionContinuityCheckpoint:
             authenticity or ContinuityAuthenticity()
         )
         self.authenticity_scope = str(authenticity_scope)
+        self.artifact_process = artifact_process
+        self.commit_artifact_deadline_sec = max(
+            0.1,
+            float(commit_artifact_deadline_sec),
+        )
         self.log = log
         self.runtime_errors = RuntimeErrorCounter(now=wall_time)
         self._lock = threading.RLock()
+        self._commit_epoch_lock = threading.Lock()
         self._task: asyncio.Task[None] | None = None
         self._last_signature = ""
         self._state = "not_initialized"
         self._last_restored_at: float | None = None
         self._last_persisted_at: float | None = None
         self._checkpoint_revoked_at: float | None = None
+        self._reset_boundary_at: float | None = None
+        self._guild_reset_boundaries: dict[int, float] = {}
         self._restored_session_count = 0
         self._persisted_session_count = 0
         self._guild_revocations: dict[int, float] = {}
@@ -341,6 +362,9 @@ class SessionContinuityCheckpoint:
         self._commit_last_at: float | None = None
         self._commit_last_succeeded: bool | None = None
         self._commit_last_target_verified: bool | None = None
+        self._commit_next_epoch = 0
+        self._commit_success_epochs: dict[str, int] = {}
+        self._commit_in_flight_started: dict[int, float] = {}
 
     def _emit(self, message: str) -> None:
         if self.log is not None:
@@ -539,6 +563,15 @@ class SessionContinuityCheckpoint:
             },
             "sessions": sessions,
         }
+        if self._reset_boundary_at is not None:
+            payload["resetBoundaryAt"] = self._reset_boundary_at
+        if self._guild_reset_boundaries:
+            payload["guildResetBoundaries"] = {
+                str(guild_id): reset_at
+                for guild_id, reset_at in sorted(
+                    self._guild_reset_boundaries.items()
+                )
+            }
         payload["checkpointHash"] = _checkpoint_hash(payload)
         return payload
 
@@ -645,9 +678,34 @@ class SessionContinuityCheckpoint:
 
     def _commit_metrics(self) -> dict[str, Any]:
         samples = self._commit_latency_samples_ms
+        with self._commit_epoch_lock:
+            in_flight_started = tuple(
+                self._commit_in_flight_started.values()
+            )
+        stall_age_ms = (
+            round(
+                max(
+                    0.0,
+                    float(self.commit_stall_clock())
+                    - min(in_flight_started),
+                )
+                * 1000.0,
+                3,
+            )
+            if in_flight_started
+            else None
+        )
+        stalled = bool(
+            stall_age_ms is not None
+            and stall_age_ms
+            >= self.commit_artifact_deadline_sec * 1000.0
+        )
         p50_ms = self._percentile(samples, 0.50)
         p95_ms = self._percentile(samples, 0.95)
-        if self._commit_last_succeeded is False:
+        if stalled:
+            state = "warning"
+            warning_code = "conversation_continuity_commit_stalled"
+        elif self._commit_last_succeeded is False:
             state = "error"
             warning_code = "conversation_continuity_commit_failed"
         elif len(samples) < self.commit_latency_warning_min_samples:
@@ -684,6 +742,14 @@ class SessionContinuityCheckpoint:
             "lastTargetVerified": (
                 self._commit_last_target_verified
             ),
+            "inFlight": bool(in_flight_started),
+            "inFlightCount": len(in_flight_started),
+            "stallAgeMs": stall_age_ms,
+            "stalled": stalled,
+            "artifactDeadlineMs": round(
+                self.commit_artifact_deadline_sec * 1000.0,
+                3,
+            ),
             "warningThresholdMs": (
                 self.commit_latency_warning_ms
             ),
@@ -696,6 +762,7 @@ class SessionContinuityCheckpoint:
         started_at: float,
         succeeded: bool,
         target_verified: bool,
+        publish_latest: bool = True,
     ) -> None:
         try:
             elapsed_ms = max(
@@ -706,34 +773,57 @@ class SessionContinuityCheckpoint:
         except (OverflowError, TypeError, ValueError):
             elapsed_ms = 0.0
         self._commit_attempt_count += 1
-        self._commit_last_ms = round(elapsed_ms, 3)
-        self._commit_last_at = self.wall_time()
-        self._commit_last_succeeded = bool(succeeded)
-        self._commit_last_target_verified = bool(
-            target_verified
-        )
+        elapsed_ms = round(elapsed_ms, 3)
         if succeeded:
             self._commit_success_count += 1
             self._commit_latency_samples_ms.append(
-                self._commit_last_ms
+                elapsed_ms
             )
             del self._commit_latency_samples_ms[
                 : -self.commit_latency_sample_limit
             ]
         else:
             self._commit_failure_count += 1
+        if not publish_latest:
+            return
+        self._commit_last_ms = elapsed_ms
+        self._commit_last_at = self.wall_time()
+        self._commit_last_succeeded = bool(succeeded)
+        self._commit_last_target_verified = bool(
+            target_verified
+        )
+
+    def _reserve_commit_epoch(self) -> int:
+        with self._commit_epoch_lock:
+            self._commit_next_epoch += 1
+            return self._commit_next_epoch
+
+    def _begin_commit_in_flight(self, attempt_epoch: int) -> None:
+        with self._commit_epoch_lock:
+            self._commit_in_flight_started[attempt_epoch] = float(
+                self.commit_stall_clock()
+            )
+
+    def _finish_commit_in_flight(self, attempt_epoch: int) -> None:
+        with self._commit_epoch_lock:
+            self._commit_in_flight_started.pop(attempt_epoch, None)
+
+    def _artifact_scope(self) -> Any:
+        return durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.commit_artifact_deadline_sec,
+        )
 
     def _load_checkpoint_head(self) -> dict[str, Any] | None:
         path = self.head_path
-        if not path.exists() and not path.is_symlink():
+        raw_text = read_bounded_text(
+            path,
+            maximum_bytes=128 * 1024,
+            missing_ok=True,
+        )
+        if raw_text is None:
             return None
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size > 128 * 1024
-        ):
-            raise ValueError("checkpoint_head_rejected")
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(raw_text)
         if not isinstance(payload, dict):
             raise ValueError("checkpoint_head_rejected")
         validated, auth_state = validate_continuity_head(
@@ -753,12 +843,13 @@ class SessionContinuityCheckpoint:
         state: str,
         generation: int,
         checkpoint_hash: str,
-    ) -> None:
+    ) -> float:
+        updated_at = self.wall_time()
         head = build_continuity_head(
             state=state,
             generation=generation,
             checkpoint_hash=checkpoint_hash,
-            updated_at=self.wall_time(),
+            updated_at=updated_at,
             authenticity=self.authenticity,
             auth_scope=self.authenticity_scope,
         )
@@ -772,17 +863,71 @@ class SessionContinuityCheckpoint:
             if self.authenticity.configured
             else "unconfigured"
         )
+        return updated_at
 
     def _discard_checkpoint_head(self) -> None:
         try:
-            if (
-                self.head_path.exists()
-                and not self.head_path.is_symlink()
-                and self.head_path.is_file()
-            ):
-                self.head_path.unlink()
+            unlink_regular_artifact(self.head_path)
         except OSError:
             return
+
+    @staticmethod
+    def _payload_reset_boundary_at(
+        payload: dict[str, Any],
+        *,
+        generation: int,
+        previous_hash: str,
+    ) -> float | None:
+        saved_at = _finite_float(payload.get("savedAt"), default=-1.0)
+        raw_boundary = payload.get("resetBoundaryAt")
+        if raw_boundary is None:
+            if (
+                generation > 1
+                and previous_hash
+                == SESSION_CONTINUITY_CHAIN_GENESIS
+                and saved_at >= 0.0
+            ):
+                return saved_at
+            return None
+        if isinstance(raw_boundary, bool):
+            raise ValueError("checkpoint_reset_boundary_rejected")
+        boundary = _finite_float(raw_boundary, default=-1.0)
+        if (
+            boundary < 0.0
+            or saved_at < 0.0
+            or boundary > saved_at + 60.0
+        ):
+            raise ValueError("checkpoint_reset_boundary_rejected")
+        return boundary
+
+    @staticmethod
+    def _payload_guild_reset_boundaries(
+        payload: dict[str, Any],
+    ) -> dict[int, float]:
+        raw_boundaries = payload.get("guildResetBoundaries", {})
+        if (
+            not isinstance(raw_boundaries, dict)
+            or len(raw_boundaries) > DEFAULT_MAX_GUILD_REVOCATIONS
+        ):
+            raise ValueError("checkpoint_reset_boundary_rejected")
+        saved_at = _finite_float(payload.get("savedAt"), default=-1.0)
+        boundaries: dict[int, float] = {}
+        for raw_guild_id, raw_boundary in raw_boundaries.items():
+            guild_id = _safe_int(raw_guild_id)
+            boundary = _finite_float(raw_boundary, default=-1.0)
+            if (
+                not isinstance(raw_guild_id, str)
+                or str(guild_id) != raw_guild_id
+                or guild_id is None
+                or guild_id < 0
+                or isinstance(raw_boundary, bool)
+                or boundary < 0.0
+                or saved_at < 0.0
+                or boundary > saved_at + 60.0
+            ):
+                raise ValueError("checkpoint_reset_boundary_rejected")
+            boundaries[guild_id] = boundary
+        return boundaries
 
     def _checkpoint_snapshot(self) -> dict[str, Any]:
         head = self._load_checkpoint_head()
@@ -792,7 +937,12 @@ class SessionContinuityCheckpoint:
             else "missing"
         )
         path = self.checkpoint_path
-        if not path.exists() and not path.is_symlink():
+        raw_text = read_bounded_text(
+            path,
+            maximum_bytes=self.max_file_bytes,
+            missing_ok=True,
+        )
+        if raw_text is None:
             if head is not None and head["state"] == "active":
                 raise ValueError("checkpoint_missing_after_head")
             return {
@@ -818,14 +968,14 @@ class SessionContinuityCheckpoint:
                     else "missing"
                 ),
                 "headAuthenticity": head_authenticity,
+                "resetBoundaryAt": (
+                    float(head["updatedAt"])
+                    if head is not None
+                    and head["state"] == "empty"
+                    else None
+                ),
+                "guildResetBoundaries": {},
             }
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size > self.max_file_bytes
-        ):
-            raise ValueError("checkpoint_rejected")
-        raw_text = path.read_text(encoding="utf-8")
         payload = json.loads(raw_text)
         if not isinstance(payload, dict):
             raise ValueError("checkpoint_rejected")
@@ -865,6 +1015,8 @@ class SessionContinuityCheckpoint:
                 "integrity": "legacy",
                 "headState": head_state,
                 "headAuthenticity": head_authenticity,
+                "resetBoundaryAt": None,
+                "guildResetBoundaries": {},
             }
         if schema != SESSION_CONTINUITY_CHECKPOINT_SCHEMA:
             raise ValueError("invalid_schema")
@@ -884,6 +1036,14 @@ class SessionContinuityCheckpoint:
             or checkpoint_hash != _checkpoint_hash(payload)
         ):
             raise ValueError("checkpoint_integrity_failed")
+        reset_boundary_at = self._payload_reset_boundary_at(
+            payload,
+            generation=generation,
+            previous_hash=previous_hash,
+        )
+        guild_reset_boundaries = (
+            self._payload_guild_reset_boundaries(payload)
+        )
         if head is None:
             if (
                 self.authenticity.configured
@@ -941,6 +1101,8 @@ class SessionContinuityCheckpoint:
                 "integrity": "empty",
                 "headState": "empty",
                 "headAuthenticity": head_authenticity,
+                "resetBoundaryAt": float(head["updatedAt"]),
+                "guildResetBoundaries": {},
             }
         else:
             raise ValueError("checkpoint_rollback_or_head_mismatch")
@@ -955,6 +1117,8 @@ class SessionContinuityCheckpoint:
             "integrity": "verified",
             "headState": head_state,
             "headAuthenticity": head_authenticity,
+            "resetBoundaryAt": reset_boundary_at,
+            "guildResetBoundaries": guild_reset_boundaries,
         }
 
     def _anchor_checkpoint_snapshot(
@@ -1064,6 +1228,8 @@ class SessionContinuityCheckpoint:
 
     def _revoke_checkpoint_chain(self) -> None:
         self._checkpoint_revoked_at = self.wall_time()
+        self._reset_boundary_at = self._checkpoint_revoked_at
+        self._guild_reset_boundaries = {}
         generation = self._checkpoint_generation
         checkpoint_hash = SESSION_CONTINUITY_CHAIN_GENESIS
         anchor_slot = self.authenticity.checkpoint_anchor_slot(
@@ -1141,7 +1307,12 @@ class SessionContinuityCheckpoint:
 
     def _load_guild_revocations(self) -> dict[int, float]:
         path = self.revocations_path
-        if not path.exists() and not path.is_symlink():
+        raw_text = read_bounded_text(
+            path,
+            maximum_bytes=128 * 1024,
+            missing_ok=True,
+        )
+        if raw_text is None:
             self._guild_revocations_authenticity = "missing"
             if self._guild_revocations_anchor_configured():
                 try:
@@ -1171,13 +1342,7 @@ class SessionContinuityCheckpoint:
                 else "unconfigured"
             )
             return {}
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size > 128 * 1024
-        ):
-            raise ValueError("guild_revocations_rejected")
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(raw_text)
         schema = (
             str(payload.get("schema") or "")
             if isinstance(payload, dict)
@@ -1491,24 +1656,20 @@ class SessionContinuityCheckpoint:
 
     def _discard_checkpoint(self) -> None:
         try:
-            if (
-                self.checkpoint_path.exists()
-                and not self.checkpoint_path.is_symlink()
-                and self.checkpoint_path.is_file()
-            ):
-                self.checkpoint_path.unlink()
+            unlink_regular_artifact(self.checkpoint_path)
         except OSError:
             return
 
     def _load_checkpoint_revoked_at(self) -> float | None:
         try:
-            if (
-                not self.status_path.is_file()
-                or self.status_path.is_symlink()
-                or self.status_path.stat().st_size > 128 * 1024
-            ):
+            raw_text = read_bounded_text(
+                self.status_path,
+                maximum_bytes=128 * 1024,
+                missing_ok=True,
+            )
+            if raw_text is None:
                 return None
-            payload = json.loads(self.status_path.read_text(encoding="utf-8"))
+            payload = json.loads(raw_text)
             if (
                 not isinstance(payload, dict)
                 or payload.get("schema") != SESSION_CONTINUITY_STATUS_SCHEMA
@@ -1523,6 +1684,10 @@ class SessionContinuityCheckpoint:
             return None
 
     def restore(self) -> dict[str, Any]:
+        with self._artifact_scope():
+            return self._restore_attempt()
+
+    def _restore_attempt(self) -> dict[str, Any]:
         with self._lock:
             revoked_at = self._load_checkpoint_revoked_at()
             self._checkpoint_revoked_at = revoked_at
@@ -1560,6 +1725,12 @@ class SessionContinuityCheckpoint:
                     "conversation_continuity_restore_failed",
                     exc,
                 )
+            self._reset_boundary_at = snapshot.get(
+                "resetBoundaryAt"
+            )
+            self._guild_reset_boundaries = dict(
+                snapshot.get("guildResetBoundaries") or {}
+            )
             if snapshot["payload"] is None:
                 if self._guild_revocations_anchor_configured():
                     try:
@@ -1584,12 +1755,21 @@ class SessionContinuityCheckpoint:
                 return self.status()
             payload = snapshot["payload"]
             saved_at = _finite_float(payload.get("savedAt"), default=-1.0)
-            now_wall = self.wall_time()
-            if saved_at < 0.0 or saved_at > now_wall + 60.0:
+            expires_at = _finite_float(
+                payload.get("expiresAt"),
+                default=-1.0,
+            )
+            now_wall = _finite_float(self.wall_time(), default=-1.0)
+            if (
+                saved_at < 0.0
+                or now_wall < 0.0
+                or saved_at > now_wall + 60.0
+                or expires_at <= saved_at
+            ):
                 self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_checkpoint_rejected",
-                    ValueError("invalid_saved_at"),
+                    ValueError("invalid_checkpoint_time"),
                 )
             if revoked_at is not None and revoked_at >= saved_at:
                 self._revoke_checkpoint_chain()
@@ -1598,13 +1778,17 @@ class SessionContinuityCheckpoint:
                     ValueError("checkpoint_revoked"),
                 )
             age_sec = max(0.0, now_wall - saved_at)
-            if age_sec > self.max_age_sec:
+            if now_wall > expires_at or age_sec > self.max_age_sec:
                 self._revoke_checkpoint_chain()
                 self._checkpoint_revoked_at = None
                 self._checkpoint_integrity = "empty"
                 self._state = "stale"
                 self._write_status()
                 return self.status()
+            effective_max_age_sec = min(
+                self.max_age_sec,
+                expires_at - saved_at,
+            )
             try:
                 guild_revocations = self._load_guild_revocations()
             except ContinuityAuthenticityError as exc:
@@ -1646,23 +1830,14 @@ class SessionContinuityCheckpoint:
                     if activity_known
                     else self.max_age_sec + 1.0
                 )
-                if age_sec + last_active_ago_sec > self.max_age_sec:
+                if age_sec + last_active_ago_sec > effective_max_age_sec:
                     continue
-                selected_activity_at = max(
-                    0.0,
-                    saved_at - last_active_ago_sec,
-                )
                 guild_id = _session_guild_id(session_key)
-                if guild_id is not None:
-                    revoked_at = _finite_float(
-                        guild_revocations.get(guild_id),
-                        default=-1.0,
-                    )
-                    if revoked_at >= 0.0 and (
-                        not activity_known
-                        or revoked_at >= selected_activity_at
-                    ):
-                        continue
+                if (
+                    guild_id is not None
+                    and guild_id in guild_revocations
+                ):
+                    continue
                 history = _safe_history(
                     row.get("history"),
                     max_items=self.max_history_items,
@@ -1728,20 +1903,49 @@ class SessionContinuityCheckpoint:
             )
             return self.status()
 
+    def active_guild_revocation_ids(self) -> tuple[int, ...]:
+        """Load and expose only guild IDs from unfinished durable resets."""
+
+        with self._artifact_scope():
+            with self._lock:
+                self._guild_revocations = self._load_guild_revocations()
+                return tuple(sorted(self._guild_revocations))
+
     def reset_guild(
         self,
         guild_id: int,
         reset_runtime_state: Callable[[], Any],
     ) -> dict[str, Any]:
         """Durably revoke a guild checkpoint before clearing its live state."""
+        with self._artifact_scope():
+            return self._reset_guild_attempt(
+                guild_id,
+                reset_runtime_state,
+            )
+
+    def _reset_guild_attempt(
+        self,
+        guild_id: int,
+        reset_runtime_state: Callable[[], Any],
+    ) -> dict[str, Any]:
         normalized_guild_id = _safe_int(guild_id)
         if normalized_guild_id is None or normalized_guild_id < 0:
             raise ValueError("invalid_guild_id")
         with self._lock:
             try:
                 revocations = self._load_guild_revocations()
-                revocations[normalized_guild_id] = self.wall_time()
+                reset_boundary_at = self.wall_time()
+                revocations[normalized_guild_id] = reset_boundary_at
                 self._write_guild_revocations(revocations)
+                self._guild_reset_boundaries[
+                    normalized_guild_id
+                ] = max(
+                    self._guild_reset_boundaries.get(
+                        normalized_guild_id,
+                        0.0,
+                    ),
+                    reset_boundary_at,
+                )
                 self._state = "guild_reset_revoked"
                 self._write_status(durable=True)
             except Exception as exc:
@@ -1781,6 +1985,20 @@ class SessionContinuityCheckpoint:
         required_session_key: str = "",
         required_turn_id: str = "",
     ) -> dict[str, Any]:
+        with self._artifact_scope():
+            return self._flush_attempt(
+                force=force,
+                required_session_key=required_session_key,
+                required_turn_id=required_turn_id,
+            )
+
+    def _flush_attempt(
+        self,
+        *,
+        force: bool = False,
+        required_session_key: str = "",
+        required_turn_id: str = "",
+    ) -> dict[str, Any]:
         with self._lock:
             try:
                 snapshot = self._checkpoint_snapshot()
@@ -1808,6 +2026,21 @@ class SessionContinuityCheckpoint:
                 return self._record_error(
                     "conversation_continuity_flush_failed",
                     exc,
+                )
+            snapshot_reset_boundary_at = snapshot.get(
+                "resetBoundaryAt"
+            )
+            if snapshot_reset_boundary_at is not None:
+                self._reset_boundary_at = max(
+                    self._reset_boundary_at or 0.0,
+                    float(snapshot_reset_boundary_at),
+                )
+            for guild_id, reset_at in (
+                snapshot.get("guildResetBoundaries") or {}
+            ).items():
+                self._guild_reset_boundaries[guild_id] = max(
+                    self._guild_reset_boundaries.get(guild_id, 0.0),
+                    reset_at,
                 )
             if self._guild_revocations_anchor_configured():
                 try:
@@ -1851,13 +2084,18 @@ class SessionContinuityCheckpoint:
                 previous_hash = str(snapshot["checkpointHash"])
                 generation = previous_generation + 1
                 try:
-                    self._write_checkpoint_head(
+                    reset_boundary_at = self._write_checkpoint_head(
                         state="empty",
                         generation=generation,
                         checkpoint_hash=(
                             SESSION_CONTINUITY_CHAIN_GENESIS
                         ),
                     )
+                    self._reset_boundary_at = max(
+                        self._reset_boundary_at or 0.0,
+                        reset_boundary_at,
+                    )
+                    self._guild_reset_boundaries = {}
                 except Exception as exc:
                     self._revoke_checkpoint_chain()
                     return self._record_error(
@@ -1997,6 +2235,52 @@ class SessionContinuityCheckpoint:
             )
         return False
 
+    def _snapshot_verifies_commit_target(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        session_key: str,
+        turn_id: str,
+    ) -> bool:
+        return bool(
+            snapshot.get("headState") == "current"
+            and (
+                not self.authenticity.configured
+                or snapshot.get("headAuthenticity") == "verified"
+            )
+            and self._snapshot_contains_commit_target(
+                snapshot,
+                session_key=session_key,
+                turn_id=turn_id,
+            )
+        )
+
+    def _snapshot_has_durable_structure(
+        self,
+        snapshot: dict[str, Any],
+        status: dict[str, Any],
+    ) -> bool:
+        payload = snapshot.get("payload")
+        expected_head_state = (
+            "empty" if payload is None else "current"
+        )
+        return bool(
+            snapshot.get("headState") == expected_head_state
+            and status.get("rollbackProtected") is True
+            and (
+                status.get("keyedAuthenticity") is not True
+                or (
+                    status.get("checkpointHeadAuthenticity")
+                    == "verified"
+                    and status.get("tamperEvident") is True
+                )
+            )
+            and (
+                status.get("externalAnchorConfigured") is not True
+                or status.get("externalReplayProtected") is True
+            )
+        )
+
     def commit_completed_turn(
         self,
         session_key: str,
@@ -2005,7 +2289,50 @@ class SessionContinuityCheckpoint:
         before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         """Durably anchor the named completed turn before returning."""
+        return self._commit_completed_turn_attempt(
+            session_key,
+            turn_id,
+            before_commit=before_commit,
+            attempt_epoch=self._reserve_commit_epoch(),
+        )
+
+    def _commit_completed_turn_attempt(
+        self,
+        session_key: str,
+        turn_id: str,
+        *,
+        before_commit: Callable[[int], Any] | None,
+        attempt_epoch: int,
+    ) -> dict[str, Any]:
+        self._begin_commit_in_flight(attempt_epoch)
+        try:
+            with self._artifact_scope():
+                self._write_status()
+                try:
+                    self._commit_completed_turn_scoped(
+                        session_key,
+                        turn_id,
+                        before_commit=before_commit,
+                        attempt_epoch=attempt_epoch,
+                    )
+                finally:
+                    self._finish_commit_in_flight(attempt_epoch)
+                    self._write_status()
+        finally:
+            self._finish_commit_in_flight(attempt_epoch)
+        return self.status()
+
+    def _commit_completed_turn_scoped(
+        self,
+        session_key: str,
+        turn_id: str,
+        *,
+        before_commit: Callable[[int], Any] | None,
+        attempt_epoch: int,
+    ) -> dict[str, Any]:
         started_at = float(self.commit_latency_clock())
+        required_session = ""
+        superseded_failure = False
         try:
             required_session = _valid_session_key(session_key)
             required_turn = _valid_turn_id(turn_id)
@@ -2015,6 +2342,43 @@ class SessionContinuityCheckpoint:
             ):
                 raise ValueError("continuity_commit_target_invalid")
             with self._lock:
+                latest_success_epoch = self._commit_success_epochs.get(
+                    required_session,
+                    0,
+                )
+                if attempt_epoch < latest_success_epoch:
+                    snapshot = self._anchor_checkpoint_snapshot(
+                        self._checkpoint_snapshot()
+                    )
+                    current_status = self.status()
+                    if not self._snapshot_has_durable_structure(
+                        snapshot,
+                        current_status,
+                    ):
+                        raise RuntimeError(
+                            "conversation_continuity_commit_failed"
+                        )
+                    if before_commit is None:
+                        if self._snapshot_verifies_commit_target(
+                            snapshot,
+                            session_key=required_session,
+                            turn_id=required_turn,
+                        ):
+                            require_durable_continuity_receipt(
+                                current_status
+                            )
+                            self._record_commit_attempt(
+                                started_at=started_at,
+                                succeeded=True,
+                                target_verified=True,
+                                publish_latest=False,
+                            )
+                            self._write_status()
+                            return self.status()
+                    superseded_failure = True
+                    raise RuntimeError(
+                        "conversation_continuity_commit_superseded"
+                    )
                 if before_commit is not None:
                     snapshot = self._anchor_checkpoint_snapshot(
                         self._checkpoint_snapshot()
@@ -2026,18 +2390,10 @@ class SessionContinuityCheckpoint:
                     required_turn_id=required_turn,
                 )
                 snapshot = self._checkpoint_snapshot()
-                target_verified = bool(
-                    snapshot.get("headState") == "current"
-                    and (
-                        not self.authenticity.configured
-                        or snapshot.get("headAuthenticity")
-                        == "verified"
-                    )
-                    and self._snapshot_contains_commit_target(
-                        snapshot,
-                        session_key=required_session,
-                        turn_id=required_turn,
-                    )
+                target_verified = self._snapshot_verifies_commit_target(
+                    snapshot,
+                    session_key=required_session,
+                    turn_id=required_turn,
                 )
                 if (
                     status.get("state") == "error"
@@ -2051,6 +2407,13 @@ class SessionContinuityCheckpoint:
                     raise RuntimeError(
                         "conversation_continuity_commit_failed"
                     )
+                self._commit_success_epochs[required_session] = max(
+                    self._commit_success_epochs.get(
+                        required_session,
+                        0,
+                    ),
+                    attempt_epoch,
+                )
                 self._record_commit_attempt(
                     started_at=started_at,
                     succeeded=True,
@@ -2064,8 +2427,12 @@ class SessionContinuityCheckpoint:
                     started_at=started_at,
                     succeeded=False,
                     target_verified=False,
+                    publish_latest=not superseded_failure,
                 )
-                if self._state != "error":
+                if (
+                    not superseded_failure
+                    and self._state != "error"
+                ):
                     self.runtime_errors.record(
                         "conversation_continuity_commit_failed",
                         exc,
@@ -2083,11 +2450,13 @@ class SessionContinuityCheckpoint:
         *,
         before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
+        attempt_epoch = self._reserve_commit_epoch()
         return await asyncio.to_thread(
-            self.commit_completed_turn,
+            self._commit_completed_turn_attempt,
             session_key,
             turn_id,
             before_commit=before_commit,
+            attempt_epoch=attempt_epoch,
         )
 
     async def _run(self) -> None:
@@ -2108,6 +2477,7 @@ class SessionContinuityCheckpoint:
 
 
 __all__ = [
+    "DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC",
     "DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT",
     "DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES",
     "DEFAULT_COMMIT_LATENCY_WARNING_MS",

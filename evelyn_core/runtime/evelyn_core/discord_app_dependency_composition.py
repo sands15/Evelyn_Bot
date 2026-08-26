@@ -87,6 +87,12 @@ class DiscordAppDependencyComposition:
             claim_conversation_ingress=(
                 deps.conversation_ingress.claim_discord_text
             ),
+            conversation_ingress_guild_epoch=(
+                deps.conversation_ingress.guild_epoch
+            ),
+            activate_conversation_ingress_guild_turn=(
+                deps.conversation_ingress.activate_guild_turn
+            ),
             conversation_ingress_recovery_context=(
                 deps.conversation_ingress.recovery_context_for_scope
             ),
@@ -154,6 +160,7 @@ class DiscordAppDependencyComposition:
             question_ttl_sec=deps.question_ttl_sec,
             commit_session_continuity=deps.commit_session_continuity_sync,
             log=deps.log,
+            conversation_ingress=deps.conversation_ingress,
         )
 
 

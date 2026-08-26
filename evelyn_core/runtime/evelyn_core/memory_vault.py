@@ -48,7 +48,10 @@ from .memory_confirmation_contract import (
     MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
     MEMORY_USER_CONFIRMATION_TAG,
     is_user_confirmed_memory_integrity_valid,
+    memory_owner_scope,
     memory_owner_scope_is_canonical,
+    memory_reset_scope,
+    memory_reset_scope_is_canonical,
 )
 from .memory_provenance_audit import (
     DIRECT_SOURCE_TYPES,
@@ -106,6 +109,7 @@ MEMORY_GRAPH_INTERNAL_NOTE_TYPES = frozenset(MEMORY_INTERNAL_NOTE_TYPES)
 MEMORY_PROVENANCE_SCHEMA = "memory.provenance.v1"
 MEMORY_DELETE_PREVIEW_SCHEMA = "memory.deletion.preview.v1"
 MEMORY_DELETE_RESULT_SCHEMA = "memory.deletion.result.v1"
+MEMORY_GUILD_RESET_SCHEMA = "memory.guild-reset.v1"
 MEMORY_DELETE_TOMBSTONE_SCHEMA = MEMORY_DELETE_TOMBSTONE_V1_SCHEMA
 MEMORY_DERIVATION_IMPACT_SCHEMA = "memory.derivation.impact.v1"
 MEMORY_DERIVATION_REVOCATIONS_SCHEMA = "memory.derivation.revocations.v1"
@@ -161,6 +165,12 @@ _memory_provenance_backfill_tokens: dict[
 
 class MemoryNoteDeletedError(RuntimeError):
     pass
+
+
+class MemoryGuildResetError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def _memory_deletion_linearized(
@@ -2307,12 +2317,13 @@ def _daily_intro_block(
     *,
     note_id: str,
     guild_id: int,
+    reset_scope: str,
     scope_type: str,
     scope_key: str | None,
     scope_labels: list[str] | tuple[str, ...] | None,
 ) -> str:
     now = _utc_now_iso()
-    scope_ref = f"{clean_text(scope_type).lower() or 'guild'}:{clean_text(scope_key or str(guild_id))}"
+    scope_ref = f"guild:{guild_id}"
     return "\n".join(
         [
             _format_front_matter(
@@ -2325,6 +2336,7 @@ def _daily_intro_block(
                     "updated_at": now,
                     "source": "conversation-turn-log",
                     "source_refs": [scope_ref],
+                    "reset_scope": reset_scope,
                     "tags": ["daily", "conversation"],
                     "projects": [DEFAULT_PROJECT],
                     "confidence": "high",
@@ -2342,16 +2354,46 @@ def _daily_intro_block(
     )
 
 
+def _automatic_memory_guild_id(guild_id: object) -> int:
+    if isinstance(guild_id, bool):
+        raise ValueError("memory_guild_scope_invalid")
+    try:
+        normalized = int(guild_id)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("memory_guild_scope_invalid") from None
+    if normalized < 0:
+        raise ValueError("memory_guild_scope_invalid")
+    return normalized
+
+
+def _automatic_memory_reset_scope(guild_id: int) -> str:
+    return memory_reset_scope(guild_id if guild_id > 0 else None)
+
+
+def _guild_daily_rel_path(guild_id: int, day_key: str) -> Path:
+    return Path("daily") / f"guild-{guild_id}" / f"{day_key}.md"
+
+
+def _guild_daily_source_ref(guild_id: int, day_key: str) -> str:
+    return _guild_daily_rel_path(guild_id, day_key).with_suffix("").as_posix()
+
+
+def _guild_daily_note_id(guild_id: int, day_key: str) -> str:
+    return f"daily-guild-{guild_id}-{day_key}"
+
+
 @_memory_deletion_linearized
 def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max_items: int = 12) -> Path | None:
+    normalized_guild_id = _automatic_memory_guild_id(guild_id)
+    reset_scope = _automatic_memory_reset_scope(normalized_guild_id)
     base_root = root or MEMORY_ROOT
-    guild_dir = base_root / f"guild_{guild_id}"
+    guild_dir = base_root / f"guild_{normalized_guild_id}"
     if not guild_dir.exists():
         return None
     _read_memory_deletion_tombstones(root)
 
     vault = ensure_memory_vault_layout(root)
-    target = vault / "core" / f"legacy-guild-{guild_id}.md"
+    target = vault / "core" / f"legacy-guild-{normalized_guild_id}.md"
     scope_dirs = [guild_dir]
     for pattern in ("room_*", "person_*", "session_*"):
         scope_dirs.extend(sorted(guild_dir.glob(pattern))[:20])
@@ -2438,6 +2480,10 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
                 and clean_text(existing_note.body) == clean_text(body)
                 and clean_text(str(existing_note.metadata.get("source") or ""))
                 == "legacy-memory-mirror"
+                and clean_text(
+                    str(existing_note.metadata.get("reset_scope") or "")
+                )
+                == reset_scope
             ):
                 return target
         except Exception:
@@ -2446,13 +2492,14 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
         [
             _format_front_matter(
                 {
-                    "id": f"legacy-guild-{guild_id}",
+                    "id": f"legacy-guild-{normalized_guild_id}",
                     "type": "legacy",
                     "title": "이블린 메모리",
                     "status": "active",
                     "updated_at": _utc_now_iso(),
                     "source": "legacy-memory-mirror",
-                    "source_refs": [f"guild:{guild_id}"],
+                    "source_refs": [f"guild:{normalized_guild_id}"],
+                    "reset_scope": reset_scope,
                     "confidence": "medium",
                     "projects": [DEFAULT_PROJECT],
                 }
@@ -2559,6 +2606,9 @@ def _write_legacy_node_note(
             "links": [f"legacy-guild-{guild_id}"],
             "source": "legacy-memory-node-mirror",
             "source_refs": [source_rel],
+            "reset_scope": _automatic_memory_reset_scope(
+                _automatic_memory_guild_id(guild_id)
+            ),
             "importance": "0.42",
             "confidence": "medium",
             "updated_at": _legacy_source_updated_at(source_path),
@@ -2655,6 +2705,8 @@ def append_turn_rows_to_memory_vault(
     scope_labels: list[str] | tuple[str, ...] | None = None,
     root: Path | None = None,
 ) -> Path | None:
+    normalized_guild_id = _automatic_memory_guild_id(guild_id)
+    reset_scope = _automatic_memory_reset_scope(normalized_guild_id)
     normalized: list[str] = []
     meaningful_user_seen = False
     for row in rows:
@@ -2674,8 +2726,11 @@ def append_turn_rows_to_memory_vault(
     _read_memory_deletion_tombstones(root)
     vault = ensure_memory_vault_layout(root)
     day_key = time.strftime("%Y-%m-%d")
-    path = vault / "daily" / f"{day_key}.md"
-    note_id = f"daily-{day_key}"
+    path = vault / _guild_daily_rel_path(
+        normalized_guild_id,
+        day_key,
+    )
+    note_id = _guild_daily_note_id(normalized_guild_id, day_key)
     initialize_note = not path.exists()
     if path.exists():
         try:
@@ -2693,11 +2748,14 @@ def append_turn_rows_to_memory_vault(
     if memory_note_was_deleted(note_id, root=root):
         generation = 1
         while memory_note_was_deleted(
-            f"daily-{day_key}-continuation-{generation}",
+            f"{_guild_daily_note_id(normalized_guild_id, day_key)}-continuation-{generation}",
             root=root,
         ):
             generation += 1
-        note_id = f"daily-{day_key}-continuation-{generation}"
+        note_id = (
+            f"{_guild_daily_note_id(normalized_guild_id, day_key)}"
+            f"-continuation-{generation}"
+        )
         initialize_note = True
     block = "\n".join(
         [
@@ -2729,7 +2787,8 @@ def append_turn_rows_to_memory_vault(
                 _daily_intro_block(
                     day_key,
                     note_id=note_id,
-                    guild_id=guild_id,
+                    guild_id=normalized_guild_id,
+                    reset_scope=reset_scope,
                     scope_type=scope_type,
                     scope_key=scope_key,
                     scope_labels=scope_labels,
@@ -2770,10 +2829,18 @@ def consolidate_daily_memory_once(
     day_key: str | None = None,
     min_chars: int = CONSOLIDATION_MIN_DAILY_CHARS,
 ) -> Path | None:
+    if guild_id is None:
+        return None
+    normalized_guild_id = _automatic_memory_guild_id(guild_id)
+    reset_scope = _automatic_memory_reset_scope(normalized_guild_id)
     _read_memory_deletion_tombstones(root)
     vault = ensure_memory_vault_layout(root)
     day = day_key or time.strftime("%Y-%m-%d")
-    source_path = vault / "daily" / f"{day}.md"
+    source_ref = _guild_daily_source_ref(normalized_guild_id, day)
+    source_path = vault / _guild_daily_rel_path(
+        normalized_guild_id,
+        day,
+    )
     if not source_path.exists():
         return None
     source_text = source_path.read_text(encoding="utf-8", errors="ignore")
@@ -2790,8 +2857,16 @@ def consolidate_daily_memory_once(
         return None
 
     digest = hashlib.sha1(body.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    target = vault / "episodes" / f"{day}-daily-consolidation.md"
-    if memory_note_was_deleted(f"daily-consolidation-{day}", root=root):
+    target_note_id = (
+        f"daily-consolidation-guild-{normalized_guild_id}-{day}"
+    )
+    target = (
+        vault
+        / "episodes"
+        / f"guild-{normalized_guild_id}"
+        / f"{day}-daily-consolidation.md"
+    )
+    if memory_note_was_deleted(target_note_id, root=root):
         return None
     if target.exists():
         try:
@@ -2808,7 +2883,7 @@ def consolidate_daily_memory_once(
     title = f"Daily Memory Consolidation {day}"
     front_matter = _format_front_matter(
         {
-            "id": f"daily-consolidation-{day}",
+            "id": target_note_id,
             "type": "episode",
             "title": title,
             "status": "active",
@@ -2817,23 +2892,24 @@ def consolidate_daily_memory_once(
             "importance": 0.45,
             "confidence": "medium",
             "source": "daily-consolidation",
-            "source_refs": [f"daily/{day}"],
+            "source_refs": [source_ref],
             "derived_from": [source_note.note_id],
             "evidence_hashes": [digest],
             "source_hash": digest,
             "tags": ["daily", "consolidated", "conversation"],
             "projects": [DEFAULT_PROJECT],
-            "links": [f"daily/{day}"],
+            "links": [source_ref],
+            "reset_scope": reset_scope,
         }
     )
-    scope = f"guild:{guild_id}" if guild_id is not None else "guild:unknown"
+    scope = f"guild:{normalized_guild_id}"
     content = "\n".join(
         [
             front_matter,
             "",
             f"# {title}",
             "",
-            f"Source: [[daily/{day}]]",
+            f"Source: [[{source_ref}]]",
             f"Scope: {scope}",
             "",
             "## Highlights",
@@ -2894,6 +2970,8 @@ def run_semantic_memory_consolidation_once(
     max_source_chars: int = SEMANTIC_CONSOLIDATION_MAX_SOURCE_CHARS,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    normalized_guild_id = _automatic_memory_guild_id(guild_id)
+    reset_scope = _automatic_memory_reset_scope(normalized_guild_id)
     health = sub_llm_health if isinstance(sub_llm_health, dict) else probe_sub_llm_dependency()
     if not health.get("available"):
         return {
@@ -2904,7 +2982,11 @@ def run_semantic_memory_consolidation_once(
 
     vault = ensure_memory_vault_layout(root)
     day = day_key or time.strftime("%Y-%m-%d")
-    source_path = vault / "daily" / f"{day}.md"
+    source_ref = _guild_daily_source_ref(normalized_guild_id, day)
+    source_path = vault / _guild_daily_rel_path(
+        normalized_guild_id,
+        day,
+    )
     if not source_path.exists():
         return {
             "status": "skipped_missing_daily_note",
@@ -2952,7 +3034,7 @@ def run_semantic_memory_consolidation_once(
         {
             "role": "user",
             "content": (
-                f"guild_id={guild_id}\n"
+                f"guild_id={normalized_guild_id}\n"
                 f"day={day}\n"
                 f"source_hash={digest}\n\n"
                 f"Daily memory markdown body:\n{source_body}"
@@ -3027,7 +3109,10 @@ def run_semantic_memory_consolidation_once(
                     1,
                 ),
             }
-        for item in notes[:SEMANTIC_CONSOLIDATION_MAX_NOTES]:
+        for item_index, item in enumerate(
+            notes[:SEMANTIC_CONSOLIDATION_MAX_NOTES],
+            start=1,
+        ):
             if not isinstance(item, dict):
                 continue
             note_type = clean_text(
@@ -3051,7 +3136,7 @@ def run_semantic_memory_consolidation_once(
                 continue
             tags = list(_as_list(item.get("tags")))[:12]
             links = list(_as_list(item.get("links")))
-            links.append(f"daily/{day}")
+            links.append(source_ref)
             try:
                 importance = max(
                     0.0,
@@ -3076,10 +3161,15 @@ def run_semantic_memory_consolidation_once(
                     note_type=note_type,
                     title=title,
                     body=body,
+                    storage_key=(
+                        f"guild-{normalized_guild_id}-{day}-"
+                        f"{item_index}-{title}"
+                    ),
                     tags=tags or ["semantic-consolidation"],
                     links=links,
                     source="sub-llm-semantic-consolidation",
-                    source_refs=[f"daily/{day}"],
+                    reset_scope=reset_scope,
+                    source_refs=[source_ref],
                     derived_from=[source_note.note_id],
                     evidence_hashes=[digest],
                     importance=importance,
@@ -4356,6 +4446,7 @@ def write_memory_vault_note(
     links: list[str] | None = None,
     source: str = "runtime",
     owner_scope: str | None = None,
+    reset_scope: str | None = None,
     source_refs: list[str] | None = None,
     derived_from: list[str] | None = None,
     evidence_hashes: list[str] | None = None,
@@ -4429,6 +4520,13 @@ def write_memory_vault_note(
         ):
             raise ValueError("memory_owner_scope_invalid")
         metadata["owner_scope"] = normalized_owner_scope
+    normalized_reset_scope = clean_text(reset_scope)
+    if normalized_reset_scope:
+        if not memory_reset_scope_is_canonical(
+            normalized_reset_scope
+        ):
+            raise ValueError("memory_reset_scope_invalid")
+        metadata["reset_scope"] = normalized_reset_scope
     normalized_confirmed_at = clean_text(confirmed_at)
     if normalized_confirmed_at:
         metadata["confirmed_at"] = normalized_confirmed_at
@@ -4897,6 +4995,18 @@ def _memory_vault_note_owner_scope(
 
 
 @_memory_deletion_linearized
+def _memory_vault_note_reset_scope(
+    note_id_or_rel_path: str,
+    *,
+    root: Path | None = None,
+) -> str:
+    target = _memory_vault_find_note(note_id_or_rel_path, root=root)
+    if target is None:
+        return ""
+    return clean_text(target[1].metadata.get("reset_scope"))
+
+
+@_memory_deletion_linearized
 def memory_vault_user_note(
     note_id_or_rel_path: str,
     *,
@@ -5263,6 +5373,7 @@ def _memory_deletion_reason(value: str) -> str:
             "privacy_request",
             "obsolete_memory",
             "test_cleanup",
+            "guild_reset",
         }
         else "user_requested"
     )
@@ -8421,6 +8532,7 @@ def preview_memory_vault_user_note_deletion(
     reason: str = "user_requested",
     root: Path | None = None,
     now: Callable[[], float] = time.time,
+    _verified_reset_scope: str = "",
 ) -> dict[str, Any]:
     sync_memory_vault_index(root=root)
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
@@ -8430,9 +8542,17 @@ def preview_memory_vault_user_note_deletion(
     vault = ensure_memory_vault_layout(root)
     rel_path = path.relative_to(vault).as_posix()
     protection = _memory_note_deletion_protection(note, rel_path)
-    if protection == "internal_note_not_public":
+    verified_reset_scope = clean_text(_verified_reset_scope)
+    reset_scope_matches = bool(
+        memory_reset_scope_is_canonical(verified_reset_scope)
+        and secrets.compare_digest(
+            clean_text(note.metadata.get("reset_scope")),
+            verified_reset_scope,
+        )
+    )
+    if protection == "internal_note_not_public" and not reset_scope_matches:
         return {"ok": False, "error": "note_not_found"}
-    if protection:
+    if protection and not reset_scope_matches:
         return {
             "ok": False,
             "error": "memory_note_delete_protected",
@@ -8457,6 +8577,9 @@ def preview_memory_vault_user_note_deletion(
             "contentHash": note.source_hash,
             "derivationImpactHash": derivation_impact_hash,
             "reason": normalized_reason,
+            "verifiedResetScope": (
+                verified_reset_scope if reset_scope_matches else ""
+            ),
             "expiresAt": expires_at,
             "used": False,
         }
@@ -8502,6 +8625,7 @@ def delete_memory_vault_user_note(
     reason: str = "user_requested",
     root: Path | None = None,
     now: Callable[[], float] = time.time,
+    _verified_reset_scope: str = "",
 ) -> dict[str, Any]:
     token = clean_text(confirm_token)
     timestamp = float(now())
@@ -8537,7 +8661,21 @@ def delete_memory_vault_user_note(
         return {"ok": False, "error": "memory_delete_target_invalid"}
     rel_path = resolved_path.relative_to(vault).as_posix()
     protection = _memory_note_deletion_protection(note, rel_path)
-    if protection:
+    verified_reset_scope = clean_text(_verified_reset_scope)
+    reset_scope_matches = bool(
+        memory_reset_scope_is_canonical(verified_reset_scope)
+        and secrets.compare_digest(
+            clean_text(str(preview.get("verifiedResetScope") or "")),
+            verified_reset_scope,
+        )
+        and secrets.compare_digest(
+            clean_text(note.metadata.get("reset_scope")),
+            verified_reset_scope,
+        )
+    )
+    if verified_reset_scope and not reset_scope_matches:
+        return {"ok": False, "error": "memory_delete_token_mismatch"}
+    if protection and not reset_scope_matches:
         return {
             "ok": False,
             "error": "memory_note_delete_protected",
@@ -8585,6 +8723,7 @@ def delete_memory_vault_user_note(
     }
 
     source_file_deleted = False
+    reset_graph_is_valid = True
     try:
         with _memory_delete_lock:
             if not resolved_path.exists():
@@ -8629,7 +8768,16 @@ def delete_memory_vault_user_note(
                 tombstone,
                 root=root,
             )
-            if _redact_memory_note_before_unlink(
+            if verified_reset_scope:
+                try:
+                    reset_graph_is_valid = (
+                        _guild_reset_generated_artifacts_are_attributed(
+                            root=root,
+                        )
+                    )
+                except Exception:
+                    reset_graph_is_valid = False
+            if reset_graph_is_valid and _redact_memory_note_before_unlink(
                 resolved_path,
                 current_note,
             ):
@@ -8671,23 +8819,36 @@ def delete_memory_vault_user_note(
         cleanup_errors.append(
             "memory_delete_runtime_artifact_cleanup_failed"
         )
-    try:
-        version = sync_memory_vault_index(root=root)
-        deletion_cleanup = _reconcile_memory_deletion_tombstones(
-            root=root,
-        )
-        if int(deletion_cleanup.get("cleanupErrorCount") or 0) > 0:
-            cleanup_errors.append(
-                "memory_delete_source_cleanup_failed"
+    if verified_reset_scope and reset_graph_is_valid:
+        try:
+            reset_graph_is_valid = (
+                _guild_reset_generated_artifacts_are_attributed(
+                    root=root,
+                )
             )
-    except MemoryDeletionJournalIntegrityError as exc:
-        version = 0
-        cleanup_errors.append(
-            memory_deletion_journal_error_code(exc)
-        )
-    except Exception:
-        version = 0
-        cleanup_errors.append("memory_delete_index_cleanup_failed")
+        except Exception:
+            reset_graph_is_valid = False
+        if not reset_graph_is_valid:
+            cleanup_errors.append(
+                "memory_delete_generated_attribution_changed"
+            )
+    version = 0
+    if reset_graph_is_valid:
+        try:
+            version = sync_memory_vault_index(root=root)
+            deletion_cleanup = _reconcile_memory_deletion_tombstones(
+                root=root,
+            )
+            if int(deletion_cleanup.get("cleanupErrorCount") or 0) > 0:
+                cleanup_errors.append(
+                    "memory_delete_source_cleanup_failed"
+                )
+        except MemoryDeletionJournalIntegrityError as exc:
+            cleanup_errors.append(
+                memory_deletion_journal_error_code(exc)
+            )
+        except Exception:
+            cleanup_errors.append("memory_delete_index_cleanup_failed")
     if "memory_delete_user_state_cleanup_failed" in cleanup_errors:
         try:
             if note.note_id not in _read_user_note_state(root):
@@ -8699,14 +8860,15 @@ def delete_memory_vault_user_note(
     source_file_deleted = not resolved_path.exists()
     if not source_file_deleted:
         cleanup_errors.append("memory_delete_source_cleanup_failed")
-    try:
-        refresh_memory_hot_context(root=root)
-    except MemoryDeletionJournalIntegrityError as exc:
-        cleanup_errors.append(
-            memory_deletion_journal_error_code(exc)
-        )
-    except Exception:
-        cleanup_errors.append("memory_delete_hot_context_cleanup_failed")
+    if reset_graph_is_valid:
+        try:
+            refresh_memory_hot_context(root=root)
+        except MemoryDeletionJournalIntegrityError as exc:
+            cleanup_errors.append(
+                memory_deletion_journal_error_code(exc)
+            )
+        except Exception:
+            cleanup_errors.append("memory_delete_hot_context_cleanup_failed")
     if cleanup_errors:
         return {
             "ok": False,
@@ -8741,6 +8903,998 @@ def delete_memory_vault_user_note(
         "deletionIntegrity": memory_deletion_journal_status(
             memory_index_dir(root)
         ),
+    }
+
+
+def _legacy_copy_guild_id(rel_path: str) -> int | None:
+    normalized = clean_text(rel_path).replace("\\", "/").lower()
+    match = re.fullmatch(r"core/legacy-guild-(\d+)\.md", normalized)
+    if match is None:
+        match = re.match(r"legacy/guild-(\d+)(?:/|$)", normalized)
+    return int(match.group(1)) if match is not None else None
+
+
+def _guild_reset_legacy_copy_is_attributed(
+    note: MemoryVaultNote,
+    rel_path: str,
+    *,
+    root: Path | None,
+) -> bool:
+    normalized_rel = clean_text(rel_path).replace("\\", "/").lower()
+    guild_id = _legacy_copy_guild_id(normalized_rel)
+    if guild_id is None or clean_text(note.note_type).lower() != "legacy":
+        return False
+    source = clean_text(note.metadata.get("source")).lower()
+    source_refs = _as_list(note.metadata.get("source_refs"))
+    if _as_list(note.metadata.get("derived_from")):
+        return False
+
+    mirror_rel = f"core/legacy-guild-{guild_id}.md"
+    if normalized_rel == mirror_rel:
+        return bool(
+            source == "legacy-memory-mirror"
+            and note.note_id == f"legacy-guild-{guild_id}"
+            and source_refs == (f"guild:{guild_id}",)
+        )
+
+    if not re.fullmatch(
+        rf"legacy/guild-{guild_id}/[^/]+-[0-9a-f]{{16}}\.md",
+        normalized_rel,
+    ):
+        return False
+    if source != "legacy-memory-node-mirror" or len(source_refs) != 1:
+        return False
+    source_ref = source_refs[0]
+    source_path = Path(source_ref)
+    guild_root = (Path(root or MEMORY_ROOT) / f"guild_{guild_id}").resolve()
+    try:
+        source_rel = source_path.resolve().relative_to(guild_root)
+    except (OSError, ValueError):
+        return False
+    parts = source_rel.parts
+    scope_offset = 0
+    if parts and re.fullmatch(r"(?:room|person|session)_.+", parts[0]):
+        scope_offset = 1
+    source_parts = parts[scope_offset:]
+    source_label = ""
+    if source_parts == ("rolling_summary.txt",):
+        source_label = "summary"
+        scope_dir = source_path.parent
+    elif source_parts == ("cognitive_state.json",):
+        source_label = "state"
+        scope_dir = source_path.parent
+    elif source_parts in {
+        ("vault", "facts.jsonl"),
+        ("vault", "questions.jsonl"),
+    }:
+        source_label = source_parts[-1].removesuffix(".jsonl")
+        scope_dir = source_path.parent.parent
+    elif (
+        len(source_parts) == 3
+        and source_parts[:2] == ("vault", "raw")
+        and source_parts[-1].endswith(".jsonl")
+    ):
+        source_label = f"raw-{Path(source_parts[-1]).stem}"
+        scope_dir = source_path.parent.parent.parent
+    else:
+        return False
+    vault = ensure_memory_vault_layout(root).resolve()
+    expected_rel = _legacy_node_path(
+        vault,
+        guild_id,
+        scope_dir,
+        source_label,
+    ).relative_to(vault).as_posix().lower()
+    return bool(
+        normalized_rel == expected_rel
+        and note.note_id == f"legacy-{_stable_id(str(source_path))}"
+        and _as_list(note.metadata.get("tags"))
+        == ("legacy-memory", source_label, f"guild-{guild_id}")
+        and _as_list(note.metadata.get("links"))
+        == (f"legacy-guild-{guild_id}",)
+    )
+
+
+def _guild_reset_note_artifact_is_attributed(
+    note: MemoryVaultNote,
+    rel_path: str,
+    *,
+    root: Path | None = None,
+) -> bool:
+    note_reset_scope = clean_text(note.metadata.get("reset_scope"))
+    derived_from = _as_list(note.metadata.get("derived_from"))
+    source_refs = _as_list(note.metadata.get("source_refs"))
+    source_type = _memory_source_type(
+        clean_text(note.metadata.get("source")),
+        note.note_type,
+    )
+    source = clean_text(note.metadata.get("source")).lower()
+    daily_path_match = re.fullmatch(
+        r"daily/guild-(\d+)/[^/]+\.md",
+        rel_path.lower(),
+    )
+    daily_consolidation_path_match = re.fullmatch(
+        r"episodes/guild-(\d+)/[^/]+-daily-consolidation\.md",
+        rel_path.lower(),
+    )
+    daily_ref_guild_ids: set[int] = set()
+    for source_ref in source_refs:
+        normalized_ref = clean_text(source_ref).replace(
+            "\\", "/"
+        ).lower()
+        source_ref_match = re.fullmatch(
+            r"daily/guild-(\d+)/[^/]+(?:\.md)?",
+            normalized_ref,
+        )
+        if source_ref_match is not None:
+            daily_ref_guild_ids.add(int(source_ref_match.group(1)))
+        elif normalized_ref.startswith("daily/guild-"):
+            return False
+    legacy_guild_id = _legacy_copy_guild_id(rel_path)
+    if legacy_guild_id is not None:
+        if not _guild_reset_legacy_copy_is_attributed(
+            note,
+            rel_path,
+            root=root,
+        ):
+            return False
+        if not note_reset_scope:
+            return True
+        return bool(
+            memory_reset_scope_is_canonical(note_reset_scope)
+            and secrets.compare_digest(
+                note_reset_scope,
+                _automatic_memory_reset_scope(legacy_guild_id),
+            )
+        )
+    attributed_guild_ids = set(daily_ref_guild_ids)
+    if daily_path_match is not None:
+        daily_path_guild_id = int(daily_path_match.group(1))
+        attributed_guild_ids.add(daily_path_guild_id)
+        if (
+            source_type != "conversation"
+            or source_refs != (f"guild:{daily_path_guild_id}",)
+        ):
+            return False
+    if daily_consolidation_path_match is not None:
+        attributed_guild_ids.add(
+            int(daily_consolidation_path_match.group(1))
+        )
+    if attributed_guild_ids:
+        if len(attributed_guild_ids) != 1:
+            return False
+        attributed_guild_id = next(iter(attributed_guild_ids))
+        if not (
+            memory_reset_scope_is_canonical(note_reset_scope)
+            and secrets.compare_digest(
+                note_reset_scope,
+                _automatic_memory_reset_scope(attributed_guild_id),
+            )
+        ):
+            return False
+        if source == "daily-consolidation" and (
+            daily_consolidation_path_match is None
+            or int(daily_consolidation_path_match.group(1))
+            != attributed_guild_id
+            or daily_ref_guild_ids != {attributed_guild_id}
+            or len(source_refs) != 1
+        ):
+            return False
+        if source == "sub-llm-semantic-consolidation":
+            semantic_path_match = re.fullmatch(
+                r"(?:concepts|episodes|procedures|projects)/"
+                r"guild-(\d+)-[^/]+\.md",
+                rel_path.lower(),
+            )
+            if (
+                semantic_path_match is None
+                or int(semantic_path_match.group(1))
+                != attributed_guild_id
+                or daily_ref_guild_ids != {attributed_guild_id}
+                or len(source_refs) != 1
+            ):
+                return False
+    elif source_type == "conversation" or source in {
+        "daily-consolidation",
+        "sub-llm-semantic-consolidation",
+    }:
+        return False
+    if memory_reset_scope_is_canonical(note_reset_scope):
+        return True
+    return not (
+        source_type in {"conversation", "derived", "legacy"}
+        or derived_from
+    )
+
+
+def _guild_reset_generated_artifacts_are_attributed(
+    *,
+    root: Path | None,
+) -> bool:
+    vault = ensure_memory_vault_layout(root).resolve()
+    notes_by_id: dict[str, list[MemoryVaultNote]] = {}
+    derived_edges: list[tuple[str, tuple[str, ...]]] = []
+    for path in sorted(vault.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            resolved_path = path.resolve()
+            if not resolved_path.is_relative_to(vault):
+                raise OSError("memory_guild_reset_target_invalid")
+            note = parse_memory_note(
+                resolved_path,
+                resolved_path.read_text(encoding="utf-8"),
+            )
+        except (OSError, UnicodeError) as exc:
+            raise MemoryGuildResetError(
+                "memory_guild_reset_scan_failed"
+            ) from exc
+        rel_path = resolved_path.relative_to(vault).as_posix()
+        note_reset_scope = clean_text(note.metadata.get("reset_scope"))
+        derived_from = _as_list(note.metadata.get("derived_from"))
+        notes_by_id.setdefault(note.note_id, []).append(note)
+        if derived_from:
+            derived_edges.append((note_reset_scope, derived_from))
+        if not _guild_reset_note_artifact_is_attributed(
+            note,
+            rel_path,
+            root=root,
+        ):
+            return False
+    for derived_scope, source_note_ids in derived_edges:
+        if not memory_reset_scope_is_canonical(derived_scope):
+            return False
+        for source_note_id in source_note_ids:
+            sources = notes_by_id.get(source_note_id, [])
+            if len(sources) != 1:
+                return False
+            source_scope = clean_text(
+                sources[0].metadata.get("reset_scope")
+            )
+            if not (
+                memory_reset_scope_is_canonical(source_scope)
+                and secrets.compare_digest(
+                    source_scope,
+                    derived_scope,
+                )
+            ):
+                return False
+    return True
+
+
+def _validate_guild_legacy_copy_targets(
+    guild_id: int,
+    *,
+    root: Path | None,
+) -> tuple[Path, Path]:
+    vault = ensure_memory_vault_layout(root).resolve()
+    mirror = vault / "core" / f"legacy-guild-{guild_id}.md"
+    nodes = vault / "legacy" / f"guild-{guild_id}"
+    for path, expects_directory in ((mirror, False), (nodes, True)):
+        is_junction = getattr(path, "is_junction", lambda: False)
+        if path.is_symlink() or is_junction():
+            raise MemoryGuildResetError(
+                "memory_guild_reset_target_invalid"
+            )
+        if not path.exists():
+            continue
+        if (
+            path.is_dir() is not expects_directory
+            or not path.resolve().is_relative_to(vault)
+        ):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_target_invalid"
+            )
+        if expects_directory:
+            for child in path.rglob("*"):
+                child_is_junction = getattr(
+                    child,
+                    "is_junction",
+                    lambda: False,
+                )
+                if (
+                    child.is_symlink()
+                    or child_is_junction()
+                    or not child.resolve().is_relative_to(vault)
+                ):
+                    raise MemoryGuildResetError(
+                        "memory_guild_reset_target_invalid"
+                    )
+                if not child.is_file() or child.suffix.lower() != ".md":
+                    raise MemoryGuildResetError(
+                        "memory_guild_reset_legacy_scope_missing"
+                    )
+                try:
+                    note = parse_memory_note(
+                        child,
+                        child.read_text(encoding="utf-8"),
+                    )
+                    child_rel = child.resolve().relative_to(vault).as_posix()
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise MemoryGuildResetError(
+                        "memory_guild_reset_legacy_scope_missing"
+                    ) from exc
+                if not _guild_reset_note_artifact_is_attributed(
+                    note,
+                    child_rel,
+                    root=root,
+                ):
+                    raise MemoryGuildResetError(
+                        "memory_guild_reset_legacy_scope_missing"
+                    )
+        else:
+            try:
+                note = parse_memory_note(
+                    path,
+                    path.read_text(encoding="utf-8"),
+                )
+                path_rel = path.resolve().relative_to(vault).as_posix()
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise MemoryGuildResetError(
+                    "memory_guild_reset_legacy_scope_missing"
+                ) from exc
+            if not _guild_reset_note_artifact_is_attributed(
+                note,
+                path_rel,
+                root=root,
+            ):
+                raise MemoryGuildResetError(
+                    "memory_guild_reset_legacy_scope_missing"
+                )
+    return mirror, nodes
+
+
+@dataclass(frozen=True, slots=True)
+class _GuildResetPathSnapshot:
+    kind: str
+    identity: tuple[int, int] | None = None
+    files: tuple[tuple[str, str, tuple[int, int]], ...] = ()
+    directories: tuple[tuple[str, tuple[int, int]], ...] = ()
+
+
+def _guild_reset_path_snapshot(
+    path: Path,
+    *,
+    allowed_root: Path,
+    error_code: str,
+) -> _GuildResetPathSnapshot:
+    root = allowed_root.resolve()
+
+    def is_link(candidate: Path) -> bool:
+        return bool(
+            candidate.is_symlink()
+            or getattr(candidate, "is_junction", lambda: False)()
+        )
+
+    def identity(candidate: Path) -> tuple[int, int]:
+        stat = candidate.stat(follow_symlinks=False)
+        observed = int(stat.st_dev), int(stat.st_ino)
+        if not all(observed):
+            raise MemoryGuildResetError(error_code)
+        return observed
+
+    try:
+        if is_link(path):
+            raise MemoryGuildResetError(error_code)
+        if not path.exists():
+            return _GuildResetPathSnapshot("missing")
+        if not path.resolve().is_relative_to(root):
+            raise MemoryGuildResetError(error_code)
+        if path.is_file():
+            return _GuildResetPathSnapshot(
+                "file",
+                identity(path),
+                (
+                    (
+                        ".",
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                        identity(path),
+                    ),
+                ),
+            )
+        if not path.is_dir():
+            raise MemoryGuildResetError(error_code)
+
+        files: list[tuple[str, str, tuple[int, int]]] = []
+        directories: list[tuple[str, tuple[int, int]]] = []
+
+        def visit(directory: Path) -> None:
+            for child in sorted(
+                directory.iterdir(),
+                key=lambda item: item.name,
+            ):
+                if is_link(child) or not child.resolve().is_relative_to(
+                    root
+                ):
+                    raise MemoryGuildResetError(error_code)
+                rel_path = child.relative_to(path).as_posix()
+                if child.is_dir():
+                    directories.append((rel_path, identity(child)))
+                    visit(child)
+                elif child.is_file():
+                    files.append(
+                        (
+                            rel_path,
+                            hashlib.sha256(child.read_bytes()).hexdigest(),
+                            identity(child),
+                        )
+                    )
+                else:
+                    raise MemoryGuildResetError(error_code)
+
+        visit(path)
+        return _GuildResetPathSnapshot(
+            "directory",
+            identity(path),
+            tuple(files),
+            tuple(directories),
+        )
+    except MemoryGuildResetError:
+        raise
+    except OSError as exc:
+        raise MemoryGuildResetError(error_code) from exc
+
+
+def _remove_guild_reset_path(
+    path: Path,
+    snapshot: _GuildResetPathSnapshot,
+    *,
+    allowed_root: Path,
+) -> bool:
+    error_code = "memory_guild_reset_directory_delete_failed"
+    if _guild_reset_path_snapshot(
+        path,
+        allowed_root=allowed_root,
+        error_code=error_code,
+    ) != snapshot:
+        raise MemoryGuildResetError(error_code)
+    if snapshot.kind == "missing":
+        return False
+    try:
+        if snapshot.kind == "file":
+            expected_hash = snapshot.files[0][1]
+            expected_identity = snapshot.files[0][2]
+            path_stat = path.stat(follow_symlinks=False)
+            if (
+                path.is_symlink()
+                or getattr(path, "is_junction", lambda: False)()
+                or not path.is_file()
+                or (
+                    int(path_stat.st_dev),
+                    int(path_stat.st_ino),
+                )
+                != expected_identity
+                or hashlib.sha256(path.read_bytes()).hexdigest()
+                != expected_hash
+            ):
+                raise MemoryGuildResetError(error_code)
+            path.unlink()
+            return True
+        if snapshot.kind != "directory":
+            raise MemoryGuildResetError(error_code)
+        root = allowed_root.resolve()
+
+        def root_identity_matches() -> bool:
+            current = path.stat(follow_symlinks=False)
+            return (
+                int(current.st_dev),
+                int(current.st_ino),
+            ) == snapshot.identity
+
+        for rel_path, expected_hash, expected_identity in snapshot.files:
+            child = path / rel_path
+            child_stat = child.stat(follow_symlinks=False)
+            if (
+                not root_identity_matches()
+                or path.is_symlink()
+                or getattr(path, "is_junction", lambda: False)()
+                or child.is_symlink()
+                or getattr(child, "is_junction", lambda: False)()
+                or not child.is_file()
+                or not child.resolve().is_relative_to(root)
+                or (int(child_stat.st_dev), int(child_stat.st_ino))
+                != expected_identity
+                or hashlib.sha256(child.read_bytes()).hexdigest()
+                != expected_hash
+            ):
+                raise MemoryGuildResetError(error_code)
+            child.unlink()
+        for rel_path, expected_identity in sorted(
+            snapshot.directories,
+            key=lambda item: (item[0].count("/"), item[0]),
+            reverse=True,
+        ):
+            child = path / rel_path
+            child_stat = child.stat(follow_symlinks=False)
+            if (
+                not root_identity_matches()
+                or path.is_symlink()
+                or getattr(path, "is_junction", lambda: False)()
+                or child.is_symlink()
+                or getattr(child, "is_junction", lambda: False)()
+                or not child.is_dir()
+                or not child.resolve().is_relative_to(root)
+                or (int(child_stat.st_dev), int(child_stat.st_ino))
+                != expected_identity
+            ):
+                raise MemoryGuildResetError(error_code)
+            child.rmdir()
+        path_stat = path.stat(follow_symlinks=False)
+        if (
+            not root_identity_matches()
+            or path.is_symlink()
+            or getattr(path, "is_junction", lambda: False)()
+            or not path.is_dir()
+            or not path.resolve().is_relative_to(root)
+            or (int(path_stat.st_dev), int(path_stat.st_ino))
+            != snapshot.identity
+        ):
+            raise MemoryGuildResetError(error_code)
+        path.rmdir()
+        return True
+    except MemoryGuildResetError:
+        raise
+    except OSError as exc:
+        raise MemoryGuildResetError(error_code) from exc
+
+
+def _guild_reset_directory_snapshot_is_bound(
+    initial: _GuildResetPathSnapshot,
+    current: _GuildResetPathSnapshot,
+    *,
+    require_known_children: bool,
+) -> bool:
+    if initial.kind == "missing":
+        return current.kind == "missing"
+    if not (
+        initial.kind == "directory"
+        and current.kind == "directory"
+        and initial.identity == current.identity
+    ):
+        return False
+    if not require_known_children:
+        return True
+    return bool(
+        set(current.files).issubset(initial.files)
+        and set(current.directories).issubset(initial.directories)
+    )
+
+
+def _remove_guild_legacy_copies(
+    mirror: Path,
+    nodes: Path,
+    *,
+    vault: Path,
+    mirror_snapshot: _GuildResetPathSnapshot,
+    nodes_snapshot: _GuildResetPathSnapshot,
+) -> None:
+    _remove_guild_reset_path(
+        mirror,
+        mirror_snapshot,
+        allowed_root=vault,
+    )
+    _remove_guild_reset_path(
+        nodes,
+        nodes_snapshot,
+        allowed_root=vault,
+    )
+
+
+def _remove_guild_memory_directory(
+    memory_dir: Path,
+    snapshot: _GuildResetPathSnapshot,
+    *,
+    memory_root: Path,
+) -> bool:
+    return _remove_guild_reset_path(
+        memory_dir,
+        snapshot,
+        allowed_root=memory_root,
+    )
+
+
+def _guild_reset_confirmed_notes(
+    *,
+    target_reset_scope: str,
+    root: Path | None,
+) -> tuple[list[str], bool]:
+    vault = ensure_memory_vault_layout(root).resolve()
+    targets: list[tuple[str, str, tuple[str, ...]]] = []
+    legacy_scope_missing = False
+    legacy_local_owner_scope = memory_owner_scope(
+        guild_id=None,
+        person_key="control-page:local",
+    )
+    for path in sorted(vault.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            resolved_path = path.resolve()
+            if not resolved_path.is_relative_to(vault):
+                raise OSError("memory_guild_reset_target_invalid")
+            raw = resolved_path.read_text(
+                encoding="utf-8",
+            )
+            note = parse_memory_note(resolved_path, raw)
+        except (OSError, UnicodeError) as exc:
+            raise MemoryGuildResetError(
+                "memory_guild_reset_scan_failed"
+            ) from exc
+        note_reset_scope = clean_text(
+            note.metadata.get("reset_scope")
+        )
+        if memory_reset_scope_is_canonical(
+            note_reset_scope
+        ):
+            if secrets.compare_digest(
+                note_reset_scope,
+                target_reset_scope,
+            ):
+                targets.append(
+                    (
+                        note.note_id,
+                        resolved_path.relative_to(vault).as_posix(),
+                        _as_list(note.metadata.get("derived_from")),
+                    )
+                )
+            continue
+        if not _is_user_confirmed_memory_note(note):
+            continue
+        note_owner_scope = clean_text(
+            note.metadata.get("owner_scope")
+        )
+        if not secrets.compare_digest(
+            note_owner_scope,
+            legacy_local_owner_scope,
+        ):
+            legacy_scope_missing = True
+    if len({note_id for note_id, _path, _deps in targets}) != len(
+        targets
+    ):
+        raise MemoryGuildResetError("memory_guild_reset_scan_failed")
+    pending = {
+        note_id: (rel_path, dependencies)
+        for note_id, rel_path, dependencies in targets
+    }
+    ordered: list[str] = []
+    while pending:
+        depended_on = {
+            dependency
+            for _path, dependencies in pending.values()
+            for dependency in dependencies
+            if dependency in pending
+        }
+        leaves = sorted(
+            (
+                (note_id, rel_path)
+                for note_id, (rel_path, _dependencies) in pending.items()
+                if note_id not in depended_on
+            ),
+            key=lambda item: item[1],
+        )
+        if not leaves:
+            raise MemoryGuildResetError(
+                "memory_guild_reset_scan_failed"
+            )
+        for note_id, rel_path in leaves:
+            ordered.append(rel_path)
+            pending.pop(note_id)
+    return ordered, legacy_scope_missing
+
+
+@_memory_deletion_journal_mutation_linearized
+def reset_guild_memory_vault(
+    guild_id: object,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    try:
+        target_reset_scope = memory_reset_scope(guild_id)
+        normalized_guild_id = int(guild_id)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MemoryGuildResetError(
+            "memory_guild_reset_scope_invalid"
+        ) from exc
+
+    targets, legacy_scope_missing = _guild_reset_confirmed_notes(
+        target_reset_scope=target_reset_scope,
+        root=root,
+    )
+    if legacy_scope_missing:
+        raise MemoryGuildResetError(
+            "memory_guild_reset_legacy_scope_missing"
+        )
+    if not _guild_reset_generated_artifacts_are_attributed(root=root):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_legacy_scope_missing"
+        )
+    _validate_guild_legacy_copy_targets(
+        normalized_guild_id,
+        root=root,
+    )
+    vault = ensure_memory_vault_layout(root).resolve()
+    initial_target_note_ids: dict[str, str] = {}
+    try:
+        for rel_path in targets:
+            target_path = (vault / rel_path).resolve()
+            if not target_path.is_relative_to(vault):
+                raise OSError("memory_guild_reset_target_invalid")
+            initial_target_note_ids[rel_path] = parse_memory_note(
+                target_path,
+                target_path.read_text(encoding="utf-8"),
+            ).note_id
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise MemoryGuildResetError(
+            "memory_guild_reset_scan_failed"
+        ) from exc
+    sync_memory_vault_index(root=root)
+    targets, legacy_scope_missing = _guild_reset_confirmed_notes(
+        target_reset_scope=target_reset_scope,
+        root=root,
+    )
+    fresh_targets = set(targets)
+    if fresh_targets.difference(initial_target_note_ids) or any(
+        rel_path not in fresh_targets
+        and not memory_note_was_deleted(note_id, root=root)
+        for rel_path, note_id in initial_target_note_ids.items()
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_delete_failed"
+        )
+    if (
+        legacy_scope_missing
+        or not _guild_reset_generated_artifacts_are_attributed(root=root)
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_legacy_scope_missing"
+        )
+    legacy_mirror, legacy_nodes = _validate_guild_legacy_copy_targets(
+        normalized_guild_id,
+        root=root,
+    )
+    initial_legacy_mirror_snapshot = _guild_reset_path_snapshot(
+        legacy_mirror,
+        allowed_root=vault,
+        error_code="memory_guild_reset_target_invalid",
+    )
+    initial_legacy_nodes_snapshot = _guild_reset_path_snapshot(
+        legacy_nodes,
+        allowed_root=vault,
+        error_code="memory_guild_reset_target_invalid",
+    )
+    if (
+        initial_legacy_mirror_snapshot.kind
+        not in {"missing", "file"}
+        or initial_legacy_nodes_snapshot.kind
+        not in {"missing", "directory"}
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_target_invalid"
+        )
+    memory_root = Path(root or MEMORY_ROOT).resolve()
+    memory_dir = memory_root / f"guild_{normalized_guild_id}"
+    memory_dir_snapshot = _guild_reset_path_snapshot(
+        memory_dir,
+        allowed_root=memory_root,
+        error_code="memory_guild_reset_target_invalid",
+    )
+    if memory_dir_snapshot.kind not in {"missing", "directory"}:
+        raise MemoryGuildResetError(
+            "memory_guild_reset_target_invalid"
+        )
+
+    deleted_note_count = 0
+    for rel_path in targets:
+        if not _guild_reset_generated_artifacts_are_attributed(root=root):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_delete_failed"
+            )
+        preview = preview_memory_vault_user_note_deletion(
+            rel_path,
+            reason="guild_reset",
+            root=root,
+            _verified_reset_scope=target_reset_scope,
+        )
+        if not preview.get("ok"):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_delete_failed"
+            )
+        derivation_impact = preview.get("derivationImpact")
+        if not (
+            isinstance(derivation_impact, dict)
+            and derivation_impact.get("affectedCount") == 0
+            and derivation_impact.get("cascadeDeleteCount") == 0
+            and derivation_impact.get("quarantineCount") == 0
+            and derivation_impact.get("cascadeDelete") == []
+            and derivation_impact.get("quarantine") == []
+        ):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_delete_failed"
+            )
+        preview_note = preview.get("note")
+        preview_content_hash = clean_text(
+            str(
+                preview_note.get("contentHash")
+                if isinstance(preview_note, dict)
+                else ""
+            )
+        )
+        try:
+            vault = ensure_memory_vault_layout(root).resolve()
+            current_path = (vault / rel_path).resolve()
+            if (
+                not current_path.is_relative_to(vault)
+                or not current_path.is_file()
+            ):
+                raise OSError("memory_guild_reset_target_invalid")
+            current_note = parse_memory_note(
+                current_path,
+                current_path.read_text(encoding="utf-8"),
+            )
+            current_reset_scope = clean_text(
+                current_note.metadata.get("reset_scope")
+            )
+            if not (
+                preview_content_hash
+                and secrets.compare_digest(
+                    current_note.source_hash,
+                    preview_content_hash,
+                )
+                and memory_reset_scope_is_canonical(
+                    current_reset_scope
+                )
+                and secrets.compare_digest(
+                    current_reset_scope,
+                    target_reset_scope,
+                )
+                and _guild_reset_note_artifact_is_attributed(
+                    current_note,
+                    rel_path,
+                    root=root,
+                )
+            ):
+                raise MemoryGuildResetError(
+                    "memory_guild_reset_delete_failed"
+                )
+        except MemoryGuildResetError:
+            raise
+        except Exception as exc:
+            raise MemoryGuildResetError(
+                "memory_guild_reset_delete_failed"
+            ) from exc
+        deleted = delete_memory_vault_user_note(
+            rel_path,
+            str(preview.get("confirmToken") or ""),
+            reason="guild_reset",
+            root=root,
+            _verified_reset_scope=target_reset_scope,
+        )
+        if not (
+            deleted.get("ok") is True
+            and deleted.get("deleted") is True
+            and deleted.get("tombstoned") is True
+            and deleted.get("sourceFileDeleted") is True
+        ):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_delete_failed"
+            )
+        if not _guild_reset_generated_artifacts_are_attributed(root=root):
+            raise MemoryGuildResetError(
+                "memory_guild_reset_verification_failed"
+            )
+        deleted_note_count += 1
+
+    remaining, legacy_scope_missing = _guild_reset_confirmed_notes(
+        target_reset_scope=target_reset_scope,
+        root=root,
+    )
+    if (
+        legacy_scope_missing
+        or remaining
+        or not _guild_reset_generated_artifacts_are_attributed(root=root)
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_verification_failed"
+        )
+
+    legacy_mirror_snapshot = _guild_reset_path_snapshot(
+        legacy_mirror,
+        allowed_root=vault,
+        error_code="memory_guild_reset_target_invalid",
+    )
+    legacy_nodes_snapshot = _guild_reset_path_snapshot(
+        legacy_nodes,
+        allowed_root=vault,
+        error_code="memory_guild_reset_target_invalid",
+    )
+    if (
+        legacy_mirror_snapshot.kind not in {"missing", "file"}
+        or legacy_nodes_snapshot.kind not in {"missing", "directory"}
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_target_invalid"
+        )
+    mirror_rel_path = legacy_mirror.relative_to(vault).as_posix()
+    mirror_binding_is_valid = (
+        legacy_mirror_snapshot.kind == "missing"
+        if mirror_rel_path in targets
+        else legacy_mirror_snapshot
+        == initial_legacy_mirror_snapshot
+    )
+    if not (
+        mirror_binding_is_valid
+        and _guild_reset_directory_snapshot_is_bound(
+            initial_legacy_nodes_snapshot,
+            legacy_nodes_snapshot,
+            require_known_children=True,
+        )
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_directory_delete_failed"
+        )
+    _remove_guild_legacy_copies(
+        legacy_mirror,
+        legacy_nodes,
+        vault=vault,
+        mirror_snapshot=legacy_mirror_snapshot,
+        nodes_snapshot=legacy_nodes_snapshot,
+    )
+    if legacy_mirror.exists() or legacy_nodes.exists():
+        raise MemoryGuildResetError(
+            "memory_guild_reset_verification_failed"
+        )
+
+    current_memory_dir_snapshot = _guild_reset_path_snapshot(
+        memory_dir,
+        allowed_root=memory_root,
+        error_code="memory_guild_reset_directory_delete_failed",
+    )
+    if not _guild_reset_directory_snapshot_is_bound(
+        memory_dir_snapshot,
+        current_memory_dir_snapshot,
+        require_known_children=True,
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_directory_delete_failed"
+        )
+    directory_removed = _remove_guild_memory_directory(
+        memory_dir,
+        current_memory_dir_snapshot,
+        memory_root=memory_root,
+    )
+    if (
+        memory_dir.exists()
+        or memory_dir.is_symlink()
+        or getattr(memory_dir, "is_junction", lambda: False)()
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_verification_failed"
+        )
+
+    if not _guild_reset_generated_artifacts_are_attributed(root=root):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_verification_failed"
+        )
+    sync_memory_vault_index(root=root)
+    remaining, legacy_scope_missing = _guild_reset_confirmed_notes(
+        target_reset_scope=target_reset_scope,
+        root=root,
+    )
+    if (
+        legacy_scope_missing
+        or remaining
+        or not _guild_reset_generated_artifacts_are_attributed(root=root)
+    ):
+        raise MemoryGuildResetError(
+            "memory_guild_reset_verification_failed"
+        )
+
+    return {
+        "schema": MEMORY_GUILD_RESET_SCHEMA,
+        "state": "reset",
+        "deletedNoteCount": deleted_note_count,
+        "guildDirectoryRemoved": directory_removed,
+        "contentFree": True,
     }
 
 
@@ -9161,6 +10315,7 @@ __all__ = [
     "MEMORY_DERIVATION_REVOCATIONS_SCHEMA",
     "MEMORY_DELETE_PREVIEW_SCHEMA",
     "MEMORY_DELETE_RESULT_SCHEMA",
+    "MEMORY_GUILD_RESET_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_SCHEMA",
     "MEMORY_EDIT_RESULT_SCHEMA",
     "MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA",
@@ -9172,6 +10327,7 @@ __all__ = [
     "MEMORY_QUARANTINE_STATUS_SCHEMA",
     "MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA",
     "MemoryDeletionJournalIntegrityError",
+    "MemoryGuildResetError",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",
     "activate_memory_vault_for_guild",
@@ -9200,6 +10356,7 @@ __all__ = [
     "refresh_legacy_memory_mirror",
     "refresh_legacy_memory_node_notes",
     "refresh_memory_hot_context",
+    "reset_guild_memory_vault",
     "consolidate_daily_memory_once",
     "run_memory_vault_maintenance_once",
     "run_memory_derivation_recomposition_once",

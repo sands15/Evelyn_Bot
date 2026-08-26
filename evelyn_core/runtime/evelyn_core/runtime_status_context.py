@@ -102,7 +102,11 @@ async def build_runtime_status_context_from_runtime(
         return ""
 
     cached_at = float(state.cache.get("cached_at") or 0.0)
-    if not force and state.cache.get("text") and (deps.now() - cached_at) <= deps.refresh_sec:
+    if (
+        not force
+        and state.cache.get("text")
+        and 0.0 <= (deps.now() - cached_at) <= deps.refresh_sec
+    ):
         return str(state.cache.get("text") or "")
 
     if state.lock is None:
@@ -110,7 +114,11 @@ async def build_runtime_status_context_from_runtime(
 
     async with state.lock:
         cached_at = float(state.cache.get("cached_at") or 0.0)
-        if not force and state.cache.get("text") and (deps.now() - cached_at) <= deps.refresh_sec:
+        if (
+            not force
+            and state.cache.get("text")
+            and 0.0 <= (deps.now() - cached_at) <= deps.refresh_sec
+        ):
             return str(state.cache.get("text") or "")
 
         probes: list[tuple[str, str, int]] = [

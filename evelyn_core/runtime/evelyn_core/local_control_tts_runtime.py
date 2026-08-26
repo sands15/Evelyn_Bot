@@ -9,6 +9,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .voice_pipeline import build_answer_payload_from_text
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ def schedule_local_control_tts_from_runtime(
 ) -> Any | None:
     if not deps.local_only_mode or not deps.local_tts_enabled():
         return None
+    spoken_answer = build_answer_payload_from_text(answer).spoken_text
     metrics: dict[str, Any] = {
         "started_at": deps.monotonic(),
         "meta": {
@@ -76,7 +78,7 @@ def schedule_local_control_tts_from_runtime(
                 index_dir=deps.memory_index_dir,
             ):
                 ok = await deps.speak_answer_local(
-                    answer,
+                    spoken_answer,
                     turn_id=turn_id,
                     session_key=session_key,
                     turn_scope=turn_scope,

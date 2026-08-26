@@ -19,6 +19,7 @@ from .voice_validation import emit_transcript_validation_event
 class VoiceTranscriptionDependencyCompositionDeps:
     build_partial_stt_window: Callable[..., Any]
     get_partial_transcript: Callable[..., Any]
+    commit_deferred_partial_transcript: Callable[..., Any]
     session_committed_stt_text: MutableMapping[str, str]
     run_blocking_stt_task: Callable[..., Any]
     speculate_from_committed_stt: Callable[..., Any]
@@ -61,6 +62,9 @@ class VoiceTranscriptionDependencyComposition:
             run_full_stt_with_optional_rescore=run_full_stt_with_optional_rescore,
             build_partial_stt_window=deps.build_partial_stt_window,
             get_partial_transcript=deps.get_partial_transcript,
+            commit_deferred_partial_transcript=(
+                deps.commit_deferred_partial_transcript
+            ),
             read_committed_text=lambda key: deps.session_committed_stt_text.get(key or "", ""),
             run_blocking_stt_task=deps.run_blocking_stt_task,
             speculate_from_committed_stt=deps.speculate_from_committed_stt,

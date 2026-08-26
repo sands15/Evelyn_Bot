@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from .autonomy_authorization import SUPPORTED_AUTONOMY_ACTIONS
-from .autonomy_outcome_evidence import AUTONOMY_ACTION_EVIDENCE_CODES
+from .autonomy_outcome_evidence import (
+    AUTONOMY_ACTION_EVIDENCE_CODES,
+    autonomy_outcome_verified,
+)
 
 
 AUTONOMY_FAILURE_SCHEMA = "autonomy.failure.v1"
@@ -85,7 +88,6 @@ _AUTONOMY_RESULT_EVIDENCE_CODES = frozenset(
 )
 _AUTONOMY_RESULT_BOOL_FIELDS = frozenset(
     {
-        "verified",
         "skipped",
         "replan",
         "continuityDurable",
@@ -224,6 +226,30 @@ def sanitize_autonomy_step_result(
         and evidence_code in _AUTONOMY_RESULT_EVIDENCE_CODES
     ):
         sanitized["evidence_code"] = evidence_code
+    action_key = ""
+    step = value.get("step")
+    if isinstance(step, dict):
+        domain = step.get("domain")
+        action = step.get("action")
+        if isinstance(domain, str) and isinstance(action, str):
+            domain = domain.strip()
+            action = action.strip()
+            candidate = f"{domain}:{action}"
+            if candidate in SUPPORTED_AUTONOMY_ACTIONS:
+                action_key = candidate
+                sanitized["step"] = {
+                    "domain": domain,
+                    "action": action,
+                }
+    if "verified" in value:
+        sanitized["verified"] = autonomy_outcome_verified(
+            action_key,
+            {
+                "status": sanitized.get("status"),
+                "evidence_code": sanitized.get("evidence_code"),
+                "verified": value.get("verified"),
+            },
+        )
     for key in _AUTONOMY_RESULT_BOOL_FIELDS:
         candidate = value.get(key)
         if type(candidate) is bool:

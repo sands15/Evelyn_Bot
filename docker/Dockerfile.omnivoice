@@ -1,19 +1,25 @@
 # syntax=docker/dockerfile:1.7
 
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.9.2-base-ubuntu22.04@sha256:8cd34c18c70fcb862f9829e7a2a04597feeb5f5d221904c77610b60c78c00ba4
 
 ARG EVELYN_SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.revision=$EVELYN_SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$EVELYN_SOURCE_REVISION \
+    ai.evelyn.omnivoice.flashinfer-revision=28bc0889d92110491d726a9c79f26a895db5a074
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ffmpeg \
     libgomp1 \
+    libpython3.10 \
     libsndfile1 \
     patch \
     python3 \
     python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnpp-12-9=12.4.1.87-1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN if ! getent group ubuntu >/dev/null; then groupadd ubuntu; fi \
@@ -31,24 +37,42 @@ ENV HOME=/home/ubuntu \
     HF_HUB_CACHE=/home/ubuntu/.cache/huggingface/hub \
     HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
-    OMNIVOICE_MODEL_REVISION=c5fdb5ccb189668d56333f77ba2629f4cd7535f4
+    FLASHINFER_DISABLE_JIT=1 \
+    OMNIVOICE_MODEL_REVISION=c5fdb5ccb189668d56333f77ba2629f4cd7535f4 \
+    OMNIVOICE_RUNTIME_REVISION=omnivoice-0.1.5 \
+    OMNIVOICE_FLASHINFER_REVISION=28bc0889d92110491d726a9c79f26a895db5a074
+
+ADD --checksum=sha256:7568e042e614b890b2e3fffa8296a2c9a44fdc1a95bc748063facf307cd3cdb1 \
+    https://raw.githubusercontent.com/k2-fsa/OmniVoice/28bc0889d92110491d726a9c79f26a895db5a074/omnivoice/models/omnivoice_flashinfer.py \
+    /tmp/omnivoice_flashinfer.py
+ADD --checksum=sha256:c843a20ede4d1e7595c2736b88fc62cb7483a8c082eb7092a3772248849c59e2 \
+    https://raw.githubusercontent.com/k2-fsa/OmniVoice/28bc0889d92110491d726a9c79f26a895db5a074/LICENSE \
+    /licenses/OmniVoice.LICENSE
 
 RUN python3 -m venv --system-site-packages "$VIRTUAL_ENV" \
     && "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
-        torch==2.8.0+cu128 \
-        torchaudio==2.8.0+cu128 \
-        torchcodec==0.11 \
-        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.8.0+cu129 \
+        torchaudio==2.8.0+cu129 \
+        torchcodec==0.7.0+cu129 \
+        --index-url https://download.pytorch.org/whl/cu129 \
     && "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
         "fastapi==0.136.1" \
         "huggingface-hub==1.15.0" \
+        "transformers==5.8.1" \
+        "accelerate==1.13.0" \
         "omnivoice==0.1.5" \
         "platformdirs==4.9.6" \
         "psutil==7.2.2" \
         "pydantic==2.13.4" \
         "pydantic-settings==2.14.1" \
         "python-multipart==0.0.29" \
-        "uvicorn[standard]==0.47.0"
+        "uvicorn[standard]==0.47.0" \
+    && "$VIRTUAL_ENV/bin/pip" install --no-cache-dir \
+        "https://files.pythonhosted.org/packages/a7/7b/9b31a44c39022a655dccba2c8b47907a1c520258437a11db757c353a195c/flashinfer_python-0.6.15.post1-py3-none-any.whl#sha256=f2419fd2b77c2705816e8d0a31c784c6456b17f373f8494b5cfc3bdf434d5c44" \
+        "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.15.post1/flashinfer_cubin-0.6.15.post1-py3-none-any.whl#sha256=25cfd305afa1f34baa2f419bca35db58c369c534ee1961662e83d9fe858ce021" \
+        "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.15.post1/flashinfer_jit_cache-0.6.15.post1%2Bcu129-cp39-abi3-manylinux_2_28_x86_64.whl#sha256=d8f8c4c42945bb687d176e8e05dc732b5eb72ce610acb2b219c7f2c03fcfaa51" \
+    && "$VIRTUAL_ENV/bin/python" -c "import hashlib,omnivoice,shutil; from pathlib import Path; source=Path('/tmp/omnivoice_flashinfer.py'); target=Path(omnivoice.__file__).parent/'models'/'omnivoice_flashinfer.py'; shutil.copyfile(source,target); assert hashlib.sha256(target.read_bytes()).hexdigest() == '7568e042e614b890b2e3fffa8296a2c9a44fdc1a95bc748063facf307cd3cdb1'" \
+    && "$VIRTUAL_ENV/bin/python" -c "import importlib.metadata as m, importlib.util as u, torch, torchcodec; assert torch.version.cuda == '12.9'; assert m.version('omnivoice') == '0.1.5'; assert m.version('torchcodec') == '0.7.0+cu129'; assert m.version('flashinfer-python') == '0.6.15.post1'; assert m.version('flashinfer-cubin') == '0.6.15.post1'; assert m.version('flashinfer-jit-cache') == '0.6.15.post1+cu129'; assert u.find_spec('omnivoice.models.omnivoice_flashinfer'); assert u.find_spec('flashinfer')"
 
 COPY docker/omnivoice_source.sha256 /tmp/omnivoice_source.sha256
 COPY docker/omnivoice_model.sha256 /opt/omnivoice-server/omnivoice_model.sha256

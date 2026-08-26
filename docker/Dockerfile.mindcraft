@@ -31,15 +31,20 @@ COPY external/mindcraft_evelyn/relocation.patch /tmp/evelyn-mindcraft-relocation
 COPY external/mindcraft_evelyn/lint.patch /tmp/evelyn-mindcraft-lint.patch
 COPY external/mindcraft_evelyn/history_boundary.patch /tmp/evelyn-mindcraft-history-boundary.patch
 COPY external/mindcraft_evelyn/history_sink_boundary.patch /tmp/evelyn-mindcraft-history-sink-boundary.patch
+COPY external/mindcraft_evelyn/latency.patch /tmp/evelyn-mindcraft-latency.patch
 RUN sed -i 's/\r$//' \
+      main.js \
       profiles/defaults/survival.json \
       src/agent/action_manager.js \
       src/agent/agent.js \
       src/agent/commands/actions.js \
+      src/agent/commands/index.js \
+      src/agent/commands/queries.js \
       src/agent/conversation.js \
       src/agent/coder.js \
       src/agent/self_prompter.js \
       src/agent/library/skills.js \
+      src/agent/library/world.js \
       src/agent/modes.js \
       src/mindcraft/mindserver.js \
       src/models/prompter.js \
@@ -54,7 +59,8 @@ RUN sed -i 's/\r$//' \
     patch -p1 < /tmp/evelyn-mindcraft-lint.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-history-boundary.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-history-sink-boundary.patch && \
-    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch /tmp/evelyn-mindcraft-lint.patch /tmp/evelyn-mindcraft-history-boundary.patch /tmp/evelyn-mindcraft-history-sink-boundary.patch
+    patch -p1 < /tmp/evelyn-mindcraft-latency.patch && \
+    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch /tmp/evelyn-mindcraft-lint.patch /tmp/evelyn-mindcraft-history-boundary.patch /tmp/evelyn-mindcraft-history-sink-boundary.patch /tmp/evelyn-mindcraft-latency.patch
 
 COPY external/mindcraft_evelyn/src/models/codex_gateway.js /app/mindcraft/src/models/codex_gateway.js
 COPY external/mindcraft_evelyn/src/models/evelyn_planner.js /app/mindcraft/src/models/evelyn_planner.js
@@ -63,6 +69,7 @@ COPY external/mindcraft_evelyn/src/utils/evelyn_history_boundary.js /app/mindcra
 COPY external/mindcraft_evelyn/src/utils/evelyn_runtime.js /app/mindcraft/src/utils/evelyn_runtime.js
 COPY external/mindcraft_evelyn/src/utils/translator.js /app/mindcraft/src/utils/translator.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_combat.js /app/mindcraft/src/agent/evelyn_combat.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_combat_experience.js /app/mindcraft/src/agent/evelyn_combat_experience.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_escape_controller.js /app/mindcraft/src/agent/evelyn_escape_controller.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_survival_mode.js /app/mindcraft/src/agent/evelyn_survival_mode.js
 COPY external/mindcraft_evelyn/src/agent/evelyn_world_state.js /app/mindcraft/src/agent/evelyn_world_state.js
@@ -72,11 +79,31 @@ COPY external/mindcraft_evelyn/src/agent/vision/browser_viewer.js /app/mindcraft
 COPY external/mindcraft_evelyn/src/agent/vision/vision_interpreter.js /app/mindcraft/src/agent/vision/vision_interpreter.js
 COPY external/mindcraft_evelyn/profiles/evelyn.json /app/mindcraft/profiles/evelyn.json
 COPY external/mindcraft_evelyn/tests/evelyn_planner.test.mjs /app/mindcraft/tests/evelyn_planner.test.mjs
+COPY external/mindcraft_evelyn/tests/combat_experience.test.mjs /app/mindcraft/tests/combat_experience.test.mjs
+COPY external/mindcraft_evelyn/tests/combat_mode.test.mjs /app/mindcraft/tests/combat_mode.test.mjs
+COPY external/mindcraft_evelyn/tests/escape_controller.test.mjs /app/mindcraft/tests/escape_controller.test.mjs
+COPY external/mindcraft_evelyn/tests/goal_manager.test.mjs /app/mindcraft/tests/goal_manager.test.mjs
+COPY external/mindcraft_evelyn/tests/survival_hostile_reflex.test.mjs /app/mindcraft/tests/survival_hostile_reflex.test.mjs
+COPY external/mindcraft_evelyn/tests/survival_mode.test.mjs /app/mindcraft/tests/survival_mode.test.mjs
+COPY external/mindcraft_evelyn/tests/navigation_skills.test.mjs /app/mindcraft/tests/navigation_skills.test.mjs
+COPY external/mindcraft_evelyn/tests/pathfinder_goto.test.mjs /app/mindcraft/tests/pathfinder_goto.test.mjs
 COPY external/mindcraft_evelyn/scripts/verify_runtime_lint.mjs /app/mindcraft/scripts/verify_runtime_lint.mjs
 COPY external/mindcraft_evelyn/scripts/verify_combat_runtime.mjs /app/mindcraft/scripts/verify_combat_runtime.mjs
+COPY external/mindcraft_evelyn/scripts/verify_latency_runtime.mjs /app/mindcraft/scripts/verify_latency_runtime.mjs
 RUN node --test /app/mindcraft/tests/evelyn_planner.test.mjs
+RUN node --test \
+      /app/mindcraft/tests/combat_experience.test.mjs \
+      /app/mindcraft/tests/combat_mode.test.mjs \
+      /app/mindcraft/tests/escape_controller.test.mjs \
+      /app/mindcraft/tests/goal_manager.test.mjs \
+      /app/mindcraft/tests/survival_hostile_reflex.test.mjs \
+      /app/mindcraft/tests/survival_mode.test.mjs
+RUN node --test \
+      /app/mindcraft/tests/navigation_skills.test.mjs \
+      /app/mindcraft/tests/pathfinder_goto.test.mjs
 RUN node /app/mindcraft/scripts/verify_runtime_lint.mjs
 RUN node /app/mindcraft/scripts/verify_combat_runtime.mjs
+RUN node /app/mindcraft/scripts/verify_latency_runtime.mjs
 
 COPY docker/requirements.mindcraft.txt /app/docker/requirements.mindcraft.txt
 RUN python3 -m pip install --break-system-packages --no-cache-dir -r /app/docker/requirements.mindcraft.txt

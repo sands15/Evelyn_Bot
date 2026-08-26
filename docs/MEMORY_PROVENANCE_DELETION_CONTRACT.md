@@ -1,7 +1,7 @@
 # Memory Provenance And Deletion Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-12 KST
+Last reviewed: 2026-08-16 KST
 
 이 문서는 Evelyn Memory Vault가 기억의 근거를 공개하고 사용자 삭제를
 영구적으로 지키는 현재 런타임 계약을 정의한다.
@@ -65,7 +65,10 @@ Main/Fast prompt 경계에서 본문 전체를 보류한다.
 ingress의 exact `(guild_id, person_key)`이고, Fast Control은 cross-surface continuity의
 configured guild/user가 완전할 때 같은 owner를 사용하며 그렇지 않으면 고정
 `control-page:local` owner만 사용한다. room/session key나 action ID에서 owner를
-추론하지 않는다.
+추론하지 않는다. Main의 direct local-speaker 경로도 synthetic guild `0`을 validator에
+허용하지 않고, startup에서 고정한 같은 Fast owner를 write와 recall에 명시 전달한다.
+configured guild/user가 완전하지 않으면 cross-surface owner로 추정하지 않고 고정
+local owner로 격리한다.
 
 owner scope는 cache lookup 전과 FTS/scan, vector 추가, graph neighbor, read-only
 Markdown 재결합, 최종 render에서 exact match로 다시 검사한다. retrieval cache key도
@@ -79,6 +82,30 @@ Control Page 관리·편집·삭제 surface는 유지하지만 owner를 기존 g
 session에서 자동 추정하지 않는다. 현재 authenticated principal이 다시 `/remember`한
 새 근거 또는 별도 명시적 owner-assignment 절차가 생기기 전까지 prompt에서는
 fail-closed한다.
+
+### Explicit-memory guild reset binding
+
+새 직접 확인 기억은 owner와 별도로 raw guild ID를 포함하지 않는 canonical
+`memory-reset-<sha256>` scope를 Markdown에 기록한다. Discord text/voice는 trusted
+guild를 사용하고, Fast Control과 Main local-speaker는 cross-surface guild/user가
+완전할 때 같은 configured guild scope를 사용한다. 그렇지 않은 local 기억은 고정
+local reset scope를 사용한다. 이 scope는 public receipt, card, provenance, status,
+log에 투영하지 않는다.
+
+Discord guild reset은 전체 memory-deletion journal mutation lease 안에서 vault의
+Markdown을 strict UTF-8로 스캔한다. canonical reset scope는 filename, tag 또는
+`memory_contract`가 rename·손상돼도 권위 있는 reset binding이다. exact target scope의
+note만 기존 preview→single-use confirm token→tombstone/redaction→source unlink→
+derivation/index/cache/hot-context cleanup으로 지운다. 다른 guild/local scope는 보존한다.
+canonical local owner의 과거 scope-less note만 호환성 예외로 남기며, 그 밖의
+scope-less/invalid direct-confirm note나 읽기 손상은 어떤 삭제 전에 고정 오류로
+fail-closed한다. 기존 note의 guild를 owner hash, 본문, 경로 또는 최근 session에서
+역추정하지 않는다.
+
+삭제 뒤 전체를 다시 스캔해 target binding과 손상 legacy가 없음을 확인한 다음에만
+exact `guild_<id>` directory를 제거하고 검증한다. 부분 삭제·재스캔·directory cleanup
+실패는 성공으로 낮추지 않으며 durable guild-revocation marker가 후속 retry/restart를
+계속 소유한다. 반환값은 schema/state/count/boolean만 가진 content-free receipt다.
 
 ### Legacy layered raw scope authorization
 
@@ -276,6 +303,10 @@ observation만으로 결정되므로 대화 exposure guard 안에서 유지한�
 현재 exposure에서 만든 compact receipt를 continuity에 함께 기록한다. 일반 autonomy
 loop나 cognitive refresh가 살아 있는 guild reset은 continuity·파일 mutation 전에
 거부하며, idle engine은 같은 객체의 cache를 content-free 상태로 비운다.
+normal/batch memory writebehind도 guild-prefixed task registry에서 실제 종료까지 reset을
+막는다. batch replacement가 취소한 predecessor가 cancellation을 무시하면 canonical key를
+새 task가 이어받은 뒤에도 별도 `memory-drain` alias로 추적하고, done callback의 exact-self
+제거 전에는 `memory_background_work_inflight`를 유지한다.
 
 guild/room/person/session의 stored summary, fact, question과 assistant raw는 vault note
 삭제 현재성을 증명하는 receipt가 없으므로 layered prompt 입력에서 전역 보류한다.

@@ -85,6 +85,33 @@ class ArtifactJsonProbeTests(unittest.TestCase):
             "artifact_path_outside_runtime_root",
         )
 
+    def test_json_contract_does_not_accept_boolean_as_integer(self):
+        expected = {
+            "max_concurrent": 1,
+            "jit_disabled": True,
+            "buckets": [2.0, 4.0, 8.0],
+        }
+        self.write({**expected, "heartbeatAt": time.time()})
+        self.assertTrue(self.probe(expect_json=expected)["ok"])
+
+        self.write({**expected, "max_concurrent": True, "heartbeatAt": time.time()})
+        self.assertEqual(
+            self.probe(expect_json=expected)["reason"],
+            "unexpected_json",
+        )
+
+        self.write({**expected, "jit_disabled": 1, "heartbeatAt": time.time()})
+        self.assertEqual(
+            self.probe(expect_json=expected)["reason"],
+            "unexpected_json",
+        )
+
+        self.write({**expected, "buckets": [2, 4, 8], "heartbeatAt": time.time()})
+        self.assertEqual(
+            self.probe(expect_json=expected)["reason"],
+            "unexpected_json",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

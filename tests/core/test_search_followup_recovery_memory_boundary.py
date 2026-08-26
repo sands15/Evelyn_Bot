@@ -38,7 +38,13 @@ from evelyn_core.search_followup_runtime import (  # noqa: E402
     SearchFollowupRuntimeDeps,
     recover_search_followups_from_runtime,
 )
-from tests.core.test_search_followup_runtime import build_deps  # noqa: E402
+from tests.core.test_search_followup_runtime import (  # noqa: E402
+    build_deps,
+    delivery_receipt,
+)
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 _MISSING = object()
@@ -211,6 +217,7 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
 
         async def send(_channel, text, **_kwargs):
             sent.append(text)
+            return delivery_receipt(text)
 
         async def speak(_voice, text, **_kwargs):
             spoken.append(text)
@@ -236,10 +243,9 @@ class SearchFollowupRecoveryMemoryBoundaryTests(
                 "format_display_text": display,
                 "current_turn_id": lambda _key: "delivery-turn",
                 "search_followup_recovery": recovery,
-                "continuity_status": lambda: {
-                    "checkpointGeneration": 5,
-                    "rollbackProtected": True,
-                },
+                "continuity_status": lambda: (
+                    durable_continuity_status(5)
+                ),
             }
         )
         result = await recover_search_followups_from_runtime(deps=deps)

@@ -36,7 +36,7 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("Evelyn dependency topology:", local_runtime_context_py)
         self.assertIn("role=primary answer text generation", local_runtime_context_py)
         self.assertIn("role=route/cognitive policy before the main answer", local_runtime_context_py)
-        self.assertIn("runtime_state=runtime_context if context_policy.needs_runtime_state else dependency_context", context_assembly_py)
+        self.assertIn('runtime_state=runtime_context if context_policy.needs_runtime_state else ""', context_assembly_py)
 
     def test_runtime_dependency_context_renderer_uses_live_payloads(self) -> None:
         text = build_evelyn_runtime_dependency_context_from_payload(
@@ -68,6 +68,9 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         route_execution_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
         ).read_text(encoding="utf-8")
+        context_assembly_py = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_context_assembly.py"
+        ).read_text(encoding="utf-8")
         runtime_status_context = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_status_context.py"
         ).read_text(encoding="utf-8")
@@ -85,7 +88,8 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("current_oom_signal=", runtime_status_context)
         self.assertIn("recent_errors_are_historical=true", runtime_status_context)
         self.assertIn("RUNTIME_STATUS_RULE", voice_response_runtime)
-        self.assertIn("needs_runtime_status_context = route_decision.needs_runtime_state", route_execution_py)
+        self.assertIn("needs_runtime_state=bool(context_policy.needs_runtime_state)", route_execution_py)
+        self.assertIn("runtime_status = await deps.build_runtime_status_context", context_assembly_py)
         self.assertIn("def answer_gpu_runtime_status_query", runtime_status_context)
         self.assertIn("gpu_runtime_status_fast_path", route_execution_py)
 

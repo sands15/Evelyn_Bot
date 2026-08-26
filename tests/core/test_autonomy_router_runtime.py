@@ -21,6 +21,7 @@ try:
         get_routed_autonomy_executor_from_runtime,
         resolve_route_executor_from_runtime,
     )
+    from evelyn_core.autonomy import AutonomyExecutionContext  # noqa: E402
 except ModuleNotFoundError as exc:
     _runtime_import_error = exc.name
 except Exception as exc:  # noqa: BLE001
@@ -213,6 +214,46 @@ class DefaultAutonomyExecutorOutcomeTests(
         self.assertEqual(
             result["evidence_code"],
             "discord_send_completed",
+        )
+
+    async def test_delivery_callbacks_receive_exact_action_context(self) -> None:
+        observed: list[tuple[str, str]] = []
+
+        async def callback(
+            text: str,
+            *,
+            context: AutonomyExecutionContext,
+        ) -> dict:
+            observed.append((text, context.action_run_id))
+            return {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            }
+
+        executor = DefaultAutonomyExecutor(
+            send_followup_fn=callback,
+            maybe_ping_user_fn=callback,
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-exact-1",
+            authorization_grant_id="grant-1",
+        )
+
+        await executor.execute_step(
+            {"action": "send_followup", "text": "follow"},
+            context=context,
+        )
+        await executor.execute_step(
+            {"action": "maybe_ping_user", "text": "ping"},
+            context=context,
+        )
+
+        self.assertEqual(
+            observed,
+            [("follow", "run-exact-1"), ("ping", "run-exact-1")],
         )
 
 

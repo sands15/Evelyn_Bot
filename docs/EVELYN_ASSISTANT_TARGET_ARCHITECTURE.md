@@ -20,6 +20,7 @@ Related reference:
 - current runtime snapshot: `CURRENT_EVELYN_ARCHITECTURE.md`
 - memory vault / index / cache target: `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
 - context assembly target: `docs/CONTEXT_PIPELINE_TARGET.md`
+- Main LLM end-to-end latency target: `docs/MAIN_LLM_LATENCY_TARGET_ARCHITECTURE.md`
 
 ---
 

@@ -64,6 +64,9 @@ from evelyn_core.memory_exposure import (  # noqa: E402
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalIntegrityError,
 )
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 from evelyn_core.memory_integrity_authenticity import (  # noqa: E402
     MEMORY_INTEGRITY_ANCHOR_DIR_ENV,
     MEMORY_INTEGRITY_BOOTSTRAP_ENV,
@@ -236,7 +239,7 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         async def commit(*args):
             commits.append(args)
-            return {"state": "durable"}
+            return durable_continuity_status(len(commits))
 
         async def handle_input(guild, text: str) -> str:
             return await answer_control_page_text_from_runtime(
@@ -297,7 +300,7 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([row[1] for row in ui_rows], ["user"])
         self.assertEqual(persisted, [])
-        self.assertEqual(commits, [])
+        self.assertEqual(commits, [("control:0", "turn-1")])
         self.assertEqual(tts, [])
         self.assertNotIn(PRIVATE_CANARY, str(ui_rows))
 
@@ -321,7 +324,7 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         async def commit(*args):
             commits.append(args)
-            return {"state": "durable"}
+            return durable_continuity_status(len(commits))
 
         search_deps = ControlPageSearchRuntimeDeps(
             control_page_effective_guild_id=lambda _guild: 0,
@@ -335,7 +338,12 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
             clean_text=lambda value: value.strip(),
             get_session_lock=lambda _key: state_lock,
             begin_user_text_turn=lambda *_args, **_kwargs: (
-                SimpleNamespace(turn_id="turn-1")
+                SimpleNamespace(
+                    turn_id="turn-1",
+                    history=[
+                        {"role": "user", "content": "question"}
+                    ],
+                )
             ),
             turn_scope_factory=lambda turn_id: SimpleNamespace(
                 turn_id=turn_id
@@ -385,7 +393,7 @@ class ControlPageMemoryDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row[1] for row in ui_rows], ["user"])
         self.assertEqual(persisted, [])
         self.assertEqual(active, [])
-        self.assertEqual(commits, [])
+        self.assertEqual(commits, [("control:0", "turn-1")])
         self.assertEqual(tts, [])
         self.assertNotIn(PRIVATE_CANARY, str(ui_rows))
 

@@ -182,6 +182,25 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
         self.assertEqual(expired["code"], "authorization_required")
         self.assertEqual(self.manager.status()["activeGrantCount"], 0)
 
+    def test_monotonic_ttl_survives_wall_clock_rollback(self) -> None:
+        monotonic = FakeClock(0.0)
+        self.manager.monotonic = monotonic
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+            ttl_sec=60.0,
+        )
+
+        self.clock.value = 900.0
+        monotonic.value = 61.0
+        expired = self.manager.authorize(7, "assistant:idle")
+
+        self.assertFalse(expired["allowed"])
+        self.assertEqual(expired["code"], "authorization_required")
+        self.assertEqual(self.manager.status()["activeGrantCount"], 0)
+
     def test_authorization_and_outcome_share_explicit_action_run_id(
         self,
     ) -> None:
@@ -222,6 +241,10 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
             {action_run_id},
         )
         self.assertTrue(relevant[-1]["verified"])
+        self.assertEqual(
+            relevant[-1]["evidenceCode"],
+            "no_side_effect_required",
+        )
 
     def test_grant_rejects_unknown_authorization_source(self) -> None:
         result = self.manager.grant(
@@ -258,6 +281,7 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
         self.assertEqual(replacement.authorized_actions(7), [])
 
     def test_outcome_journal_excludes_raw_arguments_and_payloads(self) -> None:
+        private_evidence = "sk_live_PRIVATE_TOKEN_123"
         self.manager.grant(
             guild_id=7,
             issuer_ref="discord_user:123",
@@ -270,7 +294,7 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
             {
                 "status": "ok",
                 "verified": True,
-                "evidence_code": "idle_effect_verified",
+                "evidence_code": private_evidence,
                 "raw": "private transcript C:\\secret",
             },
         )
@@ -279,8 +303,8 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
 
         self.assertNotIn("private transcript", serialized)
         self.assertNotIn("C:\\\\secret", serialized)
+        self.assertNotIn(private_evidence, serialized)
         self.assertIn("discord_user:123", serialized)
-        self.assertIn("idle_effect_verified", serialized)
         outcome = [
             row
             for row in self.read_events()
@@ -288,6 +312,40 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
         ][-1]
         self.assertEqual(outcome["outcomeStatus"], "unverified")
         self.assertFalse(outcome["verified"])
+        self.assertEqual(outcome["evidenceCode"], "")
+
+    def test_outcome_journal_drops_cross_action_evidence(self) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+
+        receipt = self.manager.record_outcome(
+            7,
+            "assistant:idle",
+            {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            },
+        )
+
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertEqual(
+            receipt,
+            {
+                "recorded": True,
+                "verified": False,
+                "authorizationCurrent": True,
+            },
+        )
+        self.assertEqual(outcome["evidenceCode"], "")
 
     def test_every_supported_action_has_exact_evidence_policy(self) -> None:
         for action in SUPPORTED_AUTONOMY_ACTIONS:
@@ -524,6 +582,121 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.state.enabled)
         self.assertEqual(engine.state.status, "authorization_required")
         self.assertEqual(executor.connect_count, 0)
+
+    async def test_start_rechecks_currentness_after_connect_before_commit(
+        self,
+    ) -> None:
+        class BlockingConnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.connect_started = asyncio.Event()
+                inner_self.connect_release = asyncio.Event()
+                inner_self.connected = False
+
+            async def connect(inner_self) -> None:
+                inner_self.connect_count += 1
+                inner_self.connect_started.set()
+                await inner_self.connect_release.wait()
+                inner_self.connected = True
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                inner_self.connected = False
+
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        executor = BlockingConnectExecutor()
+        engine = self.engine(executor)
+        current = True
+        start_task = asyncio.create_task(
+            engine.start(is_current=lambda: current)
+        )
+        connect_wait = asyncio.create_task(
+            executor.connect_started.wait()
+        )
+        done, _pending = await asyncio.wait(
+            {start_task, connect_wait},
+            timeout=1.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if start_task in done:
+            await start_task
+        self.assertIn(connect_wait, done)
+
+        # A guild reset can pass while start is awaiting executor connect:
+        # no loop is visible yet and the persisted state is still idle.
+        self.assertIsNone(engine._task)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "idle")
+        current = False
+        engine.state.allowed_actions = []
+        executor.connect_release.set()
+
+        started = await asyncio.wait_for(start_task, timeout=1.0)
+        self.assertFalse(started)
+        self.assertFalse(executor.connected)
+        self.assertEqual(executor.disconnect_count, 1)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "idle")
+        self.assertIsNone(engine._task)
+
+    async def test_start_rechecks_grant_expiry_after_executor_connect(
+        self,
+    ) -> None:
+        class BlockingConnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.connect_started = asyncio.Event()
+                inner_self.connect_release = asyncio.Event()
+                inner_self.connected = False
+
+            async def connect(inner_self) -> None:
+                inner_self.connect_count += 1
+                inner_self.connect_started.set()
+                await inner_self.connect_release.wait()
+                inner_self.connected = True
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                inner_self.connected = False
+
+        monotonic = FakeClock(0.0)
+        self.manager.monotonic = monotonic
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+            ttl_sec=60.0,
+        )
+        executor = BlockingConnectExecutor()
+        engine = self.engine(executor)
+        start_task = asyncio.create_task(engine.start())
+        await asyncio.wait_for(
+            executor.connect_started.wait(),
+            timeout=1.0,
+        )
+
+        self.clock.value = 900.0
+        monotonic.value = 61.0
+        executor.connect_release.set()
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "autonomy_authorization_required",
+        ):
+            await asyncio.wait_for(start_task, timeout=1.0)
+
+        self.assertFalse(executor.connected)
+        self.assertEqual(executor.disconnect_count, 1)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "authorization_required")
+        self.assertEqual(engine.state.allowed_actions, [])
+        self.assertIsNone(engine._task)
 
     async def test_start_replaces_live_disabled_loop(self) -> None:
         self.manager.grant(
@@ -908,6 +1081,69 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 for row in self.read_events()
             )
         )
+
+    async def test_outcome_audit_exception_disables_engine_before_effect_can_repeat(
+        self,
+    ) -> None:
+        executor = DummyExecutor()
+        engine = self.engine(executor)
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        def unavailable_audit(
+            _guild_id: int,
+            _action: str,
+            _result: dict,
+        ) -> dict:
+            raise OSError("audit storage unavailable")
+
+        engine.record_action_outcome = unavailable_audit
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(executor.execute_count, 1)
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "authorization_audit_unavailable")
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.status, "authorization_required")
+        self.assertEqual(engine.state.allowed_actions, [])
+
+    async def test_missing_outcome_audit_receipt_cannot_advance_effect(self) -> None:
+        executor = DummyExecutor()
+        engine = self.engine(executor)
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        engine.record_action_outcome = lambda *_args: None
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "authorization_audit_unavailable")
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
 
     async def test_outcome_revoked_before_record_does_not_advance_plan(
         self,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,7 +22,10 @@ STT_TRANSCRIPTION_RUNTIME = RUNTIME_ROOT / "stt_transcription_runtime.py"
 MAIN = REPO_ROOT / "main.py"
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
 
-from evelyn_core.stt_client import transcribe_audio16k_via_service  # noqa: E402
+from evelyn_core.stt_client import (  # noqa: E402
+    transcribe_audio16k_via_service,
+    transcribe_completed_audio16k_via_service,
+)
 
 
 class SttServiceContractTests(unittest.TestCase):
@@ -29,8 +34,14 @@ class SttServiceContractTests(unittest.TestCase):
 
         self.assertIn('@app.get("/health")', source)
         self.assertIn('@app.post("/v1/stt/transcribe")', source)
+        self.assertIn('@app.post("/v1/stt/streams", status_code=201)', source)
+        self.assertIn('@app.post("/v1/stt/streams/{stream_id}/chunks")', source)
+        self.assertIn('@app.post("/v1/stt/streams/{stream_id}/finish")', source)
+        self.assertIn('@app.delete("/v1/stt/streams/{stream_id}")', source)
         self.assertIn("audio_f32_base64", source)
-        self.assertIn("Qwen3ASRModel.from_pretrained", source)
+        self.assertIn("Qwen3ASRModel.LLM", source)
+        self.assertIn('"gpu_memory_utilization": STT_VLLM_GPU_MEMORY_UTILIZATION', source)
+        self.assertNotIn("from vllm import", source)
 
     def test_stt_health_exposes_safe_configuration_and_error_counters(self) -> None:
         source = STT_SERVICE.read_text(encoding="utf-8")
@@ -60,6 +71,79 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn("np.asarray(audio, dtype=np.float32)", source)
         self.assertIn("base64.b64encode(stt_audio.tobytes())", source)
         self.assertIn("/v1/stt/transcribe", source)
+
+    def test_completed_discord_batch_validates_and_calls_service_once(self) -> None:
+        with patch(
+            "evelyn_core.stt_client.transcribe_audio16k_via_service",
+            return_value={"text": "완료"},
+        ) as transcribe:
+            result = asyncio.run(
+                transcribe_completed_audio16k_via_service(
+                    np.zeros(16, dtype=np.float32),
+                    service_url="http://stt",
+                    timeout_sec=3.0,
+                    sampling_rate=16000,
+                    max_new_tokens=12,
+                    language="Korean",
+                )
+            )
+        self.assertEqual(result, {"text": "완료"})
+        transcribe.assert_called_once()
+        self.assertEqual(transcribe.call_args.kwargs["stage"], "discord-completed")
+
+        with self.assertRaisesRegex(ValueError, "discord_stt_audio_invalid"):
+            asyncio.run(
+                transcribe_completed_audio16k_via_service(
+                    np.zeros((1, 2), dtype=np.float32),
+                    service_url="http://stt",
+                    timeout_sec=3.0,
+                    sampling_rate=16000,
+                    max_new_tokens=12,
+                )
+            )
+
+    def test_completed_discord_batch_cancellation_drains_physical_request(self) -> None:
+        request_entered = threading.Event()
+        allow_request_return = threading.Event()
+
+        def blocked_transcribe(*_args, **_kwargs):
+            request_entered.set()
+            if not allow_request_return.wait(timeout=2.0):
+                raise TimeoutError("test request was not released")
+            return {"text": "late"}
+
+        async def scenario() -> None:
+            with patch(
+                "evelyn_core.stt_client.transcribe_audio16k_via_service",
+                side_effect=blocked_transcribe,
+            ):
+                task = asyncio.create_task(
+                    transcribe_completed_audio16k_via_service(
+                        np.zeros(16, dtype=np.float32),
+                        service_url="http://stt",
+                        timeout_sec=3.0,
+                        sampling_rate=16000,
+                        max_new_tokens=12,
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(request_entered.wait, 1.0)
+                    )
+                    task.cancel()
+                    done, _pending = await asyncio.wait(
+                        {task},
+                        timeout=0.1,
+                    )
+                    self.assertEqual(done, set())
+                    allow_request_return.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, timeout=2.0)
+                finally:
+                    allow_request_return.set()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(scenario())
 
     def test_validation_privacy_flag_reaches_service_without_binding_ids(self) -> None:
         requests = []
@@ -111,6 +195,15 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn('profiles: ["stt"]', source)
         self.assertIn("docker/Dockerfile.stt", source)
         self.assertIn("127.0.0.1:8892:8892", source)
+        self.assertIn('STT_STREAMING_ENABLED: "${STT_STREAMING_ENABLED:-true}"', source)
+        self.assertIn(
+            'STT_FULL_RESCORING_ENABLED: "${STT_FULL_RESCORING_ENABLED:-false}"',
+            source,
+        )
+        self.assertIn(
+            'STT_VLLM_GPU_MEMORY_UTILIZATION: "${STT_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"',
+            source,
+        )
 
 
 if __name__ == "__main__":

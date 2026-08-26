@@ -12,6 +12,7 @@ from .discord_ingress import (
     is_reply_to_target_user,
 )
 from .continuity_commit_contract import (
+    await_continuity_commit_without_early_unlock,
     require_durable_continuity_receipt,
 )
 from .public_error_contract import public_failure_message
@@ -22,7 +23,9 @@ from .explicit_memory_confirmation import (
 from .memory_confirmation_contract import (
     explicit_memory_writer_skip_decision,
     memory_owner_scope,
+    memory_reset_scope,
 )
+from .memory_writebehind import run_registered_memory_thread
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_metrics,
     not_used_memory_receipt_ref,
@@ -46,6 +49,8 @@ class DiscordTextMessageHandlerDeps:
     current_turn_id: Any
     resolve_pending_proactive_question_for_turn: Any
     claim_conversation_ingress: Any
+    conversation_ingress_guild_epoch: Any
+    activate_conversation_ingress_guild_turn: Any
     conversation_ingress_recovery_context: Any
     mark_ingress_response_ready: Any
     mark_ingress_delivery_inflight: Any
@@ -85,11 +90,14 @@ class DiscordTextMessageHandlerDeps:
 class _PreparedDiscordTextTurn:
     entry_id: str
     turn_id: str
+    guild_epoch: int
     topic_id: str
     state_lock: asyncio.Lock
     reply_lock: asyncio.Lock
     recovery_context: dict[str, Any] | None
     proactive_resolution: dict[str, Any] | None
+    turn_scope: TurnScope
+    turn_task: Any
 
 
 class _PreAcquiredReplyLock:
@@ -158,12 +166,6 @@ async def _prepare_durable_text_turn(
                 state_lock=state_lock,
                 reply_lock=reply_lock,
             )
-            if prepared_turn is not None:
-                deps.remember_session_followup_target(
-                    ingress.session_key,
-                    channel_id=message.channel.id,
-                    message_id=message.id,
-                )
             keep_reply_lock = prepared_turn is not None
             return prepared_turn
     finally:
@@ -182,10 +184,14 @@ async def _prepare_claimed_text_turn(
 ) -> _PreparedDiscordTextTurn | None:
     session_key = ingress.session_key
     try:
+        ingress_guild_epoch = deps.conversation_ingress_guild_epoch(
+            message.guild.id
+        )
         ingress_claim = await asyncio.to_thread(
             deps.claim_conversation_ingress,
             ingress,
             user_text,
+            expected_guild_epoch=ingress_guild_epoch,
         )
     except Exception as exc:
         deps.log_turn_event(
@@ -232,7 +238,17 @@ async def _prepare_claimed_text_turn(
         return None
     entry_id = str(ingress_claim.get("entryId") or "")
     turn_id = str(ingress_claim.get("turnId") or "")
-    if not entry_id or not turn_id:
+    claimed_guild_epoch = ingress_claim.get(
+        "guildEpoch",
+        ingress_guild_epoch,
+    )
+    if (
+        not entry_id
+        or not turn_id
+        or isinstance(claimed_guild_epoch, bool)
+        or not isinstance(claimed_guild_epoch, int)
+        or claimed_guild_epoch != ingress_guild_epoch
+    ):
         deps.log_turn_event(
             "turn_drop",
             turn_id=deps.current_turn_id(session_key),
@@ -255,7 +271,7 @@ async def _prepare_claimed_text_turn(
             "[TEXT TURN] conversation_ingress_context_failed errorType=",
             type(exc).__name__,
         )
-    try:
+    def activate_turn() -> _PreparedDiscordTextTurn | None:
         proactive_resolution = (
             deps.resolve_pending_proactive_question_for_turn(
                 message.guild.id,
@@ -271,32 +287,50 @@ async def _prepare_claimed_text_turn(
             user_id=message.author.id,
             turn_id=turn_id,
         )
+        if started_turn.turn_id != turn_id:
+            deps.log_turn_event(
+                "turn_drop",
+                turn_id=turn_id,
+                segment_id=0,
+                source="text",
+                session_key=session_key,
+                reason="conversation_ingress_turn_binding_mismatch",
+                user_id=message.author.id,
+            )
+            return None
+        deps.remember_session_followup_target(
+            ingress.session_key,
+            channel_id=message.channel.id,
+            message_id=message.id,
+        )
+        turn_scope = TurnScope(turn_id)
+        deps.replace_room_turn_scope(session_key, turn_scope)
+        turn_task = deps.attach_current_task(turn_scope)
+        return _PreparedDiscordTextTurn(
+            entry_id=entry_id,
+            turn_id=turn_id,
+            guild_epoch=claimed_guild_epoch,
+            topic_id=started_turn.topic_id,
+            state_lock=state_lock,
+            reply_lock=reply_lock,
+            recovery_context=recovery_context,
+            proactive_resolution=proactive_resolution,
+            turn_scope=turn_scope,
+            turn_task=turn_task,
+        )
+
+    try:
+        return deps.activate_conversation_ingress_guild_turn(
+            message.guild.id,
+            ingress_guild_epoch,
+            activate_turn,
+        )
     except Exception as exc:
         deps.log(
             "[TEXT TURN] conversation_ingress_turn_start_failed errorType=",
             type(exc).__name__,
         )
         return None
-    if started_turn.turn_id != turn_id:
-        deps.log_turn_event(
-            "turn_drop",
-            turn_id=turn_id,
-            segment_id=0,
-            source="text",
-            session_key=session_key,
-            reason="conversation_ingress_turn_binding_mismatch",
-            user_id=message.author.id,
-        )
-        return None
-    return _PreparedDiscordTextTurn(
-        entry_id=entry_id,
-        turn_id=turn_id,
-        topic_id=started_turn.topic_id,
-        state_lock=state_lock,
-        reply_lock=reply_lock,
-        recovery_context=recovery_context,
-        proactive_resolution=proactive_resolution,
-    )
 
 
 async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHandlerDeps) -> None:
@@ -378,13 +412,13 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     reply_lock = prepared_turn.reply_lock
     ingress_entry_id = prepared_turn.entry_id
     turn_id = prepared_turn.turn_id
+    ingress_guild_epoch = prepared_turn.guild_epoch
     topic_id = prepared_turn.topic_id
     ingress_recovery_context = prepared_turn.recovery_context
     proactive_resolution = prepared_turn.proactive_resolution
 
-    turn_scope = TurnScope(turn_id)
-    deps.replace_room_turn_scope(session_key, turn_scope)
-    turn_task = deps.attach_current_task(turn_scope)
+    turn_scope = prepared_turn.turn_scope
+    turn_task = prepared_turn.turn_task
     vc = None
     answer = ""
     plain_answer = ""
@@ -430,6 +464,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         await asyncio.to_thread(
             deps.mark_ingress_response_ready,
             ingress_entry_id,
+            guild_id=message.guild.id,
+            expected_guild_epoch=ingress_guild_epoch,
             assistant_text=delivered_answer,
             memory_receipt_ref=memory_ref,
         )
@@ -439,6 +475,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         await asyncio.to_thread(
             deps.mark_ingress_delivery_inflight,
             ingress_entry_id,
+            guild_id=message.guild.id,
+            expected_guild_epoch=ingress_guild_epoch,
             delivery_ref=ingress_delivery_ref,
         )
         ingress_delivery_inflight = True
@@ -448,6 +486,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         await asyncio.to_thread(
             deps.mark_ingress_delivery_succeeded,
             ingress_entry_id,
+            guild_id=message.guild.id,
+            expected_guild_epoch=ingress_guild_epoch,
             delivery_ref=ingress_delivery_ref,
         )
         ingress_delivery_succeeded = True
@@ -459,6 +499,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             await asyncio.to_thread(
                 deps.mark_ingress_delivery_ambiguous,
                 ingress_entry_id,
+                guild_id=message.guild.id,
+                expected_guild_epoch=ingress_guild_epoch,
             )
         except Exception as exc:
             deps.log(
@@ -487,19 +529,25 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         )
         try:
             continuity_status = (
-                await deps.commit_session_continuity(
-                    session_key,
-                    turn_id,
-                    before_commit=lambda generation: (
-                        deps.begin_ingress_terminal_commit(
-                            ingress_entry_id,
-                            continuity_generation=int(generation),
-                            assistant_text=ingress_answer_text,
-                            memory_receipt_ref=(
-                                ingress_memory_receipt_ref
-                            ),
-                        )
-                    ),
+                await await_continuity_commit_without_early_unlock(
+                    deps.commit_session_continuity(
+                        session_key,
+                        turn_id,
+                        before_commit=lambda generation: (
+                            deps.begin_ingress_terminal_commit(
+                                ingress_entry_id,
+                                guild_id=message.guild.id,
+                                expected_guild_epoch=(
+                                    ingress_guild_epoch
+                                ),
+                                continuity_generation=int(generation),
+                                assistant_text=ingress_answer_text,
+                                memory_receipt_ref=(
+                                    ingress_memory_receipt_ref
+                                ),
+                            )
+                        ),
+                    )
                 )
             )
             continuity_receipt = (
@@ -537,6 +585,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             await asyncio.to_thread(
                 deps.complete_ingress,
                 ingress_entry_id,
+                guild_id=message.guild.id,
+                expected_guild_epoch=ingress_guild_epoch,
                 continuity_generation=int(
                     continuity_receipt["generation"]
                 ),
@@ -564,6 +614,7 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
 
     reply_lock_guard = _PreAcquiredReplyLock(reply_lock)
     try:
+        turn_scope.raise_if_cancelled()
         async with reply_lock_guard:
             async with message.channel.typing():
                 if is_explicit_memory_confirmation_command(
@@ -574,9 +625,11 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         memory_command_reply,
                         memory_write_receipt,
                         memory_command_error,
-                    ) = await asyncio.to_thread(
+                    ) = await run_registered_memory_thread(
+                        message.guild.id,
                         execute_explicit_memory_confirmation,
                         user_text,
+                        task_kind="explicit-confirmation",
                         action_id=(
                             f"discord-message:{message.guild.id}:"
                             f"{message.channel.id}:{message.id}"
@@ -586,6 +639,9 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         owner_scope=memory_owner_scope(
                             guild_id=message.guild.id,
                             person_key=person_key,
+                        ),
+                        reset_scope=memory_reset_scope(
+                            message.guild.id
                         ),
                     )
                 else:

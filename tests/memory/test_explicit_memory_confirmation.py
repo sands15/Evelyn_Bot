@@ -27,6 +27,8 @@ from evelyn_core.memory_vault import memory_vault_user_note  # noqa: E402
 from evelyn_core.memory_confirmation_contract import (  # noqa: E402
     is_explicit_memory_confirmation_receipt,
     memory_owner_scope,
+    memory_owner_scope_for_local_surface,
+    memory_reset_scope,
 )
 from evelyn_core.memory_deletion_journal import (  # noqa: E402
     MemoryDeletionJournalIntegrityError,
@@ -38,6 +40,39 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         guild_id=None,
         person_key="control-page:local",
     )
+
+    def test_local_surface_owner_matches_fast_principal_policy(self) -> None:
+        self.assertEqual(
+            memory_owner_scope_for_local_surface(),
+            self.owner_scope,
+        )
+        configured_owner_scope = memory_owner_scope_for_local_surface(
+            configured_guild_id=77,
+            configured_user_id=88,
+        )
+        self.assertEqual(
+            configured_owner_scope,
+            memory_owner_scope(
+                guild_id=77,
+                person_key="user:88",
+            ),
+        )
+        self.assertNotEqual(configured_owner_scope, self.owner_scope)
+        with self.assertRaisesRegex(
+            ValueError,
+            "memory_owner_scope_invalid",
+        ):
+            memory_owner_scope_for_local_surface(
+                configured_guild_id=77,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "memory_owner_scope_invalid",
+        ):
+            memory_owner_scope(
+                guild_id=0,
+                person_key="user:88",
+            )
 
     def test_parser_accepts_only_explicit_commands(self) -> None:
         self.assertEqual(
@@ -190,6 +225,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 "각자 저장한 같은 사실",
                 action_id="shared-action-123",
                 owner_scope=other_owner_scope,
+                reset_scope=memory_reset_scope(77),
                 root=root,
             )
 
@@ -206,6 +242,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 evidence_turn_id="discord-turn-abc",
                 source="discord-user",
                 owner_scope=self.owner_scope,
+                reset_scope=memory_reset_scope(1),
                 root=root,
             )
             raw = next(
@@ -245,6 +282,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 evidence_turn_id="discord-turn-original",
                 source="discord-user",
                 owner_scope=self.owner_scope,
+                reset_scope=memory_reset_scope(1),
                 root=root,
             )
             duplicate = store_explicit_memory_confirmation(
@@ -253,6 +291,7 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
                 evidence_turn_id="discord-turn-retry",
                 source="discord-user",
                 owner_scope=self.owner_scope,
+                reset_scope=memory_reset_scope(1),
                 root=root,
             )
 
@@ -282,6 +321,38 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             caught.exception.code,
             "memory_confirmation_source_invalid",
         )
+
+    def test_nonlocal_write_requires_exact_reset_scope(self) -> None:
+        cases = (
+            ("discord-user", self.owner_scope),
+            (
+                "control-page-user",
+                memory_owner_scope(
+                    guild_id=77,
+                    person_key="user:88",
+                ),
+            ),
+        )
+        for index, (source, owner_scope) in enumerate(cases):
+            with self.subTest(source=source):
+                with TemporaryDirectory() as temp_dir:
+                    with self.assertRaises(
+                        ExplicitMemoryConfirmationError
+                    ) as caught:
+                        store_explicit_memory_confirmation(
+                            "길드 범위가 없는 쓰기는 막아",
+                            action_id=(
+                                f"missing-reset-scope-{index}"
+                            ),
+                            source=source,
+                            owner_scope=owner_scope,
+                            root=Path(temp_dir),
+                        )
+
+                self.assertEqual(
+                    caught.exception.code,
+                    "memory_confirmation_reset_scope_required",
+                )
 
     def test_duplicate_fails_closed_when_stored_provenance_is_damaged(self) -> None:
         with TemporaryDirectory() as temp_dir:

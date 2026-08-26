@@ -31,6 +31,7 @@ class VoiceWakeProbeDeps:
     should_require_confirm_exact_for_wake: Callable[[dict[str, Any] | None], bool]
     apply_strict_wake_confirm_policy: Callable[..., Any]
     apply_fuzzy_wake_near_miss: Callable[..., Any]
+    extract_leading_wake_alias: Callable[[str], str | None]
     fuzzy_leading_wake_alias: Callable[[str], str | None]
     register_drop_reason: Callable[..., Any]
     log_voice_bottleneck_summary: Callable[..., Any]
@@ -108,7 +109,17 @@ async def run_voice_wake_probe_from_runtime(
     duration_sec: float,
     metrics: MutableMapping[str, Any],
     deps: VoiceWakeProbeDeps,
+    stream_result: Any | None = None,
+    source_is_current: Callable[[], bool] | None = None,
 ) -> VoiceWakeProbeResult | None:
+    def wake_source_is_current() -> bool:
+        if source_is_current is None:
+            return True
+        try:
+            return bool(source_is_current())
+        except Exception:
+            return False
+
     member_id = int(member.id)
     display_name = getattr(member, "display_name", None)
     validation_bound = bool(
@@ -125,9 +136,8 @@ async def run_voice_wake_probe_from_runtime(
     )
 
     def log_text(value: Any) -> Any:
-        if not validation_bound:
-            return value
-        return f"<validation-text chars={len(str(value or ''))}>"
+        label = "validation-text" if validation_bound else "transcript"
+        return f"<{label} chars={len(str(value or ''))}>"
 
     owner_followup_active = deps.is_room_owner_active(room_session_key, member_id) and deps.is_session_active_for_user(
         session_key,
@@ -154,38 +164,58 @@ async def run_voice_wake_probe_from_runtime(
             "웨이크 프로브 시작",
             extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}",
         )
-        try:
-            wake_result = await deps.run_blocking_stt_task(
-                lambda: deps.detect_wake_word_sync(
-                    audio_for_wake,
-                    sampling_rate=wake_sampling_rate,
-                    validation_bound=validation_bound,
-                ),
-                stage="wake",
-                timeout_sec=max(5.0, deps.wake_stt_timeout_sec),
-                metrics=metrics,
+        strict_confirm_required = deps.should_require_confirm_exact_for_wake(debug_meta)
+        if stream_result is not None and not strict_confirm_required:
+            stream_text = deps.apply_stt_post_corrections(
+                str(getattr(stream_result, "final_text", "") or ""),
+                wake_detected=False,
             )
-        except Exception as exc:
-            deps.print_fn(
-                f"[WAKE STT] errorType={type(exc).__name__}"
-            )
-            _register_wake_drop(
-                deps,
-                metrics,
-                "wake_probe_error",
-                session_key=session_key,
-                room_session_key=room_session_key,
-                owner_user_id=owner_user_id,
-                error="wake_probe_failed",
-                error_type=type(exc).__name__,
-            )
-            deps.log_voice_stage(
-                metrics,
-                "웨이크 프로브 실패",
-                extra=f"errorType={type(exc).__name__}",
-            )
-            _log_wake_drop_summary(deps, metrics, "wake_probe_error")
-            return None
+            stream_alias = deps.extract_leading_wake_alias(stream_text)
+            wake_result = {
+                "wake_detected": stream_alias is not None,
+                "wake_probe_text": stream_text,
+                "wake_confirm_text": stream_text,
+                "wake_match_mode": "exact" if stream_alias is not None else "rejected",
+                "wake_alias": stream_alias,
+                "wake_reject_reason": None if stream_alias is not None else "probe_miss",
+            }
+        else:
+            try:
+                wake_result = await deps.run_blocking_stt_task(
+                    lambda: deps.detect_wake_word_sync(
+                        audio_for_wake,
+                        sampling_rate=wake_sampling_rate,
+                        validation_bound=validation_bound,
+                    ),
+                    stage="wake",
+                    timeout_sec=max(5.0, deps.wake_stt_timeout_sec),
+                    metrics=metrics,
+                )
+            except Exception as exc:
+                if not wake_source_is_current():
+                    return None
+                deps.print_fn(
+                    f"[WAKE STT] errorType={type(exc).__name__}"
+                )
+                _register_wake_drop(
+                    deps,
+                    metrics,
+                    "wake_probe_error",
+                    session_key=session_key,
+                    room_session_key=room_session_key,
+                    owner_user_id=owner_user_id,
+                    error="wake_probe_failed",
+                    error_type=type(exc).__name__,
+                )
+                deps.log_voice_stage(
+                    metrics,
+                    "웨이크 프로브 실패",
+                    extra=f"errorType={type(exc).__name__}",
+                )
+                _log_wake_drop_summary(deps, metrics, "wake_probe_error")
+                return None
+            if not wake_source_is_current():
+                return None
 
         wake_interpretation = deps.interpret_wake_probe_result(
             wake_result,
@@ -207,7 +237,7 @@ async def run_voice_wake_probe_from_runtime(
 
         wake_interpretation = deps.apply_strict_wake_confirm_policy(
             wake_interpretation,
-            strict_confirm_required=deps.should_require_confirm_exact_for_wake(debug_meta),
+            strict_confirm_required=strict_confirm_required,
         )
         wake_detected = wake_interpretation.wake_detected
         wake_match_mode = wake_interpretation.wake_match_mode

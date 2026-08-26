@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -9,11 +10,13 @@ if TYPE_CHECKING:
     from .discord_runtime_status import DiscordRuntimeStatus
 
 from .discord_command_handlers import (
+    AUTONOMY_START_STALE_REPLY,
     handle_autonomy_start_command,
     handle_autonomy_status_command,
     handle_autonomy_stop_command,
     handle_channel_setting_command,
     handle_control_command_error,
+    handle_discord_command_error,
     handle_evelyn_page_command,
     handle_join_voice_command,
     handle_leave_voice_command,
@@ -45,6 +48,13 @@ from .discord_text_turn import handle_discord_text_message
 
 
 DepsFactory = Callable[[], Any]
+_VOICE_REARM_ATTEMPTS = 3
+_VOICE_REARM_RETRY_DELAY_SEC = 0.5
+_VOICE_READY_RESTORE_RETRY_REASON = "voice_rearm_failed"
+_SEARCH_RECOVERY_PENDING = "pending"
+_SEARCH_RECOVERY_RUNNING = "running"
+_SEARCH_RECOVERY_COMPLETE = "complete"
+_SEARCH_RECOVERY_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -128,9 +138,9 @@ class DiscordCommandCompositionDeps:
     build_command_channel_usage: Callable[..., str]
     build_help_command_text: Callable[..., str]
     is_control_command_authorized: Callable[[Any], bool]
-    memory_root: Any
+    guild_is_open: Callable[[int], bool]
+    guild_epoch: Callable[[int], int]
     reset_guild_runtime_state: Callable[..., Any]
-    remove_tree: Callable[..., Any]
     build_reset_guild_memory_reply: Callable[..., str]
     log: Callable[..., Any]
 
@@ -172,6 +182,13 @@ class DiscordAppComposition:
 
     def __init__(self, deps: DiscordAppCompositionDeps) -> None:
         self.deps = deps
+        self._ready_generation = 0
+        self._search_recovery_lock = asyncio.Lock()
+        self._search_recovery_state = (
+            _SEARCH_RECOVERY_COMPLETE
+            if deps.events.recover_search_followups is None
+            else _SEARCH_RECOVERY_PENDING
+        )
 
     def _record_runtime_error(self, code: str, exc: BaseException) -> None:
         runtime_status = self.deps.events.runtime_status
@@ -181,48 +198,95 @@ class DiscordAppComposition:
             except Exception:
                 pass
 
-    async def _recover_search_followups(self) -> None:
+    async def _recover_search_followups_once(self) -> bool:
         deps = self.deps.events
-        if deps.recover_search_followups is None:
-            return
-        try:
-            recovery = await deps.recover_search_followups()
-            if int(recovery.get("pending", 0)):
-                deps.log(
-                    "[SEARCH] recovery_complete "
-                    f"pending={int(recovery.get('pending', 0))} "
-                    f"resumed={int(recovery.get('resumed', 0))} "
-                    f"verified={int(recovery.get('verified', 0))} "
-                    f"redelivered={int(recovery.get('redelivered', 0))} "
-                    f"uncertain={int(recovery.get('uncertain', 0))}"
+        async with self._search_recovery_lock:
+            if self._search_recovery_state == _SEARCH_RECOVERY_COMPLETE:
+                return True
+            if self._search_recovery_state == _SEARCH_RECOVERY_FAILED:
+                return False
+            self._search_recovery_state = _SEARCH_RECOVERY_RUNNING
+            try:
+                recovery = await deps.recover_search_followups()
+                if int(recovery.get("pending", 0)):
+                    deps.log(
+                        "[SEARCH] recovery_complete "
+                        f"pending={int(recovery.get('pending', 0))} "
+                        f"resumed={int(recovery.get('resumed', 0))} "
+                        f"verified={int(recovery.get('verified', 0))} "
+                        f"redelivered={int(recovery.get('redelivered', 0))} "
+                        f"uncertain={int(recovery.get('uncertain', 0))}"
+                    )
+            except asyncio.CancelledError as exc:
+                self._search_recovery_state = _SEARCH_RECOVERY_FAILED
+                self._record_runtime_error(
+                    "search_followup_recovery_failed",
+                    exc,
                 )
-        except Exception as exc:
-            self._record_runtime_error(
-                "search_followup_recovery_failed",
-                exc,
-            )
-            deps.log(
-                "[SEARCH] recovery_start_failed "
-                f"errorType={type(exc).__name__}"
-            )
+                raise
+            except Exception as exc:
+                self._search_recovery_state = _SEARCH_RECOVERY_FAILED
+                self._record_runtime_error(
+                    "search_followup_recovery_failed",
+                    exc,
+                )
+                return False
+            self._search_recovery_state = _SEARCH_RECOVERY_COMPLETE
+            return True
+
+    async def admit_search_followup_ingress(self) -> bool:
+        state = self._search_recovery_state
+        if state == _SEARCH_RECOVERY_COMPLETE:
+            return True
+        if state != _SEARCH_RECOVERY_RUNNING:
+            return False
+        async with self._search_recovery_lock:
+            return self._search_recovery_state == _SEARCH_RECOVERY_COMPLETE
 
     def _command_context(self, ctx: Any) -> Any:
         if isinstance(ctx, ContinuityRecordingCommandContext):
             return ctx
+        runtime_deps = self.deps.commands.command_session()
         return ContinuityRecordingCommandContext(
             ctx,
             record_reply=self.mark_text_session_from_command,
             log=self.deps.commands.log,
+            runtime_deps=runtime_deps,
         )
+
+    async def _admit_guild_mutation(self, ctx: Any) -> bool:
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
+            return True
+        try:
+            allowed = self.deps.commands.guild_is_open(guild.id)
+        except Exception:
+            allowed = False
+        if allowed:
+            return True
+        await ctx.send(
+            "길드 초기화를 마무리하는 중이야. 초기화를 다시 시도해줘."
+        )
+        return False
 
     async def on_ready(self) -> None:
         deps = self.deps.events
+        self._ready_generation += 1
+        ready_generation = self._ready_generation
         if deps.runtime_status is not None:
             deps.runtime_status.start()
             deps.runtime_status.write_once()
         user = deps.bot_user()
         deps.log(f"로그인 완료: {user}")
         deps.mark_startup_component("discord_gateway", "done", deps.clean_text(str(user or "")))
+        try:
+            await deps.ensure_startup_components_ready()
+        except Exception as exc:
+            self._record_runtime_error("startup_initialization_failed", exc)
+            deps.log(f"[STARTUP] init_fail err={exc!r}")
+            raise
+        if not await self._recover_search_followups_once():
+            return
         deps.ensure_voice_worker_started()
         try:
             await deps.start_control_page_server()
@@ -237,7 +301,6 @@ class DiscordAppComposition:
                 f"errorCode=control_page_start_failed errorType={error_type}"
             )
         try:
-            await deps.ensure_startup_components_ready()
             await deps.ensure_local_mic_service_started()
             deps.ensure_vision_watch_started()
         except Exception as exc:
@@ -266,7 +329,26 @@ class DiscordAppComposition:
             elif voice_client is not None:
                 deps.log(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(voice_client)!r}")
             elif deps.voice_rejoin_on_ready:
-                ok, detail = await deps.restore_last_voice_channel(guild)
+                ok = False
+                detail = "voice_rearm_failed"
+                superseded = False
+                for attempt in range(_VOICE_REARM_ATTEMPTS):
+                    if ready_generation != self._ready_generation:
+                        superseded = True
+                        break
+                    ok, detail = await deps.restore_last_voice_channel(guild)
+                    if ready_generation != self._ready_generation:
+                        superseded = True
+                        break
+                    if (
+                        ok
+                        or detail != _VOICE_READY_RESTORE_RETRY_REASON
+                        or attempt + 1 >= _VOICE_REARM_ATTEMPTS
+                    ):
+                        break
+                    await asyncio.sleep(_VOICE_REARM_RETRY_DELAY_SEC)
+                if superseded:
+                    continue
                 if ok:
                     deps.log(f"[VOICE READY REJOIN] guild={guild.id} channel={detail}")
                 elif detail not in {"no_saved_voice_channel", "manual_disconnect"}:
@@ -276,7 +358,6 @@ class DiscordAppComposition:
                     f"[AUTONOMY] guild={guild.id} "
                     "available approval_required=true"
                 )
-        await self._recover_search_followups()
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:
         deps = self.deps.events
@@ -287,6 +368,8 @@ class DiscordAppComposition:
             deps.runtime_status.write_once()
         guild = getattr(member, "guild", None)
         if guild is None:
+            return
+        if not await self.admit_search_followup_ingress():
             return
         voice_client = guild.voice_client
         if not isinstance(voice_client, deps.voice_client_type):
@@ -301,13 +384,47 @@ class DiscordAppComposition:
             and getattr(before_channel, "id", None)
             != getattr(after_channel, "id", None)
         )
+        target_channel_id = getattr(target_channel, "id", None)
+        rearmed_client = None
+        last_error: Exception | None = None
         try:
-            rearmed_client = await deps.ensure_listening_voice_client(
-                guild,
-                target_channel,
-                force_listener_reset=channel_changed,
-                expected_voice_client=voice_client,
-            )
+            for attempt in range(_VOICE_REARM_ATTEMPTS):
+                if (
+                    guild.voice_client is not voice_client
+                    or getattr(
+                        getattr(voice_client, "channel", None),
+                        "id",
+                        None,
+                    )
+                    != target_channel_id
+                ):
+                    return
+                try:
+                    rearmed_client = await deps.ensure_listening_voice_client(
+                        guild,
+                        target_channel,
+                        force_listener_reset=channel_changed,
+                        expected_voice_client=voice_client,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if attempt + 1 >= _VOICE_REARM_ATTEMPTS:
+                        break
+                    await asyncio.sleep(_VOICE_REARM_RETRY_DELAY_SEC)
+                    continue
+                break
+            if last_error is not None and rearmed_client is None:
+                self._record_runtime_error(
+                    "voice_state_rearm_failed",
+                    last_error,
+                )
+                deps.log(
+                    f"[VOICE STATE REARM FAIL] guild={guild.id} "
+                    f"errorType={type(last_error).__name__}"
+                )
+                return
             if not (
                 isinstance(rearmed_client, deps.voice_client_type)
                 and rearmed_client.is_connected()
@@ -318,20 +435,26 @@ class DiscordAppComposition:
                 f"channel={getattr(target_channel, 'name', None)} "
                 f"listening={rearmed_client.is_listening()}"
             )
-            await self._recover_search_followups()
         except Exception as exc:
             self._record_runtime_error("voice_state_rearm_failed", exc)
-            deps.log(f"[VOICE STATE REARM FAIL] guild={guild.id} err={exc!r}")
+            deps.log(
+                f"[VOICE STATE REARM FAIL] guild={guild.id} "
+                f"errorType={type(exc).__name__}"
+            )
         finally:
             if deps.runtime_status is not None:
                 deps.runtime_status.write_once()
 
     async def on_message(self, message: discord.Message) -> None:
+        if not await self.admit_search_followup_ingress():
+            return
         await handle_discord_text_message(message, self.deps.events.text_message_handler())
 
     async def join_voice(self, ctx: Any) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if not await self._admit_guild_mutation(ctx):
+            return
         await handle_join_voice_command(
             ctx,
             ensure_listening_voice_client=deps.ensure_listening_voice_client,
@@ -341,6 +464,8 @@ class DiscordAppComposition:
     async def rejoin_voice(self, ctx: Any) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if not await self._admit_guild_mutation(ctx):
+            return
         await handle_rejoin_voice_command(
             ctx,
             ensure_listening_voice_client=deps.ensure_listening_voice_client,
@@ -377,6 +502,10 @@ class DiscordAppComposition:
         ctx = self._command_context(ctx)
         await handle_control_command_error(ctx, error)
 
+    async def on_command_error(self, ctx: Any, error: Any) -> None:
+        ctx = self._command_context(ctx)
+        await handle_discord_command_error(ctx, error)
+
     async def status_command(self, ctx: Any) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
@@ -399,6 +528,8 @@ class DiscordAppComposition:
     async def set_guild_prefix(self, ctx: Any, new_prefix: str | None = None) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if new_prefix is not None and not await self._admit_guild_mutation(ctx):
+            return
         await handle_prefix_command(
             ctx,
             new_prefix,
@@ -414,6 +545,27 @@ class DiscordAppComposition:
     async def autonomy_start_command(self, ctx: Any) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if not await self._admit_guild_mutation(ctx):
+            return
+        guild = getattr(ctx, "guild", None)
+        guild_mutation_is_current = None
+        if guild is not None:
+            guild_id = guild.id
+            try:
+                admitted_epoch = deps.guild_epoch(guild_id)
+            except Exception:
+                await ctx.send(AUTONOMY_START_STALE_REPLY)
+                return
+
+            def guild_mutation_is_current() -> bool:
+                try:
+                    return (
+                        deps.guild_is_open(guild_id)
+                        and deps.guild_epoch(guild_id) == admitted_epoch
+                    )
+                except Exception:
+                    return False
+
         await handle_autonomy_start_command(
             ctx,
             autonomy_enabled=deps.autonomy_enabled,
@@ -427,6 +579,7 @@ class DiscordAppComposition:
             grant_autonomy_authorization=deps.grant_autonomy_authorization,
             revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
+            guild_mutation_is_current=guild_mutation_is_current,
             record_runtime_error=self._record_runtime_error,
         )
 
@@ -462,18 +615,31 @@ class DiscordAppComposition:
         answer_text: str,
         *,
         awaiting_user_reply: bool = False,
-    ) -> None:
-        mark_text_session_from_command_runtime(
+        turn_id: str | None = None,
+        before_commit: Callable[[int], Any] | None = None,
+    ) -> dict[str, Any] | None:
+        guild = getattr(ctx, "guild", None)
+        if guild is not None:
+            try:
+                if not self.deps.commands.guild_is_open(guild.id):
+                    return None
+            except Exception:
+                return None
+        return mark_text_session_from_command_runtime(
             ctx,
             user_text,
             answer_text,
             awaiting_user_reply=awaiting_user_reply,
+            turn_id=turn_id,
+            before_commit=before_commit,
             deps=self.deps.commands.command_session(),
         )
 
     async def minecraft_connect_command(self, ctx: Any) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if not await self._admit_guild_mutation(ctx):
+            return
         await handle_minecraft_connect_command(
             ctx,
             enable_minecraft_mode=deps.enable_minecraft_mode,
@@ -515,6 +681,8 @@ class DiscordAppComposition:
     async def minecraft_goal_command(self, ctx: Any, *, goal: str | None = None) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        if str(goal or "").strip() and not await self._admit_guild_mutation(ctx):
+            return
         await handle_minecraft_goal_command(
             ctx,
             goal=goal,
@@ -532,6 +700,12 @@ class DiscordAppComposition:
     ) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        normalized_action = deps.normalize_channel_setting_action(action)
+        if (
+            normalized_action not in {"목록", "list"}
+            and not await self._admit_guild_mutation(ctx)
+        ):
+            return
         await handle_channel_setting_command(
             ctx,
             action,
@@ -558,6 +732,12 @@ class DiscordAppComposition:
     ) -> None:
         ctx = self._command_context(ctx)
         deps = self.deps.commands
+        normalized_action = deps.normalize_channel_setting_action(action)
+        if (
+            normalized_action not in {"목록", "list"}
+            and not await self._admit_guild_mutation(ctx)
+        ):
+            return
         await handle_channel_setting_command(
             ctx,
             action,
@@ -592,9 +772,7 @@ class DiscordAppComposition:
         deps = self.deps.commands
         await handle_reset_guild_memory_command(
             ctx,
-            memory_root=deps.memory_root,
             reset_guild_runtime_state=deps.reset_guild_runtime_state,
-            remove_tree=deps.remove_tree,
             get_guild_command_prefix=deps.get_guild_command_prefix,
             build_reply=deps.build_reset_guild_memory_reply,
             guild_only_message=deps.guild_only_message,
@@ -675,6 +853,7 @@ class DiscordAppComposition:
         on_ready = bot.event(self.on_ready)
         on_voice_state_update = bot.event(self.on_voice_state_update)
         on_message = bot.event(self.on_message)
+        bot.event(self.on_command_error)
 
         join_voice = bot.command(name="들어와", aliases=["join"])(join_voice_callback)
         rejoin_voice = bot.command(name="다시들어와", aliases=["rejoin"])(rejoin_voice_callback)
@@ -717,19 +896,23 @@ class DiscordAppComposition:
         minecraft_connect_command = bot.command(
             name="마크접속",
             aliases=["mc-connect", "minecraft-connect"],
+            ignore_extra=False,
         )(minecraft_connect_command_callback)
         minecraft_connect_command.add_check(commands.is_control_command_authorized)
         minecraft_connect_command.error(self.control_command_error)
         minecraft_disconnect_command = bot.command(
             name="마크종료",
             aliases=["mc-disconnect", "minecraft-disconnect"],
+            ignore_extra=False,
         )(minecraft_disconnect_command_callback)
         minecraft_disconnect_command.add_check(commands.is_control_command_authorized)
         minecraft_disconnect_command.error(self.control_command_error)
         minecraft_status_command = bot.command(
             name="마크상태",
             aliases=["mc-status", "minecraft-status"],
+            ignore_extra=False,
         )(minecraft_status_command_callback)
+        minecraft_status_command.error(self.control_command_error)
         minecraft_goal_command = bot.command(
             name="마크목표",
             aliases=["mc-goal", "minecraft-goal"],

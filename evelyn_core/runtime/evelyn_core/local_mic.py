@@ -18,6 +18,7 @@ from .audio import (
     resample_audio_float,
 )
 from .config import (
+    TARGET_RATE,
     VOICE_WAVEFORM_BODY_PEAK_MIN,
     VOICE_WAVEFORM_BODY_RMS_MIN,
     VOICE_WAVEFORM_MIN_RUN_MS,
@@ -115,6 +116,19 @@ def mono16k_float_to_discord_pcm(audio: np.ndarray, *, sampling_rate: int) -> by
     return pcm16.tobytes()
 
 
+def mono_float_to_pcm16k(audio: np.ndarray, *, sampling_rate: int) -> bytes:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.size == 0:
+        return b""
+    canonical = (
+        resample_audio_float(audio, sampling_rate, TARGET_RATE)
+        if sampling_rate != TARGET_RATE
+        else audio
+    )
+    pcm16 = np.clip(canonical * 32767.0, -32768.0, 32767.0).astype("<i2")
+    return pcm16.tobytes()
+
+
 def normalize_sounddevice_identifier(device: str | int | None) -> str | int | None:
     if isinstance(device, str):
         token = device.strip()
@@ -147,6 +161,9 @@ class LocalMicCaptureService:
         self,
         *,
         on_segment: Callable[[bytes, dict[str, Any]], None],
+        on_speech_start: Callable[[int], None] | None = None,
+        on_audio_chunk: Callable[[int, bytes], None] | None = None,
+        on_speech_end: Callable[[int, bool], None] | None = None,
         capture_context_provider: Callable[[], dict[str, Any] | None] | None = None,
         sample_rate: int = 16000,
         block_ms: int = 30,
@@ -163,8 +180,12 @@ class LocalMicCaptureService:
         vad_filter_enabled: bool = True,
         env_noise_filter_enabled: bool = True,
         waveform_filter_enabled: bool = True,
+        stream_chunk_ms: int = 500,
     ) -> None:
         self.on_segment = on_segment
+        self.on_speech_start = on_speech_start
+        self.on_audio_chunk = on_audio_chunk
+        self.on_speech_end = on_speech_end
         self.capture_context_provider = capture_context_provider
         self.sample_rate = max(8000, int(sample_rate))
         self.block_ms = max(10, int(block_ms))
@@ -182,12 +203,17 @@ class LocalMicCaptureService:
         self.vad_filter_enabled = bool(vad_filter_enabled)
         self.env_noise_filter_enabled = bool(env_noise_filter_enabled)
         self.waveform_filter_enabled = bool(waveform_filter_enabled)
+        self.stream_chunk_ms = min(500, max(20, int(stream_chunk_ms)))
 
         self.block_samples = max(1, int(round(self.sample_rate * (self.block_ms / 1000.0))))
         self._trailing_silence_blocks = max(1, int(round(self.max_silence_ms / self.block_ms)))
         self._preroll_blocks = max(1, int(round(self.preroll_ms / self.block_ms))) if self.preroll_ms > 0 else 1
         self._min_voiced_samples = max(1, int(round(self.sample_rate * (self.min_voiced_ms / 1000.0))))
         self._max_segment_samples = max(self.sample_rate, int(round(self.sample_rate * self.max_segment_sec)))
+        self._stream_chunk_bytes = max(
+            2,
+            int(round(TARGET_RATE * (self.stream_chunk_ms / 1000.0))) * 2,
+        )
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -206,6 +232,10 @@ class LocalMicCaptureService:
         self._trailing_silence = 0
         self._voiced_samples = 0
         self._total_samples = 0
+        self._stream_generation = 0
+        self._active_stream_generation: int | None = None
+        self._stream_pcm16 = bytearray()
+        self._stream_callback_failed = False
         self.input_block_count = 0
         self.last_input_at: float | None = None
         self.last_input_level = 0.0
@@ -394,6 +424,16 @@ class LocalMicCaptureService:
         self._candidate_capture_context = {}
         self._total_samples = sum(int(block.size) for block in self._current_blocks)
         self._voiced_samples = sum(int(block.size) for block, level in self._pre_roll if level >= self.continue_threshold)
+        if self.on_speech_start is not None or self.on_audio_chunk is not None or self.on_speech_end is not None:
+            self._stream_generation += 1
+            self._active_stream_generation = self._stream_generation
+            self._stream_pcm16.clear()
+            self._stream_callback_failed = not self._emit_stream_callback(
+                self.on_speech_start,
+                self._stream_generation,
+            )
+            if self._current_blocks:
+                self._buffer_stream_audio(np.concatenate(self._current_blocks))
 
     def _capture_context_snapshot(self) -> dict[str, Any]:
         capture_context: dict[str, Any] = {}
@@ -411,6 +451,51 @@ class LocalMicCaptureService:
         self._total_samples += int(block.size)
         if level >= self.continue_threshold:
             self._voiced_samples += int(block.size)
+        self._buffer_stream_audio(block)
+
+    @staticmethod
+    def _emit_stream_callback(callback: Callable[..., None] | None, *args: Any) -> bool:
+        if callback is None:
+            return True
+        try:
+            callback(*args)
+            return True
+        except Exception as exc:
+            log.warning(
+                "Local mic stream callback failed: errorType=%s",
+                type(exc).__name__,
+            )
+            return False
+
+    def _buffer_stream_audio(self, audio: np.ndarray) -> None:
+        generation = self._active_stream_generation
+        if generation is None or self.on_audio_chunk is None:
+            return
+        self._stream_pcm16.extend(
+            mono_float_to_pcm16k(audio, sampling_rate=self.sample_rate)
+        )
+        while len(self._stream_pcm16) >= self._stream_chunk_bytes:
+            chunk = bytes(self._stream_pcm16[: self._stream_chunk_bytes])
+            del self._stream_pcm16[: self._stream_chunk_bytes]
+            if not self._emit_stream_callback(self.on_audio_chunk, generation, chunk):
+                self._stream_callback_failed = True
+
+    def _finish_stream_capture(self, *, accepted: bool) -> int | None:
+        generation = self._active_stream_generation
+        if generation is None:
+            return None
+        effective_accept = bool(accepted and not self._stream_callback_failed)
+        if effective_accept and self._stream_pcm16 and self.on_audio_chunk is not None:
+            effective_accept = self._emit_stream_callback(
+                self.on_audio_chunk,
+                generation,
+                bytes(self._stream_pcm16),
+            )
+        self._stream_pcm16.clear()
+        self._active_stream_generation = None
+        self._stream_callback_failed = False
+        self._emit_stream_callback(self.on_speech_end, generation, effective_accept)
+        return generation
 
     def _voice_filter_result(self, segment: np.ndarray) -> tuple[bool, dict[str, Any]]:
         band_ratio, flatness, rms = compute_voice_band_metrics(segment, sampling_rate=self.sample_rate)
@@ -474,6 +559,7 @@ class LocalMicCaptureService:
         self._voiced_samples = 0
         self._total_samples = 0
         if not blocks:
+            self._finish_stream_capture(accepted=False)
             return
         if not force and (voiced_samples < self._min_voiced_samples or total_samples < self._min_voiced_samples):
             self.rejected_segment_count += 1
@@ -486,6 +572,7 @@ class LocalMicCaptureService:
                 "durationSec": round(total_samples / float(self.sample_rate), 3),
                 "minVoicedMs": self.min_voiced_ms,
             }
+            self._finish_stream_capture(accepted=False)
             return
         segment = np.concatenate(blocks).astype(np.float32, copy=False)
         filter_passed, filter_meta = self._voice_filter_result(segment)
@@ -493,10 +580,13 @@ class LocalMicCaptureService:
         if not filter_passed:
             self.rejected_segment_count += 1
             self.last_rejected_reason = str(filter_meta.get("reason") or "voice_filter")
+            self._finish_stream_capture(accepted=False)
             return
         pcm_bytes = mono16k_float_to_discord_pcm(segment, sampling_rate=self.sample_rate)
         if not pcm_bytes:
+            self._finish_stream_capture(accepted=False)
             return
+        stream_generation = self._finish_stream_capture(accepted=True)
         segment_meta = {
             "source": "local_mic",
             "unstable": unstable,
@@ -504,5 +594,7 @@ class LocalMicCaptureService:
             "sampling_rate": self.sample_rate,
             "voice_filter": filter_meta,
         }
+        if stream_generation is not None:
+            segment_meta["_asrCaptureGeneration"] = stream_generation
         segment_meta.update(capture_context)
         self.on_segment(pcm_bytes, segment_meta)

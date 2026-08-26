@@ -1,7 +1,34 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .session_memory_state import SessionStateStore
+
+
+def _parse_voice_user_session_key(session_key: str) -> tuple[str, int] | None:
+    parts = str(session_key or "").split(":")
+    if (
+        len(parts) != 6
+        or parts[0] != "guild"
+        or parts[2] != "voice"
+        or parts[4] != "user"
+    ):
+        return None
+    numeric_parts = (parts[1], parts[3], parts[5])
+    if any(
+        not value.isascii()
+        or not value.isdigit()
+        or int(value) <= 0
+        or str(int(value)) != value
+        for value in numeric_parts
+    ):
+        return None
+    guild_id, channel_id, user_id = map(int, numeric_parts)
+    return f"guild:{guild_id}:voice:{channel_id}", user_id
 
 
 @dataclass(slots=True)
@@ -13,6 +40,74 @@ class RoomSpeakerActivityStore:
     @classmethod
     def create_empty(cls) -> "RoomSpeakerActivityStore":
         return cls(recent_speaker_stats={}, room_owner_user_ids={}, room_owner_until={})
+
+    def restore_owners_from_sessions(
+        self,
+        sessions: "SessionStateStore",
+        *,
+        now: float | None = None,
+    ) -> int:
+        now_mono = time.monotonic() if now is None else float(now)
+        if not math.isfinite(now_mono):
+            raise ValueError("invalid_restore_time")
+        candidates: dict[str, list[tuple[float, int, float, bool]]] = {}
+        blocked_rooms: set[str] = set()
+        for session_key, raw_last_active_at in sessions.last_active_at.items():
+            parsed = _parse_voice_user_session_key(session_key)
+            if parsed is None:
+                continue
+            room_session_key, key_user_id = parsed
+            try:
+                last_active_at = float(raw_last_active_at)
+            except (TypeError, ValueError):
+                blocked_rooms.add(room_session_key)
+                continue
+            if (
+                not math.isfinite(last_active_at)
+                or last_active_at > now_mono
+            ):
+                blocked_rooms.add(room_session_key)
+                continue
+            try:
+                active_until = float(sessions.active_until.get(session_key, 0.0))
+            except (TypeError, ValueError):
+                active_until = float("nan")
+            remembered_user_id = sessions.active_user_ids.get(session_key)
+            candidates.setdefault(room_session_key, []).append(
+                (
+                    last_active_at,
+                    key_user_id,
+                    active_until,
+                    type(remembered_user_id) is int
+                    and remembered_user_id == key_user_id,
+                )
+            )
+
+        self.room_owner_user_ids.clear()
+        self.room_owner_until.clear()
+        restored = 0
+        for room_session_key, room_candidates in candidates.items():
+            if room_session_key in blocked_rooms:
+                continue
+            newest_at = max(candidate[0] for candidate in room_candidates)
+            newest = [
+                candidate
+                for candidate in room_candidates
+                if candidate[0] == newest_at
+            ]
+            if len(newest) != 1:
+                continue
+            _, user_id, active_until, user_bound = newest[0]
+            if (
+                not user_bound
+                or not math.isfinite(active_until)
+                or active_until <= now_mono
+            ):
+                continue
+            self.room_owner_user_ids[room_session_key] = user_id
+            self.room_owner_until[room_session_key] = active_until
+            restored += 1
+        return restored
 
     def prune(self, room_session_key: str | None, *, now: float | None = None) -> dict[int, dict[str, float]]:
         if not room_session_key:

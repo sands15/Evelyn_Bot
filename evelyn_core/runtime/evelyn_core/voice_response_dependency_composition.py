@@ -18,7 +18,6 @@ class VoiceResponseDependencyCompositionDeps:
     main_llm_stop_tokens: tuple[str, ...] | list[str]
     voice_llm_max_tokens: int
     get_http_session: Callable[..., Any]
-    build_chat_messages: Callable[..., Any]
     fallback_answer_for: Callable[..., str]
     split_tts_sentences: Callable[..., Any]
     build_answer_payload_from_text: Callable[..., Any]
@@ -74,7 +73,6 @@ class VoiceResponseDependencyComposition:
             main_llm_stop_tokens=tuple(deps.main_llm_stop_tokens),
             voice_llm_max_tokens=deps.voice_llm_max_tokens,
             get_http_session=deps.get_http_session,
-            build_chat_messages=deps.build_chat_messages,
             fallback_answer_for=deps.fallback_answer_for,
             split_tts_sentences=deps.split_tts_sentences,
             build_answer_payload_from_text=deps.build_answer_payload_from_text,

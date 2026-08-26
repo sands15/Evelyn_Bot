@@ -347,6 +347,7 @@ class SessionStateStore:
         topic_id: str | None = None,
         now_monotonic: float | None = None,
         memory_receipt: Any = None,
+        complete_turn_id: str | None = None,
     ) -> AssistantTextTurnFinish:
         ttl_sec = float(question_ttl_sec if awaiting_user_reply else normal_ttl_sec)
         self.append_history(
@@ -357,6 +358,7 @@ class SessionStateStore:
             max_history_items=max_history_items,
             guild_id=guild_id,
             memory_receipt=memory_receipt,
+            complete_turn_id=complete_turn_id,
         )
         self.mark_active(
             session_key,

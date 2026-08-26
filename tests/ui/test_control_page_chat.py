@@ -88,6 +88,29 @@ class ControlPageChatTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_microsoft_device_code_uses_existing_minecraft_status_line(self) -> None:
+        self.assertIn(
+            "const minecraftAuth = minecraft.authChallenge",
+            self.html,
+        )
+        self.assertIn(
+            "/^[A-Z0-9]{8}$/.test(minecraftAuthCode)",
+            self.html,
+        )
+        self.assertIn(
+            'minecraftAuth.verificationUrl === "https://www.microsoft.com/link"',
+            self.html,
+        )
+        self.assertIn(
+            "`Microsoft 로그인 ${minecraftAuthCode} · microsoft.com/link`",
+            self.html,
+        )
+        self.assertEqual(
+            self.html.count('id="minecraftStatusLine"'),
+            1,
+        )
+        self.assertNotIn('id="microsoftAuth', self.html)
+
     def test_initial_static_bubble_does_not_explain_memory_command(self) -> None:
         self.assertNotIn("?? ?ш린 ?덉뼱. 硫붾え由щ뒗 /memory ?쇨퀬 ?낅젰?섎㈃ ?댁뼱?섍쾶.", self.html)
         self.assertIn('<span class="caption">...</span>', self.html)

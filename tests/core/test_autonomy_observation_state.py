@@ -17,14 +17,18 @@ from evelyn_core.autonomy_observation_state import (  # noqa: E402
     build_default_autonomy_observation,
     pick_recent_user_text,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
 
 
 class AutonomyObservationStateTests(unittest.TestCase):
-    def test_pick_recent_user_text_skips_autonomy_marker(self) -> None:
+    def test_pick_recent_user_text_skips_autonomy_markers(self) -> None:
         history = [
             {"role": "user", "content": "첫 요청"},
             {"role": "assistant", "content": "응"},
             {"role": "user", "content": "[autonomy]"},
+            {"role": "user", "content": "[autonomy:error]"},
         ]
 
         self.assertEqual(pick_recent_user_text(history), "첫 요청")
@@ -109,6 +113,123 @@ class AutonomyObservationStateTests(unittest.TestCase):
         self.assertEqual(observation["vision_fingerprint"], "abc")
         self.assertTrue(observation["vision_analysis_recent"])
         self.assertTrue(observation["queued_proactive_question_available"])
+
+    def test_only_completed_autonomy_pair_resolves_prior_search_signal(self) -> None:
+        receipt = not_used_memory_receipt_ref()
+
+        def observed(history: list[dict]) -> dict:
+            return build_default_autonomy_observation(
+                connected=True,
+                known_followup_channels=1,
+                inflight_llm_requests=0,
+                active_sessions=0,
+                history=history,
+                last_autonomy_ping_at=0.0,
+                observe_channel_ids=[10],
+                command_only_channel_ids=[],
+                observed_channels=[],
+                quiet_hours=False,
+                last_result={},
+                cached_cognitive=None,
+                last_cognitive_refresh_at=0.0,
+                router_refresh_inflight=False,
+                autonomy_cognitive_stale_sec=100.0,
+                autonomy_cognitive_min_interval_sec=10.0,
+                autonomy_cognitive_force_refresh_sec=500.0,
+                vision_watch={},
+                vision_watch_interval_sec=20.0,
+                local_tts_state={},
+                local_mic_state={},
+                queued_proactive_question_available=False,
+                answer_promises_search_fn=lambda text: "SEARCH" in text,
+                now_mono=100.0,
+                now_time=2000.0,
+            )
+
+        completed = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy]"},
+                {
+                    "role": "assistant",
+                    "content": "verified followup",
+                    "memoryReceiptRef": receipt,
+                },
+            ]
+        )
+        newer = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy]"},
+                {
+                    "role": "assistant",
+                    "content": "verified followup",
+                    "memoryReceiptRef": receipt,
+                },
+                {"role": "assistant", "content": "SEARCH NEW"},
+            ]
+        )
+        unrelated = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "ordinary"},
+                {
+                    "role": "assistant",
+                    "content": "ordinary reply",
+                    "memoryReceiptRef": receipt,
+                },
+            ]
+        )
+        partial = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy]"},
+            ]
+        )
+        malformed = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy]"},
+                {
+                    "role": "assistant",
+                    "content": "unbound reply",
+                    "memoryReceiptRef": {"state": "not_used"},
+                },
+            ]
+        )
+        unattributed = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy]"},
+                {
+                    "role": "assistant",
+                    "content": "unattributed reply",
+                    "memoryReceiptRef": {
+                        **receipt,
+                        "state": "unattributed",
+                    },
+                },
+            ]
+        )
+        error_notification = observed(
+            [
+                {"role": "assistant", "content": "SEARCH"},
+                {"role": "user", "content": "[autonomy:error]"},
+                {
+                    "role": "assistant",
+                    "content": "failure notice",
+                    "memoryReceiptRef": receipt,
+                },
+            ]
+        )
+
+        self.assertFalse(completed["search_pending"])
+        self.assertTrue(newer["search_pending"])
+        self.assertTrue(unrelated["search_pending"])
+        self.assertTrue(partial["search_pending"])
+        self.assertTrue(malformed["search_pending"])
+        self.assertTrue(unattributed["search_pending"])
+        self.assertTrue(error_notification["search_pending"])
 
     def test_unreliable_or_old_vision_does_not_trigger_recent_change(self) -> None:
         observation = build_default_autonomy_observation(

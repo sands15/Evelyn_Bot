@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import (
+    artifact_target_allowed,
+    atomic_json_write,
+    read_bounded_text,
+)
 
 
 CONTINUITY_AUTH_KEY_FILE_ENV = (
@@ -446,18 +450,14 @@ class ContinuityAuthenticity:
             return None
         path = self._anchor_path(slot)
         try:
-            if not path.exists() and not path.is_symlink():
+            raw_text = read_bounded_text(
+                path,
+                maximum_bytes=CONTINUITY_AUTH_ANCHOR_MAX_FILE_BYTES,
+                missing_ok=True,
+            )
+            if raw_text is None:
                 return None
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or path.stat().st_size
-                > CONTINUITY_AUTH_ANCHOR_MAX_FILE_BYTES
-            ):
-                raise ContinuityAuthenticityError(
-                    "continuity_anchor_record_rejected"
-                )
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(raw_text)
             expected_keys = {
                 "schema",
                 "slot",
@@ -566,9 +566,7 @@ class ContinuityAuthenticity:
         }
         payload["authTag"] = self._anchor_tag(payload)
         try:
-            if path.is_symlink() or (
-                path.exists() and not path.is_file()
-            ):
+            if not artifact_target_allowed(path):
                 raise ContinuityAuthenticityError(
                     "continuity_anchor_record_rejected"
                 )

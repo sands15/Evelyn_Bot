@@ -141,6 +141,10 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         service.waveform_filter_enabled = False
 
         playback_owner = bridge._claim_playback_owner()
+        bridge._mark_playback_started_once(
+            expected_owner_id=playback_owner,
+            expected_owner_token=bridge.playback_controller.owner_token,
+        )
         voiced = np.full(service.block_samples, 0.05, dtype=np.float32)
         service._consume_block(voiced, {})
         self.assertFalse(service._capture_active)

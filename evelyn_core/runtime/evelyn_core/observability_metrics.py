@@ -2,11 +2,142 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from .text import clean_text
+
+
+VOICE_LATENCY_TRACE_SCHEMA = "evelyn.voice-latency-trace.v1"
+VOICE_LATENCY_TRACE_METRICS_KEY = "_voice_latency_trace"
+VOICE_LATENCY_STAGES: tuple[str, ...] = (
+    "request_received",
+    "turn_accepted",
+    "ingress_committed",
+    "route_done",
+    "context_done",
+    "prompt_compiled",
+    "main_admission_requested",
+    "main_slot_acquired",
+    "main_request_written",
+    "main_headers_received",
+    "raw_first_token",
+    "safe_first_delta",
+    "speech_prefix_committed",
+    "tts_requested",
+    "tts_started",
+    "tts_first_pcm",
+    "playback_first_write",
+    "turn_completed",
+)
+_VOICE_LATENCY_STAGE_SET = frozenset(VOICE_LATENCY_STAGES)
+_VOICE_LATENCY_DURATION_PAIRS = tuple(zip(VOICE_LATENCY_STAGES, VOICE_LATENCY_STAGES[1:])) + (
+    ("main_request_written", "raw_first_token"),
+    ("raw_first_token", "speech_prefix_committed"),
+    ("speech_prefix_committed", "tts_first_pcm"),
+    ("request_received", "tts_first_pcm"),
+    ("request_received", "playback_first_write"),
+)
+_MAX_MONOTONIC_NS = (1 << 63) - 1
+
+
+def _require_voice_latency_stage(stage: str) -> None:
+    if stage not in _VOICE_LATENCY_STAGE_SET:
+        raise ValueError("unsupported voice latency stage")
+
+
+@dataclass(slots=True)
+class VoiceLatencyTrace:
+    """Bounded, content-free monotonic markers for one Main voice turn."""
+
+    clock_ns: Callable[[], int] = time.monotonic_ns
+    _markers_ns: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+
+    def mark(self, stage: str, at_ns: int | None = None) -> bool:
+        _require_voice_latency_stage(stage)
+        if stage in self._markers_ns:
+            return False
+        timestamp_ns = self.clock_ns() if at_ns is None else at_ns
+        if (
+            isinstance(timestamp_ns, bool)
+            or not isinstance(timestamp_ns, int)
+            or not 0 <= timestamp_ns <= _MAX_MONOTONIC_NS
+        ):
+            raise ValueError("voice latency marker must be a bounded monotonic timestamp")
+        self._markers_ns[stage] = timestamp_ns
+        return True
+
+    def elapsed_ms(self, start_stage: str, end_stage: str) -> float | None:
+        _require_voice_latency_stage(start_stage)
+        _require_voice_latency_stage(end_stage)
+        start_ns = self._markers_ns.get(start_stage)
+        end_ns = self._markers_ns.get(end_stage)
+        if start_ns is None or end_ns is None or end_ns < start_ns:
+            return None
+        return (end_ns - start_ns) / 1_000_000.0
+
+    def public_summary(self) -> dict[str, Any]:
+        if not self._markers_ns:
+            return {
+                "schema": VOICE_LATENCY_TRACE_SCHEMA,
+                "markers_ms": {},
+                "durations_ms": {},
+            }
+        origin_ns = min(self._markers_ns.values())
+        markers_ms = {
+            stage: round((self._markers_ns[stage] - origin_ns) / 1_000_000.0, 3)
+            for stage in VOICE_LATENCY_STAGES
+            if stage in self._markers_ns
+        }
+        durations_ms: dict[str, float] = {}
+        for start_stage, end_stage in _VOICE_LATENCY_DURATION_PAIRS:
+            elapsed_ms = self.elapsed_ms(start_stage, end_stage)
+            if elapsed_ms is not None:
+                durations_ms[f"{start_stage}_to_{end_stage}_ms"] = round(elapsed_ms, 3)
+        return {
+            "schema": VOICE_LATENCY_TRACE_SCHEMA,
+            "markers_ms": markers_ms,
+            "durations_ms": durations_ms,
+        }
+
+
+def voice_latency_trace_from_metrics(
+    metrics: dict[str, Any] | None,
+) -> VoiceLatencyTrace | None:
+    if not isinstance(metrics, dict):
+        return None
+    trace = metrics.get(VOICE_LATENCY_TRACE_METRICS_KEY)
+    return trace if isinstance(trace, VoiceLatencyTrace) else None
+
+
+def mark_voice_latency_stage(
+    metrics: dict[str, Any] | None,
+    stage: str,
+) -> bool:
+    trace = voice_latency_trace_from_metrics(metrics)
+    return bool(trace is not None and trace.mark(stage))
+
+
+CONTENT_FREE_TOOL_STATUSES = frozenset(
+    {
+        "planned",
+        "executed",
+        "executed_empty",
+        "executed_withheld",
+        "failed",
+        "failed_or_unavailable",
+        "needs_local_tool",
+        "needs_permission_or_external_tool",
+        "skipped_no_memory_scope",
+    }
+)
+
+
+def content_free_tool_status(value: Any) -> str:
+    status = clean_text(str(value or "")).lower()
+    return status if status in CONTENT_FREE_TOOL_STATUSES else "unknown"
 
 
 def percentile_p95(values: list[float]) -> float:
@@ -144,9 +275,12 @@ def new_turn_metrics_from_runtime(
     segment_id: int | None = None,
     chunk_index: int | None = None,
 ) -> dict:
+    latency_trace = VoiceLatencyTrace()
+    latency_trace.mark("request_received")
     metrics = {
         "started_at": monotonic(),
         "marks": {"t_ingress": 0.0},
+        VOICE_LATENCY_TRACE_METRICS_KEY: latency_trace,
         "meta": {
             "source": source,
             "session_key": session_key,
@@ -306,6 +440,36 @@ def record_context_pipeline_benchmark_from_runtime(
     context_meta = meta.get("context_pipeline") if isinstance(meta, dict) else None
     if not isinstance(context_meta, dict):
         return
+    raw_policy = context_meta.get("policy")
+    content_free_policy = None
+    if isinstance(raw_policy, dict):
+        content_free_policy = {
+            key: bool(raw_policy.get(key))
+            for key in (
+                "needs_main_llm",
+                "needs_memory",
+                "needs_runtime_state",
+                "needs_minecraft_state",
+                "needs_vision",
+                "needs_skill_graph",
+                "needs_long_context",
+                "needs_search",
+                "needs_tts",
+                "tool_plan_authoritative",
+            )
+        }
+        content_free_policy["specialist"] = clean_text(str(raw_policy.get("specialist") or "none"))
+        tools = raw_policy.get("tools")
+        if isinstance(tools, list):
+            content_free_policy["tools"] = [
+                {
+                    "tool_name": clean_text(str(item.get("tool_name") or item.get("tool") or "")),
+                    "status": content_free_tool_status(item.get("status")),
+                    "required_before_answer": bool(item.get("required_before_answer")),
+                }
+                for item in tools
+                if isinstance(item, dict)
+            ]
     record = {
         "ts": round(now(), 3),
         "source": clean_text(source),
@@ -313,7 +477,7 @@ def record_context_pipeline_benchmark_from_runtime(
         "session_key": session_key,
         "turn_id": meta.get("turn_id") if isinstance(meta, dict) else None,
         "route": context_meta.get("route") or meta.get("route") if isinstance(meta, dict) else None,
-        "policy": context_meta.get("policy"),
+        "policy": content_free_policy,
         "sections": context_meta.get("sections"),
         "section_chars": context_meta.get("section_chars"),
         "minecraft_context": bool(context_meta.get("minecraft_context")),
@@ -598,6 +762,11 @@ def summarize_voice_p95_metrics(
 
 __all__ = [
     "ModelCallMetricsStore",
+    "VOICE_LATENCY_STAGES",
+    "VOICE_LATENCY_TRACE_METRICS_KEY",
+    "VOICE_LATENCY_TRACE_SCHEMA",
+    "VoiceLatencyTrace",
+    "mark_voice_latency_stage",
     "record_model_call_trace_from_runtime",
     "record_context_pipeline_benchmark_from_runtime",
     "new_turn_metrics_from_runtime",
@@ -613,4 +782,5 @@ __all__ = [
     "summarize_question_metrics_payload",
     "summarize_turn_path_metrics_payload",
     "summarize_voice_p95_metrics",
+    "voice_latency_trace_from_metrics",
 ]

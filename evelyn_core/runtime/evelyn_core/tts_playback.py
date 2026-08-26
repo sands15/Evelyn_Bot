@@ -1,6 +1,7 @@
 import asyncio
 import audioop
 import contextlib
+import hashlib
 import queue
 import re
 import threading
@@ -12,7 +13,8 @@ from typing import Any, Awaitable, Callable
 
 import discord
 
-from .text import clean_text, clean_tts_text
+from .observability_metrics import mark_voice_latency_stage
+from .text import clean_text, clean_tts_text, strip_omnivoice_tags
 from .voice_validation import validation_attempt_binding_is_current
 
 from .config import (
@@ -151,6 +153,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         self._rate_state = None
         self._input_remainder = b""
         self._first_frame_sent = False
+        self._first_packet_sent = False
         self._on_first_frame = on_first_frame
         self._on_first_packet_sent = on_first_packet_sent
         self._ready_event = threading.Event()
@@ -261,8 +264,6 @@ class OmniVoicePCMStream(discord.AudioSource):
                 self._first_frame_sent = True
                 if self._on_first_frame is not None:
                     self._on_first_frame()
-                if self._on_first_packet_sent is not None:
-                    self._on_first_packet_sent()
             return chunk
 
         if self._done and self._buffer:
@@ -273,11 +274,15 @@ class OmniVoicePCMStream(discord.AudioSource):
                 self._first_frame_sent = True
                 if self._on_first_frame is not None:
                     self._on_first_frame()
-                if self._on_first_packet_sent is not None:
-                    self._on_first_packet_sent()
             return padded
 
         return b""
+
+    def mark_packet_sent(self, chunk: bytes) -> None:
+        if chunk and not self._first_packet_sent and any(chunk):
+            self._first_packet_sent = True
+            if self._on_first_packet_sent is not None:
+                self._on_first_packet_sent()
 
     def cleanup(self) -> None:
         self._closed = True
@@ -299,7 +304,7 @@ class CachedWaveAudioSource(discord.AudioSource):
         self.path = Path(path)
         self._offset = 0
         self._closed = False
-        self._first_frame_sent = False
+        self._first_packet_sent = False
         self._on_first_packet_sent = on_first_packet_sent
         self.error: Exception | None = None
 
@@ -340,11 +345,13 @@ class CachedWaveAudioSource(discord.AudioSource):
         if len(chunk) < DISCORD_FRAME_BYTES:
             chunk += b"\x00" * (DISCORD_FRAME_BYTES - len(chunk))
 
-        if not self._first_frame_sent and any(chunk):
-            self._first_frame_sent = True
+        return chunk
+
+    def mark_packet_sent(self, chunk: bytes) -> None:
+        if chunk and not self._first_packet_sent and any(chunk):
+            self._first_packet_sent = True
             if self._on_first_packet_sent is not None:
                 self._on_first_packet_sent()
-        return chunk
 
     def cleanup(self) -> None:
         self._closed = True
@@ -444,6 +451,11 @@ class QueuedAudioSource(discord.AudioSource):
             if item is not None:
                 item.cleanup()
 
+    def mark_packet_sent(self, chunk: bytes) -> None:
+        mark_packet_sent = getattr(self._current, "mark_packet_sent", None)
+        if callable(mark_packet_sent):
+            mark_packet_sent(chunk)
+
 
 BAD_TAIL_WORDS = (
     "그리고",
@@ -480,6 +492,8 @@ class ChunkerConfig:
     hard_break_grace_chars: int = 10
     candidate_unstable_penalty: int = 80
     natural_end_bonus: int = 12
+    allow_forced_cuts: bool = False
+    short_hard_min_chars: int = 4
     first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(18, 24, 40, True, False))
     next_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(12, 36, 72, False, True))
     structured_first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(22, 30, 48, False, False))
@@ -612,11 +626,16 @@ class SpeechChunker:
             raw_idx = i + 1
             chunk = clean_tts_text(text[:raw_idx])
             visible_len = len(clean_text(chunk))
-            if visible_len < window.min_chars:
-                continue
-
             is_hard = ch in self.config.hard_breaks
             is_soft = ch in self.config.soft_breaks
+            if visible_len < window.min_chars:
+                short_complete = bool(
+                    is_hard
+                    and visible_len >= self.config.short_hard_min_chars
+                    and not is_unstable_tail(chunk)
+                )
+                if not short_complete:
+                    continue
             if not is_hard:
                 if not is_soft:
                     continue
@@ -654,7 +673,11 @@ class SpeechChunker:
                     continue
                 return raw_idx
 
-        if best_idx is None and clean_len >= window.max_chars:
+        if (
+            self.config.allow_forced_cuts
+            and best_idx is None
+            and clean_len >= window.max_chars
+        ):
             forced_idx = self._find_forced_cut(text, window.max_chars)
             forced_chunk = clean_tts_text(text[:forced_idx])
             if forced_chunk and not is_unstable_tail(forced_chunk):
@@ -681,6 +704,236 @@ class SpeechChunker:
             if ch.isspace() or ch in self.config.soft_breaks or ch in self.config.hard_breaks:
                 return raw_idx
         return target_raw_idx
+
+
+class SpeechCommitContractError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechCommit:
+    """Internal TTS handoff; the content-derived hash must not enter telemetry."""
+
+    turn_id: str
+    response_generation: object
+    prefix_index: int
+    prefix_hash: str
+    text: str = field(repr=False)
+
+
+@dataclass
+class SpeechCommitGate:
+    """Bind shared chunk candidates to one current, immutable speech prefix."""
+
+    turn_id: str
+    response_generation: object
+    generation_is_current: Callable[[object], bool]
+    commit_allowed: Callable[[], bool] | None = None
+    memory_bound: bool = False
+    chunker: SpeechChunker = field(default_factory=SpeechChunker)
+    _safe_stream: str = field(default="", init=False, repr=False)
+    _pending: str = field(default="", init=False, repr=False)
+    _committed_prefix: str = field(default="", init=False, repr=False)
+    _next_prefix_index: int = field(default=0, init=False, repr=False)
+    _final_text: str | None = field(default=None, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _stale: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.turn_id = clean_text(self.turn_id)
+        if not self.turn_id:
+            raise ValueError("speech commit turn_id is required")
+        if self.response_generation is None:
+            raise ValueError("speech commit response_generation is required")
+        if not callable(self.generation_is_current):
+            raise TypeError("speech commit generation check is required")
+        if self.memory_bound and not callable(self.commit_allowed):
+            raise ValueError("memory-bound speech requires an explicit handoff barrier")
+
+    @property
+    def committed_prefix(self) -> str:
+        return self._committed_prefix
+
+    @property
+    def stale(self) -> bool:
+        return self._stale
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def push(self, safe_delta: str) -> list[SpeechCommit]:
+        if self._closed:
+            raise SpeechCommitContractError("speech commit gate is closed")
+        if safe_delta:
+            self._safe_stream += safe_delta
+            self._pending += safe_delta
+        if not self._generation_current():
+            self._invalidate()
+            return []
+        if self.memory_bound or not self._commit_is_allowed():
+            return []
+        if self._pending:
+            chunks = self.chunker.push(self._pending, max_chunks=None)
+            self._pending = ""
+        else:
+            chunks = self.chunker.push("", max_chunks=None)
+        return self._bind_chunks(chunks, final_text=None)
+
+    def observe_safe_delta(self, safe_delta: str) -> bool:
+        """Record post-policy speech text without making it speakable yet."""
+
+        if self._closed:
+            raise SpeechCommitContractError("speech commit gate is closed")
+        if not self._generation_current():
+            self._invalidate()
+            return False
+        visible_delta = self._canonical_prefix(safe_delta)
+        if visible_delta:
+            self._safe_stream = clean_text(
+                f"{self._safe_stream} {visible_delta}"
+            )
+        return True
+
+    def commit_candidate(self, text: str) -> list[SpeechCommit]:
+        """Bind one already-chunked, post-policy candidate to this turn."""
+
+        if self._closed:
+            raise SpeechCommitContractError("speech commit gate is closed")
+        if not self._generation_current():
+            self._invalidate()
+            return []
+        if not self._commit_is_allowed():
+            return []
+        speech_text = clean_tts_text(text)
+        if not speech_text:
+            return []
+        return self._bind_chunks([speech_text], final_text=None)
+
+    def validate_final(self, final_text: str) -> None:
+        """Close after proving every committed chunk is an immutable prefix."""
+
+        if self._closed:
+            if self._final_text is not None and final_text == self._final_text:
+                return
+            raise SpeechCommitContractError("speech commit gate is closed")
+        if not self._generation_current():
+            self._invalidate()
+            raise SpeechCommitContractError("speech response generation is stale")
+        if not self._commit_is_allowed():
+            raise SpeechCommitContractError(
+                "speech final validation is not authorized"
+            )
+        if self._final_text is not None and final_text != self._final_text:
+            raise SpeechCommitContractError("speech final text changed")
+        self._final_text = final_text
+        final_prefix = self._canonical_prefix(final_text)
+        if self._committed_prefix and not final_prefix.startswith(
+            self._committed_prefix
+        ):
+            raise SpeechCommitContractError(
+                "committed speech is not an immutable final prefix"
+            )
+        self._closed = True
+
+    def finish(self, final_text: str) -> list[SpeechCommit]:
+        if self._closed:
+            return []
+        if self._final_text is not None and final_text != self._final_text:
+            raise SpeechCommitContractError("speech final text changed")
+        self._final_text = final_text
+        if not self._generation_current():
+            self._invalidate()
+            return []
+        if not self._commit_is_allowed():
+            return []
+
+        final_prefix = self._canonical_prefix(final_text)
+        if self._committed_prefix and not final_prefix.startswith(
+            self._committed_prefix
+        ):
+            raise SpeechCommitContractError(
+                "committed speech is not an immutable final prefix"
+            )
+
+        if self.memory_bound:
+            self.chunker.buf = ""
+            chunks = self.chunker.push(final_text, max_chunks=None)
+        else:
+            chunks = self.chunker.push(self._pending, max_chunks=None)
+        self._pending = ""
+        chunks.extend(self.chunker.flush())
+        commits = self._bind_chunks(chunks, final_text=final_text)
+        self._closed = True
+        return commits
+
+    def cancel(self) -> None:
+        self._invalidate()
+
+    def _generation_current(self) -> bool:
+        try:
+            return bool(self.generation_is_current(self.response_generation))
+        except Exception:
+            return False
+
+    def _commit_is_allowed(self) -> bool:
+        if self.commit_allowed is None:
+            return True
+        try:
+            return bool(self.commit_allowed())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _canonical_prefix(text: str) -> str:
+        return clean_text(
+            strip_omnivoice_tags(clean_tts_text(text))
+        )
+
+    def _bind_chunks(
+        self,
+        chunks: list[str],
+        *,
+        final_text: str | None,
+    ) -> list[SpeechCommit]:
+        source_prefix = self._canonical_prefix(
+            self._safe_stream if final_text is None else final_text
+        )
+        commits: list[SpeechCommit] = []
+        for text in chunks:
+            if not self._generation_current():
+                self._invalidate()
+                break
+            speech_text = clean_tts_text(text)
+            visible_chunk = self._canonical_prefix(speech_text)
+            if not visible_chunk:
+                continue
+            candidate_prefix = clean_text(
+                f"{self._committed_prefix} {visible_chunk}"
+            )
+            if not source_prefix.startswith(candidate_prefix):
+                raise SpeechCommitContractError(
+                    "speech candidate is not a safe output prefix"
+                )
+            commit = SpeechCommit(
+                turn_id=self.turn_id,
+                response_generation=self.response_generation,
+                prefix_index=self._next_prefix_index,
+                prefix_hash=hashlib.sha256(
+                    candidate_prefix.encode("utf-8")
+                ).hexdigest(),
+                text=speech_text,
+            )
+            commits.append(commit)
+            self._committed_prefix = candidate_prefix
+            self._next_prefix_index += 1
+        return commits
+
+    def _invalidate(self) -> None:
+        self._stale = True
+        self._closed = True
+        self._pending = ""
+        self.chunker.buf = ""
 
 
 def split_tts_sentences(
@@ -1284,6 +1537,11 @@ class TtsPlaybackManager:
 
         def on_play_start() -> None:
             nonlocal did_start
+            if self.tracker.registry.generation(guild_id) is playback_generation:
+                mark_voice_latency_stage(
+                    request.metrics,
+                    "playback_first_write",
+                )
             did_start = True
             mark_tts_playback_summary_state(request.metrics, started=True)
 
@@ -1295,7 +1553,7 @@ class TtsPlaybackManager:
                 "source_type": type(request.source).__name__,
             }
             trace_payload.update(request.trace_payload)
-            completed = await play_audio_source(
+            transport_completed = await play_audio_source(
                 request.vc,
                 request.source,
                 on_play_start=on_play_start,
@@ -1307,6 +1565,7 @@ class TtsPlaybackManager:
                 ),
                 trace_payload=trace_payload,
             )
+            completed = bool(transport_completed and did_start)
             return completed
         finally:
             if request.cleanup_source:
@@ -1384,6 +1643,11 @@ class TtsPlaybackManager:
 
         def on_play_start() -> None:
             nonlocal did_speak
+            if self.tracker.registry.generation(guild_id) is playback_generation:
+                mark_voice_latency_stage(
+                    request.metrics,
+                    "playback_first_write",
+                )
             did_speak = True
             mark_tts_playback_summary_state(request.metrics, started=True)
 
@@ -1782,6 +2046,38 @@ async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
         await asyncio.sleep(0.05)
 
 
+class _PlaybackReceiptAudioSource(discord.AudioSource):
+    def __init__(
+        self,
+        source: discord.AudioSource,
+        on_first_nonzero_frame: Callable[[], None],
+    ) -> None:
+        self._source = source
+        self._on_first_nonzero_frame = on_first_nonzero_frame
+        self._sent_nonzero_frame = False
+
+    def read(self) -> bytes:
+        return self._source.read()
+
+    def mark_packet_sent(self, chunk: bytes) -> None:
+        raw_mark_packet_sent = getattr(self._source, "mark_packet_sent", None)
+        try:
+            if callable(raw_mark_packet_sent):
+                raw_mark_packet_sent(chunk)
+        finally:
+            if chunk and not self._sent_nonzero_frame and any(chunk):
+                self._sent_nonzero_frame = True
+                self._on_first_nonzero_frame()
+
+    def is_opus(self) -> bool:
+        return self._source.is_opus()
+
+    def cleanup(self) -> None:
+        cleanup = getattr(self._source, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
+
+
 async def play_audio_source(
     vc: discord.VoiceClient,
     source: discord.AudioSource,
@@ -1791,6 +2087,7 @@ async def play_audio_source(
     trace_payload: dict[str, Any] | None = None,
     timeout_sec: float = OMNIVOICE_TIMEOUT_SEC,
 ) -> bool:
+    raw_source = source
     payload = dict(trace_payload or {})
     payload.setdefault("source_type", type(source).__name__)
     timeout_sec = max(0.001, float(timeout_sec))
@@ -1833,12 +2130,21 @@ async def play_audio_source(
             playback_error[0] = err
         loop.call_soon_threadsafe(done.set)
 
+    if on_play_start is not None:
+        def dispatch_play_start() -> None:
+            loop.call_soon_threadsafe(on_play_start)
+
+        source = _PlaybackReceiptAudioSource(source, dispatch_play_start)
+
     try:
-        if on_play_start is not None:
-            on_play_start()
         _log_turn_event("discord_playback_play_invoked", **payload)
         vc.play(source, after=after_play)
         await asyncio.wait_for(done.wait(), timeout=timeout_sec)
+    except asyncio.CancelledError:
+        if getattr(vc, "source", None) is source:
+            with contextlib.suppress(Exception):
+                vc.stop()
+        raise
     except asyncio.TimeoutError:
         if getattr(vc, "source", None) is source:
             with contextlib.suppress(Exception):
@@ -1880,19 +2186,22 @@ async def play_audio_source(
         )
         raise playback_error[0]
 
-    if isinstance(source, (OmniVoicePCMStream, QueuedAudioSource)) and source.error is not None:
+    if (
+        isinstance(raw_source, (OmniVoicePCMStream, QueuedAudioSource))
+        and raw_source.error is not None
+    ):
         _log_turn_event(
             "discord_playback_exception",
             **merge_log_event_payload(
                 explicit={
                     "stage": "source_error",
                     "error": "discord_playback_failed",
-                    "error_type": type(source.error).__name__,
+                    "error_type": type(raw_source.error).__name__,
                 },
                 extra=payload,
             ),
         )
-        raise source.error
+        raise raw_source.error
 
     _log_turn_event("discord_playback_finished", **payload)
     return True
@@ -1971,7 +2280,7 @@ class StreamingVoiceDelivery:
 
 
 class LazyStreamingVoiceDelivery:
-    """Buffer chunks, then start playback after the memory-lease handoff."""
+    """Start ordinary speech eagerly; buffer memory-bound speech to handoff."""
 
     def __init__(
         self,
@@ -1982,6 +2291,7 @@ class LazyStreamingVoiceDelivery:
         metrics: dict,
         log_stage: Callable[..., Any] | None = None,
         prefetch_chunks: int | None = None,
+        eager_start_allowed: Callable[[], bool] | None = None,
     ) -> None:
         self.sentence_queue = sentence_queue
         self.tts_sink = tts_sink
@@ -1990,6 +2300,7 @@ class LazyStreamingVoiceDelivery:
         self.metrics = metrics
         self._log_stage = log_stage
         self._prefetch_chunks = prefetch_chunks
+        self._eager_start_allowed = eager_start_allowed
 
     def _ensure_started(self) -> asyncio.Task:
         if self.playback_task is None:
@@ -1997,12 +2308,12 @@ class LazyStreamingVoiceDelivery:
         return self.playback_task
 
     async def on_chunk(self, text: str) -> None:
-        # The producer can still hold the memory-deletion read lease while
-        # yielding model chunks. Starting a child playback task here would
-        # make that task contend with its parent for the same exclusive
-        # lease. Buffer until ``close`` performs the explicit handoff after
-        # upstream response consumption has finished.
         await self.tts_sink.on_chunk(text)
+        if (
+            self._eager_start_allowed is not None
+            and self._eager_start_allowed()
+        ):
+            self._ensure_started()
 
     async def close(self, final_text: str) -> None:
         self._ensure_started()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import os
 import unittest
@@ -538,6 +539,55 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(health["observability"]["exceptions"], expected)
         self.assertEqual(health["overallState"], "up")
+
+    def test_public_health_keeps_only_content_free_stall_metrics(self) -> None:
+        raw = {
+            "observability": {
+                "exceptions": {
+                    "summary": {},
+                    "sources": {
+                        "conversationContinuity": {
+                            "id": "conversationContinuity",
+                            "state": "degraded",
+                            "available": True,
+                            "stale": False,
+                            "errorCount": 0,
+                            "hasCurrentError": False,
+                            "completedTurnCommit": {
+                                "schema": (
+                                    "conversation_continuity."
+                                    "commit-metrics.v1"
+                                ),
+                                "state": "warning",
+                                "inFlight": True,
+                                "inFlightCount": 1,
+                                "stallAgeMs": 800.0,
+                                "stalled": True,
+                                "artifactDeadlineMs": 500.0,
+                                "warningCode": (
+                                    "conversation_continuity_commit_stalled"
+                                ),
+                                "privateText": "hidden request",
+                            },
+                        }
+                    },
+                    "recentErrors": [],
+                    "warnings": [],
+                }
+            }
+        }
+
+        public = public_runtime_health_snapshot(raw)
+        metrics = public["observability"]["exceptions"]["sources"][
+            "conversationContinuity"
+        ]["completedTurnCommit"]
+
+        self.assertTrue(metrics["inFlight"])
+        self.assertEqual(metrics["inFlightCount"], 1)
+        self.assertEqual(metrics["stallAgeMs"], 800.0)
+        self.assertTrue(metrics["stalled"])
+        self.assertEqual(metrics["artifactDeadlineMs"], 500.0)
+        self.assertNotIn("privateText", json.dumps(public))
 
     async def test_all_services_up_returns_legacy_ready_flags(self) -> None:
         manifest = load_service_manifest(force=True)

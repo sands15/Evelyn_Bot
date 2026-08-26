@@ -1,12 +1,15 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-08-02
+Last reviewed: 2026-08-25
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
 implemented behavior.
 
 ## Project Navigation And Working Memory
+
+- `../plan.md`
+  - 현재 실행 우선순위, 완료 조건, 보류 원칙을 관리하는 단일 작업 계획.
 
 - `docs/00_EVELYN_HOME.md`
   - 공식 Obsidian Vault의 탐색 시작점. 현재 사실을 복제하지 않고 권위 문서로
@@ -53,6 +56,10 @@ implemented behavior.
 - `docs/CONTEXT_PIPELINE_TARGET.md`
   - Partly current: includes implemented context-pipeline status, but the file
     also contains target direction.
+
+- `docs/GPU1_CONCURRENCY_BENCHMARK.md`
+  - Fast Main TTFT, Qwen timeout/latency, STT final latency와 GPU1 memory를 같은
+    동시부하에서 측정하는 독립 report 계약과 승인 후 live 실행 절차.
 
 - `docs/RUNTIME_ARTIFACTS_RETENTION.md`
   - Current retention guidance for runtime artifacts.
@@ -187,11 +194,19 @@ These describe desired end states. Do not treat them as current runtime facts
 without checking code or current docs.
 
 - `docs/EVELYN_ASSISTANT_TARGET_ARCHITECTURE.md`
+- `docs/MAIN_LLM_LATENCY_TARGET_ARCHITECTURE.md`
+  - STT final 이후 검증된 첫 답변 PCM까지의 end-to-end SLO, Prompt ABI와 cache proof,
+    Main/TTS GPU realtime lane, irreversible speech commit, privacy-safe 계측과
+    LLM 후보 생성기·고정 하네스·사람 승격 경계를 정의한다.
 - `docs/EVELYN_CURRENT_STRUCTURE_LAYER_MAPPING.md`
 - `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
 - `docs/GROWTH_ORIENTED_BOT_ARCHITECTURE.md`
 - `docs/GROWTH_ORIENTED_BOT_REFACTOR_ROADMAP.md`
 - `docs/GROWTH_ORIENTED_BOT_COMPLETION_CHECKLIST.md`
+- `docs/KOREAN_ASR_TARGET_ARCHITECTURE.md`
+  - Local Voice와 Discord의 기존 admission 경계를 유지하면서 단일 capture owner, stateful
+    Qwen streaming, partial 안정화, 조건부 final 재검증과 privacy-safe rollout을 정의하고
+    2026-08-15 source 구현 checkpoint와 남은 live/Discord packet-time 단계를 구분한다.
 - `docs/MINECRAFT_AGENT_CODE_FIRST_ARCHITECTURE.md`
 - `docs/MINECRAFT_BOT_TARGET_ARCHITECTURE.md`
 

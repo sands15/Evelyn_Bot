@@ -12,6 +12,19 @@ It is for project knowledge and navigation. It is not Evelyn's runtime memory
 store, and it must not receive private transcripts, credentials, generated
 memory records, or runtime artifacts.
 
+## Solution Quality
+
+- Default to root-cause, end-state solutions that include verification,
+  operational safety, and regression prevention.
+- Do not present temporary mitigations as the main solution. Use them only when
+  explicitly requested or needed to restore service, label them temporary, and
+  state their removal criteria.
+- For performance work, optimize the end-to-end user SLO while preserving
+  quality, safety, durability, and privacy instead of optimizing one subsystem
+  in isolation.
+- Simplicity means the minimum necessary end-state architecture, not a knowingly
+  incomplete fix.
+
 ## Obsidian Working-Memory Loop
 
 Use `docs/` as external project memory while working. Access the Markdown files

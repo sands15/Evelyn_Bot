@@ -35,6 +35,18 @@ class DeliveryEntryCompositionTests(unittest.TestCase):
             start_task()
             current.assert_called_once_with()
             d.create_scoped_task.call_args.args[0].close()
+    def test_streaming_eager_predicates_fail_closed_for_memory_exposure(self):
+        c,d=self.build()
+        with patch.object(delivery_entry,"current_memory_exposure_position",return_value="E"):
+            c.start_streaming_local_voice_delivery(metrics={},turn_id="t",session_key="s",turn_scope=None)
+            local_predicate=d.streaming_delivery_factory.call_args.kwargs["eager_start_allowed"]
+            self.assertFalse(local_predicate())
+            c.start_streaming_voice_delivery("vc",metrics={},turn_id="t",session_key="s",turn_scope=None)
+            discord_predicate=c.discord.request_factory.call_args.kwargs["eager_start_allowed"]
+            self.assertFalse(discord_predicate())
+        with patch.object(delivery_entry,"current_memory_exposure_position",return_value=None):
+            self.assertTrue(local_predicate())
+            self.assertTrue(discord_predicate())
     def test_local_control_delegates(self):
         c,_=self.build()
         with patch("evelyn_core.delivery_entry_composition.schedule_local_control_tts_from_runtime",return_value="task") as runtime:

@@ -151,7 +151,7 @@ class AutonomyEngine:
         *,
         guild_id: int,
         executor: AutonomyExecutor,
-        notify: Callable[[str], Awaitable[None]] | None = None,
+        notify: Callable[..., Awaitable[None]] | None = None,
         poll_interval_sec: float = 4.0,
         get_authorized_actions: Callable[[int], list[str]] | None = None,
         authorize_action: Callable[..., dict[str, Any]] | None = None,
@@ -179,6 +179,33 @@ class AutonomyEngine:
         self._lock = asyncio.Lock()
         self._executor_connected = False
         self._blocked_counts: dict[str, int] = defaultdict(int)
+        self._failure_notification_attempted = False
+        self._failure_notification_action_run_id = ""
+
+    async def _notify_failure_once(self, code: str) -> None:
+        if self._failure_notification_attempted:
+            return
+        self._failure_notification_attempted = True
+        self._failure_notification_action_run_id = secrets.token_hex(12)
+        if self.notify is None:
+            return
+        text = f"[자율봇] 오류: {code}"
+        try:
+            inspect.signature(self.notify).bind(
+                text,
+                action_run_id=self._failure_notification_action_run_id,
+            )
+        except (TypeError, ValueError):
+            await self.notify(text)
+            return
+        await self.notify(
+            text,
+            action_run_id=self._failure_notification_action_run_id,
+        )
+
+    def _reset_failure_notification_episode(self) -> None:
+        self._failure_notification_attempted = False
+        self._failure_notification_action_run_id = ""
 
     @property
     def memory_scope_key(self) -> str:
@@ -260,11 +287,15 @@ class AutonomyEngine:
         }
         write_json_file(path, payload)
 
-    async def start(self) -> None:
+    async def start(
+        self,
+        *,
+        is_current: Callable[[], bool] | None = None,
+    ) -> bool:
         async with self._lock:
             if self._task is not None and not self._task.done():
                 if self.state.enabled:
-                    return
+                    return True
                 task = self._task
                 self._task = None
                 task.cancel()
@@ -277,17 +308,7 @@ class AutonomyEngine:
             if not self.state.enabled and self._executor_connected:
                 await self._disconnect_executor_once()
             self.load_persisted_state()
-            authorized_actions = (
-                self.get_authorized_actions(self.guild_id)
-                if self.get_authorized_actions is not None
-                else []
-            )
-            supported = set(self.default_allowed_actions())
-            authorized_actions = [
-                action
-                for action in authorized_actions
-                if action in supported
-            ]
+            authorized_actions = self._current_authorized_actions()
             if not authorized_actions:
                 self.state.enabled = False
                 self.state.status = "authorization_required"
@@ -296,12 +317,44 @@ class AutonomyEngine:
                 self.persist_state()
                 raise PermissionError("autonomy_authorization_required")
             await self._connect_executor_once()
+            try:
+                start_is_current = (
+                    is_current is None or bool(is_current())
+                )
+            except Exception:
+                start_is_current = False
+            if not start_is_current:
+                await self._disconnect_executor_once()
+                return False
+            authorized_actions = self._current_authorized_actions()
+            if not authorized_actions:
+                await self._disconnect_executor_once()
+                self.state.enabled = False
+                self.state.status = "authorization_required"
+                self.state.allowed_actions = []
+                self.state.updated_at = time.time()
+                self.persist_state()
+                raise PermissionError("autonomy_authorization_required")
             self.state.enabled = True
             self.state.status = "running"
             self.state.allowed_actions = list(dict.fromkeys(authorized_actions))
             self.state.updated_at = time.time()
             self.persist_state()
             self._task = asyncio.create_task(self._run_loop())
+            return True
+
+    def _current_authorized_actions(self) -> list[str]:
+        authorized_actions = (
+            self.get_authorized_actions(self.guild_id)
+            if self.get_authorized_actions is not None
+            else []
+        )
+        supported = set(self.default_allowed_actions())
+        return [
+            action
+            for action in authorized_actions
+            if action in supported
+        ]
 
     async def stop(self) -> None:
         async with self._lock:
@@ -350,14 +403,14 @@ class AutonomyEngine:
                     self.state.status = "error"
                     self.state.updated_at = time.time()
                     self.persist_state()
-                    if self.notify is not None:
-                        with contextlib.suppress(Exception):
-                            await self.notify(
-                                "[자율봇] 오류: "
-                                f"{AUTONOMY_CYCLE_FAILED}"
-                            )
+                    with contextlib.suppress(Exception):
+                        await self._notify_failure_once(
+                            AUTONOMY_CYCLE_FAILED
+                        )
                     await asyncio.sleep(self.poll_interval_sec)
                     continue
+                if cycle_result.state.status != "error":
+                    self._reset_failure_notification_episode()
                 await asyncio.sleep(self.next_poll_delay(cycle_result))
         finally:
             if not self.state.enabled:
@@ -440,6 +493,14 @@ class AutonomyEngine:
             if planned is not None:
                 _mc_log("[MC PLAN]", asdict(planned))
         step_result = await self.execute_next_step(planned)
+        post_effect_cancellation = bool(
+            isinstance(step_result, dict)
+            and step_result.get("_post_effect_cancellation") is True
+        )
+        post_effect_integrity_failure = bool(
+            isinstance(step_result, dict)
+            and step_result.get("_post_effect_integrity_failure") is True
+        )
         memory_bound = current_memory_exposure_position() is not None
         history_derived = memory_bound and active_environment != "minecraft"
         if isinstance(step_result, dict) and not history_derived:
@@ -497,12 +558,15 @@ class AutonomyEngine:
         )
         self.state.updated_at = time.time()
         self.persist_state()
-        if executor_failed and self.notify is not None:
+        if executor_failed:
             with contextlib.suppress(Exception):
-                await self.notify(
-                    "[자율봇] 오류: "
-                    f"{AUTONOMY_EXECUTOR_EXECUTE_FAILED}"
+                await self._notify_failure_once(
+                    AUTONOMY_EXECUTOR_EXECUTE_FAILED
                 )
+        if post_effect_integrity_failure:
+            raise MemoryDeletionJournalIntegrityError()
+        if post_effect_cancellation:
+            raise asyncio.CancelledError()
         return AutonomyCycleResult(
             observation=safe_observation,
             needs=[] if history_derived else needs,
@@ -959,15 +1023,21 @@ class AutonomyEngine:
                 authorization_grant_id
             )
             audit_result["_action_run_id"] = action_run_id
-            recorded = self.record_action_outcome(
-                self.guild_id,
-                action_key,
-                audit_result,
-            )
+            try:
+                recorded = self.record_action_outcome(
+                    self.guild_id,
+                    action_key,
+                    audit_result,
+                )
+            except Exception:
+                recorded = False
             failure_reason = ""
-            if recorded is False or (
-                isinstance(recorded, dict)
-                and recorded.get("recorded") is not True
+            if not (
+                recorded is True
+                or (
+                    isinstance(recorded, dict)
+                    and recorded.get("recorded") is True
+                )
             ):
                 failure_reason = "authorization_audit_unavailable"
             elif (
@@ -1000,6 +1070,17 @@ class AutonomyEngine:
                     "reportedStatus": result.get("status"),
                     "step": result.get("step"),
                     "verified": False,
+                    **(
+                        {"_post_effect_cancellation": True}
+                        if result.get("_post_effect_cancellation") is True
+                        else {}
+                    ),
+                    **(
+                        {"_post_effect_integrity_failure": True}
+                        if result.get("_post_effect_integrity_failure")
+                        is True
+                        else {}
+                    ),
                 }
         if plan is not None:
             plan.cursor += 1
@@ -1150,6 +1231,24 @@ class AutonomyEngine:
                             "reportedStatus": result.get("status"),
                             "step": step,
                             "verified": False,
+                            **(
+                                {"_post_effect_cancellation": True}
+                                if result.get("_post_effect_cancellation")
+                                is True
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "_post_effect_integrity_failure": (
+                                        True
+                                    )
+                                }
+                                if result.get(
+                                    "_post_effect_integrity_failure"
+                                )
+                                is True
+                                else {}
+                            ),
                         },
                         authorization_grant_id=(
                             authorization_grant_id

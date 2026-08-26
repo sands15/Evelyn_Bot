@@ -34,6 +34,26 @@ class MemoryUpdateRuntimeDeps:
     log: Callable[..., Any] = print
 
 
+def _track_memory_task_drain(
+    guild_id: int,
+    task: asyncio.Task,
+    *,
+    deps: MemoryUpdateRuntimeDeps,
+) -> None:
+    if task.done():
+        return
+    drain_key = f"guild:{guild_id}:memory-drain:{id(task)}"
+    if deps.background_memory_tasks.get(drain_key) is task:
+        return
+    deps.background_memory_tasks[drain_key] = task
+
+    def release(completed: asyncio.Task) -> None:
+        if deps.background_memory_tasks.get(drain_key) is completed:
+            deps.background_memory_tasks.pop(drain_key, None)
+
+    task.add_done_callback(release)
+
+
 def schedule_memory_update_from_runtime(
     guild_id: int,
     user_text: str,
@@ -135,6 +155,7 @@ def schedule_memory_update_from_runtime(
         existing = deps.background_memory_tasks.get(memory_task_key)
         if existing is not None and not existing.done() and schedule_plan.replace_existing:
             existing.cancel()
+            _track_memory_task_drain(guild_id, existing, deps=deps)
 
         async def _batched_memory_refresh() -> None:
             try:
@@ -219,5 +240,18 @@ def schedule_memory_update_from_runtime(
         log=deps.log,
         writebehind_mode=schedule_plan.writebehind_mode,
     )
-    deps.create_turn_scoped_task(_memory_writebehind(), turn_scope=turn_scope)
+    task = deps.create_turn_scoped_task(
+        _memory_writebehind(),
+        turn_scope=turn_scope,
+    )
+    memory_task_key = (
+        f"guild:{guild_id}:memory-writebehind:normal:{id(task)}"
+    )
+    deps.background_memory_tasks[memory_task_key] = task
+
+    def _discard_memory_task(done_task: asyncio.Task) -> None:
+        if deps.background_memory_tasks.get(memory_task_key) is done_task:
+            deps.background_memory_tasks.pop(memory_task_key, None)
+
+    task.add_done_callback(_discard_memory_task)
     return decision_payload

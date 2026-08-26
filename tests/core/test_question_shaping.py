@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 import unittest
 from dataclasses import dataclass
@@ -16,6 +17,11 @@ from evelyn_core.question_shaping import (  # noqa: E402
     enforce_question_limits,
     filter_stream_chunk_for_question_limits,
     split_answer_sentences,
+)
+from evelyn_core.tts_playback import SpeechChunker, SpeechCommitGate  # noqa: E402
+from evelyn_core.voice_stream_chunks import (  # noqa: E402
+    emit_stream_delta_chunks,
+    flush_streamed_answer_chunks,
 )
 
 
@@ -193,6 +199,47 @@ class QuestionShapingTests(unittest.TestCase):
             self.assertGreaterEqual(filter_pos, 0)
             self.assertGreater(delivery_pos, filter_pos)
             self.assertIn("if not chunk:", source)
+
+    def test_memory_bound_stream_waits_for_commit_barrier(self) -> None:
+        generation = object()
+        allowed = False
+        spoken: list[str] = []
+        answer = "기억을 반영한 답이야."
+        gate = SpeechCommitGate(
+            turn_id="voice-memory-turn",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+            commit_allowed=lambda: allowed,
+            memory_bound=True,
+        )
+        chunker = SpeechChunker()
+
+        async def on_sentence(text: str) -> None:
+            spoken.append(text)
+
+        async def run() -> None:
+            nonlocal allowed
+            emitted = await emit_stream_delta_chunks(
+                answer,
+                speech_chunker=chunker,
+                on_sentence=on_sentence,
+                speech_commit_gate=gate,
+            )
+            self.assertFalse(emitted)
+            self.assertEqual(spoken, [])
+            allowed = True
+            await flush_streamed_answer_chunks(
+                answer,
+                speech_chunker=chunker,
+                on_sentence=on_sentence,
+                emitted_any=False,
+                speech_commit_gate=gate,
+            )
+
+        asyncio.run(run())
+
+        self.assertEqual(spoken, [answer])
+        self.assertTrue(gate.closed)
 
 
 if __name__ == "__main__":

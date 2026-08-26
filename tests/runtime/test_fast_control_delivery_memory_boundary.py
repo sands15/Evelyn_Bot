@@ -24,7 +24,10 @@ REPO_ROOT = next(
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
-sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
+    sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 from evelyn_core.conversation_memory_exposure import (  # noqa: E402
@@ -264,8 +267,22 @@ class FastControlDeliveryMemoryBoundaryTests(
         app = fast_api.create_app(
             enable_minecraft_world_lease_owner=False
         )
+        app[fast_api.FAST_MAIN_LLM_WARMUP_STATE_KEY].update(
+            {
+                "status": "done",
+                "ready": True,
+                "cacheProof": True,
+                "promptAbiExact": True,
+                "promptAbiProductionMatch": True,
+                "verifiedAtMonotonic": fast_api.time.monotonic(),
+            }
+        )
         client = TestClient(TestServer(app))
         with patch.object(
+            fast_api,
+            "warm_fast_main_llm_until_ready",
+            new=AsyncMock(return_value=None),
+        ), patch.object(
             fast_api,
             "plan_fast_tool_request_for_turn",
             new=AsyncMock(return_value=None),
@@ -325,8 +342,22 @@ class FastControlDeliveryMemoryBoundaryTests(
         app = fast_api.create_app(
             enable_minecraft_world_lease_owner=False
         )
+        app[fast_api.FAST_MAIN_LLM_WARMUP_STATE_KEY].update(
+            {
+                "status": "done",
+                "ready": True,
+                "cacheProof": True,
+                "promptAbiExact": True,
+                "promptAbiProductionMatch": True,
+                "verifiedAtMonotonic": fast_api.time.monotonic(),
+            }
+        )
         client = TestClient(TestServer(app))
         with patch.object(
+            fast_api,
+            "warm_fast_main_llm_until_ready",
+            new=AsyncMock(return_value=None),
+        ), patch.object(
             fast_api,
             "consume_local_voice_admission",
             return_value=("local handoff", None, None),

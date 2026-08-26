@@ -1,7 +1,7 @@
 # Dependency, Configuration, and Credential Hardening
 
 Document status: **Current**
-Last reviewed: 2026-08-03 KST
+Last reviewed: 2026-08-25 KST
 
 ## Dependency compatibility result
 
@@ -11,28 +11,48 @@ Last reviewed: 2026-08-03 KST
 | --- | --- | --- | --- |
 | Root/Windows and CI | `torch==2.13.0` | `4.57.6` | Torch finding removed from the root audit exception list |
 | Discord image | `torch==2.13.0` | not installed directly | CPU runtime pinned to the patched Torch release |
-| STT CUDA 12.8 image | `torch/torchaudio==2.11.0+cu128` | `4.57.6` | newest matched CUDA 12.8 family currently published |
+| STT CUDA 12.8 image | `torch/torchaudio==2.9.1+cu128` | `4.57.6` | `qwen-asr==0.0.6` streaming compatibility with `vllm==0.14.0`; image smoke pending |
 | Vision CUDA 12.8 image | `torch==2.11.0+cu128`, `torchvision==0.26.0+cu128` | `5.14.1` | matched CUDA family and current Transformers |
-| OmniVoice image | `torch/torchaudio==2.8.0+cu128` | image-owned | default TTS; `omnivoice==0.1.5` and SHA-256-gated server source |
+| OmniVoice image | `torch/torchaudio==2.8.0+cu129`, `torchcodec==0.7.0+cu129` | `5.8.1` | default TTS; `omnivoice==0.1.5`, FlashInfer 0.6.15.post1 and SHA-256-gated server source |
 | VoxCPM compatibility image | `torch/torchaudio==2.8.0` | image-owned | opt-in diagnostics only; unchanged pending exact-latent and FlashAttention model smoke |
 
 `qwen-asr==0.0.6` declares an exact dependency on
 `transformers==4.57.6`. A dry resolver check rejects combining it with
 Transformers 5.14.1. The STT service therefore keeps 4.57.6 until Qwen-ASR
-publishes a compatible release. Vision is isolated and can use 5.14.1.
+publishes a compatible release. Its official vLLM extra also pins
+`vllm==0.14.0`, whose CUDA requirements pin Torch/Torchaudio 2.9.1. The STT
+image is therefore isolated on that combination for the new in-process Qwen
+streaming API, while Vision remains isolated and can use 5.14.1. Source and
+resolver contracts are updated, but the revised STT image has not yet been
+built, loaded, or GPU-smoke-tested.
 
-The official CUDA 12.8 index currently stops at Torch/Torchaudio 2.11 and
-Torchvision 0.26. Root/CPU runtimes can use Torch 2.13, but CUDA services
-cannot claim the same remediation until compatible CUDA wheels and model
-smoke evidence exist.
+Root/CPU runtimes use Torch 2.13. Vision remains on its matched CUDA 12.8
+Torch 2.11/Torchvision 0.26 family, while STT deliberately uses the older
+vLLM-compatible pair. Neither CUDA service may claim the root remediation
+without compatible wheels and model smoke evidence. The vLLM pin should be
+revisited when Qwen publishes a tested newer extra; Evelyn invokes the
+in-process model API and does not expose vLLM's standalone HTTP/media-fetch
+surface.
 
 OmniVoice does not install mutable server `main`. The image copies only the
 external checkout's `omnivoice_server/` package through a named build context,
 copies only four explicit Python globs, compares the exact 20-file set and validates every
 SHA-256 from `docker/omnivoice_source.sha256`. Runtime dependency pins cover the
 direct dependencies only. Startup also verifies all 13 required paths in the pinned model
-snapshot against `docker/omnivoice_model.sha256`; transitive wheels and the CUDA base image
-digest remain unlocked, so this is not described as a fully reproducible image.
+snapshot against `docker/omnivoice_model.sha256`. The CUDA 12.9.2 base digest and
+`libnpp-12-9=12.4.1.87-1` are fixed; transitive wheels are not fully locked, so this is not
+described as a fully reproducible image.
+
+The image keeps OmniVoice 0.1.5 and grafts only the reviewed
+`omnivoice_flashinfer.py` from signed commit
+`28bc0889d92110491d726a9c79f26a895db5a074`; the module and upstream license use Docker
+`ADD --checksum`. `flashinfer-python==0.6.15.post1`, `flashinfer-cubin==0.6.15.post1` and its
+CUDA 12.9 JIT-cache wheel are installed from exact URLs with SHA-256 fragments.
+The image build assertion checks Torch, Torchaudio, TorchCodec, and the FlashInfer
+Python/Cubin/JIT packages. `FLASHINFER_DISABLE_JIT=1`, concurrency 1, three bounded graph
+buckets, and the Torch/CUDA/FlashInfer Python/JIT/backend fields exposed by runtime health are
+fail-closed. These direct hashes do not lock FlashInfer's
+transitive wheels; a Linux hash lock remains a future reproducibility hardening item.
 
 The model cache mount is limited to `hub/`, read-only, and loaded offline. It must contain
 revision `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`; readiness also requires that exact

@@ -9,9 +9,12 @@ from .discord_voice_connection_runtime import (
     wait_for_internal_voice_reconnect_from_runtime,
 )
 from .omnivoice_source_runtime import create_omnivoice_source_from_runtime
+from .observability_metrics import VoiceLatencyTrace
 from .stt_text_runtime import (
+    DeferredPartialTranscript,
     build_partial_stt_window_from_runtime,
     choose_full_stt_candidate_from_runtime,
+    commit_deferred_partial_transcript_from_runtime,
     commit_stable_transcript_from_runtime,
     detect_wake_word_sync_from_runtime,
     get_partial_transcript_from_runtime,
@@ -38,9 +41,15 @@ from .voice_timing_runtime import (
     log_voice_stage_from_runtime,
     should_log_voice_timing_from_runtime,
 )
+from .voice_input_lease import (
+    acquire_discord_voice_input_lease,
+    release_discord_voice_input_lease,
+)
 
 
 TARGET_RATE = 16000
+VOICE_LISTENER_REARM_ATTEMPTS = 3
+VOICE_LISTENER_REARM_DELAY_SEC = 0.5
 DepsFactory = Callable[[], Any]
 
 
@@ -83,6 +92,8 @@ class VoiceSupportCompositionDeps:
     voice_channel_type: type
     now: Callable[[], float]
     log: Callable[..., Any]
+    acquire_voice_input_lease: Callable[[], Any] | None = None
+    release_voice_input_lease: Callable[[str], Any] | None = None
 
 
 class VoiceSupportComposition:
@@ -91,6 +102,164 @@ class VoiceSupportComposition:
     def __init__(self, deps: VoiceSupportCompositionDeps) -> None:
         self.deps = deps
         self._guild_voice_locks: dict[int, asyncio.Lock] = {}
+        self._listener_rearm_tasks: dict[
+            tuple[int, int, int], asyncio.Task[Any]
+        ] = {}
+        self._listener_rearm_generations: dict[tuple[int, int, int], int] = {}
+        self._listener_rearm_attempts: dict[tuple[int, int, int], int] = {}
+
+    def _schedule_listener_rearm(
+        self,
+        guild: Any,
+        target_channel: Any,
+        voice_client: Any,
+        listener_generation: int,
+    ) -> None:
+        target_channel_id = int(getattr(target_channel, "id", 0) or 0)
+        rearm_key = (int(guild.id), target_channel_id, id(voice_client))
+        if (
+            guild.voice_client is not voice_client
+            or getattr(getattr(voice_client, "channel", None), "id", None)
+            != target_channel_id
+            or getattr(voice_client, "_listener_generation", None)
+            != listener_generation
+        ):
+            return
+        self._listener_rearm_generations[rearm_key] = listener_generation
+        current = self._listener_rearm_tasks.get(rearm_key)
+        if current is not None and not current.done():
+            return
+        if (
+            self._listener_rearm_attempts.get(rearm_key, 0)
+            >= VOICE_LISTENER_REARM_ATTEMPTS
+        ):
+            self.deps.log(
+                "[VOICE LISTENER REARM FAIL] "
+                f"guild={guild.id} channel={target_channel_id} "
+                "errorType=RuntimeError"
+            )
+            return
+        task = asyncio.create_task(
+            self._rearm_listener_after_failure(
+                guild,
+                target_channel,
+                voice_client,
+                rearm_key,
+            ),
+            name="discord-voice-listener-rearm",
+        )
+        self._listener_rearm_tasks[rearm_key] = task
+
+        def consume_result(done: asyncio.Task[Any]) -> None:
+            if self._listener_rearm_tasks.get(rearm_key) is done:
+                self._listener_rearm_tasks.pop(rearm_key, None)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self.deps.log(
+                    "[VOICE LISTENER REARM FAIL] "
+                    f"errorType={type(exc).__name__}"
+                )
+
+        task.add_done_callback(consume_result)
+
+    async def _rearm_listener_after_failure(
+        self,
+        guild: Any,
+        target_channel: Any,
+        voice_client: Any,
+        rearm_key: tuple[int, int, int],
+    ) -> None:
+        last_error: Exception | None = None
+        target_channel_id = getattr(target_channel, "id", None)
+        while (
+            self._listener_rearm_attempts.get(rearm_key, 0)
+            < VOICE_LISTENER_REARM_ATTEMPTS
+        ):
+            listener_generation = self._listener_rearm_generations.get(rearm_key)
+            if (
+                guild.voice_client is not voice_client
+                or getattr(getattr(voice_client, "channel", None), "id", None)
+                != target_channel_id
+                or getattr(voice_client, "_listener_generation", None)
+                != listener_generation
+                or not voice_client.is_connected()
+                or voice_client.is_listener_healthy()
+            ):
+                return
+            self._listener_rearm_attempts[rearm_key] = (
+                self._listener_rearm_attempts.get(rearm_key, 0) + 1
+            )
+            try:
+                rearmed = await self.ensure_listening_voice_client(
+                    guild,
+                    target_channel,
+                    force_listener_reset=True,
+                    expected_voice_client=voice_client,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+            else:
+                # Let freshly-created listener tasks and their done callbacks run
+                # before treating the new generation as stable.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                if rearmed is voice_client and voice_client.is_listener_healthy():
+                    self._listener_rearm_attempts.pop(rearm_key, None)
+                    self._listener_rearm_generations.pop(rearm_key, None)
+                    self.deps.log(
+                        "[VOICE LISTENER REARM OK] "
+                        f"guild={guild.id} channel={target_channel_id}"
+                    )
+                    return
+                latest_generation = self._listener_rearm_generations.get(
+                    rearm_key
+                )
+                if (
+                    latest_generation
+                    == getattr(voice_client, "_listener_generation", None)
+                    and not voice_client.is_listener_healthy()
+                ):
+                    continue
+                return
+            latest_generation = self._listener_rearm_generations.get(rearm_key)
+            if (
+                latest_generation
+                != getattr(voice_client, "_listener_generation", None)
+            ):
+                return
+            if (
+                self._listener_rearm_attempts.get(rearm_key, 0)
+                >= VOICE_LISTENER_REARM_ATTEMPTS
+            ):
+                break
+            await asyncio.sleep(VOICE_LISTENER_REARM_DELAY_SEC)
+        self.deps.log(
+            "[VOICE LISTENER REARM FAIL] "
+            f"guild={guild.id} channel={target_channel_id} "
+            f"errorType={type(last_error).__name__ if last_error is not None else 'RuntimeError'}"
+        )
+
+    async def _acquire_voice_input_lease(self) -> str:
+        acquire = (
+            self.deps.acquire_voice_input_lease
+            or acquire_discord_voice_input_lease
+        )
+        token = str(await acquire() or "").strip()
+        if not token:
+            raise RuntimeError("voice_input_lease_unavailable")
+        return token
+
+    async def _release_voice_input_lease(self, token: str) -> None:
+        release = (
+            self.deps.release_voice_input_lease
+            or release_discord_voice_input_lease
+        )
+        await release(token)
 
     def parse_barge_in_reason_label(self, raw_reason_code: str) -> str:
         return parse_barge_in_reason_label_from_runtime(raw_reason_code, deps=self.deps.continuity())
@@ -205,6 +374,7 @@ class VoiceSupportComposition:
         session_key: str | None = None,
         turn_scope: Any | None = None,
         trace_payload: dict[str, Any] | None = None,
+        latency_trace: VoiceLatencyTrace | None = None,
     ) -> Any:
         return await create_omnivoice_source_from_runtime(
             text,
@@ -220,6 +390,7 @@ class VoiceSupportComposition:
             session_key=session_key,
             turn_scope=turn_scope,
             trace_payload=trace_payload,
+            latency_trace=latency_trace,
         )
 
     def transcribe_audio16k_sync(
@@ -264,7 +435,8 @@ class VoiceSupportComposition:
         *,
         sampling_rate: int = TARGET_RATE,
         validation_bound: bool = False,
-    ) -> tuple[str, str]:
+        defer_state_writes: bool = False,
+    ) -> tuple[str, str] | DeferredPartialTranscript:
         return get_partial_transcript_from_runtime(
             session_key,
             audio16k,
@@ -273,6 +445,18 @@ class VoiceSupportComposition:
             transcribe_audio16k_sync=self.transcribe_audio16k_sync,
             deps=self.deps.stt_text(),
             validation_bound=validation_bound,
+            defer_state_writes=defer_state_writes,
+        )
+
+    def commit_deferred_partial_transcript(
+        self,
+        session_key: str | None,
+        candidate: DeferredPartialTranscript,
+    ) -> tuple[str, str]:
+        return commit_deferred_partial_transcript_from_runtime(
+            session_key,
+            candidate,
+            deps=self.deps.stt_text(),
         )
 
     def score_stt_candidate(self, text: str, *, wake_probe: str = "") -> float:
@@ -372,6 +556,14 @@ class VoiceSupportComposition:
             != getattr(target_channel, "id", None)
         ):
             return None
+        if not force_listener_reset:
+            rearm_key = (
+                int(guild.id),
+                int(getattr(target_channel, "id", 0) or 0),
+                id(voice_client),
+            )
+            self._listener_rearm_attempts.pop(rearm_key, None)
+            self._listener_rearm_generations.pop(rearm_key, None)
         return voice_client
 
     async def _ensure_listening_voice_client_locked(
@@ -434,6 +626,7 @@ class VoiceSupportComposition:
         ):
             return None
 
+        lease_token = await self._acquire_voice_input_lease()
         pending_client = None
         transitioning = False
         try:
@@ -486,6 +679,23 @@ class VoiceSupportComposition:
                     pending_client = voice_client
                     setattr(voice_client, "_evelyn_voice_move_pending", True)
                 voice_client.on_user_audio = self.deps.process_member_audio()
+                set_listener_failure_callback = getattr(
+                    voice_client,
+                    "set_listener_failure_callback",
+                    None,
+                )
+                if not callable(set_listener_failure_callback):
+                    raise RuntimeError(
+                        "voice_listener_failure_binding_unavailable"
+                    )
+                set_listener_failure_callback(
+                    lambda failed_client, generation: self._schedule_listener_rearm(
+                        guild,
+                        target_channel,
+                        failed_client,
+                        generation,
+                    )
+                )
                 if (
                     not voice_client.is_connected()
                     or guild.voice_client is not voice_client
@@ -493,13 +703,47 @@ class VoiceSupportComposition:
                     != target_channel_id
                 ):
                     return None
+                has_lease = getattr(
+                    voice_client,
+                    "has_voice_input_lease",
+                    None,
+                )
+                if not callable(has_lease):
+                    raise RuntimeError("voice_input_lease_binding_unavailable")
+                if voice_client.is_listener_healthy() and not has_lease():
+                    voice_client.stop_listening()
                 if not voice_client.is_listener_healthy():
                     if not transitioning:
                         try:
                             voice_client.stop_listening()
                         except Exception:
                             pass
-                    voice_client.listen()
+                    refresh_udp_transport = getattr(
+                        voice_client,
+                        "refresh_udp_transport_from_base",
+                        None,
+                    )
+                    if callable(refresh_udp_transport):
+                        await refresh_udp_transport()
+                    bind_lease = getattr(
+                        voice_client,
+                        "bind_voice_input_lease",
+                        None,
+                    )
+                    if not callable(bind_lease):
+                        raise RuntimeError(
+                            "voice_input_lease_binding_unavailable"
+                        )
+                    bind_lease(
+                        lease_token,
+                        self._release_voice_input_lease,
+                    )
+                    lease_token = ""
+                    try:
+                        voice_client.listen()
+                    except Exception:
+                        voice_client.stop_listening()
+                        raise
                     self.deps.log(
                         f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}"
                     )
@@ -518,6 +762,8 @@ class VoiceSupportComposition:
                     delattr(pending_client, "_evelyn_voice_move_pending")
                 except AttributeError:
                     pass
+            if lease_token:
+                await self._release_voice_input_lease(lease_token)
 
     async def ensure_voice_client(self, message: Any) -> Any | None:
         if not message.guild:

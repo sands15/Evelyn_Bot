@@ -7,6 +7,13 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from .main_inference_contract import (
+    MainLlmPayload,
+    admitted_main_request,
+    compile_main_prompt,
+    main_admission_headers,
+    main_request_kind_for_source,
+)
 from .memory_exposure import (
     MemoryExposurePosition,
     capture_memory_exposure_position,
@@ -48,7 +55,6 @@ class VoiceResponseRuntimeDeps:
     main_llm_stop_tokens: tuple[str, ...] | list[str]
     voice_llm_max_tokens: int
     get_http_session: Callable[..., Awaitable[Any]]
-    build_chat_messages: Callable[..., Any]
     fallback_answer_for: Callable[[str], str]
     split_tts_sentences: Callable[..., tuple[list[str], str]]
     build_answer_payload_from_text: Callable[..., AnswerPayload]
@@ -239,26 +245,35 @@ async def build_first_response_from_runtime(
         f"{deps.build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
     )
 
-    payload = {
+    compiled = compile_main_prompt(
+        model_name=deps.model_name,
+        messages=messages,
+        final_user_text=final_user_text,
+        content_format=deps.main_llm_chat_content_format,
+    )
+    request_kind = main_request_kind_for_source(source)
+    payload = MainLlmPayload({
         "model": deps.model_name,
-        "messages": deps.build_chat_messages(
-            messages + [{"role": "user", "content": final_user_text}],
-            content_format=deps.main_llm_chat_content_format,
-        ),
+        "messages": compiled.wire_messages(),
         "temperature": 0.0,
         "max_tokens": min(40, deps.voice_llm_max_tokens),
         "stream": False,
         "cache_prompt": True,
+        "timings_per_token": True,
         "stop": list(deps.main_llm_stop_tokens),
-    }
+    }, prompt_abi=compiled.abi, request_kind=request_kind)
 
     session = await deps.get_http_session()
-    async with memory_exposure_request(
-        session.post,
-        deps.llm_server_url,
-        memory_index_dir=deps.memory_index_dir,
-        json=payload,
-        timeout=aiohttp.ClientTimeout(total=120),
+    async with admitted_main_request(
+        lambda: memory_exposure_request(
+            session.post,
+            deps.llm_server_url,
+            memory_index_dir=deps.memory_index_dir,
+            json=payload,
+            headers=main_admission_headers(request_kind),
+            timeout=aiohttp.ClientTimeout(total=120),
+        ),
+        kind=request_kind,
     ) as resp:
         if resp.status != 200:
             error_text = await resp.text()
@@ -338,27 +353,36 @@ async def build_followup_response_from_runtime(
         + "할 일: 첫 응답과 겹치지 않는 보충 설명만 1~2문장으로 이어서 말해. "
         + "첫 문장을 반복하거나 비슷하게 다시 시작하지 마. 새 정보가 없으면 빈 응답을 반환해."
     )
-    payload = {
+    compiled = compile_main_prompt(
+        model_name=deps.model_name,
+        messages=messages,
+        final_user_text=followup_prompt,
+        content_format=deps.main_llm_chat_content_format,
+    )
+    request_kind = main_request_kind_for_source(source)
+    payload = MainLlmPayload({
         "model": deps.model_name,
-        "messages": deps.build_chat_messages(
-            messages + [{"role": "user", "content": followup_prompt}],
-            content_format=deps.main_llm_chat_content_format,
-        ),
+        "messages": compiled.wire_messages(),
         "temperature": 0.0,
         "max_tokens": min(64, deps.voice_llm_max_tokens),
         "stream": False,
         "cache_prompt": True,
+        "timings_per_token": True,
         "stop": list(deps.main_llm_stop_tokens),
-    }
+    }, prompt_abi=compiled.abi, request_kind=request_kind)
     session = await deps.get_http_session()
-    async with memory_exposure_request(
-        session.post,
-        deps.llm_server_url,
-        expected_position=combined_exposure,
-        memory_index_dir=deps.memory_index_dir,
-        memory_boundary_required=combined_exposure is not None,
-        json=payload,
-        timeout=aiohttp.ClientTimeout(total=120),
+    async with admitted_main_request(
+        lambda: memory_exposure_request(
+            session.post,
+            deps.llm_server_url,
+            expected_position=combined_exposure,
+            memory_index_dir=deps.memory_index_dir,
+            memory_boundary_required=combined_exposure is not None,
+            json=payload,
+            headers=main_admission_headers(request_kind),
+            timeout=aiohttp.ClientTimeout(total=120),
+        ),
+        kind=request_kind,
     ) as resp:
         if resp.status != 200:
             error_text = await resp.text()

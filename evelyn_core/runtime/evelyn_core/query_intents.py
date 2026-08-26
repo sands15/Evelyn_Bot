@@ -45,14 +45,6 @@ TIME_QUERY_MARKERS = (
 
 EXPLICIT_SEARCH_MARKERS = (
     "\uac80\uc0c9",
-    "\ucc3e\uc544",
-    "\ucc3e\uc544\ubd10",
-    "\ucc3e\uc544\uc918",
-    "\uc54c\uc544\ubd10",
-    "\uc54c\uc544 \ubd10",
-    "\uc54c\uc544\ubcf4",
-    "\uc870\uc0ac\ud574",
-    "\uc870\uc0ac\ud574\ubd10",
     "\uc678\ubd80 \uac80\uc0c9",
     "\uc778\ud130\ub137",
     "\uc6f9",
@@ -63,8 +55,6 @@ EXPLICIT_SEARCH_MARKERS = (
     "\uacf5\uc2dd \ubb38\uc11c",
     "\uacf5\uc2dd\ubb38\uc11c",
     "search",
-    "look up",
-    "find",
     "web",
     "internet",
     "source",

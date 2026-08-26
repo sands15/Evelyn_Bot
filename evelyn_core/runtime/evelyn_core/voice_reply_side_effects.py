@@ -25,6 +25,7 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .observability_metrics import mark_voice_latency_stage
 from .reply_memory_boundary import validate_reply_memory_boundary
 
 
@@ -148,6 +149,7 @@ def checkpoint_accepted_voice_turn_from_runtime(
     meta = metrics.setdefault("meta", {})
     if meta.get("accepted_voice_turn_precommitted") is True:
         return
+    mark_voice_latency_stage(metrics, "turn_accepted")
     try:
         deps.begin_user_only_turn(
             session_key,
@@ -190,6 +192,7 @@ def checkpoint_accepted_voice_turn_from_runtime(
             ),
         }
     )
+    mark_voice_latency_stage(metrics, "ingress_committed")
 
 
 def finalize_voice_reply_side_effects_from_runtime(
@@ -446,6 +449,7 @@ def finalize_voice_reply_side_effects_from_runtime(
             metrics.setdefault("meta", {})[
                 "voice_reply_side_effects_state"
             ] = "durable"
+            mark_voice_latency_stage(metrics, "turn_completed")
     except MemoryDeletionJournalIntegrityError:
         _record_memory_boundary_failure(metrics=metrics, deps=deps)
         return

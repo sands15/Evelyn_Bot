@@ -20,6 +20,7 @@ from evelyn_core.control_page_contracts import (  # noqa: E402
     build_control_page_panel_state_payload,
     detect_memory_panel_action,
 )
+from evelyn_core.llm_context_assembly import bound_voice_prompt_history  # noqa: E402
 
 
 class SharedContractTests(unittest.TestCase):
@@ -39,6 +40,20 @@ class SharedContractTests(unittest.TestCase):
 
         self.assertNotIn(FAST_MAIN_LLM_USER_PREFIX, text)
         self.assertEqual(text, "안녕")
+
+    def test_voice_prompt_keeps_system_and_only_recent_turns(self) -> None:
+        messages = [{"role": "system", "content": "stable"}]
+        messages.extend(
+            {"role": "user" if index % 2 == 0 else "assistant", "content": str(index)}
+            for index in range(12)
+        )
+        messages.insert(7, {"role": "system", "content": "dynamic"})
+
+        bounded = bound_voice_prompt_history(messages, limit=4)
+
+        self.assertEqual(bounded[0], {"role": "system", "content": "stable"})
+        self.assertEqual([message["content"] for message in bounded[1:]], ["8", "9", "10", "11"])
+        self.assertEqual(bound_voice_prompt_history(messages, limit=-1), [messages[0]])
 
     def test_control_page_memory_panel_contract_is_shared(self) -> None:
         self.assertEqual(CONTROL_PAGE_UI_PANELS["memory"], "Memory")

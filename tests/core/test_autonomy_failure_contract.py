@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -297,8 +298,13 @@ class AutonomyFailureContractTests(
                 "reason": "summary_ready",
                 "summary": PRIVATE,
                 "text": PRIVATE,
-                "step": {"text": PRIVATE},
+                "step": {
+                    "domain": "assistant",
+                    "action": "idle",
+                    "text": PRIVATE,
+                },
                 "verified": True,
+                "evidence_code": "no_side_effect_required",
                 "count": 2,
             }
         )
@@ -308,7 +314,12 @@ class AutonomyFailureContractTests(
             {
                 "status": "ok",
                 "reason": "summary_ready",
+                "step": {
+                    "domain": "assistant",
+                    "action": "idle",
+                },
                 "verified": True,
+                "evidence_code": "no_side_effect_required",
                 "count": 2,
             },
         )
@@ -325,12 +336,16 @@ class AutonomyFailureContractTests(
             }
         )
 
-        self.assertEqual(projected, {"verified": True})
+        self.assertEqual(projected, {"verified": False})
         self.assertNotIn(private_token, json.dumps(projected))
 
         minecraft = sanitize_autonomy_step_result(
             {
                 "status": "ok",
+                "step": {
+                    "domain": "minecraft",
+                    "action": "gather_logs",
+                },
                 "evidence_code": "minecraft_gather_logs_completed",
                 "verified": True,
             }
@@ -339,6 +354,40 @@ class AutonomyFailureContractTests(
             minecraft["evidence_code"],
             "minecraft_gather_logs_completed",
         )
+        self.assertTrue(minecraft["verified"])
+
+    def test_step_result_projection_recomputes_verified_exactly(self) -> None:
+        invalid_results = (
+            {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+            },
+            {
+                "status": "ok",
+                "step": {"domain": "assistant", "action": "idle"},
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            },
+            {
+                "status": "failed",
+                "step": {"domain": "assistant", "action": "idle"},
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+            },
+            {
+                "status": "ok",
+                "step": {"domain": PRIVATE, "action": "idle"},
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+            },
+        )
+
+        for result in invalid_results:
+            with self.subTest(result=result):
+                projected = sanitize_autonomy_step_result(result)
+                self.assertFalse(projected["verified"])
+                self.assertNotIn(PRIVATE, json.dumps(projected))
 
     def test_replan_summary_uses_only_safe_reason_code(self) -> None:
         private_token = "sk_live_ABC123"
@@ -427,6 +476,63 @@ class AutonomyFailureContractTests(
             notifications,
             [f"[자율봇] 오류: {AUTONOMY_CYCLE_FAILED}"],
         )
+        self.assertNotIn(PRIVATE, json.dumps(notifications))
+
+    async def test_persistent_cycle_error_notifies_once_per_episode(
+        self,
+    ) -> None:
+        notifications: list[tuple[str, str]] = []
+
+        async def notify(
+            text: str,
+            *,
+            action_run_id: str,
+        ) -> None:
+            notifications.append((text, action_run_id))
+
+        engine = AutonomyEngine(
+            guild_id=7,
+            executor=DummyExecutor(),
+            notify=notify,
+            poll_interval_sec=1.0,
+        )
+        engine.state.enabled = True
+        attempts = 0
+
+        async def cycle():
+            nonlocal attempts
+            attempts += 1
+            if attempts in {1, 2}:
+                raise RuntimeError(PRIVATE)
+            if attempts == 3:
+                return SimpleNamespace(
+                    state=SimpleNamespace(status="running")
+                )
+            engine.state.enabled = False
+            raise RuntimeError(PRIVATE)
+
+        engine.run_cycle = cycle
+        with (
+            patch.object(engine, "persist_state"),
+            patch.object(engine, "next_poll_delay", return_value=1.0),
+            patch(
+                "evelyn_core.autonomy.asyncio.sleep",
+                return_value=None,
+            ),
+        ):
+            await engine._run_loop()
+
+        self.assertEqual(attempts, 4)
+        self.assertEqual(len(notifications), 2)
+        self.assertEqual(
+            [text for text, _run_id in notifications],
+            [
+                f"[자율봇] 오류: {AUTONOMY_CYCLE_FAILED}",
+                f"[자율봇] 오류: {AUTONOMY_CYCLE_FAILED}",
+            ],
+        )
+        self.assertTrue(all(run_id for _text, run_id in notifications))
+        self.assertNotEqual(notifications[0][1], notifications[1][1])
         self.assertNotIn(PRIVATE, json.dumps(notifications))
 
     async def test_action_exception_becomes_failed_cycle_state(

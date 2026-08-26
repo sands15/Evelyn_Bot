@@ -44,8 +44,10 @@ class FakeSession:
         self.response = response
         self.posts: list[dict] = []
 
-    def post(self, url: str, *, json: dict, timeout):
-        self.posts.append({"url": url, "json": json, "timeout": timeout})
+    def post(self, url: str, *, json: dict, headers: dict[str, str], timeout):
+        self.posts.append(
+            {"url": url, "json": json, "headers": headers, "timeout": timeout}
+        )
         return self.response
 
 

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from collections.abc import Awaitable
+from typing import Any, TypeVar
+
+
+_T = TypeVar("_T")
 
 
 CONTINUITY_STATUS_SCHEMA = "conversation_continuity.status.v1"
@@ -17,6 +22,28 @@ CONTINUITY_COMMIT_FAILED = (
 
 class ConversationContinuityCommitError(RuntimeError):
     pass
+
+
+async def await_continuity_commit_without_early_unlock(
+    commit: Awaitable[_T],
+) -> _T:
+    commit_task = asyncio.ensure_future(commit)
+    cancellation: asyncio.CancelledError | None = None
+    while not commit_task.done():
+        try:
+            await asyncio.shield(commit_task)
+        except asyncio.CancelledError as exc:
+            if commit_task.cancelled():
+                raise
+            if cancellation is None:
+                cancellation = exc
+    if cancellation is not None:
+        try:
+            commit_task.result()
+        except BaseException:
+            pass
+        raise cancellation
+    return commit_task.result()
 
 
 def _exact_nonnegative_int(value: object) -> int | None:
@@ -107,5 +134,6 @@ __all__ = [
     "CONTINUITY_COMMIT_FAILED",
     "CONTINUITY_COMMIT_RECEIPT_SCHEMA",
     "ConversationContinuityCommitError",
+    "await_continuity_commit_without_early_unlock",
     "require_durable_continuity_receipt",
 ]

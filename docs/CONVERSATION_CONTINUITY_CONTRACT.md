@@ -1,7 +1,7 @@
 # Conversation Continuity Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-12 KST
+Last reviewed: 2026-08-24 KST
 
 ## Purpose
 
@@ -25,7 +25,7 @@ Last reviewed: 2026-08-12 KST
 - system prompt
 - stack trace, 예외 메시지, 파일시스템 경로
 
-## Accepted voice turn delivery failure
+## Accepted conversational turn delivery failure
 
 최종 STT와 reply gate를 통과한 음성 발화는 답변 전달이 실패해도 사라진 턴으로
 취급하지 않는다. Discord voice connection 부재, 빈 최종 답변, LLM/TTS 전달 실패와
@@ -35,6 +35,14 @@ Local Bridge의 `failed|partial|cancelled` software-playback ACK에 다음 경�
   user-only history로 만들고 durable continuity receipt를 요구한다. receipt가
   반환되기 전에는 room owner·TurnScope·LLM·TTS·playback을 시작하지 않으며,
   commit 실패는 고정 `conversation_continuity_commit_failed`로 닫는다.
+- direct Main `local_mic`도 Fast ingress를 우회하므로 Discord voice와 같은 exact source turn을
+  user-only checkpoint하고 receipt 뒤에만 owner·TurnScope·LLM·TTS를 시작한다. 별도 Local Bridge/Fast
+  ingress 경로는 기존 exact ingress checkpoint owner를 유지하며 Main에서 중복 precommit하지 않는다.
+- Control Page 일반 text는 session lock 안에서 exact user-only turn을 시작하고 durable receipt를 받은 뒤에만
+  TurnScope와 LLM을 시작한다. precommitted current user는 current turn ID·exact tail/text 검증 뒤 prompt
+  복사본에서 한 번 제거되고 final payload가 한 번 추가한다. 정상 완료는 같은 `complete_turn_id`에 assistant만
+  붙이며, LLM 실패·취소·restart는 user-only tail을 보존한다. continuity commit 중 caller cancellation은
+  physical commit을 shield-drain하는 동안 session lock을 유지한 뒤 원래 cancellation을 재전파한다.
 - 같은 current turn ID와 정규화된 exact user-only tail을 다시 시작하면 history를
   바꾸지 않는다. 다른 turn ID는 같은 문장이어도 별도 user row를 시작하고,
   user-only 시작 단계에서 같은 current turn ID의 다른 tail 또는 assistant로 이미
@@ -45,6 +53,12 @@ Local Bridge의 `failed|partial|cancelled` software-playback ACK에 다음 경�
   exact completed pair의 재호출은 history를 다시 쓰지 않고, 전달 실패나 취소는
   존재하지 않는 assistant를 만들지 않은 채 user-only tail을 유지한다. 취소 신호는
   일반 오류로 삼키지 않고 그대로 전파한다.
+- Discord audio playback은 exact current source의 0이 아닌 첫 frame이 실제
+  `_connection.send_packet()` 경계를 성공한 뒤에만 started receipt를 가진다. `play()` 호출,
+  source read, worker/after callback, 무음 frame이나 UDP send 실패는 시작·완료·qualified
+  interrupt 증거가 아니다. 개별 UDP drop 뒤 base playback이 계속되면 이후 성공한 exact current
+  nonzero packet이 그때 started receipt를 만들 수 있다. 끝까지 receipt가 없으면 assistant completion
+  없이 accepted user-only tail을 유지한다.
 - Discord voice의 shared ingress worker는 STT·reply gate와 durable user-only checkpoint,
   room owner·TurnScope 등록까지 한 발화씩 직렬화한다. exact process task가 새 scope에
   attach된 뒤에만 delivery ownership을 넘겨 다음 발화를 dequeue한다. 다음 accepted turn은
@@ -201,6 +215,10 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 - 최종 성공·실패 답변은 Fast continuity owner의 단일 잠금 안에서 다음
   generation을 먼저 `terminal_committing`에 기록한 뒤 대화 checkpoint에
   commit한다. 정확한 durable receipt 뒤에만 action 표식을 제거한다.
+- process-local coordinator의 history cap은 terminal task만 제거한다. running task는
+  cap을 넘겨서라도 exact terminal owner를 유지하고, cancellation을 runner가 삼킨 뒤
+  값을 반환하면 성공이나 verified cancel로 바꾸지 않고 outcome-unverified failure로
+  기록해 자동 재시도하지 않는다.
 - process가 checkpoint commit 뒤 표식 제거 전에 죽어도 새 owner의 current
   generation이 예상 값에 도달했고 continuity가 `durableReady=true`일 때만
   이미 전달된 결과로 인정해 조용히 정리한다.
@@ -252,14 +270,21 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
 - Main checkpoint에서 Control Page로 가져올 session은 명시적으로 설정한
   Discord guild ID와 user ID가 모두 일치해야 한다. 반대 방향도 현재 Discord
   turn의 session key가 같은 personal scope일 때만 Fast Control 문맥을 읽는다.
-- 현재 owner의 더 최신 empty boundary 또는 대상 scope가 없는 더 최신
-  checkpoint는 reset 경계다. 그보다 오래된 다른 owner의 문맥을 다시 넣지
-  않아 삭제 전 대화가 surface 전환으로 되살아나는 것을 막는다.
+- Fast Control writer는 configured guild/user를 domain-separated SHA-256으로 만든 opaque
+  session key를 checkpoint와 ingress scope에 사용한다. reader는 그 exact key만 허용하며,
+  configured principal에서 legacy fixed key나 다른 principal artifact를 복구하지 않는다.
+  raw guild/user는 Fast checkpoint·status에 저장하지 않는다.
+- current owner의 verified empty head `updatedAt`은 reset 경계이며, 다음 active checkpoint의
+  hashed payload에 `resetBoundaryAt`으로 전파된다. 첫 post-reset local turn 뒤에도 그보다 오래된
+  다른 owner 문맥을 넣지 않지만, boundary 뒤 같은 principal의 새 cross activity는 다시 병합한다.
+  대상 scope가 없는 더 최신 checkpoint도 기존 fail-closed reset 경계를 유지한다.
 - checkpoint v2의 각 session row는 checkpoint 시점 기준의 유한한 비음수
   `state.lastActiveAgoSec`를 저장한다. verifier는 `savedAt - lastActiveAgoSec`로
   선택 session의 활동시각을 복원하고, 이 시각으로 owner chunk 순서와 선택
-  session stale·guild revocation·reset 경계를 판정한다. revoked target은
-  revocation 시각을 경계로 보존하고, target이 전혀 없거나 owner가 empty이면
+  session stale·완료된 reset 경계를 판정한다. 미완료 guild revocation은 벽시계
+  순서와 무관하게 marker 존재만으로 Main restore와 read-only cross-surface reader
+  모두에서 해당 guild row 전체를 제외한다. revoked target은 revocation 시각을
+  상태 경계로만 보존하고, target이 전혀 없거나 owner가 empty이면
   owner `savedAt`을 reset 경계로 유지한다.
 - owner restore는 checkpoint 자체 age와 각 row의 `lastActiveAgoSec`를 합친
   effective age가 `maxAgeSec`를 넘으면 그 session의 history·active state를
@@ -270,6 +295,9 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
   cross-surface reader도 같은 손상 metadata snapshot을 거부한다. 따라서 무관한
   user/session의 후속 flush가 만료 session을 최신으로 만들거나 철회·reset 전
   문맥을 되살리지 않는다.
+- checkpoint에 저장된 `expiresAt`은 writer가 발급한 복구 창의 hard cap이다.
+  새 process의 `maxAgeSec`가 더 길어져도 checkpoint 자체를 되살리지 않으며, row의
+  effective age도 `min(current maxAgeSec, expiresAt - savedAt)` 안에서만 인정한다.
 - 선택 session 활동시각으로 owner chunk 순서를 정하고 현재 user input과 인접
   중복을 제거한 뒤 Main의 최신 eligible session 한 개에서 기본 최근 8개만
   prompt에 넣는다. 상대 활동시각과 session ID는 새 artifact·public status에
@@ -396,6 +424,43 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 `conversation_continuity_commit_failed`로 처리한다. callback의 임의 private
 필드는 receipt, metrics, log에 복사하지 않는다.
 
+외부 텍스트 effect가 성공한 뒤 cancellation이 들어온 autonomy follow-up은 현재
+history/session/continuity commit을 shield하고 실제 task 결과까지 drain한다. durable receipt와
+action outcome/cursor/state를 남긴 뒤 원래 cancellation을 재전파한다. 정상 follow-up pair는 exact
+`[autonomy]` marker, 오류 알림 pair는 `[autonomy:error]` marker를 사용하며 latter는 prior search
+promise 완료나 recent user text의 근거가 아니다.
+
+각 completed-turn commit 호출은 `to_thread` 제출 전에 process-local epoch를 예약한다. 취소된 worker가
+뒤늦게 lock을 얻더라도 같은 session의 더 최신 **성공** epoch만 그 호출을 supersede할 수 있다. 다른
+session의 성공이나 더 최신 실패는 오래된 유효 commit을 막지 않는다. superseded 경로도 현재 payload/head,
+rollback protection, keyed authenticity와 external anchor 구조를 먼저 검증하고 one-step lag를 기존 복구
+규칙으로 anchor한다. 구조가 유효하고 exact target이 이미 durable한 callback-free 호출만 coalesced success로
+반환한다. `before_commit` callback은 stale 호출에서 재실행하지 않는다. 최신 target이 기존 target을 대체한
+정상 stale 실패는 누적 실패 수에는 포함하되 최신 성공의 `last*` health를 덮지 않으며, 손상·인증 실패는
+실제 오류로 공개한다. async wrapper의 `to_thread`는 event loop 격리에만 사용한다. production 기본
+artifact primitive는 shared warm child process의 절대 deadline 안에서 실행하므로 filesystem 호출이
+멈춰도 parent thread가 그 호출을 직접 수행하지 않는다.
+
+- child protocol은 content-free worker nonce, request ID와 단조 sequence를 결박한
+  `READY -> PREPARED -> COMMIT|ABORT`만 허용한다. frame, path와 payload 크기를 제한하고 absolute path와
+  regular-file/no-follow 규칙을 검사한다. worker에는 runtime package path와 최소 OS 환경만 주며
+  Discord/OpenAI 등 목적 밖 credential을 상속하지 않는다.
+- process lock 대기와 request exchange는 각각 deadline을 가진다. lock 획득 timeout은 request 제출 전
+  bounded 실패로 반환하고 다른 호출이 쓰는 current child를 건드리지 않는다. lock을 획득한 request의
+  exchange timeout/disconnect에서는 해당 child를 terminate, wait, kill, wait 순서로 reap하고, reap 전
+  replacement를 시작하지 않는다. 부모가 hard-exit하면 Windows parent handle, Linux PDEATHSIG 또는 bounded
+  parent watcher가 worker를 종료한다.
+- mutation request는 worker PID와 request ID로 유일한 same-directory temporary를 정한다. 실패 뒤 살아 있는
+  current worker를 쓰거나, exchange timeout/disconnect로 abandon했다면 replacement worker를 써서 그 exact
+  temporary만 지우고 canonical disk를 bounded read한다. canonical bytes가 요청과 정확히 같으면 existing
+  file과 parent를 sync한 뒤 성공으로 수렴하고, 다르면 원래 고정 오류를 반환한다. outcome-unknown mutation을
+  맹목적으로 재실행하지 않는다. read-only request만 남은 deadline에서 한 번 새 worker로 재시도할 수 있다.
+- checkpoint/head, authenticity anchor, Discord/Fast ingress와 FastAction journal의 production 기본
+  read/write/unlink가 이 scope를 사용한다. nested scope는 같은 worker와 더 짧은 parent deadline만 허용한다.
+  checkpoint 뒤 별도 `complete`처럼 새 thread에서 시작하는 후속 journal 작업은 자체 유한 deadline을
+  가지므로 전체 다단계 transaction을 하나의 deadline이라고 표현하지 않는다. custom hook이나 callback의
+  비-I/O 대기는 이 보장의 대상이 아니다.
+
 전달과 기록 순서는 다음 계약을 따른다.
 
 - Discord text는 텍스트 전송, 완료 상태 반영, durable commit 뒤 선택적 음성
@@ -405,34 +470,40 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   durable commit을 수행한다. fallback 전송이 실패하거나 성공 여부가
   모호하면 history/checkpoint를 변경하지 않으며, 기록·commit 실패 때문에
   fallback을 다시 보내지 않는다.
-- Control Page 일반 답변은 세션 완료 상태를 반영하고 durable commit한 뒤
-  로컬 TTS를 예약한다. 일반·검색 TTS task 완료까지 exact TurnScope를 유지해
+- Control Page 일반 답변은 위 accepted user-only precommit 뒤 LLM을 실행하고, 같은 exact turn에 assistant
+  완료 상태를 반영해 durable commit한 뒤 로컬 TTS를 예약한다. 일반·검색 TTS task 완료까지 exact TurnScope를 유지해
   다음 턴이 stale 재생을 취소하게 한다. 강제 검색은 첫 per-session critical
   section에서 새 user text turn과 scope를 만들고, 느린 검색·합성 await는 lock
   밖에서 수행한다. 최종 critical section은 같은 scope가 아직 current인지 다시
   확인한 뒤에만 세션 완료, durable commit과 로컬 TTS를 수행한다. 반환된 exact
   turn ID는 metrics와 모든 최종 sink에 고정되며 이전·경쟁 turn ID는 새 검색
   답변의 commit 증거가 아니다.
-- Discord text 검색 후속은 예약 시점의 canonical session과 source turn ID를
-  고정한다. 검색 완료 뒤 같은 channel/thread reply slot과 exact session lock을
-  `reply -> session` 순서로 잡고 source가 여전히 current일 때만 전달·기록한다.
-  successor가 source를 대체했으면 send/history/commit/memory/cognitive를 만들지 않는다.
-  성공한 결과 pair는 별도 delivery turn ID로 assistant state와 함께 exact commit한다.
-  recovery journal은 source turn과 delivery turn을 서로 다른 필드로 보존해 prepare 뒤
-  crash에서도 source를 새 delivery ID로 재개하고, 동일 query의 새 source는 이전 task를
-  취소·교체한다. recovery intent가 있는 경로는 delivery pair를 durable prepare한 뒤
-  전송하고, journal 없는 direct helper는 전송 성공 뒤 같은 임계구역에서 pair를 기록한다.
-  자동 voice 검색 후속은 안전한 voice TurnScope delivery owner가 없으므로 현재 예약·전달·
-  재시작 재생을 fail-closed하며 text history/checkpoint나 voice playback을 만들지 않는다.
-- 자율 후속 답변은 `send_discord_text`가 정상 반환한 시점을 되돌릴 수 없는 전달
-  경계로 삼고 즉시 process-local 900초 ping fence를 세운다. 그 뒤 새 turn,
-  history, active session과 continuity commit을 먼저 처리하고 선택적 memory/self-state를
-  실행한다. 이 후처리의 일반 예외는 고정 코드와 type으로 관측하되 전달 성공
-  `discord_send_completed`를 실패로 바꾸거나 plan cursor를 되돌려 같은 maintain
-  답변을 다시 보내지 않는다. commit이 완료되지 않았다면 `continuityDurable=false`로
-  남는다. 취소와 memory deletion integrity 신호는 재전파하지만 이미 정상 반환한
-  전송의 ping fence는 유지한다. 이는 같은 프로세스의 자동 재실행만 막으며 send await
-  내부의 모호한 전달이나 process crash exactly-once를 보장하지 않는다.
+- Discord text 검색 후속은 예약 시점의 canonical session/source turn과 별도 delivery turn을
+  고정하고 private prepared answer는 bounded recovery journal에만 저장한다. unresolved
+  `attempted|uncertain|succeeded|canonical` entry는 같은 session 시작이나 capacity cap 때문에 축출하지
+  않으며 cap을 넘으면 새 intent를 fail-close한다. 동일 query의 새 pre-delivery source만 이전 task를
+  취소·교체할 수 있다.
+- 검색 전송은 pre-send continuity generation baseline과 delivery pair를 먼저 기록한다. restart adoption은
+  exact Discord receipt, unique source/delivery pair, baseline보다 뒤의 durable checkpoint에서 그 pair가
+  확인될 때만 허용한다. 채널 조회는 source message ID를 exact reply/reference한 유일한 bot-authored
+  same-content message만 전달 증거로 인정한다. 0개는 기존 response의 안전한 재전송으로 가고, 중복·무참조·
+  다른 source·조회 상한 도달은 불명확 상태로 fail-close한다. 다른 session commit, live-only successor,
+  generation 0·duplicate receipt는 근거가 아니다. 최초 restored snapshot recovery는 process당 한 번이고 완료 전 Discord text/voice ingress와
+  voice worker·Control Page·Local mic 시작을 차단한다. 실패·취소는 같은 process에서 live state로 재시도하지
+  않는다. journal `complete`는 선택적 memory/question/cognitive projection보다 먼저다. 자동 voice 검색
+  후속은 별도 safe delivery owner가 없으므로 계속 fail-closed한다.
+- 자율 follow-up, ping과 오류 알림은 `autonomy:{kind}:{actionRunId}` source로 기존 ingress journal을
+  사용한다. reply slot과 current target을 잡아 response를 bind하고 `delivery_inflight`를 기록한 뒤
+  physical send 직전에 original action/run/grant가 아직 current인지 다시 검사한다. 만료·철회·mismatch는
+  pre-effect entry를 discard하고 effect를 만들지 않는다. 다른 action-run의 `delivery_inflight` 또는
+  `delivery_ambiguous`가 남아 있으면 successor를 차단한다.
+- send await가 정상 반환하면 `delivery_succeeded` 뒤 exact pair와 continuity를 commit하고 journal을
+  complete한 다음 선택적 memory/self-state를 실행한다. 후처리 실패는 `continuityDurable=false`와
+  `sent_but_continuity_pending`으로 남기고 같은 action-run을 재전송하지 않는다. timeout·cancellation의
+  원격 수락 여부가 모호하면 자동 재시도하지 않는다. cycle/executor 오류 알림은 정상 cycle까지 한
+  episode와 stable action-run ID를 사용해 최대 한 번만 시도한다.
+- post-effect memory-deletion integrity 오류는 이미 일어난 전송을 되돌리지 않는다. exact outcome audit와
+  engine state/cursor/ping fence를 먼저 내구화하고, raw detail 없이 fixed integrity type만 재전파한다.
 - 대화형 자율 후속은 process-local follow-up target map에서 canonical하고 아직 active인
   Discord text user session만 고른다. voice/default/noncanonical key는 제외한다. 명시적
   관찰채널이 있으면 exact channel 또는 thread parent가 그 경계 안에 있어야 하고, 허용된
@@ -449,8 +520,9 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   user turn begin이 성공한 뒤 그 임계구역에서만 실행되므로 busy·ignored·redelivery ingress는
   target을 바꾸지 않는다. 실제 plain-text 응답의 전송·기록에 성공한 guild-prefixed command는
   기존 command-continuity 경로로 target을 갱신할 수 있다. 이는 process-local 한 turn handoff이며
-  모든 입력 queue, preemption, durable outbox 또는 exactly-once를 보장하지 않는다.
-- Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다. Discord 명령은
+  모든 입력 queue나 진행 중 normal turn의 preemption을 뜻하지 않는다.
+- Discord 명령 응답도 `command:{messageId}:{ordinal}` source로 기존 ingress journal을 claim한 뒤
+  response bind와 `delivery_inflight`를 먼저 기록하고 실제 전송·기록을 즉시 commit한다. Discord 명령은
   composition이 주입한 단일 context owner가 성공한 plain-text
   `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
   Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다. 저장 기억을 쓰지
@@ -465,9 +537,12 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
   memory-write receipt는 mutation evidence로만 유지하고, exact `not_used` response
   receipt를 response-ready에서 결박해 assistant history, terminal commit과 ingress
   completion까지 동일하게 전달한다.
-- Discord 명령 전송 자체가 실패하면 history와 checkpoint를 변경하지 않는다.
-  전송 성공 뒤 continuity 기록이 실패해도 이미 전달된 응답을 재전송하거나
-  command 실패로 바꾸지 않고 고정 event와 exception type만 기록한다.
+- Discord 명령의 definitive pre-effect 거부는 exact journal entry를 닫아 안전한 retry를 허용한다.
+  timeout·cancellation처럼 원격 수락 여부가 모호하면 `delivery_ambiguous`로 successor를 막고 history나
+  checkpoint를 추측해 변경하지 않는다. 전송 성공 뒤 journal/continuity 기록이 실패하면
+  `delivery_succeeded`를 restart reconciler가 exact turn에만 완성하며 이미 전달된 응답을 재전송하거나
+  command 실패로 바꾸지 않는다. outer cancellation은 send부터 journal·continuity·complete까지 시작된
+  full lifecycle을 shield-drain한 뒤 최초 cancellation을 재전파한다.
   Minecraft handler의 이전 수동 기록은 제거해 응답당 기록·commit을 한 번으로
   제한한다.
 - 음성 답변은 재생 완료 뒤 같은 memory-exposure guard 안에서 exact assistant history와
@@ -518,6 +593,10 @@ continuity history 결합에만 사용한다.
 - 미완료 ingress가 하나라도 있으면 같은 source delivery key의 상태 조회 외 새
   claim을 거부한다. 이는 post-write commit 실패와 restart 복구 중 후속 턴이 먼저
   저장되는 순서 역전을 막는다.
+- ingress entry의 모든 same-process phase transition과 restart recovery는 현재 wall
+  clock을 그대로 쓰지 않고 `createdAt|updatedAt`보다 이르지 않으며 기존 `expiresAt`을
+  넘지 않는 논리 `updatedAt|recoveredAt`을 기록한다. clock rollback이 journal을
+  validator 관점의 미래·역순 상태로 바꾸거나 기존 TTL을 연장하지 못한다.
 - 완료 응답의 cached replay는 `control_page`에만 허용하고, 현재 삭제 journal과
   memory exposure guard를 다시 통과해야 한다. `local_bridge`, `local_mic`,
   `voice`의 완료 재전달은 중복 TTS/재생을 막기 위해 `409`로 억제한다.
@@ -527,7 +606,7 @@ continuity history 결합에만 사용한다.
 - Discord `delivery_succeeded` 재시작은 exact current `turnId`와
   user/assistant/receipt tail을 요구한다. 같은 turn의 strict user-only crash
   checkpoint만 assistant/receipt/state를 commit 전에 한 번 완성하며, 다른 turn의
-  동일 문장은 fail-closed한다. 복구는 기존 `active_until`을 보존하고 새 TTL을
+  동일 문장이나 같은 turn ID의 다른 pair/receipt/user-only tail은 fail-closed한다. 복구는 기존 `active_until`을 보존하고 새 TTL을
   발급하지 않으며, 비교 정규화는 ingress journal의 NFKC 규칙과 같다.
 - TTS 재생이 필요한 Local Bridge 응답은 HTTP EOF를 완료로 쓰지 않는다. exact
   software-playback ACK의 `played`만 assistant turn을 완료하고,
@@ -538,6 +617,21 @@ continuity history 결합에만 사용한다.
 - terminal 순서는 `begin_terminal_commit -> checkpoint commit -> complete`다.
   재시작은 exact generation과 checkpoint의 turn/text/receipt 결합이 일치할 때만
   중간 terminal 상태를 한 번 완료한다.
+- `delivery_succeeded` restart도 checkpoint commit의 `before_commit`에서 먼저 exact
+  `terminal_committing(generation=N+1)`을 기록한다. marker 뒤 checkpoint 전 crash는 verified predecessor를
+  exact turn으로 한 번 recommit하고, checkpoint 뒤 `complete` 전 crash는 current generation을 검증해
+  journal만 완료하므로 generation을 다시 올리지 않는다. mutation 전 live store snapshot을 보존하고
+  durable checkpoint 이전 실패에서는 exact session state를 rollback한다.
+- journal-only marker `N`은 checkpoint generation `N-1`만 predecessor로 허용한다. predecessor는
+  verified active head, rollback-protected empty head, 또는 무키 fresh generation 0 missing state 중 하나여야
+  하며 generation gap/conflict는 거부한다. keyed fresh missing head는 인증 근거가 없으므로 fail-closed한다.
+  Main startup은 continuity restore와 voice-room hydration 뒤 ingress reconciliation을 먼저 수행하고, owner가
+  ready이며 generation 0/head missing인 truly pristine state에만 signed/empty bootstrap을 만든다.
+- artifact request exchange timeout/disconnect 뒤 ingress/FastAction은 in-memory mutation을 계속하지 않는다.
+  lock 획득 timeout은 request 제출 전 실패라 current child를 건드리지 않는다. 다음 mutation 전에는 살아 있는
+  current worker 또는 abandon 뒤 replacement worker로 journal/head/external anchor를 authoritative reload해
+  exact chain을 검증하거나 one-generation head/anchor lag만 수리한 뒤 재개한다. transient I/O 실패는 retryable
+  `error`, schema/hash/auth conflict는 `corrupt|auth_error`로 유지한다.
 - restart에서 복구된 미완료 입력은 최대 4개의 user-only prompt context로만
   주입한다. 자동 실행·자동 전송·assistant 합성은 없고, 동일 prompt의 entry/text
   중복과 공개 status의 raw text, source ID, entry ID, turn ID 노출을 금지한다.
@@ -545,10 +639,11 @@ continuity history 결합에만 사용한다.
   Control Page proxy는 Bot API 오류 HTTP status를 보존하고, UI는 HTTP 성공뿐
   아니라 `payload.ok === true`를 확인한 뒤에만 pending request ID를 지운다.
 
-현재 Local Voice admission manager에는 durable claim과 token consume을 한
-transaction으로 묶는 API가 없다. 따라서 `consume -> claim` 사이 process crash를
-완전히 없앴다고 주장하지 않으며, 이 원자화는 admission/ingress owner 간 별도
-typed transaction 계약이 생길 때 닫는다.
+Local Voice admission manager는 `consume_with_durable_claim()`에서 manager lock과
+cross-process claim lease를 유지한 채 durable ingress claim을 먼저 완료하고, exact
+receipt를 검증한 뒤에만 token/replay/follow-up/count를 변경한다. claim 실패·불일치와
+process crash는 token을 성공 소비로 승격하거나 자동 대화를 재실행하지 않는다. 따라서
+이전 `consume -> claim` source crash-loss 창은 닫혔으며 실제 장치 E2E 증거와는 구분한다.
 
 ## Restore and lifecycle
 
@@ -557,15 +652,97 @@ typed transaction 계약이 생길 때 닫는다.
 - 복구 시 현재 코드의 system prompt를 새로 삽입한다.
 - monotonic clock 값 자체는 재사용하지 않고, 저장된 남은 TTL에서 실제 경과
   시간을 차감해 새 프로세스의 clock으로 변환한다.
+- 저장 checkpoint의 `expiresAt`과 원래 `expiresAt - savedAt` 창은 reader 설정보다
+  우선한다. 더 긴 현재 TTL은 checkpoint나 그 안의 오래된 row를 연장하지 않는다.
+- checkpoint restore 직후 ingress를 열기 전에 process-local voice room owner를
+  다시 만든다. exact positive canonical `guild:<g>:voice:<channel>:user:<u>` row만
+  후보이며 room별 모든 후보의 `last_active_at` 중 유일한 최신 row를 먼저 고른 뒤
+  exact user binding과 미래 `active_until`을 검사한다. 최신 row가 만료·불일치·손상이거나
+  최신 시각이 동률이면 그 room은 비워 두며 이전 owner를 되살리지 않는다. 복구 TTL은
+  저장 row의 rebased `active_until`을 그대로 쓰고 새 monotonic epoch의 음수
+  `last_active_at`도 유효한 상대 시각으로 허용한다.
 - 1초 주기의 single-flight writer가 직접 변경된 세션 사전도 감지한다.
+- empty head에서 시작한 첫 active write는 검증된 `resetBoundaryAt`을 checkpoint hash와 head chain에
+  함께 결박하고 이후 write에서도 유지한다. 손상·future boundary는 checkpoint 전체를 거부한다.
 - 정상 restart, shutdown, process exit 전에 동기 flush를 시도한다.
+- 명령 기반 restart/shutdown은 호출 순간 process-local terminal owner를 동기 선점한다. Discord의
+  terminal 확인문은 실제 전송 성공 뒤, command continuity 기록 전에 owner와 watchdog을 먼저 arm한다.
+  full-stack shutdown helper도 확인문 전달 뒤 호출하며 scheduler 진입 전부터 같은 watchdog이 살아 있다.
+- 기본 hard-exit deadline은 20초다. restart는 그 1초 전 soft deadline에서 launcher를 exact once로
+  시도하고, launcher·logger·flush·cleanup이 멈춰도 독립 hard watchdog이 종료한다. 두 timer는
+  non-daemon이므로 event loop/interpreter 종료가 terminal 책임을 먼저 버리지 못한다. first-owner는
+  restart, bot shutdown, stack/local scheduled shutdown 사이에서 공유된다. Timer thread가 생성된 뒤
+  `start()`가 예외를 내는 arm 실패도 해당 timer를 취소한 다음 claim을 rollback한다.
+- Docker `discord_bot`은 Windows launcher를 호출하지 않고 container mode를 반환한다. explicit restart는
+  composition 생성 뒤 최소 10초가 지나기 전에는 task cancellation으로 exit를 앞당길 수 없고, exit 75를
+  `on-failure:3` policy에 넘긴다. 정상 shutdown은 exit 0이다. host local/Discord launcher 성공도 exit 0,
+  launcher 실패·unknown mode·hard fallback은 exit 75다.
+- terminal deadline 도달은 flush 성공이나 filesystem writer 중단을 뜻하지 않는다. 프로세스가 종료되면
+  마지막으로 이미 durable한 checkpoint만 복구 근거다. 일반 completed-turn artifact I/O는 위 killable
+  child deadline을 사용하지만 command terminal watchdog과는 별도 owner다. 한쪽의 deadline이 다른 쪽
+  flush 성공이나 process 종료 증거를 대신하지 않는다.
 - Discord guild 기억 초기화는 checkpoint owner의 단일 잠금 안에서 처리한다.
   먼저 guild revocation을 durable ledger에 기록하고, 모든 guild-prefixed
   runtime map을 각각 지운 뒤 checkpoint를 강제 저장한다. 새 checkpoint가
-  내구성 있게 교체된 다음에만 revocation을 제거한다.
-- marker 기록 전 실패하면 runtime state를 지우지 않는다. marker 기록 뒤
-  runtime reset 또는 checkpoint 저장 도중 프로세스가 종료되면 다음
-  restore가 이전 checkpoint에서 그 guild만 제외한다.
+  내구성 있게 교체된 다음에만 revocation을 제거한다. 미완료 revocation은
+  wall-clock 순서와 무관하게 Main restore와 cross-surface merge 모두에서 해당
+  guild의 checkpoint row 전체를 복구에서 제외한다.
+- 초기화 admission은 대상 guild의 normal/batch memory writebehind와 어느 guild에서
+  시작됐든 live vault maintenance가 모두 끝난 뒤에만 열린다. vault maintenance는
+  guild별 trigger를 쓰지만 derivation/bootstrap/index/hot-context를 전역 갱신하므로
+  다른 guild의 live vault worker도 reset을 막는다. 반면 normal/batch writebehind는
+  content-free guild-prefixed process-local task key로 완료까지 추적해 다른 guild의
+  작업은 막지 않는다. batch replacement가 취소한 predecessor도 실제 종료 전까지
+  guild-prefixed `memory-drain` alias로 남는다. vault task는 turn-scope 취소와 반복 취소 뒤에도 실제
+  `to_thread` worker를 shield/drain하고, worker 종료 뒤 원래 `CancelledError`를
+  재전파한 다음에만 registry에서 빠진다. 진행 중이면 runtime과 durable state를
+  건드리기 전에 `memory_background_work_inflight`로 재시도를 요구한다.
+- text/voice의 명시적 `/remember` writer도 같은 content-free guild task registry에서
+  실제 `to_thread` worker 종료까지 추적한다. outer turn cancellation만으로 reset
+  admission이 열리거나 삭제 뒤 늦은 writer가 기억을 되살릴 수 없다.
+- target guild의 일반·복구 search task도 동일 guild-prefixed registry에서 실제 종료까지
+  추적한다. same-session replacement는 기존 task를 drain alias로 보존하며, Discord send await가
+  끝나기 전 reset은 durable marker나 파일을 건드리지 않고 `search_background_work_inflight`로
+  재시도를 요구한다. 취소만으로 외부 전송 완료 여부를 추측하지 않는다.
+- durable revocation callback은 target guild를 먼저 닫고 runtime task·TurnScope·history와
+  voice/text epoch를 정리한 뒤, opaque reset scope로 결박된 explicit vault note,
+  guild별 automatic daily와 deterministic/semantic derivative, search-followup recovery metadata와
+  ingress journal을 같은 live/restart 경계에서 purge한다. vault는 strict scan, exact
+  path/source-reference/reset-scope와 same-scope derivation graph를 mutation 전에 검증하고,
+  dependent leaf부터 source까지 기존 tombstone deletion을 끝까지 수행한다. 다른 guild/local
+  note, unknown legacy file, 혼합 shared daily와 attribution이 모호한 artifact는 추측해 지우지 않는다.
+  raw/legacy tree는 preflight와 현재 file identity·hash를 결박하고 regular file만 unlink한 뒤
+  빈 directory만 제거한다. 부분 tombstone은 marker를 유지하며 repair 뒤 같은 reset 재시도로
+  수렴한다. search journal의 부분 write는
+  일반 mutation을 닫은 `error/write_failed`로 유지하고, reset 재시도만 authoritative reload와
+  one-generation roll-forward를 수행한다. 반복 transient I/O 실패는 다음 reset 재시도로 다시
+  수렴할 수 있지만 structural JSON/hash/type/value 손상은 계속 fail-closed한다.
+- persistent purge나 continuity flush/finalize가 실패하면 marker와 guild block을 유지하고 fixed
+  content-free 오류만 반환한다. 성공한 flush/finalize 뒤에만 exact guild를 다시 연다. 닫힌 동안
+  text, 양수 guild voice, search final delivery와 effectful Discord 명령은 거부하고, reset 재시도,
+  stop/disconnect/leave/restart/shutdown, read-only 명령, 다른 guild와 local guild `0`은 유지한다.
+  `CancelledError`는 일반 실패로 바꾸지 않는다.
+- effectful `자율시작`은 admission 때 guild epoch를 캡처한다. route await 뒤 grant 직전과
+  executor connect 뒤 enabled/persist/loop commit 직전에 open+epoch를 다시 검사하고, reset으로
+  stale해졌으면 executor를 disconnect하고 발급된 grant를 회수해 새 loop/world effect를 만들지 않는다.
+- Discord text ingress journal은 reset marker가 durable해진 뒤 exact `guild:<id>:`의
+  모든 phase를 원자적으로 제거한다. claim은 guild epoch를 캡처하고, recovery await 뒤
+  history begin·followup target·TurnScope 등록까지 reset과 같은 잠금에서 current epoch를
+  재검증한다. 다른 guild와 Fast/local ingress는 보존한다.
+- reset mutation은 target guild의 process-local voice-ingress epoch를 먼저 증가시킨다.
+  각 raw ingress item은 첫 await 전에 현재 epoch를 캡처하고 startup, utterance buffer,
+  dequeue, partial/full/wake STT, speaker verification/TTS interrupt, dispatch와 accepted-turn
+  첫 mutation 앞에서 exact current를 재검증한다. 이전 epoch는 debug audio·session state·
+  checkpoint·history·memory를 만들지 않는다. 다른 guild와 reset 뒤 새 epoch는 계속 처리한다.
+- target guild의 partial-STT cache와 speculative policy도 reset에서 지운다. blocking partial
+  worker는 shared map에 쓰지 않고 content result만 반환하며 event loop가 current epoch를 확인한
+  뒤 cache/partial/committed/speculative state를 한 sync 구간에서 commit한다. timeout·cancellation은
+  commit owner를 잃으므로 late worker가 state를 되살리지 못한다. synthetic local guild `0`은
+  capture currentness에는 유효하지만 Discord guild reset target으로는 허용하지 않는다.
+- marker 기록 전 실패하면 runtime state를 지우지 않는다. marker 기록 뒤 explicit vault,
+  search-followup recovery, ingress purge, runtime reset 또는 checkpoint 저장 도중 프로세스가
+  종료되면 다음 restore가 durable ledger를 checkpoint 유무와 무관하게 다시 읽고, ingress
+  owner를 열기 전에 같은 공용 purge와 reset을 반복한 뒤 해당 guild만 복구에서 제외한다.
 
 ## Operational status
 
@@ -582,10 +759,11 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 `conversationContinuity` owner가 추가된다. heartbeat가 5초를 넘으면 stale이며,
 복구·저장 실패는 고정 코드와 예외 타입만 공개한다.
 
-`status.json`의 additive `completedTurnCommit`은
+성공적으로 기록된 `status.json`의 additive `completedTurnCommit`은
 `conversation_continuity.commit-metrics.v1`이다. 이 지표는 현재 프로세스에서
-성공한 최근 256개 durable checkpoint/head commit의 last/p50/p95/max
-밀리초와 누적 시도·성공·실패 횟수, 마지막 성공 및 대상 검증 여부만 보존한다. 대화문,
+성공한 최근 256개 completed-turn commit 시도의 last/p50/p95/max
+밀리초와 누적 시도·성공·실패 횟수, 마지막 성공 및 대상 검증 여부, content-free
+`inFlight`, count, stall age, configured artifact deadline을 보존한다. 대화문,
 transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 메시지는 저장하지 않는다.
 
@@ -597,6 +775,13 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - 마지막 commit 실패는 `error`와
   `conversation_continuity_commit_failed`로 표시하고 실패 지연은 성공
   percentile에 섞지 않는다.
+- commit은 artifact mutation 전에 `inFlight=true` status 게시를 best-effort로 시도하며, 성공한 write만
+  원자적이다. Runtime Errors reader는 마지막으로 성공한 heartbeat와 현재 시각으로 stall age를 다시 계산하고
+  artifact deadline 이상이면 `conversation_continuity_commit_stalled` warning으로 투영한다. 완료 뒤
+  `inFlight=false` 게시도 best-effort이며, status write 실패는 commit control flow를 바꾸지 않는다.
+- 같은 session의 더 최신 성공에 의해 supersede된 정상 stale 실패는 누적 실패 수만
+  증가시키고 `lastSucceeded`, `lastTargetVerified`, `lastAt`, `lastMs`를 덮지 않는다.
+  구조·auth·anchor 손상은 supersede로 숨기지 않는다.
 - 전달 surface의 receipt 검증 실패는 이미 전달된 턴을 다시 보내지 않지만,
   해당 surface의 `continuity_commit`을 `failed`로 남긴다.
 - 표본은 재시작 뒤 복구하지 않는다. 오래된 프로세스의 stale 경고는 Runtime
@@ -626,6 +811,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 필수 테스트는 다음을 포함한다.
 
 - 완료 턴 및 active follow-up의 fresh restart 복구
+- hard-exit 뒤 canonical voice room owner 복구와 wake 없는 exact owner follow-up 수락,
+  다른 사용자·동률·만료·불일치 최신 row의 fail-closed 거부
 - 실제 owner status가 exact minimal receipt로 축약되는지 검증
 - 부분·legacy·손상 status와 이전 실패 metric의 durable 성공 오판 방지
 - Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속,
@@ -668,9 +855,13 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   양방향 handoff·취소·예외 lock 정리와 proactive mark-before-claim 방지
 - Local Bridge playback 실패의 exact user-only checkpoint, journal 삭제 재시도와
   fresh restart 뒤 미응답 user tail 복구
-- Discord voice 수락 turn의 pre-delivery user-only commit, commit 실패 시 downstream
-  0회, current turn/tail completion과 history 중복 방지, 취소 보존, receipt 직후
-  `os._exit` fresh restore 및 Main prompt 단일 user 투영
+- Discord voice와 direct Main local mic 수락 turn의 pre-delivery user-only commit, commit 실패 시 downstream
+  0회, current turn/tail completion과 history 중복 방지, 취소 보존, receipt 직후 `os._exit` fresh restore 및
+  Main prompt 단일 user 투영
+- Control Page 일반 text의 pre-LLM durable user-only commit, LLM 실패 fresh restore, exact assistant-only
+  completion, prompt 단일 user 투영과 caller cancellation 중 physical commit drain·session lock ordering
+- Discord source read·무음·unread·UDP send 실패의 playback receipt 부재와 exact current
+  source의 첫 successful packet send 뒤에만 started/completed/qualified가 생기는지 검증
 - Discord-channel playback의 audio→finalization→text 순서, local-mic→Discord target 포함,
   channel 없음·validation·pre-send scope 취소·이동·client 교체 시 무전송, send 자체 취소의
   무관측·무재시도·ambiguity, stale memory exposure의 send 전 거부와 일반 text-send 실패 비간섭

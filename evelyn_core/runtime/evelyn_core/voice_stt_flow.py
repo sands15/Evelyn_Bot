@@ -29,9 +29,8 @@ def _validation_bound(metrics: dict[str, Any] | None) -> bool:
 
 
 def _text_for_log(value: Any, *, validation_bound: bool) -> Any:
-    if not validation_bound:
-        return value
-    return f"<validation-text chars={len(str(value or ''))}>"
+    label = "validation-text" if validation_bound else "transcript"
+    return f"<{label} chars={len(str(value or ''))}>"
 
 
 def _redact_stt_meta_text(
@@ -39,8 +38,6 @@ def _redact_stt_meta_text(
     *,
     validation_bound: bool,
 ) -> dict[str, Any]:
-    if not validation_bound:
-        return value
     redacted = dict(value)
     for key, raw_value in tuple(redacted.items()):
         if "text" in str(key).lower():
@@ -309,7 +306,7 @@ async def run_partial_stt_flow(
     session_key: str | None,
     timeout_sec: float,
     build_partial_stt_window: Callable[..., Any],
-    get_partial_transcript: Callable[..., tuple[str, str]],
+    get_partial_transcript: Callable[..., Any],
     read_committed_text: Callable[[str | None], str],
     run_blocking_stt_task: Callable[..., Awaitable[tuple[str, str]]],
     speculate_from_committed_stt: Callable[[str, dict | None], dict[str, Any] | None],
@@ -317,6 +314,8 @@ async def run_partial_stt_flow(
     clean_text: Callable[[str], str],
     metrics: dict[str, Any] | None = None,
     print_fn: Callable[[str], Any] | None = None,
+    write_is_current: Callable[[], bool] | None = None,
+    commit_deferred_partial_transcript: Callable[..., tuple[str, str]] | None = None,
 ) -> PartialSttResult:
     validation_bound = _validation_bound(metrics)
     partial_audio = build_partial_stt_window(audio, sampling_rate=sampling_rate)
@@ -328,18 +327,35 @@ async def run_partial_stt_flow(
         committed_text = clean_text(read_committed_text(session_key))
         return PartialSttResult("", committed_text, skipped_reason="insufficient_audio")
 
-    def get_partial() -> tuple[str, str]:
+    def get_partial() -> Any:
         kwargs: dict[str, Any] = {"sampling_rate": sampling_rate}
         if validation_bound:
             kwargs["validation_bound"] = True
+        if commit_deferred_partial_transcript is not None:
+            kwargs["defer_state_writes"] = True
         return get_partial_transcript(session_key, audio, **kwargs)
 
-    partial_text, committed_text = await run_blocking_stt_task(
+    partial_result = await run_blocking_stt_task(
         get_partial,
         stage="partial",
         timeout_sec=timeout_sec,
         metrics=metrics,
     )
+    try:
+        writes_are_current = (
+            write_is_current is None or bool(write_is_current())
+        )
+    except Exception:
+        writes_are_current = False
+    if not writes_are_current:
+        return PartialSttResult("", "", skipped_reason="stale_voice_ingress")
+    if commit_deferred_partial_transcript is not None:
+        partial_text, committed_text = commit_deferred_partial_transcript(
+            session_key,
+            partial_result,
+        )
+    else:
+        partial_text, committed_text = partial_result
     if print_fn is not None and partial_text:
         print_fn(
             f"[STT RESULT][partial] "
@@ -439,11 +455,7 @@ async def run_full_stt_with_optional_rescore(
             if log_stage is not None:
                 log_stage(metrics, "full STT rescore done", extra=f"selected={stt_meta['selected']}")
         except Exception as exc:
-            error_detail = (
-                f"errorType={type(exc).__name__}"
-                if validation_bound
-                else repr(exc)
-            )
+            error_detail = f"errorType={type(exc).__name__}"
             stt_meta = {
                 "enabled": True,
                 "selected": "primary",

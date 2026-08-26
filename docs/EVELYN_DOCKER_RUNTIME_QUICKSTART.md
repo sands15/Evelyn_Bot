@@ -22,6 +22,12 @@
 
 Discord bot loop는 `discord` profile의 `discord_bot` 서비스로 분리한다. Control-Page/Bot API는 빠른 부팅과 상태 표시를 담당하고, 실제 Discord Gateway 접속과 음성 루프는 `discord_bot`이 담당한다.
 
+service-level restart policy는 `discord_bot`에만 `on-failure:3`으로 제한한다. 명시적 bot restart는 container 안에서
+Windows launcher를 호출하지 않고 exit 75를 내며, 예상하지 못한 non-zero exit와 함께 최대 3회 정책 대상이
+된다. exit 0 shutdown은 재시작하지 않는다. Docker 정책은 container가 최소 10초 살아야 발효되므로 명시적
+restart 경로도 runtime composition 생성 뒤 최소 10초를 기다린다. 이는 source/offline 계약이며 실제 Engine
+재기동은 아직 검증하지 않았다. 정책 세부사항은 [Docker 공식 restart policy 문서](https://docs.docker.com/engine/containers/start-containers-automatically/)를 따른다.
+
 ## 실행
 
 Windows 로컬 기본 경로는 launcher를 사용한다. Host Supervisor와 화면 bridge,
@@ -66,8 +72,41 @@ launcher가 추가하는 실패 요약에는 고정 코드·설명·조치만 �
 `docker/omnivoice_source.sha256`과 정확히 일치해야 하며, 복사 대상의 추가·변경은
 build가 실패한다. 광범위한 `COPY .`는 사용하지 않고 Python glob 네 개만
 이미지에 넣는다. 시작 시 `docker/omnivoice_model.sha256`으로 고정 revision의 필수
-snapshot 경로 13개를 검증한다. 직접 runtime 의존성만 고정했으며 전이 wheel과 base
-image digest까지 고정한 완전 재현 build로 보지는 않는다.
+snapshot 경로 13개를 검증한다. 직접 runtime 의존성, CUDA 12.9.2 base digest와 NPP runtime
+버전은 고정했지만 전이 wheel 전체가 lock된 완전 재현 build로 보지는 않는다.
+
+현재 target TTS image는 `evelyn-omnivoice-tts:recipe-e8151492550b`이다. pinned CUDA 12.9.2
+base, `libnpp-12-9=12.4.1.87-1`, Torch/Torchaudio 2.8.0+cu129, TorchCodec 0.7.0+cu129,
+검증된 공식 FlashInfer 모듈과 FlashInfer Python/Cubin 0.6.15.post1, JIT cache +cu129를 사용한다.
+runtime JIT는 끄고 동시 inference 1, 2/4/8초 bounded CUDA graph, overhead 512와 12-step을
+exact 설정한다. image build assertion은 Torch/Torchaudio/TorchCodec과 FlashInfer
+Python/Cubin/JIT package를 확인한다. runtime health, Compose, service manifest, Windows launcher와
+공식 checker는 health에 노출된 Torch/CUDA/FlashInfer Python/JIT/backend/bucket/step이 다르면
+readiness를 주지 않는다.
+
+### Main LLM native build 선택
+
+`main_llm` image는 pinned CUDA 12.9.2 runtime base를 사용한다. RTX 5090 controlled lab에서 검증한
+side-by-side llama.cpp candidate는 CUDA `120a-real`로 compile되고 `sm_120a` cubin만 포함하며 PTX가 없다.
+기존 multi-architecture build를 덮지 않는다. Main/GPU0의 기본 경로는
+`${EVELYN_LLAMA_CPP_DIR}/build-sm120-v1`이고 `/llama/build`에 read-only로 overlay한다. Router/Minecraft/Sub
+등 GPU1 LLM은 계속 `${EVELYN_LLAMA_CPP_DIR}/build`를 쓴다.
+
+launcher는 Main build의 `bin/llama-server`, `CMakeCache.txt`와 exact `120a-real` architecture를 검사한다.
+Compose도 시작 전에 같은 architecture를 다시 확인한다. 기본 build가 없거나 contract가 다르면 일반 build로
+fallback하지 않고 fail-close한다. 다른 compatible native build를 명시적으로 선택할 때만
+`EVELYN_MAIN_LLM_BUILD_DIR`을 override한다. Windows 경로는 forward slash를 쓴다.
+
+```powershell
+$env:EVELYN_LLAMA_CPP_DIR = "D:/llama.cpp"
+$env:EVELYN_MAIN_LLM_BUILD_DIR = "D:/llama.cpp/build-sm120-compatible"
+```
+
+fixed latency lab은 root containment, symlink/reparse boundary, server binary와 build content identity가
+다르면 실행 전에 fail-close한다. TTS-ready graph A/B와 독립 graph-on 재현 뒤 Main 기본값은 batch/ubatch
+`2048/2048`, cache reuse/RAM `256/8192MiB`, CUDA graph/full-SWA `1/1`이다. 두 graph-on run의 resident
+answer first-PCM p95는 `262.6/259.0ms`였지만 idle은 `228.8/387.8ms`로 변했다. 따라서 이 설정은 local
+기본값이지만 30/200 campaign, restart/idle/soak와 실제 speaker/Discord 검증은 여전히 필요하다.
 
 Hugging Face cache에는 offline revision
 `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`가 이미 있어야 하며 컨테이너에는
@@ -144,6 +183,11 @@ launcher를 먼저 실행해야 한다. OFF는 Compose `SIGINT`와 30초 grace�
 실제 진행 중인 Discord 답변의 drain은 아직 live 검증하지 않았으므로 대화 사이에
 전환하는 것이 안전하다. 전체 stack을 다시 시작하면 launcher에서 선택한 profile이
 다시 기준이 되며 이 토글은 별도 desired-state 설정을 저장하지 않는다.
+
+OFF는 Host Supervisor가 exact `docker compose stop discord_bot`으로 수행한다. 수동 stop 뒤 restart policy
+ignore 상태는 Docker daemon 재시작 또는 container manual restart까지 유지된다. 다만 `on-failure`는 daemon
+재시작만으로 container를 auto-start하지 않으므로 실제 ON은 명시적 `docker compose start/up`이 필요하다. 이
+manual OFF/ON과 3회 retry 소진은 source 계약만 확인했고 실제 Docker Desktop에서는 아직 검증하지 않았다.
 
 실사용 오류를 전달할 때는 다음처럼 Discord worker의 최근 로그만 확인한다.
 

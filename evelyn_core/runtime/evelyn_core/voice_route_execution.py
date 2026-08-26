@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, MutableMapping
 
 import aiohttp
 
+from .context_pipeline import build_required_evidence_failure_reply
+from .fast_action_runtime import (
+    SafeIncrementalSpeechFilter,
+    enforce_action_reply_contract,
+)
+from .main_inference_contract import (
+    MainAdmissionLease,
+    admitted_main_request,
+    main_admission_client_mode,
+    main_admission_headers,
+    main_request_kind_from_payload,
+)
 from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
 from .memory_exposure import (
     MemoryExposurePosition,
@@ -15,8 +27,14 @@ from .memory_exposure import (
     memory_exposure_guard,
     memory_exposure_request,
 )
+from .observability_metrics import (
+    mark_voice_latency_stage,
+    voice_latency_trace_from_metrics,
+)
 from .skills import SkillContext, SkillResult
+from .search_tools import render_search_results_for_user, structured_search_results
 from .text import ModelStreamPrefixFilter, clean_text, is_user_echo_answer
+from .tts_playback import SpeechCommitGate
 from .turn_budget import build_turn_execution_budget
 from .turn_lifecycle import TurnState
 from .voice_orchestration import VoiceTurnRequest, VoiceTurnRouteContext
@@ -28,6 +46,93 @@ from .voice_pipeline import (
     build_action_result,
     route_decision_policy_dict,
 )
+
+
+@dataclass
+class _IncrementalMinecraftSpeechFilter:
+    allow_minecraft: bool
+    sanitize_output: Callable[[str], str]
+    contains_leak: Callable[[str], bool]
+    pending: str = ""
+    accepted_raw_parts: list[str] = field(default_factory=list)
+    visible_text: str = ""
+    minecraft_suppressed: bool = False
+    prefix_rewrite_suppressed: bool = False
+
+    def push(self, fragment: str) -> list[str]:
+        self.pending += str(fragment or "")
+        output: list[str] = []
+        while True:
+            boundary = next(
+                (
+                    index + 1
+                    for index, char in enumerate(self.pending)
+                    if char in ".!?。！？"
+                ),
+                0,
+            )
+            if boundary <= 0:
+                break
+            sentence = self.pending[:boundary]
+            self.pending = self.pending[boundary:]
+            self._project(sentence, output)
+        return output
+
+    def finish(self) -> list[str]:
+        output: list[str] = []
+        if self.pending:
+            self._project(self.pending, output)
+            self.pending = ""
+        return output
+
+    @property
+    def safe_text(self) -> str:
+        return self.visible_text
+
+    @property
+    def suppressed(self) -> bool:
+        return self.minecraft_suppressed
+
+    def _project(self, sentence: str, output: list[str]) -> None:
+        candidate_raw = "".join((*self.accepted_raw_parts, sentence))
+        visible_sentence = clean_text(self.sanitize_output(candidate_raw))
+        if (
+            not self.allow_minecraft
+            and self.contains_leak(clean_text(visible_sentence))
+        ):
+            self.minecraft_suppressed = True
+            return
+        if self.visible_text and not visible_sentence.startswith(
+            self.visible_text
+        ):
+            self.prefix_rewrite_suppressed = True
+            return
+        suffix = visible_sentence[len(self.visible_text) :]
+        self.accepted_raw_parts.append(sentence)
+        self.visible_text = visible_sentence
+        if clean_text(suffix):
+            output.append(suffix)
+
+
+def _mark_voice_main_admission(
+    metrics: dict[str, Any] | None,
+    lease: MainAdmissionLease,
+) -> None:
+    trace = voice_latency_trace_from_metrics(metrics)
+    if trace is None:
+        return
+    trace.mark(
+        "main_slot_acquired",
+        at_ns=max(0, int(lease.admitted_at * 1_000_000_000)),
+    )
+    if lease.raw_request_written_at is not None:
+        trace.mark(
+            "main_request_written",
+            at_ns=max(
+                0,
+                int(lease.raw_request_written_at * 1_000_000_000),
+            ),
+        )
 
 
 def _combined_optional_exposure(
@@ -42,6 +147,29 @@ def _combined_optional_exposure(
     if len(positions) == 1:
         return positions[0]
     return combine_memory_exposure_positions(*positions)
+
+
+def _route_decision_allows_search(route_decision: Any) -> bool:
+    if route_decision is None:
+        return False
+    if bool(getattr(route_decision, "needs_search", False)):
+        return True
+    return any(
+        clean_text(str(getattr(decision, "tool_name", "") or ""))
+        == "web_current_info"
+        for decision in (getattr(route_decision, "tool_requests", ()) or ())
+    )
+
+
+def _promised_search_spoken_text(metrics: dict | None) -> str | None:
+    if not isinstance(metrics, dict) or not isinstance(metrics.get("meta"), dict):
+        return None
+    resolution = metrics["meta"].get("promised_search_resolution")
+    if resolution == "completed":
+        return "검색 결과를 화면에 정리했어."
+    if resolution == "completed_empty":
+        return "검색은 실행했지만 보여줄 결과를 받지 못했어."
+    return None
 
 
 @dataclass(frozen=True)
@@ -65,6 +193,7 @@ class VoiceRouteExecutionDeps:
     answer_current_datetime_query: Callable[[str], str | None]
     answer_gpu_runtime_status_query: Callable[[str], str | None]
     synthesize_tool_result_with_main_llm: Callable[..., Awaitable[str]]
+    execute_selected_specialist: Callable[..., Awaitable[str | None]]
     observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
     skill_registry: Any
     recent_skill_dispatches: MutableMapping[str, float]
@@ -108,7 +237,7 @@ class VoiceMainLlmStreamingDeps:
     sanitize_model_output: Callable[[str], str]
     parse_response_action_tag: Callable[[str], Any]
     extract_answer_from_reasoning: Callable[[str, str], str]
-    ask_llm_once: Callable[..., Awaitable[str]]
+    execute_main_llm_once: Callable[..., Awaitable[tuple[str, str] | Any]]
     resolve_promised_search_final_answer: Callable[..., Awaitable[str]]
     enforce_question_limits: Callable[..., tuple[str, dict[str, Any]]]
     record_question_trace: Callable[..., Any]
@@ -148,7 +277,7 @@ def build_voice_main_llm_streaming_deps(
     sanitize_model_output: Callable[[str], str],
     parse_response_action_tag: Callable[[str], Any],
     extract_answer_from_reasoning: Callable[[str, str], str],
-    ask_llm_once: Callable[..., Awaitable[str]],
+    execute_main_llm_once: Callable[..., Awaitable[tuple[str, str] | Any]],
     resolve_promised_search_final_answer: Callable[..., Awaitable[str]],
     enforce_question_limits: Callable[..., tuple[str, dict[str, Any]]],
     record_question_trace: Callable[..., Any],
@@ -186,7 +315,7 @@ def build_voice_main_llm_streaming_deps(
         sanitize_model_output=sanitize_model_output,
         parse_response_action_tag=parse_response_action_tag,
         extract_answer_from_reasoning=extract_answer_from_reasoning,
-        ask_llm_once=ask_llm_once,
+        execute_main_llm_once=execute_main_llm_once,
         resolve_promised_search_final_answer=resolve_promised_search_final_answer,
         enforce_question_limits=enforce_question_limits,
         record_question_trace=record_question_trace,
@@ -206,6 +335,63 @@ def build_voice_main_llm_streaming_deps(
     )
 
 
+async def retry_main_llm_with_existing_plan(
+    *,
+    deps: VoiceMainLlmStreamingDeps,
+    payload: dict[str, Any],
+    user_text: str,
+    metrics: dict | None = None,
+    session_key: str | None = None,
+    source: str = "text",
+    guild_id: int | None = None,
+) -> str:
+    retry_payload = {**payload, "stream": False}
+    if metrics is not None:
+        metrics.setdefault("meta", {})["empty_stream_retry"] = {
+            "reused_turn_plan": True,
+            "router_replanned": False,
+        }
+    started_at = time.monotonic()
+    deps.increment_inflight_llm_requests()
+    try:
+        answer, _answer_source = await deps.execute_main_llm_once(
+            payload=retry_payload,
+            user_text=user_text,
+        )
+    except Exception as exc:
+        deps.record_model_call_trace(
+            model_role="main",
+            purpose="main_response_retry",
+            hot_path=True,
+            started_at=started_at,
+            success=False,
+            metrics=metrics,
+            error=exc,
+            model_name=deps.model_name,
+            endpoint=deps.llm_server_url,
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
+        raise
+    finally:
+        deps.decrement_inflight_llm_requests()
+    deps.record_model_call_trace(
+        model_role="main",
+        purpose="main_response_retry",
+        hot_path=True,
+        started_at=started_at,
+        success=True,
+        metrics=metrics,
+        model_name=deps.model_name,
+        endpoint=deps.llm_server_url,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
+    )
+    return clean_text(answer)
+
+
 def build_skill_context(
     *,
     deps: VoiceRouteExecutionDeps,
@@ -220,6 +406,7 @@ def build_skill_context(
     metrics: dict | None,
     route_decision: RouteDecision,
     cognitive_state: dict | None,
+    turn_scope: Any | None = None,
     messages: list[dict[str, Any]] | None = None,
     minecraft_state: dict[str, Any] | None = None,
 ) -> SkillContext:
@@ -242,6 +429,7 @@ def build_skill_context(
             "route_policy": route_decision_policy_dict(route_decision),
             "should_interrupt_delivery": route_decision.should_interrupt_delivery,
             "cognitive_state": cognitive_state,
+            "turn_scope": turn_scope,
             "messages": list(messages or []),
             "minecraft_state": dict(minecraft_state or {}),
             "model_name": deps.model_name,
@@ -317,10 +505,38 @@ async def maybe_execute_registered_route(
     debug_text: str | None,
     metrics: dict | None,
     cognitive_state: dict | None,
+    turn_scope: Any | None = None,
     messages: list[dict[str, Any]] | None = None,
     allow_internal_routes: set[str] | None = None,
 ) -> str | None:
     route_name = clean_text(route_decision.route)
+    specialist_name = clean_text(str(getattr(route_decision, "specialist", "") or "")).lower()
+    if (
+        route_name not in {"search_executor", "task_executor"}
+        and specialist_name not in {"", "none"}
+    ):
+        try:
+            specialist_evidence = await deps.execute_selected_specialist(
+                route_decision=route_decision,
+                user_text=user_text,
+                messages=messages,
+                minecraft_state="",
+                metrics=metrics,
+            )
+        except MemoryDeletionJournalIntegrityError:
+            raise
+        except Exception as exc:
+            if metrics is not None:
+                metrics.setdefault("meta", {})["specialist_llm"] = {
+                    "specialist": specialist_name,
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                }
+            deps.log(f"[SPECIALIST] fallback to Main: errorType={type(exc).__name__}")
+        else:
+            if specialist_evidence:
+                return clean_text(specialist_evidence)
+
     if not route_name:
         return None
     if route_name in deps.default_internal_routes and route_name not in (allow_internal_routes or set()):
@@ -335,13 +551,31 @@ async def maybe_execute_registered_route(
     )
     now = time.monotonic()
     cleanup_recent_skill_dispatches(deps=deps, now=now)
-    last_dispatch = float(deps.recent_skill_dispatches.get(dispatch_key, 0.0) or 0.0)
-    if last_dispatch > 0 and (now - last_dispatch) < deps.skill_dispatch_repeat_window_sec:
-        return None
+    if route_name != "task_executor":
+        last_dispatch = float(
+            deps.recent_skill_dispatches.get(dispatch_key, 0.0) or 0.0
+        )
+        if (
+            last_dispatch > 0
+            and (now - last_dispatch) < deps.skill_dispatch_repeat_window_sec
+        ):
+            return None
     skills = deps.skill_registry.find_by_route(route_name, source=source)
     if not skills:
         return None
-    live_minecraft_state = await deps.observe_live_minecraft_state(guild_id)
+    needs_live_minecraft_state = bool(
+        getattr(route_decision, "needs_minecraft_state", False)
+        or getattr(route_decision, "needs_skill_graph", False)
+        or (
+            route_name != "task_executor"
+            and specialist_name == "minecraft_planning"
+        )
+    )
+    live_minecraft_state = (
+        await deps.observe_live_minecraft_state(guild_id)
+        if needs_live_minecraft_state
+        else None
+    )
     context = build_skill_context(
         deps=deps,
         user_text=user_text,
@@ -355,10 +589,12 @@ async def maybe_execute_registered_route(
         metrics=metrics,
         route_decision=route_decision,
         cognitive_state=cognitive_state,
+        turn_scope=turn_scope,
         messages=messages,
         minecraft_state=live_minecraft_state,
     )
-    deps.recent_skill_dispatches[dispatch_key] = now
+    if route_name != "task_executor":
+        deps.recent_skill_dispatches[dispatch_key] = now
     result = await deps.skill_registry.execute(skills[0].name, context)
     if isinstance(result, SkillResult):
         if not result.handled or not result.should_emit:
@@ -445,17 +681,22 @@ async def execute_search_then_answer_action(
             index_dir=deps.memory_index_dir,
         ):
             results = await deps.search_duckduckgo(search_query)
-        with memory_exposure_guard(
-            index_dir=deps.memory_index_dir,
-        ):
-            answer = await deps.answer_from_search_results(
-                search_query,
-                results,
-            )
+        search_rows = structured_search_results(results, limit=3)
+        answer = render_search_results_for_user(search_query, search_rows)
         return build_action_result(
             action="search_then_answer",
-            answer_text=clean_text(answer) or "지금 검색 결과를 정리하지 못했어. 잠깐 뒤에 다시 시도해줘.",
-            metadata={"query": search_query, "result_count": len(results)},
+            answer_text=clean_text(answer),
+            metadata={
+                "query": search_query,
+                "result_count": len(results),
+                "search_result_schema": "evelyn.search-cards.v1",
+                "search_results": search_rows,
+                "spoken_text": (
+                    f"검색 결과 {len(search_rows)}건을 화면에 정리했어."
+                    if search_rows
+                    else "검색은 실행했지만 보여줄 결과를 받지 못했어."
+                ),
+            },
         )
     except MemoryDeletionJournalIntegrityError:
         raise
@@ -463,7 +704,11 @@ async def execute_search_then_answer_action(
         return build_action_result(
             action="search_then_answer",
             answer_text="지금 검색 결과를 바로 가져오지 못했어. 잠깐 뒤에 다시 시도해줘.",
-            metadata={"query": search_query, "error": "search_failed"},
+            metadata={
+                "query": search_query,
+                "error": "search_failed",
+                "spoken_text": "지금 검색 결과를 가져오지 못했어.",
+            },
         )
 
 
@@ -476,6 +721,7 @@ async def prepare_route_context(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    memory_owner_scope: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -490,6 +736,7 @@ async def prepare_route_context(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        memory_owner_scope=memory_owner_scope,
         source=source,
         debug_text=debug_text,
         metrics=metrics,
@@ -521,6 +768,8 @@ async def prepare_route_context(
             needs_tts=bool(context_policy.needs_tts),
             response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
             priority="accuracy",
+            specialist=clean_text(context_policy.specialist) or "none",
+            tool_requests=tuple(context_policy.tool_requests),
         )
     else:
         route_decision = replace(
@@ -536,6 +785,8 @@ async def prepare_route_context(
             needs_tts=bool(context_policy.needs_tts),
             response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
             priority=clean_text(context_policy.priority) or route_decision.priority,
+            specialist=clean_text(context_policy.specialist) or "none",
+            tool_requests=tuple(context_policy.tool_requests),
         )
     route_question_policy = None
     if metrics is not None:
@@ -547,6 +798,36 @@ async def prepare_route_context(
         session_key=session_key,
         route_meta_question_policy=route_question_policy,
     )
+    route_name = clean_text(str(route_decision.route or ""))
+    if route_name != "task_executor":
+        required_evidence_failure = build_required_evidence_failure_reply(
+            route_decision.tool_requests,
+            vision_scene_available=any(
+                decision.tool_name == "vision_capture_or_watch"
+                and clean_text(decision.status) == "executed"
+                for decision in route_decision.tool_requests
+            ),
+            deferred_tool_names=(
+                {"web_current_info"}
+                if route_name == "search_executor"
+                else set()
+            ),
+        )
+        if required_evidence_failure:
+            route_decision = replace(
+                route_decision,
+                action="answer",
+                route="required_evidence_failure",
+                user_visible_preface=required_evidence_failure,
+                needs_main_llm=False,
+                needs_search=False,
+                ask_mode="none",
+                max_question_count=0,
+                question_hint=None,
+                question_reason=None,
+                question_source="none",
+                specialist="none",
+            )
     if metrics is not None:
         metrics.setdefault("meta", {})["question_cooldown_hit"] = bool(question_cooldown_hit)
         metrics.setdefault("meta", {})["route_policy"] = route_decision_policy_dict(route_decision)
@@ -587,11 +868,23 @@ async def maybe_handle_short_circuit_route(
     cognitive_state: dict | None = None,
 ) -> tuple[str | None, Callable[[], None] | None]:
     _ = room_key, person_key, session_memory_key, debug_text
+    # A task route must reach its registered executor and receipt gate. No
+    # deterministic answer or router preface is terminal authority for it.
+    if clean_text(str(route_decision.route or "")) == "task_executor":
+        return None, on_first_chunk
+    required_evidence_failure = (
+        clean_text(str(route_decision.route or ""))
+        == "required_evidence_failure"
+    )
     delivery_on_sentence = on_sentence if route_decision.needs_tts else None
     if metrics is not None:
         metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and on_sentence is not None)
 
-    simple_local_answer = deps.answer_simple_local_chat_query(user_text)
+    simple_local_answer = (
+        None
+        if required_evidence_failure
+        else deps.answer_simple_local_chat_query(user_text)
+    )
     if simple_local_answer:
         if on_first_chunk is not None:
             on_first_chunk()
@@ -616,7 +909,11 @@ async def maybe_handle_short_circuit_route(
             metrics.setdefault("meta", {})["deterministic_fast_path"] = "simple_local_chat"
         return answer_payload.display_text, on_first_chunk
 
-    datetime_answer = deps.answer_current_datetime_query(user_text)
+    datetime_answer = (
+        None
+        if required_evidence_failure
+        else deps.answer_current_datetime_query(user_text)
+    )
     if datetime_answer:
         if on_first_chunk is not None:
             on_first_chunk()
@@ -641,7 +938,11 @@ async def maybe_handle_short_circuit_route(
             metrics.setdefault("meta", {})["deterministic_fast_path"] = "datetime"
         return answer_payload.display_text, on_first_chunk
 
-    gpu_runtime_answer = deps.answer_gpu_runtime_status_query(user_text)
+    gpu_runtime_answer = (
+        None
+        if required_evidence_failure
+        else deps.answer_gpu_runtime_status_query(user_text)
+    )
     if gpu_runtime_answer:
         if on_first_chunk is not None:
             on_first_chunk()
@@ -685,10 +986,19 @@ async def maybe_handle_short_circuit_route(
             user_text=user_text,
             awaiting_user_reply=awaiting_user_reply,
         )
+        planned_search_query = next(
+            (
+                clean_text(decision.query)
+                for decision in route_decision.tool_requests
+                if decision.tool_name == "web_current_info"
+                and clean_text(decision.query)
+            ),
+            user_text,
+        )
         action_result = await execute_search_then_answer_action(
             deps=deps,
             guild_id=guild_id,
-            user_text=user_text,
+            user_text=planned_search_query,
             session_key=session_key,
             messages=messages,
         )
@@ -696,6 +1006,7 @@ async def maybe_handle_short_circuit_route(
             user_text=user_text,
             tool_name="search",
             tool_result_text=action_result.answer_text,
+            tool_result_metadata=action_result.metadata,
             guild_id=guild_id,
             session_key=session_key,
             source=source,
@@ -762,32 +1073,33 @@ async def execute_main_llm_streaming_turn(
     user_text = request.user_text
     guild_id = request.guild_id
     session_key = request.session_key
-    room_key = request.room_key
-    person_key = request.person_key
-    session_memory_key = request.session_memory_key
     source = request.source
-    debug_text = request.debug_text
     metrics = request.metrics
     turn_scope = request.turn_scope
     messages = route_context.messages
     cognitive_state = route_context.cognitive_state
     route_decision = route_context.route_decision
-    on_sentence = request.on_sentence if route_decision.needs_tts else None
+    requested_on_sentence = (
+        request.on_sentence if route_decision.needs_tts else None
+    )
+
+    async def on_committed_sentence(text: str) -> None:
+        assert requested_on_sentence is not None
+        await requested_on_sentence(text)
+        mark_voice_latency_stage(metrics, "speech_prefix_committed")
+
+    on_sentence = (
+        on_committed_sentence
+        if requested_on_sentence is not None
+        else None
+    )
     if turn_scope is not None:
         turn_scope.transition(TurnState.LLM_RUNNING, reason="execute_main_llm_streaming_turn")
     if metrics is not None:
         metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and request.on_sentence is not None)
 
     guided_user_text = route_decision.prompt_text or user_text
-    lightweight_persona_turn = deps.is_casual_call_or_status_question(guided_user_text)
-    needs_live_minecraft_state = (
-        not lightweight_persona_turn
-        and (route_decision.needs_minecraft_state or route_decision.needs_skill_graph)
-    )
-    needs_runtime_status_context = route_decision.needs_runtime_state
-    live_minecraft_state = await deps.observe_live_minecraft_state(guild_id) if needs_live_minecraft_state else None
-    runtime_status_context = await deps.build_runtime_status_context(force=needs_runtime_status_context) if needs_runtime_status_context else ""
-    final_user_text = f"{guided_user_text}\n\n{deps.build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
+    final_user_text = f"{guided_user_text}\n\n{deps.build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=None, runtime_status_context='', route_decision=route_decision)}"
     deps.mark_turn_stage(
         metrics,
         "prompt_built",
@@ -806,12 +1118,14 @@ async def execute_main_llm_streaming_turn(
         max_tokens=deps.voice_llm_max_tokens,
         stop_tokens=deps.main_llm_stop_tokens,
     )
+    mark_voice_latency_stage(metrics, "prompt_compiled")
 
     timeout = aiohttp.ClientTimeout(total=120)
     session = await deps.get_http_session()
     raw_parts: list[str] = []
     reasoning_parts: list[str] = []
     model_stream_prefix_filter = ModelStreamPrefixFilter()
+    speech_filter = SafeIncrementalSpeechFilter()
     speech_chunker = deps.build_stream_speech_chunker(metrics=metrics)
     question_stream_state = {
         "max_question_count": max(0, min(1, int(route_decision.max_question_count or 0))),
@@ -820,10 +1134,86 @@ async def execute_main_llm_streaming_turn(
     } if on_sentence is not None else None
     emitted_any = False
     allow_minecraft_domain = deps.user_explicitly_mentions_minecraft(guided_user_text)
+    minecraft_speech_filter = _IncrementalMinecraftSpeechFilter(
+        allow_minecraft=allow_minecraft_domain,
+        sanitize_output=deps.sanitize_model_output,
+        contains_leak=deps.answer_contains_minecraft_leak,
+    )
     suppressed_minecraft_leak_stream = False
+    turn_memory_exposure = current_memory_exposure_position()
+    speech_handoff_allowed = turn_memory_exposure is None
+    fallback_generation = object()
+    response_generation = (
+        turn_scope.turn_id if turn_scope is not None else fallback_generation
+    )
+
+    def speech_generation_is_current(value: object) -> bool:
+        if turn_scope is not None:
+            return bool(turn_scope.is_current(value))
+        return value is fallback_generation
+
+    speech_commit_gate = SpeechCommitGate(
+        turn_id=(
+            clean_text(getattr(turn_scope, "turn_id", ""))
+            or f"voice-main-{id(fallback_generation)}"
+        ),
+        response_generation=response_generation,
+        generation_is_current=speech_generation_is_current,
+        commit_allowed=lambda: speech_handoff_allowed,
+        memory_bound=turn_memory_exposure is not None,
+    )
+    defer_stream_delivery = bool(
+        on_sentence is not None
+        and (
+            _route_decision_allows_search(route_decision)
+            or speech_commit_gate.memory_bound
+        )
+    )
     llm_started_at = time.monotonic()
     main_first_token_ms: float | None = None
-    turn_memory_exposure = current_memory_exposure_position()
+
+    async def emit_policy_safe_fragments(fragments: list[str]) -> None:
+        nonlocal emitted_any, main_first_token_ms, on_first_chunk
+        safe_text = "".join(fragments)
+        if not clean_text(safe_text):
+            return
+        mark_voice_latency_stage(metrics, "safe_first_delta")
+        if on_first_chunk is not None and not defer_stream_delivery:
+            main_first_token_ms = max(
+                0.0,
+                (time.monotonic() - llm_started_at) * 1000.0,
+            )
+            deps.mark_turn_stage(
+                metrics,
+                "llm_first_chunk",
+                event_name="llm_first_chunk",
+                source_mode=source,
+                since_request_ms=main_first_token_ms,
+            )
+            on_first_chunk()
+            on_first_chunk = None
+        emitted_any = (
+            await deps.emit_stream_delta_chunks(
+                safe_text,
+                speech_chunker=speech_chunker,
+                on_sentence=None if defer_stream_delivery else on_sentence,
+                question_stream_state=question_stream_state,
+                speech_commit_gate=speech_commit_gate,
+            )
+        ) or emitted_any
+
+    async def emit_visible_policy_text(fragment: str) -> None:
+        nonlocal suppressed_minecraft_leak_stream
+        for visible_fragment in minecraft_speech_filter.push(fragment):
+            await emit_policy_safe_fragments(
+                speech_filter.push(visible_fragment)
+            )
+        if minecraft_speech_filter.suppressed:
+            suppressed_minecraft_leak_stream = True
+            if metrics is not None:
+                metrics.setdefault("meta", {})[
+                    "suppressed_minecraft_leak_stream"
+                ] = True
 
     deps.increment_inflight_llm_requests()
     try:
@@ -834,15 +1224,33 @@ async def execute_main_llm_streaming_turn(
             source_mode=source,
             prompt_chars=len(final_user_text),
         )
-        async with memory_exposure_request(
-            session.post,
-            deps.llm_server_url,
-            expected_position=turn_memory_exposure,
-            memory_index_dir=deps.memory_index_dir,
-            memory_boundary_required=turn_memory_exposure is not None,
-            json=payload,
-            timeout=timeout,
+        mark_voice_latency_stage(metrics, "main_admission_requested")
+
+        def main_request_factory() -> Any:
+            if main_admission_client_mode() == "local":
+                mark_voice_latency_stage(metrics, "main_request_written")
+            return memory_exposure_request(
+                session.post,
+                deps.llm_server_url,
+                expected_position=turn_memory_exposure,
+                memory_index_dir=deps.memory_index_dir,
+                memory_boundary_required=turn_memory_exposure is not None,
+                json=payload,
+                headers=main_admission_headers(
+                    main_request_kind_from_payload(payload)
+                ),
+                timeout=timeout,
+            )
+
+        async with admitted_main_request(
+            main_request_factory,
+            kind=main_request_kind_from_payload(payload),
+            on_acquired=lambda lease: _mark_voice_main_admission(
+                metrics,
+                lease,
+            ),
         ) as resp:
+            mark_voice_latency_stage(metrics, "main_headers_received")
             if resp.status != 200:
                 error_text = await resp.text()
                 raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
@@ -863,18 +1271,18 @@ async def execute_main_llm_streaming_turn(
                         extract_answer_from_reasoning=deps.extract_answer_from_reasoning,
                     )
                 if not answer:
-                    deps.log("[LLM STREAM] json answer empty, retry non-stream")
-                    answer = await deps.ask_llm_once(
-                        user_text,
-                        guild_id=guild_id,
+                    deps.log("[LLM STREAM] json answer empty, retry same plan non-stream")
+                    answer = await retry_main_llm_with_existing_plan(
+                        deps=deps,
+                        payload=payload,
+                        user_text=user_text,
+                        metrics=metrics,
                         session_key=session_key,
-                        room_key=room_key,
-                        person_key=person_key,
-                        session_memory_key=session_memory_key,
                         source=source,
-                        debug_text=debug_text,
-                        record_question_trace_enabled=False,
+                        guild_id=guild_id,
                     )
+                if answer:
+                    mark_voice_latency_stage(metrics, "raw_first_token")
                 answer = await deps.resolve_promised_search_final_answer(
                     user_text=user_text,
                     answer_text=answer,
@@ -885,6 +1293,12 @@ async def execute_main_llm_streaming_turn(
                     cognitive_state=cognitive_state,
                     route_decision=route_decision,
                     metrics=metrics,
+                )
+                answer = enforce_action_reply_contract(
+                    deps.sanitize_unrequested_minecraft_leak(
+                        guided_user_text,
+                        answer,
+                    )
                 )
                 answer, question_shape_meta = deps.enforce_question_limits(answer, route_decision)
                 deps.record_question_trace(
@@ -905,10 +1319,32 @@ async def execute_main_llm_streaming_turn(
                     )
                     on_first_chunk()
                     on_first_chunk = None
-                await deps.emit_delivery_plan_chunks(
-                    deps.build_delivery_plan(deps.build_answer_payload_from_text(answer), include_voice=on_sentence is not None, split_chunks=deps.split_tts_sentences),
-                    on_sentence=on_sentence,
+                search_resolution_spoken_text = _promised_search_spoken_text(
+                    metrics
                 )
+                spoken_answer = search_resolution_spoken_text or answer
+                if spoken_answer:
+                    mark_voice_latency_stage(metrics, "safe_first_delta")
+                delivery_memory_exposure = _combined_optional_exposure(
+                    turn_memory_exposure,
+                    current_memory_exposure_position(),
+                )
+                with memory_exposure_guard(
+                    expected_position=delivery_memory_exposure,
+                    required=delivery_memory_exposure is not None,
+                    index_dir=deps.memory_index_dir,
+                ):
+                    speech_handoff_allowed = True
+                    await deps.flush_streamed_answer_chunks(
+                        spoken_answer,
+                        speech_chunker=speech_chunker,
+                        on_sentence=on_sentence,
+                        emitted_any=False,
+                        question_stream_state=None,
+                        speech_commit_gate=speech_commit_gate,
+                    )
+                    if on_sentence is not None and not speech_commit_gate.closed:
+                        speech_commit_gate.validate_final(spoken_answer)
                 if metrics is not None:
                     metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
                 deps.record_model_call_trace(
@@ -940,54 +1376,32 @@ async def execute_main_llm_streaming_turn(
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
 
-                delta_text = model_stream_prefix_filter.push(str(stream_event.get("delta_text") or ""))
+                raw_delta_text = str(
+                    stream_event.get("delta_text") or ""
+                )
+                if raw_delta_text:
+                    mark_voice_latency_stage(metrics, "raw_first_token")
+                delta_text = model_stream_prefix_filter.push(raw_delta_text)
                 if not delta_text:
                     continue
 
-                if on_first_chunk is not None:
-                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
-                    deps.mark_turn_stage(
-                        metrics,
-                        "llm_first_chunk",
-                        event_name="llm_first_chunk",
-                        source_mode=source,
-                        since_request_ms=main_first_token_ms,
-                    )
-                    on_first_chunk()
-                    on_first_chunk = None
-
                 raw_parts.append(delta_text)
-                if not allow_minecraft_domain and deps.answer_contains_minecraft_leak(deps.sanitize_model_output("".join(raw_parts))):
-                    suppressed_minecraft_leak_stream = True
-                    if metrics is not None:
-                        metrics.setdefault("meta", {})["suppressed_minecraft_leak_stream"] = True
-                    continue
-                emitted_any = (await deps.emit_stream_delta_chunks(
-                    delta_text,
-                    speech_chunker=speech_chunker,
-                    on_sentence=on_sentence,
-                    question_stream_state=question_stream_state,
-                )) or emitted_any
+                await emit_visible_policy_text(delta_text)
             tail_text = model_stream_prefix_filter.finish()
             if tail_text:
-                if on_first_chunk is not None:
-                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
-                    deps.mark_turn_stage(
-                        metrics,
-                        "llm_first_chunk",
-                        event_name="llm_first_chunk",
-                        source_mode=source,
-                        since_request_ms=main_first_token_ms,
-                    )
-                    on_first_chunk()
-                    on_first_chunk = None
                 raw_parts.append(tail_text)
-                emitted_any = (await deps.emit_stream_delta_chunks(
-                    tail_text,
-                    speech_chunker=speech_chunker,
-                    on_sentence=on_sentence,
-                    question_stream_state=question_stream_state,
-                )) or emitted_any
+                await emit_visible_policy_text(tail_text)
+            for visible_fragment in minecraft_speech_filter.finish():
+                await emit_policy_safe_fragments(
+                    speech_filter.push(visible_fragment)
+                )
+            if minecraft_speech_filter.suppressed:
+                suppressed_minecraft_leak_stream = True
+                if metrics is not None:
+                    metrics.setdefault("meta", {})[
+                        "suppressed_minecraft_leak_stream"
+                    ] = True
+            await emit_policy_safe_fragments(speech_filter.finish())
     except Exception as e:
         deps.record_model_call_trace(
             model_role="main",
@@ -1011,24 +1425,32 @@ async def execute_main_llm_streaming_turn(
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
     answer = deps.sanitize_model_output("".join(raw_parts))
-    if suppressed_minecraft_leak_stream:
-        emitted_any = False
     if not answer:
         deps.log(
             f"[LLM STREAM] stream 응답 본문이 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = await deps.ask_llm_once(
-            user_text,
-            guild_id=guild_id,
+        answer = await retry_main_llm_with_existing_plan(
+            deps=deps,
+            payload=payload,
+            user_text=user_text,
+            metrics=metrics,
             session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
             source=source,
-            debug_text=debug_text,
-            record_question_trace_enabled=False,
+            guild_id=guild_id,
         )
-    answer = deps.sanitize_unrequested_minecraft_leak(guided_user_text, answer)
+    if (
+        (
+            suppressed_minecraft_leak_stream
+            or minecraft_speech_filter.prefix_rewrite_suppressed
+        )
+        and minecraft_speech_filter.safe_text
+    ):
+        answer = deps.sanitize_model_output(minecraft_speech_filter.safe_text)
+    else:
+        answer = deps.sanitize_unrequested_minecraft_leak(
+            guided_user_text,
+            answer,
+        )
     pre_escalation_answer = answer
     answer = await deps.resolve_promised_search_final_answer(
         user_text=user_text,
@@ -1041,8 +1463,13 @@ async def execute_main_llm_streaming_turn(
         route_decision=route_decision,
         metrics=metrics,
     )
-    if clean_text(answer) != clean_text(pre_escalation_answer):
+    search_result_replaced_model_answer = (
+        clean_text(answer) != clean_text(pre_escalation_answer)
+    )
+    search_resolution_spoken_text = _promised_search_spoken_text(metrics)
+    if search_result_replaced_model_answer:
         emitted_any = False
+    answer = enforce_action_reply_contract(answer)
     answer, question_shape_meta = deps.enforce_question_limits(answer, route_decision)
     deps.record_question_trace(
         route_decision=route_decision,
@@ -1056,6 +1483,8 @@ async def execute_main_llm_streaming_turn(
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
+    if answer:
+        mark_voice_latency_stage(metrics, "safe_first_delta")
     delivery_memory_exposure = _combined_optional_exposure(
         turn_memory_exposure,
         current_memory_exposure_position(),
@@ -1065,13 +1494,55 @@ async def execute_main_llm_streaming_turn(
         required=delivery_memory_exposure is not None,
         index_dir=deps.memory_index_dir,
     ):
-        await deps.flush_streamed_answer_chunks(
-            answer,
-            speech_chunker=speech_chunker,
-            on_sentence=on_sentence,
-            emitted_any=emitted_any,
-            question_stream_state=question_stream_state,
-        )
+        speech_handoff_allowed = True
+        if on_first_chunk is not None and answer:
+            main_first_token_ms = max(
+                0.0,
+                (time.monotonic() - llm_started_at) * 1000.0,
+            )
+            deps.mark_turn_stage(
+                metrics,
+                "llm_first_chunk",
+                event_name="llm_first_chunk",
+                source_mode=source,
+                since_request_ms=main_first_token_ms,
+            )
+            on_first_chunk()
+            on_first_chunk = None
+        if (
+            defer_stream_delivery
+            and search_resolution_spoken_text is not None
+            and on_sentence is not None
+        ):
+            speech_commit_gate.observe_safe_delta(
+                search_resolution_spoken_text
+            )
+            for commit in speech_commit_gate.commit_candidate(
+                search_resolution_spoken_text
+            ):
+                await on_sentence(commit.text)
+            speech_commit_gate.validate_final(
+                search_resolution_spoken_text
+            )
+            on_sentence = None
+            await deps.flush_streamed_answer_chunks(
+                answer,
+                speech_chunker=speech_chunker,
+                on_sentence=None,
+                emitted_any=False,
+                question_stream_state=question_stream_state,
+            )
+        else:
+            await deps.flush_streamed_answer_chunks(
+                answer,
+                speech_chunker=speech_chunker,
+                on_sentence=on_sentence,
+                emitted_any=emitted_any,
+                question_stream_state=question_stream_state,
+                speech_commit_gate=speech_commit_gate,
+            )
+        if on_sentence is not None and not speech_commit_gate.closed:
+            speech_commit_gate.validate_final(answer)
     if question_stream_state is not None and metrics is not None:
         metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
 

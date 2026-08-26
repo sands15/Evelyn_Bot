@@ -96,6 +96,61 @@ class MinecraftWorldLeaseHttpRuntimeTests(
         self.assertFalse(status["running"])
         self.assertFalse(stopped["connected"])
 
+    async def test_authorized_start_bootstraps_offline_service_once(
+        self,
+    ) -> None:
+        calls: list[tuple[str, str, object]] = []
+        starts: list[str] = []
+
+        async def request(method, path, payload):
+            calls.append((method, path, payload))
+            if len(calls) == 1:
+                return None, "connection refused"
+            return {"connected": True}, ""
+
+        async def ensure_service() -> None:
+            starts.append("start_voyager")
+
+        runtime = MinecraftWorldLeaseHttpRuntime(
+            request=request,
+            is_offline_error=lambda error: error == "connection refused",
+            ensure_service=ensure_service,
+        )
+
+        result = await runtime.start(
+            world_lease={"leaseId": "lease-1"},
+        )
+
+        self.assertTrue(result["connected"])
+        self.assertEqual(starts, ["start_voyager"])
+        self.assertEqual(
+            [(method, path) for method, path, _payload in calls],
+            [("POST", "/start"), ("POST", "/start")],
+        )
+
+    async def test_unowned_start_never_bootstraps_service(self) -> None:
+        starts: list[str] = []
+
+        async def request(_method, _path, _payload):
+            return None, "connection refused"
+
+        async def ensure_service() -> None:
+            starts.append("start_voyager")
+
+        runtime = MinecraftWorldLeaseHttpRuntime(
+            request=request,
+            is_offline_error=lambda _error: True,
+            ensure_service=ensure_service,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_service_unavailable",
+        ):
+            await runtime.start()
+
+        self.assertEqual(starts, [])
+
     async def test_non_offline_failure_is_not_reported_stopped(
         self,
     ) -> None:

@@ -16,6 +16,7 @@ from .memory_exposure import (
     memory_exposure_request,
 )
 from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
+from .context_pipeline import ContextPolicy, ToolUseDecision
 from .text import clean_text
 
 
@@ -63,25 +64,13 @@ ROUTER_LLM_MODEL = os.getenv("ROUTER_LLM_MODEL", "gemma-4-E2B-it-Q4_K_M.gguf")
 RouterProvider = Callable[[str, list[dict[str, Any]]], Awaitable[dict[str, Any] | None]]
 _MEMORY_EXPOSURE_UNSET = object()
 
-_SEARCH_MARKERS = (
+_EXPLICIT_WEB_SEARCH_MARKERS = (
     "검색",
     "웹에서",
     "인터넷",
     "외부 검색",
-    "찾아봐",
-    "찾아 봐",
-    "찾아줘",
-    "찾아 줘",
-    "찾아보",
-    "알아봐",
-    "알아 봐",
-    "알아보",
-    "조사해",
-    "조사해봐",
-    "조사해 봐",
     "search",
-    "look up",
-    "research",
+    "web",
     "최신",
     "뉴스",
     "날씨",
@@ -93,6 +82,23 @@ _SEARCH_MARKERS = (
     "weather",
     "price",
 )
+_AMBIGUOUS_RETRIEVAL_MARKERS = (
+    "찾아봐",
+    "찾아 봐",
+    "찾아줘",
+    "찾아 줘",
+    "찾아보",
+    "알아봐",
+    "알아 봐",
+    "알아보",
+    "조사해",
+    "조사해봐",
+    "조사해 봐",
+    "look up",
+    "find",
+    "research",
+)
+_SEARCH_MARKERS = _EXPLICIT_WEB_SEARCH_MARKERS + _AMBIGUOUS_RETRIEVAL_MARKERS
 _RESEARCH_MARKERS = (
     "비교",
     "후보",
@@ -180,9 +186,21 @@ _FOLLOWUP_MARKERS = (
     "하라고",
 )
 _FALSE_WEB_UNAVAILABILITY_RE = re.compile(
-    r"(?:웹\s*검색|외부\s*(?:검색|데이터\s*조회)|인터넷\s*검색).{0,40}"
+    r"(?:웹\s*검색|외부\s*(?:검색|데이터\s*조회)|인터넷\s*검색)"
+    r"[^.!?。！？]{0,40}"
     r"(?:권한.{0,12}없|지원되지\s*않|사용할\s*수\s*없|불가능)",
     re.IGNORECASE,
+)
+_CAPABILITY_SENTENCE_PATTERN = re.compile(
+    r".+?(?:[.!?。！？]+(?=\s|$)|$)",
+    re.DOTALL,
+)
+_CAPABILITY_INCREMENTAL_SENTENCE_END_RE = re.compile(
+    r"[.!?。！？]+(?=\s)"
+)
+_REGISTERED_WEB_CAPABILITY_CORRECTION = (
+    "웹 검색 도구는 연결돼 있어. 방금 요청이 검색으로 인식되지 않았거나 "
+    "검색 실행 결과가 전달되지 않은 거야."
 )
 _CAPABILITY_STATUS_MARKERS = (
     "권한",
@@ -241,6 +259,48 @@ def bind_fast_tool_plan_memory_exposure(
     if position is not None and not isinstance(position, MemoryExposurePosition):
         raise MemoryDeletionJournalIntegrityError()
     return replace(plan, memory_exposure_position=position)
+
+
+def fast_tool_plan_context_policy(plan: FastToolPlan | None) -> ContextPolicy | None:
+    if plan is None:
+        return None
+    canonical_tool = {
+        "web_search": "web_current_info",
+        "research_compare": "web_current_info",
+        "runtime_investigation": "local_file_or_log_read",
+        "runtime_log_read": "local_file_or_log_read",
+    }.get(plan.tool_name, plan.tool_name)
+    decision = ToolUseDecision(
+        tool_name=canonical_tool,
+        reason=clean_text(plan.reason) or "fast_tool_plan",
+        query=clean_text(plan.query),
+        risk="external" if canonical_tool == "web_current_info" else "low",
+        cost="medium" if canonical_tool == "web_current_info" else "low",
+        auto_allowed=canonical_tool in {
+            "memory_recall",
+            "runtime_status",
+            "local_file_or_log_read",
+            "web_current_info",
+        },
+        required_before_answer=True,
+    )
+    return ContextPolicy(
+        intent=clean_text(plan.intent) or "question",
+        needs_memory=canonical_tool == "memory_recall",
+        needs_runtime_state=canonical_tool in {
+            "runtime_status",
+            "local_file_or_log_read",
+        },
+        needs_search=canonical_tool == "web_current_info",
+        priority="accuracy",
+        specialist=(
+            "deep_reasoning"
+            if plan.tool_name in {"research_compare", "runtime_investigation"}
+            else "none"
+        ),
+        tool_plan_authoritative=True,
+        tool_requests=[decision],
+    )
 
 
 def render_fast_tool_registry_context() -> str:
@@ -331,7 +391,6 @@ def _plan_from_rules(text: str, recent_messages: list[dict[str, Any]]) -> FastTo
         return None
     contextual = contextual_tool_query(normalized, recent_messages)
     contextual_lower = contextual.lower()
-    recent_topic = _best_recent_topic(recent_messages)
 
     local_investigation = _has_any(contextual_lower, _LOCAL_RUNTIME_MARKERS) and (
         _has_any(contextual_lower, _INVESTIGATION_MARKERS)
@@ -351,13 +410,8 @@ def _plan_from_rules(text: str, recent_messages: list[dict[str, Any]]) -> FastTo
             reason="explicit local runtime investigation request",
         )
 
-    explicit_search = _has_any(lowered, _SEARCH_MARKERS)
-    contextual_search = bool(
-        recent_topic
-        and _has_any(lowered, _FOLLOWUP_MARKERS)
-        and _has_any(contextual_lower, _SEARCH_MARKERS + _RESEARCH_MARKERS)
-    )
-    if not explicit_search and not contextual_search:
+    explicit_search = _has_any(lowered, _EXPLICIT_WEB_SEARCH_MARKERS)
+    if not explicit_search:
         return None
 
     research = _has_any(contextual_lower, _RESEARCH_MARKERS) or bool(
@@ -387,6 +441,13 @@ def _plan_from_rules(text: str, recent_messages: list[dict[str, Any]]) -> FastTo
 
 def _looks_ambiguous_tool_followup(text: str, recent_messages: list[dict[str, Any]]) -> bool:
     normalized = clean_text(text).lower()
+    if _has_any(normalized, _AMBIGUOUS_RETRIEVAL_MARKERS):
+        return True
+    if _has_any(normalized, _RESEARCH_MARKERS) and _has_any(
+        normalized,
+        ("해줘", "해 줘", "봐줘", "봐 줘", "알려줘", "알려 줘"),
+    ):
+        return True
     return bool(
         _best_recent_topic(recent_messages)
         and len(normalized) <= 36
@@ -535,9 +596,70 @@ async def plan_fast_tool_request(
 
 def enforce_registered_tool_capability_truth(reply: str) -> str:
     normalized = clean_text(reply)
-    if normalized and _FALSE_WEB_UNAVAILABILITY_RE.search(normalized):
-        return (
-            "웹 검색 도구는 연결돼 있어. 방금 요청이 검색으로 인식되지 않았거나 "
-            "검색 실행 결과가 전달되지 않은 거야."
-        )
-    return normalized
+    if not normalized:
+        return normalized
+
+    projected: list[str] = []
+    replaced = False
+    for match in _CAPABILITY_SENTENCE_PATTERN.finditer(normalized):
+        sentence = clean_text(match.group(0))
+        if not sentence:
+            continue
+        if _FALSE_WEB_UNAVAILABILITY_RE.search(sentence):
+            if not replaced:
+                projected.append(_REGISTERED_WEB_CAPABILITY_CORRECTION)
+                replaced = True
+        else:
+            projected.append(sentence)
+    return clean_text(" ".join(projected)) or _REGISTERED_WEB_CAPABILITY_CORRECTION
+
+
+class RegisteredToolCapabilityIncrementalFilter:
+    """Hold one sentence until its registered-tool claims are authoritative."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._replaced_false_claim = False
+        self._emitted_any = False
+
+    def _project_fragment(
+        self,
+        value: str,
+        *,
+        boundary_proven: bool = False,
+    ) -> str:
+        normalized = clean_text(value)
+        if _FALSE_WEB_UNAVAILABILITY_RE.search(normalized):
+            if self._replaced_false_claim:
+                return ""
+            self._replaced_false_claim = True
+            projected = _REGISTERED_WEB_CAPABILITY_CORRECTION
+        else:
+            projected = normalized
+        if not projected:
+            return ""
+        separator = " " if self._emitted_any else ""
+        self._emitted_any = True
+        boundary = " " if boundary_proven else ""
+        return f"{separator}{projected}{boundary}"
+
+    def push(self, fragment: str) -> list[str]:
+        self._pending += str(fragment or "")
+        output: list[str] = []
+        while match := _CAPABILITY_INCREMENTAL_SENTENCE_END_RE.search(
+            self._pending
+        ):
+            sentence = self._pending[: match.end()]
+            self._pending = self._pending[match.end() :]
+            projected = self._project_fragment(
+                sentence,
+                boundary_proven=True,
+            )
+            if projected:
+                output.append(projected)
+        return output
+
+    def finish(self) -> list[str]:
+        projected = self._project_fragment(self._pending)
+        self._pending = ""
+        return [projected] if projected else []

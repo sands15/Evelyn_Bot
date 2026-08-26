@@ -52,9 +52,8 @@ def run_voice_session_gate_from_runtime(
     )
 
     def log_text(value: Any) -> Any:
-        if not validation_bound:
-            return value
-        return f"<validation-text chars={len(str(value or ''))}>"
+        label = "validation-text" if validation_bound else "transcript"
+        return f"<{label} chars={len(str(value or ''))}>"
 
     short_followup_candidate = deps.is_short_followup_candidate(
         final_text,

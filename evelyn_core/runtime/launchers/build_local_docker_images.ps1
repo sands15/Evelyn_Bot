@@ -1,6 +1,6 @@
 param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot '..\..\..'),
-    [ValidateSet('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')]
+    [ValidateSet('bot_api', 'control_page', 'discord_bot', 'main_llm', 'tts', 'vision')]
     [string[]]$Services = @('bot_api', 'control_page', 'discord_bot', 'tts', 'vision')
 )
 
@@ -34,9 +34,14 @@ $imageDefinitions = @{
         Dockerfile = 'docker\Dockerfile.discord-bot'
         Image = 'evelyn-fast-control-discord_bot'
     }
+    main_llm = @{
+        Dockerfile = 'docker\Dockerfile.llama'
+        Image = 'evelyn-fast-control-main_llm'
+        SealDockerfile = $true
+    }
     tts = @{
         Dockerfile = 'docker\Dockerfile.omnivoice'
-        Image = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+        Image = 'evelyn-omnivoice-tts:recipe-e8151492550b'
         BuildContexts = @("omnivoice_source=$omnivoiceSourceRoot")
     }
     vision = @(
@@ -92,23 +97,26 @@ function Invoke-DockerBuild {
     param(
         [string]$Dockerfile,
         [string]$Image,
-        [string[]]$BuildContexts = @()
+        [string[]]$BuildContexts = @(),
+        [string]$DockerfileContract = ''
     )
 
     $arguments = @(
         'build',
         '--file', $Dockerfile,
         '--tag', $Image,
-        '--build-arg', "EVELYN_SOURCE_REVISION=$sourceRevision",
-        '.'
+        '--build-arg', "EVELYN_SOURCE_REVISION=$sourceRevision"
     )
-    foreach ($buildContext in $BuildContexts) {
-        $arguments = @(
-            $arguments[0..($arguments.Count - 2)] +
-            @('--build-context', $buildContext) +
-            $arguments[-1]
+    if ($DockerfileContract) {
+        $arguments += @(
+            '--label',
+            "io.evelyn.llama-runtime-contract-sha256=$DockerfileContract"
         )
     }
+    foreach ($buildContext in $BuildContexts) {
+        $arguments += @('--build-context', $buildContext)
+    }
+    $arguments += '.'
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -182,11 +190,19 @@ try {
                     throw "Dockerfile not found for allowlisted service ${service}: $dockerfile"
                 }
                 $image = [string]$definition.Image
+                $dockerfileContract = if ($definition['SealDockerfile']) {
+                    (Get-FileHash `
+                        -LiteralPath (Join-Path $resolvedProjectRoot $dockerfile) `
+                        -Algorithm SHA256).Hash.ToLowerInvariant()
+                } else {
+                    ''
+                }
                 Write-Host "[Evelyn] Building allowlisted image $service as $image."
                 Invoke-DockerBuild `
                     -Dockerfile $dockerfile `
                     -Image $image `
-                    -BuildContexts @($definition['BuildContexts'] | Where-Object { $_ })
+                    -BuildContexts @($definition['BuildContexts'] | Where-Object { $_ }) `
+                    -DockerfileContract $dockerfileContract
             }
         }
     } finally {

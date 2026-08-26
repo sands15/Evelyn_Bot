@@ -132,6 +132,30 @@ async def _probe_tcp(_: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
         }
 
 
+def _json_contract_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return isinstance(actual, bool) and isinstance(expected, bool) and actual is expected
+    if isinstance(expected, int):
+        return isinstance(actual, int) and actual == expected
+    if isinstance(expected, float):
+        return isinstance(actual, float) and actual == expected
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(
+                _json_contract_value_matches(actual_item, expected_item)
+                for actual_item, expected_item in zip(actual, expected, strict=True)
+            )
+        )
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _json_contract_value_matches(actual[key], value)
+            for key, value in expected.items()
+        )
+    return actual == expected
+
+
 async def _probe_http(_: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
     started = time.monotonic()
     path = check.path if check.path.startswith("/") else f"/{check.path}" if check.path else ""
@@ -146,7 +170,10 @@ async def _probe_http(_: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
                 status_ok = response.status == check.expect_status if check.expect_status is not None else 200 <= response.status < 500
                 json_ok = True
                 if check.expect_json is not None:
-                    json_ok = isinstance(payload, dict) and all(payload.get(key) == value for key, value in check.expect_json.items())
+                    json_ok = isinstance(payload, dict) and all(
+                        _json_contract_value_matches(payload.get(key), value)
+                        for key, value in check.expect_json.items()
+                    )
                 ok = bool(status_ok and json_ok)
                 return {
                     "kind": "http",
@@ -245,7 +272,10 @@ async def _probe_artifact_json(_: ServiceSpec, check: HealthProbeSpec) -> dict[s
         }
     json_ok = True
     if check.expect_json is not None:
-        json_ok = all(payload.get(key) == value for key, value in check.expect_json.items())
+        json_ok = all(
+            _json_contract_value_matches(payload.get(key), value)
+            for key, value in check.expect_json.items()
+        )
     heartbeat_at = next(
         (
             float(payload[key])
@@ -909,6 +939,9 @@ def _public_commit_metrics(value: Any) -> dict[str, Any] | None:
             if isinstance(value.get("lastSucceeded"), bool)
             else None
         ),
+        "inFlight": bool(value.get("inFlight") is True),
+        "inFlightCount": _public_count(value.get("inFlightCount")),
+        "stalled": bool(value.get("stalled") is True),
         "warningCode": sanitize_runtime_error_code(
             value.get("warningCode"),
             fallback="",
@@ -920,6 +953,8 @@ def _public_commit_metrics(value: Any) -> dict[str, Any] | None:
         "p95Ms",
         "maxMs",
         "lastAt",
+        "stallAgeMs",
+        "artifactDeadlineMs",
         "warningThresholdMs",
     ):
         result[key] = _public_number(value.get(key))
@@ -1551,7 +1586,7 @@ async def collect_runtime_health(
 
 def _codex_gateway_required() -> bool:
     return (
-        str(os.environ.get("VOYAGER_ACTION_BACKEND") or "local").strip().lower() == "codex-gateway"
+        str(os.environ.get("VOYAGER_ACTION_BACKEND") or "disabled").strip().lower() == "codex-gateway"
         or str(os.environ.get("MINDCRAFT_CODEX_ENABLED") or "").strip().lower()
         in {"1", "true", "yes", "on"}
     )

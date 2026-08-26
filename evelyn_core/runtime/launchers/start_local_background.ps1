@@ -82,10 +82,31 @@ $previousInternalControlToken = [Environment]::GetEnvironmentVariable(
     'EVELYN_INTERNAL_CONTROL_TOKEN',
     [EnvironmentVariableTarget]::Process
 )
+$previousWorkspaceMutationAuthToken = [Environment]::GetEnvironmentVariable(
+    'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
+$previousWorkspaceSandboxAuthToken = [Environment]::GetEnvironmentVariable(
+    'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
 $previousVoiceCaptureHostAuthToken = [Environment]::GetEnvironmentVariable(
     'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
     [EnvironmentVariableTarget]::Process
 )
+$previousVoiceInputLeaseToken = [Environment]::GetEnvironmentVariable(
+    'EVELYN_VOICE_INPUT_LEASE_TOKEN',
+    [EnvironmentVariableTarget]::Process
+)
+$keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
+if (
+    $keepDiscordBot -and (
+        [string]::IsNullOrWhiteSpace($previousVoiceInputLeaseToken) -or
+        $previousVoiceInputLeaseToken.Trim().Length -lt 32
+    )
+) {
+    throw 'discord_keep_requires_stable_voice_input_lease_token'
+}
 try {
 # Strip inherited channel credentials before even the source-revision Git
 # probes can create a child. Narrow helpers below reintroduce only the exact
@@ -101,7 +122,22 @@ try {
     [EnvironmentVariableTarget]::Process
 )
 [Environment]::SetEnvironmentVariable(
+    'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+[Environment]::SetEnvironmentVariable(
+    'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+[Environment]::SetEnvironmentVariable(
     'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+    $null,
+    [EnvironmentVariableTarget]::Process
+)
+[Environment]::SetEnvironmentVariable(
+    'EVELYN_VOICE_INPUT_LEASE_TOKEN',
     $null,
     [EnvironmentVariableTarget]::Process
 )
@@ -134,11 +170,37 @@ $ttsProfilesRoot = if ($env:EVELYN_OMNIVOICE_PROFILES_DIR) {
 } else {
     Join-Path $projectRoot 'omnivoice_profiles'
 }
+$llamaCppRoot = if ($env:EVELYN_LLAMA_CPP_DIR) {
+    [System.IO.Path]::GetFullPath([string]$env:EVELYN_LLAMA_CPP_DIR)
+} else {
+    Join-Path $env:USERPROFILE 'llama.cpp'
+}
+$mainLlmBuildRoot = if ($env:EVELYN_MAIN_LLM_BUILD_DIR) {
+    [System.IO.Path]::GetFullPath([string]$env:EVELYN_MAIN_LLM_BUILD_DIR)
+} else {
+    Join-Path $llamaCppRoot 'build-sm120-v1'
+}
+$mainLlmServer = Join-Path $mainLlmBuildRoot 'bin\llama-server'
+$mainLlmCmakeCache = Join-Path $mainLlmBuildRoot 'CMakeCache.txt'
+$startupStage = 'docker_start'
+if (
+    -not (Test-Path -LiteralPath $mainLlmServer -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $mainLlmCmakeCache -PathType Leaf) -or
+    -not (Select-String `
+        -LiteralPath $mainLlmCmakeCache `
+        -Pattern '^CMAKE_CUDA_ARCHITECTURES:[^=]+=120a-real$' `
+        -Quiet)
+) {
+    throw 'EVELYN_MAIN_LLM_BUILD_DIR must select a native 120a llama.cpp build.'
+}
+$startupStage = 'unknown'
 
 $env:CONTROL_PAGE_PUBLIC_PORT = [string]$controlPagePublicPort
 $env:CONTROL_PAGE_BOT_API_PORT = [string]$botApiPort
 $env:EVELYN_HOST_PROJECT_ROOT = $projectRoot
 $env:EVELYN_OMNIVOICE_PROFILES_DIR = $ttsProfilesRoot
+$env:EVELYN_LLAMA_CPP_DIR = $llamaCppRoot
+$env:EVELYN_MAIN_LLM_BUILD_DIR = $mainLlmBuildRoot
 if ([string]::IsNullOrWhiteSpace($env:DISCORD_BOT_TOKEN)) {
     $env:DISCORD_BOT_TOKEN = 'local-only-disabled'
 }
@@ -170,7 +232,17 @@ $internalControlToken = if (
 } else {
     New-SecureRuntimeToken
 }
+$workspaceMutationAuthToken = New-SecureRuntimeToken
+$workspaceSandboxAuthToken = New-SecureRuntimeToken
 $voiceCaptureHostAuthToken = New-SecureRuntimeToken
+$voiceInputLeaseToken = if (
+    -not [string]::IsNullOrWhiteSpace($previousVoiceInputLeaseToken) -and
+    $previousVoiceInputLeaseToken.Trim().Length -ge 32
+) {
+    $previousVoiceInputLeaseToken.Trim()
+} else {
+    New-SecureRuntimeToken
+}
 
 if (Test-Path $stopMarker) {
     Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
@@ -249,12 +321,40 @@ function Wait-HttpReady {
     while ((Get-Date) -lt $deadline) {
         try {
             $health = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 5
+            $flashinferCudaGraphBuckets = @(
+                $health.flashinfer_cuda_graph_buckets
+            )
             $ready = if ($Contract -eq 'omnivoice') {
                 $health.ready -eq $true -and
                     $health.model_loaded -eq $true -and
                     [string]$health.status -eq 'healthy' -and
                     [string]$health.model_id -eq 'k2-fsa/OmniVoice' -and
-                    [string]$health.model_revision -eq 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4'
+                    [string]$health.model_revision -eq 'c5fdb5ccb189668d56333f77ba2629f4cd7535f4' -and
+                    [string]$health.runtime_revision -ceq 'omnivoice-0.1.5' -and
+                    [string]$health.flashinfer_revision -ceq '28bc0889d92110491d726a9c79f26a895db5a074' -and
+                    [string]$health.inference_backend -ceq 'flashinfer_cuda_graph' -and
+                    [string]$health.flashinfer_python_version -ceq '0.6.15.post1' -and
+                    [string]$health.flashinfer_jit_cache_version -ceq '0.6.15.post1+cu129' -and
+                    [string]$health.torch_version -ceq '2.8.0+cu129' -and
+                    [string]$health.torch_cuda_version -ceq '12.9' -and
+                    ($health.flashinfer_jit_disabled -is [bool]) -and
+                    $health.flashinfer_jit_disabled -eq $true -and
+                    (($health.max_concurrent -is [int]) -or
+                        ($health.max_concurrent -is [long])) -and
+                    $health.max_concurrent -eq 1 -and
+                    (($health.num_step -is [int]) -or
+                        ($health.num_step -is [long])) -and
+                    $health.num_step -eq 12 -and
+                    $flashinferCudaGraphBuckets.Count -eq 3 -and
+                    (($flashinferCudaGraphBuckets[0] -is [decimal]) -or
+                        ($flashinferCudaGraphBuckets[0] -is [double])) -and
+                    $flashinferCudaGraphBuckets[0] -eq 2.0 -and
+                    (($flashinferCudaGraphBuckets[1] -is [decimal]) -or
+                        ($flashinferCudaGraphBuckets[1] -is [double])) -and
+                    $flashinferCudaGraphBuckets[1] -eq 4.0 -and
+                    (($flashinferCudaGraphBuckets[2] -is [decimal]) -or
+                        ($flashinferCudaGraphBuckets[2] -is [double])) -and
+                    $flashinferCudaGraphBuckets[2] -eq 8.0
             } elseif ($Contract -eq 'vision') {
                 [bool]$health.ok -and [bool]$health.models.smol.loaded
             } elseif ($Contract -eq 'bot_api') {
@@ -389,6 +489,12 @@ function Wait-HostSupervisorReady {
                 $supervisorReady = (
                     [string]$supervisor.schema -eq 'host_supervisor.status.v1' -and
                     [string]$supervisor.state -eq 'running' -and
+                    ($supervisor.workspaceTaskAuthReady -is [bool]) -and
+                    $supervisor.workspaceTaskAuthReady -eq $true -and
+                    ($supervisor.workspaceMutationAuthReady -is [bool]) -and
+                    $supervisor.workspaceMutationAuthReady -eq $true -and
+                    ($supervisor.workspaceSandboxAuthReady -is [bool]) -and
+                    $supervisor.workspaceSandboxAuthReady -eq $true -and
                     ($supervisor.localBridge.running -is [bool]) -and
                     $supervisor.localBridge.running -eq $true -and
                     ($supervisor.localBridge.ownershipReady -is [bool]) -and
@@ -548,8 +654,20 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
         'EVELYN_INTERNAL_CONTROL_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
+    $previousWorkspaceMutation = [Environment]::GetEnvironmentVariable(
+        'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousWorkspaceSandbox = [Environment]::GetEnvironmentVariable(
+        'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
     $previousVoiceCapture = [Environment]::GetEnvironmentVariable(
         'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousVoiceInputLease = [Environment]::GetEnvironmentVariable(
+        'EVELYN_VOICE_INPUT_LEASE_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
     try {
@@ -560,8 +678,17 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $internalControlToken
         Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+            -Value $workspaceMutationAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+            -Value $workspaceSandboxAuthToken
+        Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
             -Value $voiceCaptureHostAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
+            -Value $voiceInputLeaseToken
         Invoke-DockerCommand -Arguments $Arguments
     } finally {
         Set-ProcessEnvironmentVariable `
@@ -571,8 +698,17 @@ function Invoke-DockerCommandWithRuntimeChannelTokens {
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $previousInternal
         Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+            -Value $previousWorkspaceMutation
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+            -Value $previousWorkspaceSandbox
+        Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
             -Value $previousVoiceCapture
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
+            -Value $previousVoiceInputLease
     }
 }
 
@@ -639,11 +775,33 @@ function Test-DockerImageSourceRevision {
     return $revisions.Count -eq 1 -and $revisions[0] -ceq $ExpectedRevision
 }
 
+function Test-MainLlmDockerImageContract {
+    param(
+        [string]$Image,
+        [string]$ExpectedContract
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $actualContract = & docker image inspect `
+            --format '{{index .Config.Labels "io.evelyn.llama-runtime-contract-sha256"}}' `
+            $Image 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return (
+        $exitCode -eq 0 -and
+        ([string]$actualContract).Trim() -ceq $ExpectedContract
+    )
+}
+
 function Stop-BotApiForImageRefresh {
     Write-Host '[Evelyn] Stopping the current Bot API cleanly before replacing its image.'
     Invoke-DockerCommand -Arguments @(
         'stop',
-        '--timeout', '60',
+        '--timeout', '130',
         'evelyn-bot-api'
     ) -IgnoreFailure
 
@@ -677,18 +835,27 @@ function Start-DockerCore {
         'control_page',
         'main_llm',
         'router_llm',
+        'minecraft_llm',
         'sub_llm',
         'tts',
         'stt',
         'vision'
     )
 
-    $keepDiscordBot = $env:EVELYN_LOCAL_KEEP_DISCORD_BOT -and ([string]$env:EVELYN_LOCAL_KEEP_DISCORD_BOT).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     $botApiImage = 'evelyn-fast-control-bot_api:latest'
     $controlPageImage = 'evelyn-fast-control-control_page:latest'
     $discordBotImage = 'evelyn-fast-control-discord_bot:latest'
-    $ttsImage = 'evelyn-omnivoice-tts:recipe-7cfc51e96088'
+    $mainLlmImage = 'evelyn-fast-control-main_llm:latest'
+    $mainLlmDockerfile = Join-Path $projectRoot 'docker\Dockerfile.llama'
+    if (-not (Test-Path -LiteralPath $mainLlmDockerfile -PathType Leaf)) {
+        throw "Main LLM Dockerfile not found: $mainLlmDockerfile"
+    }
+    $mainLlmRuntimeContract = (Get-FileHash `
+        -LiteralPath $mainLlmDockerfile `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    $mainLlmImageMissing = -not (Test-DockerImageExists -Image $mainLlmImage)
+    $ttsImage = 'evelyn-omnivoice-tts:recipe-e8151492550b'
     $ttsImageMissing = -not (Test-DockerImageExists -Image $ttsImage)
     $coreAppImagesNeedBuild = $buildEnabled -or
         -not (Test-DockerImageSourceRevision -Image $botApiImage -ExpectedRevision $sourceRevision) -or
@@ -697,6 +864,11 @@ function Start-DockerCore {
         $buildEnabled -or
         -not (Test-DockerImageSourceRevision -Image $discordBotImage -ExpectedRevision $sourceRevision)
     )
+    $mainLlmImageNeedsBuild = $buildEnabled -or
+        $mainLlmImageMissing -or
+        -not (Test-MainLlmDockerImageContract `
+            -Image $mainLlmImage `
+            -ExpectedContract $mainLlmRuntimeContract)
     $dockerBuildServices = @()
     if ($coreAppImagesNeedBuild) {
         if ($buildEnabled) {
@@ -712,6 +884,12 @@ function Start-DockerCore {
     }
     if ($discordImageNeedsBuild) {
         $dockerBuildServices += 'discord_bot'
+    }
+    if ($mainLlmImageNeedsBuild) {
+        if (-not $buildEnabled) {
+            Write-Host '[Evelyn] Building the missing or stale Main LLM runtime image.'
+        }
+        $dockerBuildServices += 'main_llm'
     }
     if ($buildEnabled -or $ttsImageMissing) {
         $dockerBuildServices += 'tts'
@@ -731,6 +909,12 @@ function Start-DockerCore {
         Write-Host '[Evelyn] Reusing existing Docker images. Set EVELYN_DOCKER_BUILD=true to rebuild app images.'
     }
 
+    if (-not (Test-MainLlmDockerImageContract `
+        -Image $mainLlmImage `
+        -ExpectedContract $mainLlmRuntimeContract)) {
+        throw 'Main LLM runtime image does not match docker\Dockerfile.llama.'
+    }
+
     if (-not $keepDiscordBot) {
         Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('--profile', 'discord', 'stop', 'discord_bot')) -IgnoreFailure
     }
@@ -739,7 +923,7 @@ function Start-DockerCore {
     Invoke-DockerCommandWithRuntimeChannelTokens -Arguments (
         @('compose') + $composeArgs
     )
-    Write-Host '[Evelyn] Minecraft services are deferred. Run start_voyager.bat when a Minecraft command is requested.'
+    Write-Host '[Evelyn] Minecraft world service is deferred; the shared Qwen specialist is ready.'
 }
 
 function Test-HostSupervisorRunning {
@@ -775,6 +959,7 @@ function Stop-PreviousHostSupervisorGeneration {
             throw 'Existing Host Supervisor did not stop for credential rotation.'
         }
     }
+    Remove-Item -LiteralPath $supervisorStopRequest -Force -ErrorAction SilentlyContinue
 }
 
 function Start-HostSupervisor {
@@ -823,8 +1008,20 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
         'EVELYN_INTERNAL_CONTROL_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
+    $previousWorkspaceMutation = [Environment]::GetEnvironmentVariable(
+        'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousWorkspaceSandbox = [Environment]::GetEnvironmentVariable(
+        'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
     $previousVoiceCapture = [Environment]::GetEnvironmentVariable(
         'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
+        [EnvironmentVariableTarget]::Process
+    )
+    $previousVoiceInputLease = [Environment]::GetEnvironmentVariable(
+        'EVELYN_VOICE_INPUT_LEASE_TOKEN',
         [EnvironmentVariableTarget]::Process
     )
     try {
@@ -835,8 +1032,17 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $null
         Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+            -Value $workspaceMutationAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+            -Value $workspaceSandboxAuthToken
+        Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
             -Value $voiceCaptureHostAuthToken
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
+            -Value $voiceInputLeaseToken
         Start-PowerShellWindow `
             -Title 'Evelyn Host Supervisor' `
             -Script $pythonCommand `
@@ -849,8 +1055,17 @@ if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMU
             -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
             -Value $previousInternal
         Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+            -Value $previousWorkspaceMutation
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+            -Value $previousWorkspaceSandbox
+        Set-ProcessEnvironmentVariable `
             -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
             -Value $previousVoiceCapture
+        Set-ProcessEnvironmentVariable `
+            -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
+            -Value $previousVoiceInputLease
     }
     Wait-HostSupervisorReady -MinimumHeartbeat $launchStartedAt
 }
@@ -885,7 +1100,16 @@ try {
         -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
         -Value $null
     Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+        -Value $null
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+        -Value $null
+    Set-ProcessEnvironmentVariable `
         -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
+        -Value $null
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
         -Value $null
 
     Assert-DockerReady
@@ -928,8 +1152,17 @@ try {
         -Name 'EVELYN_INTERNAL_CONTROL_TOKEN' `
         -Value $previousInternalControlToken
     Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN' `
+        -Value $previousWorkspaceMutationAuthToken
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN' `
+        -Value $previousWorkspaceSandboxAuthToken
+    Set-ProcessEnvironmentVariable `
         -Name 'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN' `
         -Value $previousVoiceCaptureHostAuthToken
+    Set-ProcessEnvironmentVariable `
+        -Name 'EVELYN_VOICE_INPUT_LEASE_TOKEN' `
+        -Value $previousVoiceInputLeaseToken
 }
 } catch {
     $startupExitCode = 1
@@ -951,8 +1184,23 @@ try {
         [EnvironmentVariableTarget]::Process
     )
     [Environment]::SetEnvironmentVariable(
+        'EVELYN_WORKSPACE_MUTATION_AUTH_TOKEN',
+        $previousWorkspaceMutationAuthToken,
+        [EnvironmentVariableTarget]::Process
+    )
+    [Environment]::SetEnvironmentVariable(
+        'EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN',
+        $previousWorkspaceSandboxAuthToken,
+        [EnvironmentVariableTarget]::Process
+    )
+    [Environment]::SetEnvironmentVariable(
         'EVELYN_VOICE_CAPTURE_HOST_AUTH_TOKEN',
         $previousVoiceCaptureHostAuthToken,
+        [EnvironmentVariableTarget]::Process
+    )
+    [Environment]::SetEnvironmentVariable(
+        'EVELYN_VOICE_INPUT_LEASE_TOKEN',
+        $previousVoiceInputLeaseToken,
         [EnvironmentVariableTarget]::Process
     )
 }

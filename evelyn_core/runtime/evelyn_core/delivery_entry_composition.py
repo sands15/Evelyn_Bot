@@ -132,6 +132,9 @@ class DeliveryEntryComposition:
             metrics=metrics,
             log_stage=deps.log_voice_stage,
             prefetch_chunks=deps.prefetch_chunks,
+            eager_start_allowed=lambda: (
+                current_memory_exposure_position() is None
+            ),
         )
 
     def schedule_local_control_tts(
@@ -180,5 +183,8 @@ class DeliveryEntryComposition:
                 log_stage=deps.log_voice_stage,
                 prefetch_chunks=deps.prefetch_chunks,
                 log=deps.log,
+                eager_start_allowed=lambda: (
+                    current_memory_exposure_position() is None
+                ),
             )
         )

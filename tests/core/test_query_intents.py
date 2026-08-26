@@ -39,6 +39,11 @@ class QueryIntentTests(unittest.TestCase):
         self.assertTrue(should_force_search_query("\uc774\uac70 \uc778\ud130\ub137\uc5d0\uc11c \uac80\uc0c9\ud574\uc918"))
         self.assertTrue(should_force_search_query("look up the latest release notes"))
 
+    def test_ambiguous_find_language_is_left_to_the_router(self) -> None:
+        self.assertFalse(should_force_search_query("\uae30\uc5b5\uc5d0\uc11c \uadf8 \uc598\uae30 \ucc3e\uc544\uc918"))
+        self.assertFalse(should_force_search_query("\uc804\uc5d0 \ub9d0\ud55c \ud30c\uc77c \ucc3e\uc544\ubd10"))
+        self.assertFalse(should_force_search_query("find the note I mentioned"))
+
     def test_volatile_current_info_is_forced_to_search(self) -> None:
         self.assertTrue(should_force_search_query("\uc624\ub298 \ub274\uc2a4 \uc54c\ub824\uc918"))
         self.assertTrue(should_force_search_query("\ud658\uc728 \ucd5c\uc2e0 \uac12 \ucc3e\uc544\ubd10"))

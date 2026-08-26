@@ -58,7 +58,7 @@ def build_fast_cognitive_state(
         hint = "지금은 더 듣는 쪽이 자연스럽다. 아주 짧게 반응해라."
     previous_ids = base.get("retrieved_context_ids") or []
     state = {
-        "action": action if action in {"answer", "ask", "wait", "search_then_answer"} else "answer",
+        "action": action if action in {"answer", "ask", "wait", "search_then_answer", "execute_task"} else "answer",
         "confidence": 0.92 if action == "answer" else 0.82,
         "user_intent": cleaned,
         "state_summary": cleaned,

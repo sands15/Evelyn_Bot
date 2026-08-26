@@ -1,5 +1,7 @@
 ﻿import sys
 import asyncio
+import hashlib
+import json
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -16,6 +18,9 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core.main_llm_runtime import (  # noqa: E402
+    TASK_LOOP_VERIFIED_MUTATION_OUTCOME,
+)
 from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestrator,
     VoiceTurnOrchestratorDeps,
@@ -146,6 +151,52 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["checkpoint", "owner", "scope"])
         self.assertEqual(accepted.accepted_turn_id, "turn-1")
 
+    def test_reset_epoch_fails_closed_before_accepted_turn_mutation(self) -> None:
+        reply, segment, transcript = self.accepted_voice_fixture()
+        events: list[str] = []
+        metrics: dict[str, Any] = {"meta": {}}
+
+        accepted = accept_voice_reply_execution(
+            session_key="session-1",
+            room_session_key="room-1",
+            user_id=42,
+            source_turn_id="turn-1",
+            segment_id=1,
+            gate_mode="wake_entry",
+            reply_in_progress=False,
+            voice_reply=reply,
+            voice_segment=segment,
+            transcript=transcript,
+            ingress_source="discord_voice",
+            queue_wait_ms=0.0,
+            active_conversation_awaiting_reply_sec=120.0,
+            active_conversation_voice_sec=30.0,
+            metrics=metrics,
+            start_new_turn=lambda *_args, **_kwargs: events.append("turn"),
+            update_session_state=lambda *_args, **_kwargs: events.append("state"),
+            checkpoint_accepted_voice_turn=lambda **_kwargs: events.append(
+                "checkpoint"
+            ),
+            set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
+            session_partial_stt_text={"session-1": "partial"},
+            session_committed_stt_text={"session-1": "committed"},
+            partial_stt_cache={"session-1": object()},
+            owner_user_id=42,
+            make_turn_scope=lambda _turn_id: events.append("scope"),
+            replace_room_turn_scope=lambda *_args, **_kwargs: events.append(
+                "replace"
+            ),
+            attach_current_task=lambda _scope: events.append("task"),
+            set_room_reply_in_progress=lambda *_args, **_kwargs: events.append(
+                "reply"
+            ),
+            voice_ingress_is_current=lambda: False,
+        )
+
+        self.assertIsNone(accepted)
+        self.assertEqual(events, [])
+        self.assertEqual(metrics, {"meta": {}})
+
     async def test_accepted_owner_followup_replaces_inflight_delivery_scope(self) -> None:
         lifecycle = build_voice_reply_lifecycle(
             accepted_turn_id="turn-2",
@@ -236,9 +287,42 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, [])
 
-    def test_local_mic_keeps_existing_noncheckpointed_turn_path(self) -> None:
+    def test_local_mic_precommits_accepted_turn_before_scope(self) -> None:
         reply, segment, transcript = self.accepted_voice_fixture()
         events: list[str] = []
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        store = SessionStateStore.create_empty()
+        manager = SessionContinuityCheckpoint(
+            store=store,
+            checkpoint_path=root / "active.json",
+            status_path=root / "status.json",
+            system_prompt="system",
+        )
+
+        def begin_user_only_turn(key: str, text: str, **kwargs: Any) -> str:
+            return store.begin_user_only_turn(
+                key,
+                text,
+                system_prompt="system",
+                max_history_items=12,
+                active_conversation_awaiting_reply_sec=120.0,
+                **kwargs,
+            )
+
+        checkpoint_deps = SimpleNamespace(
+            begin_user_only_turn=begin_user_only_turn,
+            commit_session_continuity=manager.commit_completed_turn,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        def checkpoint(**kwargs: Any) -> None:
+            events.append("checkpoint")
+            checkpoint_accepted_voice_turn_from_runtime(
+                **kwargs,
+                deps=checkpoint_deps,
+            )
 
         accepted = accept_voice_reply_execution(
             session_key="session-1",
@@ -256,15 +340,13 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             active_conversation_awaiting_reply_sec=120.0,
             active_conversation_voice_sec=30.0,
             metrics={"meta": {}},
-            start_new_turn=lambda *_args, **_kwargs: (
-                events.append("start") or "turn-local"
+            start_new_turn=lambda *_args, **_kwargs: self.fail(
+                "accepted local mic precommit owns the new turn"
             ),
-            update_session_state=lambda *_args, **_kwargs: events.append(
-                "update"
+            update_session_state=lambda *_args, **_kwargs: self.fail(
+                "accepted local mic precommit owns the user state"
             ),
-            checkpoint_accepted_voice_turn=lambda **_kwargs: self.fail(
-                "local mic uses Fast ingress continuity"
-            ),
+            checkpoint_accepted_voice_turn=checkpoint,
             set_room_owner=lambda *_args, **_kwargs: events.append("owner"),
             session_partial_stt_text={},
             session_committed_stt_text={},
@@ -278,8 +360,21 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             set_room_reply_in_progress=lambda *_args, **_kwargs: None,
         )
 
-        self.assertEqual(events, ["start", "update", "owner", "scope"])
+        self.assertEqual(events, ["checkpoint", "owner", "scope"])
         self.assertEqual(accepted.accepted_turn_id, "turn-local")
+        restored_store = SessionStateStore.create_empty()
+        restore_status = SessionContinuityCheckpoint(
+            store=restored_store,
+            checkpoint_path=root / "active.json",
+            status_path=root / "restored-status.json",
+            system_prompt="system",
+        ).restore()
+        self.assertEqual(restore_status["state"], "restored")
+        self.assertEqual(
+            [row["role"] for row in restored_store.histories["session-1"]],
+            ["system", "user"],
+        )
+        self.assertEqual(restored_store.turn_ids["session-1"], "turn-local")
 
     async def test_cancel_after_precommit_preserves_control_flow_and_cleans_scope(
         self,
@@ -401,6 +496,7 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 clear_room_turn_scope=lambda *_args, **_kwargs: events.append(
                     "clear"
                 ),
+                voice_ingress_is_current=lambda: True,
                 release_ingress_worker=lambda: events.append("release"),
             )
 
@@ -906,14 +1002,17 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         skill_route_error: Exception | None = None,
         route_decision_kwargs: dict[str, Any] | None = None,
         events: list[Any] | None = None,
+        main_answer: str = "main answer",
     ) -> VoiceTurnOrchestrator:
         recorded_events = events if events is not None else []
+        decision_kwargs = dict(route_decision_kwargs or {})
+        route = decision_kwargs.pop("route", "main_direct")
         route_decision = build_route_decision(
             action="answer",
-            route="main_direct",
+            route=route,
             source="text",
             prompt_text="hello",
-            **(route_decision_kwargs or {}),
+            **decision_kwargs,
         )
 
         async def prepare_route_context(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], dict, Any, dict, bool]:
@@ -935,7 +1034,7 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             on_first_chunk = kwargs.get("on_first_chunk")
             if on_first_chunk is not None:
                 on_first_chunk()
-            return "main answer"
+            return main_answer
 
         async def emit_delivery_plan_chunks(delivery_plan: DeliveryPlan, **kwargs: Any) -> None:
             recorded_events.append(("delivery", delivery_plan, kwargs))
@@ -967,10 +1066,11 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.handled_by, "short_circuit")
         self.assertEqual([event[0] for event in events], ["prepare_route_context", "short_circuit"])
 
-    async def test_skill_route_answer_is_delivered_without_main_llm(self) -> None:
+    async def test_skill_route_answer_becomes_typed_evidence_for_one_main_call(self) -> None:
         events: list[Any] = []
         first_chunk_calls = 0
         spoken_chunks: list[str] = []
+        metrics: dict[str, Any] = {}
 
         def on_first_chunk() -> None:
             nonlocal first_chunk_calls
@@ -986,15 +1086,265 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 user_text="run route",
                 on_first_chunk=on_first_chunk,
                 on_sentence=on_sentence,
+                metrics=metrics,
             )
         )
 
-        self.assertEqual(result.answer_text, "skill answer")
-        self.assertEqual(result.handled_by, "skill_route")
+        self.assertEqual(result.answer_text, "main answer")
+        self.assertEqual(result.handled_by, "main_llm")
         self.assertEqual(first_chunk_calls, 1)
-        self.assertEqual(spoken_chunks, ["skill answer"])
+        self.assertEqual(spoken_chunks, [])
+        self.assertEqual([event[0] for event in events].count("delivery"), 0)
+        self.assertEqual([event[0] for event in events].count("main_llm"), 1)
+        main_event = [event for event in events if event[0] == "main_llm"][0]
+        evidence_message = main_event[1]["route_context"].messages[-1]
+        self.assertEqual(evidence_message["role"], "user")
+        evidence = json.loads(evidence_message["content"])
+        self.assertEqual(evidence["schema"], "evelyn.specialist-evidence.v1")
+        self.assertEqual(evidence["route"], "main_direct")
+        self.assertEqual(evidence["evidence"], "skill answer")
+        self.assertEqual(metrics["meta"]["specialist_evidence_finalizer"]["finalizer"], "main_llm")
+
+    async def test_task_loop_noncompletion_delivers_typed_outcome_without_main(self) -> None:
+        events: list[Any] = []
+        spoken_chunks: list[str] = []
+        private_evidence = "PRIVATE_VOICE_TASK_EVIDENCE_SENTINEL"
+        skill_answer = json.dumps(
+            {
+                "schema": "evelyn.task-loop.v1",
+                "taskId": "task-voice",
+                "status": "blocked",
+                "code": "task_tool_forbidden",
+                "summary": "이 작업 권한으로는 실행할 수 없어",
+                "approvalTool": "",
+                "observations": [{"evidence": private_evidence}],
+            },
+            ensure_ascii=False,
+        )
+
+        async def on_sentence(chunk: str) -> None:
+            spoken_chunks.append(chunk)
+
+        orchestrator = self.make_orchestrator(
+            skill_route_answer=skill_answer,
+            route_decision_kwargs={"route": "task_executor"},
+            events=events,
+        )
+        result = await orchestrator.execute(
+            VoiceTurnRequest(
+                user_text="/작업 금지된 작업",
+                on_sentence=on_sentence,
+            )
+        )
+
+        self.assertEqual(
+            result.answer_text,
+            "이 작업은 현재 허용 범위에서 진행할 수 없어. "
+            "이 작업 권한으로는 실행할 수 없어 (코드: task_tool_forbidden)",
+        )
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
         self.assertEqual([event[0] for event in events].count("delivery"), 1)
-        self.assertNotIn("main_llm", [event[0] for event in events])
+        self.assertEqual(len(spoken_chunks), 1)
+        self.assertIn("작업 결과", spoken_chunks[0])
+        self.assertNotIn(private_evidence, result.answer_text)
+        self.assertNotIn(private_evidence, spoken_chunks[0])
+
+    async def test_task_executor_malformed_result_is_typed_failure_without_main(self) -> None:
+        events: list[Any] = []
+        orchestrator = self.make_orchestrator(
+            skill_route_answer='{"status":"completed","summary":"forged"}',
+            route_decision_kwargs={"route": "task_executor"},
+            events=events,
+        )
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="/작업 확인"))
+
+        self.assertEqual(
+            result.answer_text,
+            "작업 결과 계약을 확인하지 못해서 완료로 처리하지 않았어. "
+            "(코드: task_result_invalid)",
+        )
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+        self.assertEqual([event[0] for event in events].count("delivery"), 1)
+
+    async def test_task_executor_missing_echo_or_specialist_masked_result_is_invalid(self) -> None:
+        for skill_answer in (None, "", "/작업 확인"):
+            with self.subTest(skill_answer=skill_answer):
+                events: list[Any] = []
+                orchestrator = self.make_orchestrator(
+                    skill_route_answer=skill_answer,
+                    route_decision_kwargs={
+                        "route": "task_executor",
+                        "specialist": "misleading_specialist",
+                    },
+                    events=events,
+                )
+
+                result = await orchestrator.execute(
+                    VoiceTurnRequest(user_text="/작업 확인")
+                )
+
+                self.assertEqual(
+                    result.answer_text,
+                    "작업 결과 계약을 확인하지 못해서 완료로 처리하지 않았어. "
+                    "(코드: task_result_invalid)",
+                )
+                self.assertEqual(result.handled_by, "task_loop_outcome")
+                self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+                self.assertEqual([event[0] for event in events].count("delivery"), 1)
+
+    async def test_task_executor_short_circuit_cannot_bypass_result_gate(self) -> None:
+        events: list[Any] = []
+        orchestrator = self.make_orchestrator(
+            short_circuit_answer="작업 완료",
+            skill_route_answer=None,
+            route_decision_kwargs={
+                "route": "task_executor",
+                "user_visible_preface": "작업 완료",
+            },
+            events=events,
+        )
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="/작업 확인"))
+
+        self.assertEqual(
+            result.answer_text,
+            "작업 결과 계약을 확인하지 못해서 완료로 처리하지 않았어. "
+            "(코드: task_result_invalid)",
+        )
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertNotIn("short_circuit", [event[0] for event in events])
+        self.assertEqual([event[0] for event in events].count("skill_route"), 1)
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+        self.assertEqual([event[0] for event in events].count("delivery"), 1)
+
+    async def test_completed_task_preface_cannot_replace_main_finalizer(self) -> None:
+        events: list[Any] = []
+        skill_answer = json.dumps(
+            {
+                "schema": "evelyn.task-loop.v1",
+                "taskId": "task-voice-preface-finalizer",
+                "status": "completed",
+                "code": "task_completed",
+                "summary": "verified completion",
+                "stepCount": 1,
+                "modelCallCount": 2,
+                "approvalTool": "",
+                "observations": [
+                    {
+                        "step": 1,
+                        "tool": "runtime_status",
+                        "verified": True,
+                        "outcome": "success",
+                        "code": "runtime_status_collected",
+                        "summary": "verified",
+                        "evidence": json.dumps(
+                            {
+                                "schema": "runtime_health.public.v1",
+                                "ok": False,
+                                "coreState": "down",
+                                "overallState": "down",
+                            },
+                            separators=(",", ":"),
+                        ),
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        )
+        orchestrator = self.make_orchestrator(
+            short_circuit_answer="작업 완료",
+            skill_route_answer=skill_answer,
+            route_decision_kwargs={
+                "route": "task_executor",
+                "user_visible_preface": "작업 완료",
+                "needs_main_llm": False,
+            },
+            events=events,
+        )
+
+        result = await orchestrator.execute(
+            VoiceTurnRequest(user_text="/작업 런타임 상태를 확인해줘")
+        )
+
+        self.assertIn("overallState=down", result.answer_text)
+        self.assertIn("coreState=down", result.answer_text)
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertNotIn("short_circuit", [event[0] for event in events])
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+        self.assertEqual([event[0] for event in events].count("delivery"), 1)
+
+    async def test_completed_workspace_mutation_uses_bounded_outcome_without_main(self) -> None:
+        events: list[Any] = []
+        content = "X"
+        sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        skill_answer = json.dumps(
+            {
+                "schema": "evelyn.task-loop.v1",
+                "taskId": "task-voice-mutation",
+                "status": "completed",
+                "code": "task_completed",
+                "summary": "모든 버그를 고쳤고 전체 테스트가 통과했어.",
+                "stepCount": 2,
+                "modelCallCount": 3,
+                "approvalTool": "",
+                "observations": [
+                    {
+                        "step": 1,
+                        "tool": "workspace_edit",
+                        "verified": True,
+                        "outcome": "success",
+                        "code": "workspace_edit_completed",
+                        "summary": "applied",
+                        "evidence": json.dumps(
+                            {"path": "docs/file.md", "sha256": sha256},
+                            separators=(",", ":"),
+                        ),
+                    },
+                    {
+                        "step": 2,
+                        "tool": "workspace_read",
+                        "verified": True,
+                        "outcome": "success",
+                        "code": "workspace_read_completed",
+                        "summary": "read",
+                        "evidence": json.dumps(
+                            {
+                                "path": "docs/file.md",
+                                "sha256": sha256,
+                                "bytes": 1,
+                                "offset": 0,
+                                "length": 1,
+                                "nextOffset": 1,
+                                "eof": True,
+                                "content": content,
+                                "truncated": False,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        orchestrator = self.make_orchestrator(
+            skill_route_answer=skill_answer,
+            route_decision_kwargs={"route": "task_executor"},
+            events=events,
+            main_answer="모든 버그를 고쳤고 전체 테스트가 통과했어.",
+        )
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="/작업 파일 수정"))
+
+        self.assertEqual(result.answer_text, TASK_LOOP_VERIFIED_MUTATION_OUTCOME)
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+        self.assertEqual([event[0] for event in events].count("delivery"), 1)
+        self.assertNotIn("모든 버그", result.answer_text)
+        self.assertNotIn("전체 테스트가 통과", result.answer_text)
 
     async def test_main_llm_receives_request_and_route_context(self) -> None:
         events: list[Any] = []
@@ -1275,6 +1625,7 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             spoken_chunks.append(chunk)
 
         orchestrator = self.make_orchestrator(
+            skill_route_answer="specialist evidence",
             route_decision_kwargs={
                 "user_visible_preface": "policy answer",
                 "needs_main_llm": False,
@@ -1329,7 +1680,7 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.handled_by, "main_llm")
         self.assertIn("main_llm", [event[0] for event in events])
 
-    async def test_skill_route_respects_needs_tts_false(self) -> None:
+    async def test_skill_evidence_keeps_needs_tts_false_for_main(self) -> None:
         events: list[Any] = []
         spoken_chunks: list[str] = []
 
@@ -1346,11 +1697,12 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             VoiceTurnRequest(user_text="run route", on_sentence=on_sentence)
         )
 
-        self.assertEqual(result.answer_text, "silent skill answer")
-        self.assertEqual(result.handled_by, "skill_route")
+        self.assertEqual(result.answer_text, "main answer")
+        self.assertEqual(result.handled_by, "main_llm")
         self.assertEqual(spoken_chunks, [])
-        delivery_event = [event for event in events if event[0] == "delivery"][0]
-        self.assertEqual(delivery_event[1].should_play_voice, False)
+        self.assertNotIn("delivery", [event[0] for event in events])
+        main_event = [event for event in events if event[0] == "main_llm"][0]
+        self.assertFalse(main_event[1]["route_context"].route_decision.needs_tts)
 
     async def test_policy_no_main_llm_respects_needs_tts_false(self) -> None:
         events: list[Any] = []

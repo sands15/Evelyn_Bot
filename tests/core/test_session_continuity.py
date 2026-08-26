@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -420,6 +421,96 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertTrue(commit_metrics["lastSucceeded"])
         self.assertTrue(commit_metrics["lastTargetVerified"])
         self.assertEqual(commit_metrics["state"], "warming")
+        self.assertFalse(commit_metrics["inFlight"])
+        self.assertEqual(commit_metrics["inFlightCount"], 0)
+        self.assertIsNone(commit_metrics["stallAgeMs"])
+        self.assertFalse(commit_metrics["stalled"])
+
+    def test_completed_turn_commit_exposes_content_free_stall_age(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        stall_clock = [10.0]
+        manager = self.manager(
+            self.populated_store(),
+            clock,
+            commit_stall_clock=lambda: stall_clock[0],
+            commit_artifact_deadline_sec=0.5,
+        )
+
+        manager._begin_commit_in_flight(7)
+        stall_clock[0] = 10.6
+        metrics = manager.status()["completedTurnCommit"]
+
+        self.assertTrue(metrics["inFlight"])
+        self.assertEqual(metrics["inFlightCount"], 1)
+        self.assertAlmostEqual(metrics["stallAgeMs"], 600.0)
+        self.assertTrue(metrics["stalled"])
+        self.assertEqual(metrics["state"], "warning")
+        self.assertEqual(
+            metrics["warningCode"],
+            "conversation_continuity_commit_stalled",
+        )
+        self.assertNotIn(
+            "재시작 뒤에도 이어갈게",
+            json.dumps(metrics, ensure_ascii=False),
+        )
+        manager._finish_commit_in_flight(7)
+        self.assertFalse(
+            manager.status()["completedTurnCommit"]["inFlight"]
+        )
+
+    def test_completed_turn_commit_publishes_in_flight_before_write(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        manager = self.manager(
+            self.populated_store(),
+            clock,
+            commit_artifact_deadline_sec=0.5,
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[Exception] = []
+
+        def pause_before_write(_generation: int) -> None:
+            entered.set()
+            release.wait(2.0)
+
+        def commit() -> None:
+            try:
+                manager.commit_completed_turn(
+                    "guild:1:text:2:user:3",
+                    before_commit=pause_before_write,
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=commit, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(2.0))
+            persisted = json.loads(
+                self.status_path.read_text(encoding="utf-8")
+            )["completedTurnCommit"]
+            self.assertTrue(persisted["inFlight"])
+            self.assertEqual(persisted["inFlightCount"], 1)
+            self.assertEqual(persisted["artifactDeadlineMs"], 500.0)
+            self.assertNotIn(
+                "재시작 뒤에도 이어갈게",
+                json.dumps(persisted, ensure_ascii=False),
+            )
+        finally:
+            release.set()
+            thread.join(3.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(
+            json.loads(self.status_path.read_text(encoding="utf-8"))[
+                "completedTurnCommit"
+            ]["inFlight"]
+        )
 
     def test_before_commit_binds_generation_before_checkpoint_write(
         self,
@@ -499,6 +590,541 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertNotIn("wrong-private-turn-id", json.dumps(status))
         with self.assertRaises(Exception):
             require_durable_continuity_receipt(status)
+
+    def test_cancelled_older_async_failure_cannot_poison_newer_success(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            session_key = "guild:1:text:2:user:3"
+            clock = FakeClock(wall=1000.0, monotonic=100.0)
+            store = SessionStateStore.create_empty()
+            store.start_new_turn(
+                session_key,
+                turn_id="turn-1",
+                now_monotonic=100.0,
+            )
+            store.append_history(
+                session_key,
+                "첫 요청",
+                "첫 답변",
+                system_prompt="private system prompt",
+                max_history_items=12,
+            )
+            store.update_session_state(
+                session_key,
+                user_id=3,
+                speaker="assistant",
+                awaiting_user_reply=False,
+                topic_id="topic-1",
+                active_conversation_awaiting_reply_sec=300.0,
+                now_monotonic=100.0,
+            )
+            manager = self.manager(store, clock)
+            older_entered = threading.Event()
+            release_older = threading.Event()
+            older_done = threading.Event()
+            original_commit = manager._commit_completed_turn_attempt
+
+            def gate_older_before_lock(
+                target_session_key: str,
+                target_turn_id: str = "",
+                **kwargs,
+            ) -> dict:
+                if target_turn_id == "turn-1":
+                    older_entered.set()
+                    release_older.wait()
+                try:
+                    return original_commit(
+                        target_session_key,
+                        target_turn_id,
+                        **kwargs,
+                    )
+                finally:
+                    if target_turn_id == "turn-1":
+                        older_done.set()
+
+            with patch.object(
+                manager,
+                "_commit_completed_turn_attempt",
+                side_effect=gate_older_before_lock,
+            ):
+                older = asyncio.create_task(
+                    manager.commit_completed_turn_async(
+                        session_key,
+                        "turn-1",
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            older_entered.wait,
+                            1.0,
+                        )
+                    )
+                    older.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await older
+
+                    store.start_new_turn(
+                        session_key,
+                        turn_id="turn-2",
+                        now_monotonic=101.0,
+                    )
+                    store.append_history(
+                        session_key,
+                        "두 번째 요청",
+                        "두 번째 답변",
+                        system_prompt="private system prompt",
+                        max_history_items=12,
+                    )
+                    store.update_session_state(
+                        session_key,
+                        user_id=3,
+                        speaker="assistant",
+                        awaiting_user_reply=False,
+                        topic_id="topic-2",
+                        active_conversation_awaiting_reply_sec=300.0,
+                        now_monotonic=101.0,
+                    )
+                    newer = await manager.commit_completed_turn_async(
+                        session_key,
+                        "turn-2",
+                    )
+                    require_durable_continuity_receipt(newer)
+                finally:
+                    release_older.set()
+                self.assertTrue(
+                    await asyncio.to_thread(older_done.wait, 1.0)
+                )
+
+            payload = json.loads(
+                self.checkpoint_path.read_text(encoding="utf-8")
+            )
+            head = json.loads(
+                manager.head_path.read_text(encoding="utf-8")
+            )
+            status = manager.status()
+            persisted_status = json.loads(
+                self.status_path.read_text(encoding="utf-8")
+            )
+            metrics = status["completedTurnCommit"]
+
+            self.assertEqual(payload["generation"], 1)
+            self.assertEqual(head["generation"], 1)
+            self.assertEqual(head["state"], "active")
+            self.assertEqual(
+                payload["sessions"][0]["state"]["turnId"],
+                "turn-2",
+            )
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(status["checkpointHeadState"], "current")
+            self.assertEqual(metrics["attemptCount"], 2)
+            self.assertEqual(metrics["successCount"], 1)
+            self.assertEqual(metrics["failureCount"], 1)
+            self.assertTrue(metrics["lastSucceeded"])
+            self.assertTrue(metrics["lastTargetVerified"])
+            self.assertEqual(metrics["state"], "warming")
+            require_durable_continuity_receipt(status)
+            self.assertEqual(persisted_status["state"], "ready")
+            self.assertTrue(
+                persisted_status["completedTurnCommit"][
+                    "lastSucceeded"
+                ]
+            )
+
+        asyncio.run(exercise())
+
+    def test_newer_other_session_success_does_not_supersede_older_commit(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            older_session = "guild:1:text:2:user:3"
+            store = self.populated_store()
+            older_turn = store.start_new_turn(
+                older_session,
+                turn_id="turn-a",
+                now_monotonic=100.0,
+            )
+            newer_session = self.add_other_guild(store)
+            newer_turn = store.start_new_turn(
+                newer_session,
+                turn_id="turn-b",
+                now_monotonic=101.0,
+            )
+            manager = self.manager(
+                store,
+                FakeClock(wall=1000.0, monotonic=100.0),
+                max_sessions=1,
+            )
+            older_entered = threading.Event()
+            release_older = threading.Event()
+            original_commit = manager._commit_completed_turn_attempt
+
+            def gate_older(
+                session_key: str,
+                turn_id: str = "",
+                **kwargs,
+            ) -> dict:
+                if session_key == older_session:
+                    older_entered.set()
+                    release_older.wait()
+                return original_commit(
+                    session_key,
+                    turn_id,
+                    **kwargs,
+                )
+
+            with patch.object(
+                manager,
+                "_commit_completed_turn_attempt",
+                side_effect=gate_older,
+            ):
+                older = asyncio.create_task(
+                    manager.commit_completed_turn_async(
+                        older_session,
+                        older_turn,
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            older_entered.wait,
+                            1.0,
+                        )
+                    )
+                    newer = await manager.commit_completed_turn_async(
+                        newer_session,
+                        newer_turn,
+                    )
+                    require_durable_continuity_receipt(newer)
+                finally:
+                    release_older.set()
+                older_status = await asyncio.wait_for(
+                    older,
+                    timeout=1.0,
+                )
+
+            require_durable_continuity_receipt(older_status)
+            payload = json.loads(
+                self.checkpoint_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["generation"], 2)
+            self.assertEqual(
+                payload["sessions"][0]["sessionKey"],
+                older_session,
+            )
+            self.assertEqual(
+                payload["sessions"][0]["state"]["turnId"],
+                older_turn,
+            )
+            metrics = manager.status()["completedTurnCommit"]
+            self.assertEqual(metrics["attemptCount"], 2)
+            self.assertEqual(metrics["successCount"], 2)
+            self.assertEqual(metrics["failureCount"], 0)
+            self.assertTrue(metrics["lastSucceeded"])
+
+        asyncio.run(exercise())
+
+    def test_superseded_commit_does_not_hide_newer_checkpoint_corruption(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            session_key = "guild:1:text:2:user:3"
+            store = self.populated_store()
+            store.start_new_turn(
+                session_key,
+                turn_id="turn-1",
+                now_monotonic=100.0,
+            )
+            manager = self.manager(
+                store,
+                FakeClock(wall=1000.0, monotonic=100.0),
+            )
+            older_entered = threading.Event()
+            release_older = threading.Event()
+            stale_callback_called = threading.Event()
+            original_commit = manager._commit_completed_turn_attempt
+
+            def gate_older(
+                target_session: str,
+                target_turn: str = "",
+                **kwargs,
+            ) -> dict:
+                if target_turn == "turn-1":
+                    older_entered.set()
+                    release_older.wait()
+                return original_commit(
+                    target_session,
+                    target_turn,
+                    **kwargs,
+                )
+
+            with patch.object(
+                manager,
+                "_commit_completed_turn_attempt",
+                side_effect=gate_older,
+            ):
+                older = asyncio.create_task(
+                    manager.commit_completed_turn_async(
+                        session_key,
+                        "turn-1",
+                        before_commit=(
+                            lambda _generation: stale_callback_called.set()
+                        ),
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            older_entered.wait,
+                            1.0,
+                        )
+                    )
+                    store.start_new_turn(
+                        session_key,
+                        turn_id="turn-2",
+                        now_monotonic=101.0,
+                    )
+                    newer = await manager.commit_completed_turn_async(
+                        session_key,
+                        "turn-2",
+                    )
+                    require_durable_continuity_receipt(newer)
+                    self.checkpoint_path.write_text(
+                        "{",
+                        encoding="utf-8",
+                    )
+                finally:
+                    release_older.set()
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^conversation_continuity_commit_failed$",
+                ):
+                    await asyncio.wait_for(older, timeout=1.0)
+
+            status = manager.status()
+            self.assertEqual(status["state"], "error")
+            self.assertFalse(
+                status["completedTurnCommit"]["lastSucceeded"]
+            )
+            self.assertFalse(stale_callback_called.is_set())
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^conversation_continuity_commit_failed$",
+            ):
+                require_durable_continuity_receipt(status)
+
+        asyncio.run(exercise())
+
+    def test_superseded_commit_repairs_one_step_lag_before_rejection(
+        self,
+    ) -> None:
+        session_key = "guild:1:text:2:user:3"
+        store = self.populated_store()
+        store.start_new_turn(
+            session_key,
+            turn_id="turn-1",
+            now_monotonic=100.0,
+        )
+        manager = self.manager(
+            store,
+            FakeClock(wall=1000.0, monotonic=100.0),
+        )
+        older_epoch = manager._reserve_commit_epoch()
+        store.start_new_turn(
+            session_key,
+            turn_id="turn-2",
+            now_monotonic=101.0,
+        )
+        newer_epoch = manager._reserve_commit_epoch()
+        newer = manager._commit_completed_turn_attempt(
+            session_key,
+            "turn-2",
+            before_commit=None,
+            attempt_epoch=newer_epoch,
+        )
+        require_durable_continuity_receipt(newer)
+        manager.head_path.unlink()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            manager._commit_completed_turn_attempt(
+                session_key,
+                "turn-1",
+                before_commit=None,
+                attempt_epoch=older_epoch,
+            )
+
+        head = json.loads(
+            manager.head_path.read_text(encoding="utf-8")
+        )
+        status = manager.status()
+        self.assertEqual(head["state"], "active")
+        self.assertEqual(head["generation"], 1)
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["checkpointHeadState"], "current")
+        self.assertTrue(
+            status["completedTurnCommit"]["lastSucceeded"]
+        )
+        require_durable_continuity_receipt(status)
+
+    def test_superseded_commit_preserves_newer_empty_reset_state(
+        self,
+    ) -> None:
+        session_key = "guild:1:text:2:user:3"
+        store = self.populated_store()
+        store.start_new_turn(
+            session_key,
+            turn_id="turn-1",
+            now_monotonic=100.0,
+        )
+        manager = self.manager(
+            store,
+            FakeClock(wall=1000.0, monotonic=100.0),
+        )
+        older_epoch = manager._reserve_commit_epoch()
+        store.start_new_turn(
+            session_key,
+            turn_id="turn-2",
+            now_monotonic=101.0,
+        )
+        newer_epoch = manager._reserve_commit_epoch()
+        newer = manager._commit_completed_turn_attempt(
+            session_key,
+            "turn-2",
+            before_commit=None,
+            attempt_epoch=newer_epoch,
+        )
+        require_durable_continuity_receipt(newer)
+
+        def clear_session() -> None:
+            for mapping in (
+                store.histories,
+                store.followup_targets,
+                store.active_until,
+                store.active_user_ids,
+                store.last_active_at,
+                store.awaiting_user_reply,
+                store.last_speaker,
+                store.topic_ids,
+                store.turn_ids,
+            ):
+                mapping.pop(session_key, None)
+
+        reset_status = manager.reset_guild(1, clear_session)
+        self.assertEqual(reset_status["state"], "empty")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            manager._commit_completed_turn_attempt(
+                session_key,
+                "turn-1",
+                before_commit=None,
+                attempt_epoch=older_epoch,
+            )
+
+        status = manager.status()
+        self.assertEqual(status["state"], "empty")
+        self.assertEqual(status["checkpointHeadState"], "empty")
+        self.assertTrue(status["rollbackProtected"])
+        self.assertTrue(
+            status["completedTurnCommit"]["lastSucceeded"]
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            require_durable_continuity_receipt(status)
+
+    def test_newer_failure_does_not_supersede_older_valid_commit(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            session_key = "guild:1:text:2:user:3"
+            store = self.populated_store()
+            valid_turn = store.start_new_turn(
+                session_key,
+                turn_id="turn-valid",
+                now_monotonic=100.0,
+            )
+            manager = self.manager(
+                store,
+                FakeClock(wall=1000.0, monotonic=100.0),
+            )
+            older_entered = threading.Event()
+            release_older = threading.Event()
+            original_commit = manager._commit_completed_turn_attempt
+
+            def gate_older(
+                target_session: str,
+                target_turn: str = "",
+                **kwargs,
+            ) -> dict:
+                if target_turn == valid_turn:
+                    older_entered.set()
+                    release_older.wait()
+                return original_commit(
+                    target_session,
+                    target_turn,
+                    **kwargs,
+                )
+
+            with patch.object(
+                manager,
+                "_commit_completed_turn_attempt",
+                side_effect=gate_older,
+            ):
+                older = asyncio.create_task(
+                    manager.commit_completed_turn_async(
+                        session_key,
+                        valid_turn,
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            older_entered.wait,
+                            1.0,
+                        )
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "^conversation_continuity_commit_failed$",
+                    ):
+                        await manager.commit_completed_turn_async(
+                            session_key,
+                            "turn-invalid",
+                        )
+                finally:
+                    release_older.set()
+                older_status = await asyncio.wait_for(
+                    older,
+                    timeout=1.0,
+                )
+
+            require_durable_continuity_receipt(older_status)
+            payload = json.loads(
+                self.checkpoint_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["generation"], 1)
+            self.assertEqual(
+                payload["sessions"][0]["state"]["turnId"],
+                valid_turn,
+            )
+            status = manager.status()
+            metrics = status["completedTurnCommit"]
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(metrics["attemptCount"], 2)
+            self.assertEqual(metrics["successCount"], 1)
+            self.assertEqual(metrics["failureCount"], 1)
+            self.assertTrue(metrics["lastSucceeded"])
+            self.assertTrue(metrics["lastTargetVerified"])
+
+        asyncio.run(exercise())
 
     def test_completed_turn_commit_reports_content_free_latency_warning(
         self,
@@ -879,6 +1505,61 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(restored_store.awaiting_user_reply, {})
         self.assertFalse(self.checkpoint_path.exists())
 
+    def test_restart_cannot_extend_checkpoint_embedded_expiry(self) -> None:
+        source_clock = FakeClock(wall=1000.0, monotonic=100.0)
+        self.manager(
+            self.populated_store(),
+            source_clock,
+            max_age_sec=60.0,
+        ).flush()
+
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1120.0, monotonic=500.0),
+            max_age_sec=900.0,
+        ).restore()
+
+        self.assertEqual(payload["expiresAt"], 1060.0)
+        self.assertEqual(restored["state"], "stale")
+        self.assertEqual(restored_store.histories, {})
+        self.assertEqual(restored_store.awaiting_user_reply, {})
+        self.assertFalse(self.checkpoint_path.exists())
+
+    def test_restart_cannot_extend_checkpoint_row_effective_age(self) -> None:
+        session_key = "guild:1:text:2:user:3"
+        source_clock = FakeClock(wall=1000.0, monotonic=100.0)
+        source = self.populated_store()
+        source.last_active_at[session_key] = 45.0
+        self.manager(
+            source,
+            source_clock,
+            max_age_sec=60.0,
+        ).flush()
+
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1050.0, monotonic=500.0),
+            max_age_sec=900.0,
+        ).restore()
+
+        self.assertEqual(payload["expiresAt"], 1060.0)
+        self.assertEqual(
+            payload["sessions"][0]["state"]["lastActiveAgoSec"],
+            55.0,
+        )
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(restored["restoredSessionCount"], 0)
+        self.assertNotIn(session_key, restored_store.histories)
+        self.assertNotIn(session_key, restored_store.awaiting_user_reply)
+
     def test_fresh_session_flush_does_not_extend_expired_other_session(
         self,
     ) -> None:
@@ -1014,10 +1695,11 @@ class SessionContinuityTests(unittest.TestCase):
             )
 
         restored_store = SessionStateStore.create_empty()
-        restored = self.manager(
+        restored_manager = self.manager(
             restored_store,
             FakeClock(wall=1001.0, monotonic=500.0),
-        ).restore()
+        )
+        restored = restored_manager.restore()
         ledger = json.loads(
             (self.root / "guild_revocations.json").read_text(encoding="utf-8")
         )
@@ -1027,10 +1709,90 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertNotIn("guild:1:text:2:user:3", restored_store.histories)
         self.assertIn(other_key, restored_store.histories)
         self.assertEqual(ledger["guilds"], {"1": 1000.0})
+        self.assertEqual(
+            restored_manager.active_guild_revocation_ids(),
+            (1,),
+        )
         self.assertTrue(ledger["policy"]["contentFree"])
         serialized = json.dumps(ledger, ensure_ascii=False)
         self.assertNotIn("내가 하던 이야기를 기억해", serialized)
         self.assertNotIn("다른 길드의 대화", serialized)
+
+    def test_active_guild_reset_marker_survives_wall_clock_rollback(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        other_key = self.add_other_guild(store)
+        local_key = "local:control-page"
+        store.append_history(
+            local_key,
+            "로컬 대화",
+            "로컬 관계도 유지해.",
+            system_prompt="private system prompt",
+            max_history_items=12,
+        )
+        store.update_session_state(
+            local_key,
+            user_id=0,
+            speaker="assistant",
+            awaiting_user_reply=True,
+            topic_id="local-topic",
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=100.0,
+        )
+        manager = self.manager(store, clock)
+        manager.flush()
+        clock.wall = 900.0
+
+        with self.assertRaises(RuntimeError):
+            manager.reset_guild(
+                1,
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("simulated reset crash")
+                ),
+            )
+
+        restored_store = SessionStateStore.create_empty()
+        restarted = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        )
+        restored = restarted.restore()
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(restarted.active_guild_revocation_ids(), (1,))
+        self.assertNotIn(
+            "guild:1:text:2:user:3",
+            restored_store.histories,
+        )
+        self.assertIn(other_key, restored_store.histories)
+        self.assertIn(local_key, restored_store.histories)
+
+    def test_unfinished_reset_ids_load_without_a_checkpoint(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        manager = self.manager(SessionStateStore.create_empty(), clock)
+
+        class SimulatedCrash(RuntimeError):
+            pass
+
+        with self.assertRaises(SimulatedCrash):
+            manager.reset_guild(
+                1,
+                lambda: (_ for _ in ()).throw(
+                    SimulatedCrash("process exited before clear")
+                ),
+            )
+        self.assertFalse(self.checkpoint_path.exists())
+
+        restarted = self.manager(
+            SessionStateStore.create_empty(),
+            FakeClock(wall=1001.0, monotonic=500.0),
+        )
+        status = restarted.restore()
+
+        self.assertEqual(status["state"], "missing")
+        self.assertEqual(restarted.active_guild_revocation_ids(), (1,))
 
     def test_successful_guild_reset_rewrites_checkpoint_before_unrevoking(
         self,
@@ -1068,6 +1830,10 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(
             [row["sessionKey"] for row in checkpoint["sessions"]],
             [other_key],
+        )
+        self.assertEqual(
+            checkpoint["guildResetBoundaries"],
+            {"1": 1001.0},
         )
         self.assertEqual(ledger["guilds"], {})
         self.assertEqual(result["guildRevocationCount"], 0)

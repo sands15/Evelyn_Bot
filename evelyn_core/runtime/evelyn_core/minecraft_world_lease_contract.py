@@ -124,6 +124,8 @@ def load_world_lease_authorization_token(
     secret_path: Path,
     *,
     process_nonce: str,
+    lease_id: str = "",
+    monotonic_now: float | None = None,
 ) -> tuple[str, str]:
     payload = _read_json_object(Path(secret_path))
     if (
@@ -141,6 +143,25 @@ def load_world_lease_authorization_token(
         or not hmac.compare_digest(stored_nonce, expected_nonce)
     ):
         return "", "minecraft_world_lease_secret_mismatch"
+    expected_lease_id = str(lease_id or "").strip()
+    if expected_lease_id:
+        stored_lease_id = str(payload.get("leaseId") or "").strip()
+        expires_monotonic = _finite_float(
+            payload.get("expiresMonotonic")
+        )
+        current_monotonic = _finite_float(monotonic_now)
+        if (
+            not stored_lease_id
+            or not hmac.compare_digest(
+                stored_lease_id,
+                expected_lease_id,
+            )
+            or expires_monotonic is None
+            or current_monotonic is None
+        ):
+            return "", "minecraft_world_lease_secret_mismatch"
+        if expires_monotonic <= current_monotonic:
+            return "", "minecraft_world_lease_expired"
     return token, ""
 
 
@@ -150,6 +171,7 @@ def load_guarded_world_lease(
     *,
     owner_claim_path: Path | None = None,
     now: float | None = None,
+    monotonic_now: float | None = None,
     heartbeat_max_age_sec: float = DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC,
 ) -> tuple[dict[str, Any], str]:
     status, error = load_valid_world_lease(
@@ -163,6 +185,12 @@ def load_guarded_world_lease(
     _, secret_error = load_world_lease_authorization_token(
         secret_path,
         process_nonce=str(status.get("processNonce") or ""),
+        lease_id=str((status.get("lease") or {}).get("leaseId") or ""),
+        monotonic_now=(
+            time.monotonic()
+            if monotonic_now is None
+            else monotonic_now
+        ),
     )
     if secret_error:
         return {}, secret_error
@@ -248,6 +276,7 @@ def validate_world_lease_request(
     secret_path: Path,
     owner_claim_path: Path | None = None,
     now: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
     heartbeat_max_age_sec: float = DEFAULT_WORLD_LEASE_HEARTBEAT_MAX_AGE_SEC,
 ) -> tuple[bool, str]:
     if not isinstance(payload, dict):
@@ -272,6 +301,8 @@ def validate_world_lease_request(
     expected_token, token_error = load_world_lease_authorization_token(
         secret_path,
         process_nonce=str(expected.get("processNonce") or ""),
+        lease_id=str(expected.get("leaseId") or ""),
+        monotonic_now=monotonic(),
     )
     if token_error:
         return False, token_error

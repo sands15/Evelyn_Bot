@@ -8,8 +8,9 @@
   const state = {
     session: null,
     busy: false,
-    surfaces: new Set(["local", "discord"]),
+    surfaces: new Set(["local"]),
     timer: null,
+    revision: 0,
   };
 
   function escapeHtml(value) {
@@ -47,7 +48,7 @@
     return Number((step && step.events && step.events[name]) || 0);
   }
 
-  function capabilityCard(id, label, capability) {
+  function capabilityCard(id, label, capability, validationState) {
     const value = capability || { state: "unknown", blockers: [], warnings: [], repairActions: [] };
     const consent = value.consent || {};
     const blockers = (value.blockers || [])
@@ -57,6 +58,7 @@
       .map((item) => `<span class="voice-validation-warning">${escapeHtml(item.message || item.code)}</span>`)
       .join("");
     const repairs = (value.repairActions || [])
+      .filter((action) => !(action.consent && ["passed", "failed", "aborted"].includes(validationState)))
       .map((action) => {
         const manual = action.manualCommand
           ? `<span class="voice-validation-meta">${escapeHtml(action.manualCommand)}</span>`
@@ -109,7 +111,11 @@
       validationEvent("재생 취소", eventCount(step, "playback_cancelled") === 1),
     ].join("");
     const heardApplicable = step.kind === "normal" || step.kind === "barge_interrupt";
-    const canConfirm = heardApplicable && eventCount(step, "playback_completed") === 1;
+    const canConfirm = heardApplicable
+      && step.status !== "failed"
+      && step.heard !== true
+      && eventCount(step, "playback_started") === 1
+      && eventCount(step, "playback_completed") === 1;
     const canRetry = step.status === "failed";
     const silenceStarted = Number(step.silenceStartedAt || 0);
     const silenceRemaining = step.kind === "silence"
@@ -191,7 +197,7 @@
     const preflight = session.state === "preflight"
       ? [
           '<div class="voice-validation-blocker">',
-          "preflight 차단 원인을 복구한 뒤 이 세션을 중단하고 새 검증을 시작하세요.",
+          "차단 원인을 복구하거나 마이크를 허용하면 같은 검증 세션이 계속됩니다. 계속 막히면 세션을 중단하세요.",
           '<div class="voice-validation-actions"><button class="is-danger" type="button" data-voice-abort="1">preflight 세션 중단</button></div>',
           "</div>",
         ].join("")
@@ -199,21 +205,33 @@
     mount.innerHTML = [
       surfacePicker,
       '<div class="voice-validation-grid">',
-      capabilityCard("voiceLocal", "Local voice", capabilities.voiceLocal),
-      capabilityCard("voiceDiscord", "Discord voice", capabilities.voiceDiscord),
+      capabilityCard("voiceLocal", "Local voice", capabilities.voiceLocal, session.state),
+      capabilityCard("voiceDiscord", "Discord voice", capabilities.voiceDiscord, session.state),
       "</div>",
       preflight,
       renderStep(session),
       renderSummary(session),
     ].join("");
+    if (state.busy) {
+      mount.querySelectorAll("button, input").forEach((control) => {
+        control.disabled = true;
+      });
+    }
   }
 
   async function refresh() {
+    if (state.busy) {
+      scheduleRefresh();
+      return;
+    }
+    const revision = ++state.revision;
     try {
       const payload = await api("/api/control-page/voice-validation", { cache: "no-store" });
+      if (revision !== state.revision) return;
       state.session = payload.session || payload;
       render();
     } catch (error) {
+      if (revision !== state.revision) return;
       mount.innerHTML = `<p class="voice-validation-blocker">검증 상태를 읽지 못했습니다: ${escapeHtml(error.message)}</p>`;
     } finally {
       scheduleRefresh();
@@ -226,31 +244,53 @@
     state.timer = window.setTimeout(refresh, active ? 800 : 4000);
   }
 
-  async function mutate(path, payload) {
+  function beginExclusive() {
+    if (state.busy) return null;
     state.busy = true;
+    const revision = ++state.revision;
     render();
+    return revision;
+  }
+
+  function endExclusive(revision) {
+    if (revision === state.revision) state.busy = false;
+    render();
+    scheduleRefresh();
+  }
+
+  async function refreshCanonical(revision) {
+    const latest = await api("/api/control-page/voice-validation", { cache: "no-store" });
+    if (revision === state.revision) state.session = latest.session || latest;
+  }
+
+  async function mutate(path, payload) {
+    const revision = beginExclusive();
+    if (revision === null) return null;
     try {
       const result = await api(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload || {}),
       });
-      state.session = result.session || state.session;
-      render();
+      if (revision === state.revision) {
+        state.session = result.session || state.session;
+      }
       return result;
     } catch (error) {
-      const payloadState = error.payload && error.payload.session;
-      if (payloadState) state.session = payloadState;
+      try {
+        await refreshCanonical(revision);
+      } catch {
+        // Keep the last canonical state if status refresh is unavailable.
+      }
       window.alert(error.message);
-      render();
       return null;
     } finally {
-      state.busy = false;
-      scheduleRefresh();
+      endExclusive(revision);
     }
   }
 
   async function startValidation() {
+    if (state.busy) return;
     if (!state.surfaces.size) {
       window.alert("검증할 surface를 하나 이상 선택하세요.");
       return;
@@ -266,7 +306,8 @@
       window.alert("Windows에서 start_local.bat --background 를 실행하세요.");
       return;
     }
-    button.disabled = true;
+    const revision = beginExclusive();
+    if (revision === null) return;
     try {
       const plan = await api("/api/control-page/runtime-repair/preview", {
         method: "POST",
@@ -288,16 +329,17 @@
           reason: "voice P0 preflight repair",
         }),
       });
-      await refresh();
+      await refreshCanonical(revision);
     } catch (error) {
       window.alert(error.message);
     } finally {
-      button.disabled = false;
+      endExclusive(revision);
     }
   }
 
   async function grantVoiceCaptureConsent(button) {
-    button.disabled = true;
+    const revision = beginExclusive();
+    if (revision === null) return;
     try {
       const preview = await api("/api/control-page/voice-capture-consent/preview", {
         method: "POST",
@@ -319,29 +361,37 @@
           confirmToken: preview.confirmToken,
         }),
       });
-      if (result.validationSession) state.session = result.validationSession;
-      await refresh();
+      if (revision === state.revision && result.validationSession) {
+        state.session = result.validationSession;
+      }
+      await refreshCanonical(revision);
     } catch (error) {
+      try {
+        await refreshCanonical(revision);
+      } catch {
+        // Keep the last canonical state if status refresh is unavailable.
+      }
       window.alert(error.message);
     } finally {
-      button.disabled = false;
+      endExclusive(revision);
     }
   }
 
   async function revokeVoiceCaptureConsent(button) {
     if (!window.confirm("로컬 마이크 권한을 지금 철회하고 캡처를 끌까요?")) return;
-    button.disabled = true;
+    const revision = beginExclusive();
+    if (revision === null) return;
     try {
       await api("/api/control-page/voice-capture-consent/revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "user_revoked" }),
       });
-      await refresh();
+      await refreshCanonical(revision);
     } catch (error) {
       window.alert(error.message);
     } finally {
-      button.disabled = false;
+      endExclusive(revision);
     }
   }
 
@@ -353,6 +403,7 @@
     else state.surfaces.delete(input.dataset.voiceSurface);
   });
   mount.addEventListener("click", async (event) => {
+    if (state.busy) return;
     const consentGrant = event.target.closest("[data-voice-consent-grant]");
     if (consentGrant) {
       await grantVoiceCaptureConsent(consentGrant);

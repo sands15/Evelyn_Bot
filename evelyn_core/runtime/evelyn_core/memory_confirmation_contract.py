@@ -19,6 +19,7 @@ MEMORY_USER_CONFIRMATION_NOTE_SCHEMA = (
     "memory.user-confirmation.note.v2"
 )
 MEMORY_OWNER_SCOPE_SCHEMA = "memory.owner-scope.v1"
+MEMORY_RESET_SCOPE_SCHEMA = "memory.reset-scope.v1"
 MEMORY_USER_CONFIRMATION_SOURCES = frozenset(
     {"control-page-user", "discord-user"}
 )
@@ -31,6 +32,7 @@ _SOURCE_REF_RE = re.compile(
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,80}$")
 _EVIDENCE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _OWNER_SCOPE_RE = re.compile(r"^memory-owner-[0-9a-f]{64}$")
+_RESET_SCOPE_RE = re.compile(r"^memory-reset-[0-9a-f]{64}$")
 _SUCCESS_KEYS = frozenset(
     {
         "schema",
@@ -146,6 +148,66 @@ def memory_owner_scope(
     ).hexdigest()
 
 
+def memory_reset_scope(guild_id: object | None) -> str:
+    if guild_id is None:
+        normalized_guild_id = None
+    else:
+        if isinstance(guild_id, bool):
+            raise ValueError("memory_reset_scope_invalid")
+        try:
+            normalized_guild_id = int(guild_id)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("memory_reset_scope_invalid") from None
+        if normalized_guild_id <= 0:
+            raise ValueError("memory_reset_scope_invalid")
+    payload = json.dumps(
+        {
+            "guildId": normalized_guild_id,
+            "schema": MEMORY_RESET_SCOPE_SCHEMA,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "memory-reset-" + hashlib.sha256(
+        payload.encode("utf-8")
+    ).hexdigest()
+
+
+def memory_reset_scope_is_canonical(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and _clean(value) == value
+        and _RESET_SCOPE_RE.fullmatch(value)
+    )
+
+
+def memory_owner_scope_for_local_surface(
+    *,
+    configured_guild_id: object | None = None,
+    configured_user_id: object | None = None,
+) -> str:
+    if configured_guild_id is None and configured_user_id is None:
+        return memory_owner_scope(
+            guild_id=None,
+            person_key="control-page:local",
+        )
+    if configured_guild_id is None or configured_user_id is None:
+        raise ValueError("memory_owner_scope_invalid")
+    if isinstance(configured_user_id, bool):
+        raise ValueError("memory_owner_scope_invalid")
+    try:
+        normalized_user_id = int(configured_user_id)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("memory_owner_scope_invalid") from None
+    if normalized_user_id <= 0:
+        raise ValueError("memory_owner_scope_invalid")
+    return memory_owner_scope(
+        guild_id=configured_guild_id,
+        person_key=f"user:{normalized_user_id}",
+    )
+
+
 def memory_owner_scope_is_canonical(value: object) -> bool:
     return bool(
         isinstance(value, str)
@@ -249,6 +311,7 @@ def explicit_memory_writer_skip_decision() -> dict[str, Any]:
 
 
 __all__ = [
+    "MEMORY_RESET_SCOPE_SCHEMA",
     "MEMORY_USER_CONFIRMATION_NOTE_SCHEMA",
     "MEMORY_OWNER_SCOPE_SCHEMA",
     "MEMORY_USER_CONFIRMATION_SCHEMA",
@@ -259,6 +322,9 @@ __all__ = [
     "explicit_memory_writer_skip_decision",
     "is_explicit_memory_confirmation_receipt",
     "is_user_confirmed_memory_integrity_valid",
+    "memory_reset_scope",
+    "memory_reset_scope_is_canonical",
     "memory_owner_scope",
+    "memory_owner_scope_for_local_surface",
     "memory_owner_scope_is_canonical",
 ]

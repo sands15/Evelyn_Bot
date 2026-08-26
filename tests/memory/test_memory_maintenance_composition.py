@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 REPO_ROOT=next(p for p in Path(__file__).resolve().parents if (p/"main.py").exists())
 RUNTIME_ROOT=REPO_ROOT/"evelyn_core"/"runtime"
 if str(RUNTIME_ROOT) not in sys.path: sys.path.insert(0,str(RUNTIME_ROOT))
 from evelyn_core.memory_maintenance_composition import MemoryMaintenanceComposition, MemoryMaintenanceCompositionDeps
+from evelyn_core.guild_runtime_reset import MEMORY_BACKGROUND_WORK_INFLIGHT, require_guild_runtime_reset_ready
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry
 
 
 class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +22,7 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
             attach_current_task=Mock(return_value="task"),detach_task=Mock(),run_long_term_memory_update=AsyncMock(),
             collect_memory_layers=Mock(),ask_summary_llm=AsyncMock(),is_context_size_error=Mock(),should_log_voice_timing=Mock(),
             memory_fact_limit=10,memory_loop_limit=5,raw_limit=100,run_vault_maintenance_once=Mock(return_value={}),
-            create_scoped_task=Mock(),lock_factory=asyncio.Lock,sleep=AsyncMock(),to_thread=AsyncMock(),current_task=Mock(),
+            create_scoped_task=Mock(),lock_factory=asyncio.Lock,sleep=AsyncMock(),to_thread=AsyncMock(),current_task=asyncio.current_task,
             monotonic=Mock(return_value=1000.0),getenv=Mock(return_value="900"),log=Mock())
         values.update(overrides); deps=MemoryMaintenanceCompositionDeps(**values)
         return MemoryMaintenanceComposition(deps),deps
@@ -86,6 +90,7 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         composition.schedule_memory_vault_maintenance(1)
         await deps.background_vault_tasks[1]
+        self.assertNotIn(1, deps.background_vault_tasks)
 
         self.assertEqual(
             deps.vault_last_maintenance_at[1],
@@ -131,6 +136,7 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         composition.schedule_memory_vault_maintenance(1)
         await deps.background_vault_tasks[1]
+        self.assertNotIn(1, deps.background_vault_tasks)
 
         self.assertEqual(
             deps.vault_last_maintenance_at[1],
@@ -156,6 +162,74 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
             "[MEMORY VAULT] maintenance failed guild=1 errorType=RuntimeError"
         )
         self.assertNotIn(private_error, repr(log.call_args_list))
+        self.assertNotIn(1, deps.background_vault_tasks)
+
+    async def test_cancelled_vault_task_tracks_real_worker_and_blocks_every_guild_reset(self):
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def blocking_maintenance(_guild_id):
+            worker_started.set()
+            if not release_worker.wait(2.0):
+                raise TimeoutError("vault worker was not released")
+            return {}
+
+        registry = TurnScopeRegistry()
+        turn_scope = TurnScope("turn-1")
+        composition, deps = self.build(
+            run_vault_maintenance_once=blocking_maintenance,
+            create_scoped_task=registry.create_scoped_task,
+            to_thread=asyncio.to_thread,
+        )
+        reset_deps = SimpleNamespace(
+            autonomy_engines={},
+            autonomy_cognitive_refresh_tasks={},
+            background_search_tasks={},
+            background_memory_tasks={},
+            background_memory_vault_tasks=deps.background_vault_tasks,
+        )
+
+        composition.schedule_memory_vault_maintenance(
+            1,
+            turn_scope=turn_scope,
+        )
+        maintenance_task = deps.background_vault_tasks[1]
+        self.assertTrue(
+            await asyncio.wait_for(
+                asyncio.to_thread(worker_started.wait, 1.0),
+                timeout=2.0,
+            )
+        )
+
+        turn_scope.cancel("replaced")
+        await asyncio.sleep(0)
+
+        self.assertFalse(maintenance_task.done())
+        self.assertIs(deps.background_vault_tasks[1], maintenance_task)
+        maintenance_task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(maintenance_task.done())
+        self.assertIs(deps.background_vault_tasks[1], maintenance_task)
+        for guild_id in (1, 2):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                f"^{MEMORY_BACKGROUND_WORK_INFLIGHT}$",
+            ):
+                require_guild_runtime_reset_ready(
+                    guild_id,
+                    deps=reset_deps,
+                )
+
+        release_worker.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(maintenance_task, timeout=2.0)
+
+        self.assertNotIn(1, deps.background_vault_tasks)
+        for guild_id in (1, 2):
+            require_guild_runtime_reset_ready(
+                guild_id,
+                deps=reset_deps,
+            )
 
     def test_main_uses_lazy_summary_binding(self):
         source=(REPO_ROOT/"main.py").read_text(encoding="utf-8")

@@ -42,10 +42,13 @@ async def ask_json_llm_from_runtime(
     payload = {
         "model": deps.model_name,
         "messages": messages,
-        "temperature": 0.1,
+        "temperature": 0.0 if hot_path else 0.1,
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if hot_path:
+        payload["cache_prompt"] = True
+        payload["response_format"] = {"type": "json_object"}
     timeout = deps.client_timeout_factory(total=timeout_seconds)
     started_at = deps.monotonic()
 

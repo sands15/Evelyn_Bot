@@ -13,6 +13,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.omnivoice_request_runtime import OmniVoiceRequestRuntimeDeps  # noqa: E402
+from evelyn_core.observability_metrics import VoiceLatencyTrace  # noqa: E402
 from evelyn_core.omnivoice_source_runtime import (  # noqa: E402
     OmniVoiceSourceRuntimeDeps,
     create_omnivoice_source_from_runtime,
@@ -146,6 +147,7 @@ class OmniVoiceSourceRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_streams_pcm_finishes_source_and_emits_trace_callbacks(self) -> None:
         callbacks: list[str] = []
         turn_scope = object()
+        latency_trace = VoiceLatencyTrace()
 
         source = await create_omnivoice_source_from_runtime(
             " 안녕 ",
@@ -161,6 +163,7 @@ class OmniVoiceSourceRuntimeTests(unittest.IsolatedAsyncioTestCase):
             session_key="session-1",
             turn_scope=turn_scope,
             trace_payload={"turn_id": "wrong", "source_type": "test"},
+            latency_trace=latency_trace,
         )
         await self.tasks[0]
 
@@ -181,6 +184,27 @@ class OmniVoiceSourceRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "tts_first_pcm_received",
         ])
         self.assertEqual(self.failures, [])
+        self.assertEqual(
+            set(latency_trace.public_summary()["markers_ms"]),
+            {"tts_requested", "tts_started", "tts_first_pcm"},
+        )
+
+    async def test_empty_audio_never_marks_first_pcm(self) -> None:
+        self.session = FakeSession([FakeResponse(200, [])])
+        latency_trace = VoiceLatencyTrace()
+
+        source = await create_omnivoice_source_from_runtime(
+            "안녕",
+            deps=self.build_deps(),
+            latency_trace=latency_trace,
+        )
+        await self.tasks[0]
+
+        self.assertIsNotNone(source.error)
+        self.assertEqual(
+            set(latency_trace.public_summary()["markers_ms"]),
+            {"tts_requested", "tts_started"},
+        )
 
     async def test_clone_http_failure_retries_auto(self) -> None:
         self.session = FakeSession([

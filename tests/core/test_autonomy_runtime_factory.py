@@ -21,9 +21,17 @@ from evelyn_core.autonomy_runtime_factory import (
     AutonomyRuntimeFactoryDeps,
     get_or_create_autonomy_engine_from_runtime,
 )
+from evelyn_core.autonomy import AutonomyExecutionContext, AutonomyPlan
 from evelyn_core import memory_deletion_journal as journal
 from evelyn_core.conversation_memory_receipt import (
     memory_receipt_ref_from_receipt,
+)
+from evelyn_core.conversation_ingress_composition import (
+    ConversationIngressComposition,
+    ConversationIngressCompositionDeps,
+)
+from evelyn_core.conversation_ingress_recovery import (
+    ConversationIngressRecoveryJournal,
 )
 from evelyn_core.memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
@@ -122,6 +130,20 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             self.events.append(("commit", args))
             return durable_continuity_status(9)
 
+        def record_action_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            self.events.append(
+                ("outcome", (guild_id, action, result))
+            )
+            return {
+                "recorded": True,
+                "verified": True,
+                "authorizationCurrent": True,
+            }
+
         return AutonomyRuntimeFactoryDeps(
             autonomy_engines=self.engines,
             get_guild=lambda _guild_id: self.guild,
@@ -182,18 +204,25 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
                 "assistant:idle",
             ],
             authorize_action=lambda _guild_id, action: {
-                "allowed": action == "assistant:idle",
+                "allowed": action
+                in {
+                    "assistant:idle",
+                    "assistant:maybe_ping_user",
+                    "assistant:send_followup",
+                },
                 "code": (
                     "authorized"
-                    if action == "assistant:idle"
+                    if action
+                    in {
+                        "assistant:idle",
+                        "assistant:maybe_ping_user",
+                        "assistant:send_followup",
+                    }
                     else "authorization_scope_denied"
                 ),
+                "grantId": "grant-1",
             },
-            record_action_outcome=lambda guild_id, action, result: (
-                self.events.append(
-                    ("outcome", (guild_id, action, result))
-                )
-            ),
+            record_action_outcome=record_action_outcome,
             commit_session_continuity=commit_session_continuity,
             log=lambda *args, **kwargs: None,
         )
@@ -203,6 +232,27 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
 
     def default_executor(self):
         return self.create_engine().executor.default_executor
+
+    def real_ingress_owner(self) -> ConversationIngressComposition:
+        root = Path(self.temp_dir.name) / "autonomy_ingress"
+        owner = ConversationIngressComposition(
+            ConversationIngressCompositionDeps(
+                journal_factory=lambda: ConversationIngressRecoveryJournal(
+                    path=root / "main.json",
+                    head_path=root / "main.head.json",
+                ),
+                log=lambda *_args: None,
+                active_guild_revocation_ids=lambda: (),
+                reset_session_continuity_guild=(
+                    lambda _guild_id, callback: callback()
+                ),
+                reset_guild_persistent_memory=lambda _guild_id: None,
+            )
+        )
+        self.assertTrue(
+            owner.activate_after_continuity_restore()["ownerReady"]
+        )
+        return owner
 
     def test_factory_caches_engine_and_preserves_poll_interval(self) -> None:
         first = self.create_engine()
@@ -242,7 +292,340 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
 
         await engine.notify("  알림  ")
 
-        self.assertEqual(self.events, [("send", (self.channels[10], "알림"))])
+        self.assertEqual(
+            [kind for kind, _payload in self.events],
+            [
+                "send",
+                "history",
+                "session",
+                "commit",
+                "memory",
+                "self_state",
+                "outcome",
+            ],
+        )
+        history_args, _history_kwargs = next(
+            payload
+            for kind, payload in self.events
+            if kind == "history"
+        )
+        self.assertEqual(
+            history_args[:3],
+            (self.target_session_key, "[autonomy:error]", "알림"),
+        )
+        _guild_id, action, audit_result = self.events[-1][1]
+        self.assertEqual(action, "assistant:send_followup")
+        self.assertEqual(
+            audit_result["_authorization_grant_id"],
+            "grant-1",
+        )
+        self.assertTrue(audit_result["_action_run_id"])
+
+    async def test_notify_fails_closed_without_current_followup_authorization(
+        self,
+    ) -> None:
+        authorizations: list[tuple[int, str, str]] = []
+
+        def deny(
+            guild_id: int,
+            action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            authorizations.append(
+                (guild_id, action, action_run_id)
+            )
+            return {
+                "allowed": False,
+                "code": "authorization_required",
+            }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "authorize_action": deny,
+            }
+        )
+        engine = self.create_engine()
+
+        await engine.notify(
+            "must not send",
+            action_run_id="notify-denied-1",
+        )
+
+        self.assertEqual(
+            authorizations,
+            [
+                (
+                    11,
+                    "assistant:send_followup",
+                    "notify-denied-1",
+                )
+            ],
+        )
+        self.assertEqual(self.events, [])
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertEqual(self.last_ping, {})
+
+    async def test_notify_rechecks_exact_grant_after_journal_prepare(
+        self,
+    ) -> None:
+        owner = self.real_ingress_owner()
+        authorizations: list[tuple[int, str, str]] = []
+        outcomes: list[tuple[int, str, dict[str, Any]]] = []
+
+        def authorize(
+            guild_id: int,
+            action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            authorizations.append(
+                (guild_id, action, action_run_id)
+            )
+            if len(authorizations) == 1:
+                return {
+                    "allowed": True,
+                    "code": "authorized",
+                    "grantId": "grant-original",
+                    "actionRunId": action_run_id,
+                }
+            return {
+                "allowed": False,
+                "code": "authorization_required",
+                "grantId": "",
+                "actionRunId": action_run_id,
+            }
+
+        def record_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            outcomes.append((guild_id, action, dict(result)))
+            return {
+                "recorded": True,
+                "verified": False,
+                "authorizationCurrent": False,
+            }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+            }
+        )
+        engine = self.create_engine()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "outcome_unverified",
+        ):
+            await engine.notify(
+                "must not send",
+                action_run_id="notify-revoked-1",
+            )
+
+        self.assertEqual(
+            authorizations,
+            [
+                (
+                    11,
+                    "assistant:send_followup",
+                    "notify-revoked-1",
+                ),
+                (
+                    11,
+                    "assistant:send_followup",
+                    "notify-revoked-1",
+                ),
+            ],
+        )
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(
+            outcomes[0][2]["reason"],
+            "authorization_required",
+        )
+        self.assertEqual(
+            outcomes[0][2]["_authorization_grant_id"],
+            "grant-original",
+        )
+        self.assertEqual(
+            outcomes[0][2]["_action_run_id"],
+            "notify-revoked-1",
+        )
+        self.assertEqual(owner.public_status()["entryCount"], 0)
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertFalse(
+            any(kind == "send" for kind, _payload in self.events)
+        )
+        self.assertEqual(self.last_ping, {})
+
+    async def test_notify_error_is_durable_once_in_exact_session_after_restart(
+        self,
+    ) -> None:
+        system_prompt = "system"
+        store = SessionStateStore.create_empty()
+        store.append_history(
+            self.target_session_key,
+            "SEARCH_PENDING?",
+            None,
+            system_prompt=system_prompt,
+            max_history_items=12,
+        )
+        store.update_session_state(
+            self.target_session_key,
+            user_id=42,
+            speaker="user",
+            ttl_sec=300.0,
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=100.0,
+        )
+        store.remember_followup_target(
+            self.target_session_key,
+            channel_id=10,
+            message_id=1,
+        )
+        checkpoint_path = Path(self.temp_dir.name) / "notify-active.json"
+        checkpoint = SessionContinuityCheckpoint(
+            store=store,
+            checkpoint_path=checkpoint_path,
+            status_path=Path(self.temp_dir.name) / "notify-status.json",
+            system_prompt=system_prompt,
+            wall_time=lambda: 1000.0,
+            monotonic=lambda: 100.0,
+        )
+
+        async def commit(
+            session_key: str,
+            turn_id: str,
+        ) -> dict[str, Any]:
+            return await checkpoint.commit_completed_turn_async(
+                session_key,
+                turn_id,
+            )
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "session_followup_targets": store.followup_targets,
+                "session_last_active_at": store.last_active_at,
+                "is_session_active_for_user": (
+                    lambda key, user_id: store.is_active_for_user(
+                        key,
+                        user_id,
+                        now_monotonic=100.0,
+                    )
+                ),
+                "get_conversation_history": (
+                    lambda **kwargs: store.get_conversation_history(
+                        system_prompt=system_prompt,
+                        **kwargs,
+                    )
+                ),
+                "start_new_turn": (
+                    lambda session_key: store.start_new_turn(
+                        session_key,
+                        now_monotonic=100.0,
+                    )
+                ),
+                "append_history": (
+                    lambda *args, **kwargs: store.append_history(
+                        *args,
+                        system_prompt=system_prompt,
+                        max_history_items=12,
+                        **kwargs,
+                    )
+                ),
+                "mark_session_active": (
+                    lambda session_key, **kwargs: store.mark_active(
+                        session_key,
+                        active_conversation_awaiting_reply_sec=300.0,
+                        now_monotonic=100.0,
+                        **kwargs,
+                    )
+                ),
+                "commit_session_continuity": commit,
+                "answer_promises_search": (
+                    lambda text: text == "SEARCH_PENDING?"
+                ),
+                "monotonic": lambda: 100.0,
+            }
+        )
+        engine = self.create_engine()
+
+        await engine.notify("  FAILURE_NOTICE  ")
+
+        live_history = store.get_conversation_history(
+            system_prompt=system_prompt,
+            session_key=self.target_session_key,
+        )
+        self.assertEqual(
+            [(row["role"], row["content"]) for row in live_history[-2:]],
+            [
+                ("user", "[autonomy:error]"),
+                ("assistant", "FAILURE_NOTICE"),
+            ],
+        )
+        self.assertTrue(
+            (await engine.executor.default_executor.observe())[
+                "search_pending"
+            ]
+        )
+        self.assertFalse(
+            self.deps.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+
+        restored_store = SessionStateStore.create_empty()
+        restored = SessionContinuityCheckpoint(
+            store=restored_store,
+            checkpoint_path=checkpoint_path,
+            status_path=(
+                Path(self.temp_dir.name) / "notify-restored-status.json"
+            ),
+            system_prompt=system_prompt,
+            wall_time=lambda: 1001.0,
+            monotonic=lambda: 500.0,
+        ).restore()
+        restored_history = restored_store.get_conversation_history(
+            system_prompt=system_prompt,
+            session_key=self.target_session_key,
+        )
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(
+            sum(
+                row["role"] == "user"
+                and row["content"] == "[autonomy:error]"
+                for row in restored_history
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                row["role"] == "assistant"
+                and row["content"] == "FAILURE_NOTICE"
+                for row in restored_history
+            ),
+            1,
+        )
+        self.assertEqual(
+            restored_history[-1]["memoryReceiptRef"]["state"],
+            "not_used",
+        )
+        self.assertNotIn("guild:11:default", restored_store.histories)
 
     async def test_observe_builds_runtime_snapshot(self) -> None:
         observation = await self.default_executor().observe()
@@ -541,6 +924,1076 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
                 self.target_session_key,
                 f"autonomy-turn:{self.target_session_key}",
             ),
+        )
+
+    async def test_journaled_followup_orders_delivery_before_exact_commit(self) -> None:
+        lifecycle: list[tuple[str, Any]] = []
+
+        class Ingress:
+            def guild_epoch(self, guild_id: int) -> int:
+                return 4
+
+            def claim_discord_autonomy(self, **kwargs: Any) -> dict[str, Any]:
+                lifecycle.append(("claim", kwargs))
+                return {
+                    "entryId": "entry-1",
+                    "turnId": "journal-turn-1",
+                    "guildEpoch": 4,
+                    "shouldProcess": True,
+                }
+
+            def bind_response(self, entry_id: str, **kwargs: Any) -> dict[str, Any]:
+                lifecycle.append(("bind", (entry_id, kwargs)))
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, entry_id: str, **kwargs: Any) -> None:
+                lifecycle.append(("inflight", (entry_id, kwargs)))
+
+            def mark_delivery_succeeded(self, entry_id: str, **kwargs: Any) -> None:
+                lifecycle.append(("succeeded", (entry_id, kwargs)))
+
+            def begin_terminal_commit(self, entry_id: str, **kwargs: Any) -> None:
+                lifecycle.append(("terminal", (entry_id, kwargs)))
+
+            def complete(self, entry_id: str, **kwargs: Any) -> None:
+                lifecycle.append(("complete", (entry_id, kwargs)))
+
+        async def send(channel: Any, text: str) -> None:
+            lifecycle.append(("send", (channel, text)))
+
+        async def commit(
+            session_key: str,
+            turn_id: str,
+            *,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            lifecycle.append(("commit", (session_key, turn_id)))
+            before_commit(8)
+            return durable_continuity_status(8)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda session_key, *, turn_id=None: (
+                        lifecycle.append(("start", (session_key, turn_id)))
+                        or turn_id
+                    )
+                ),
+                "append_history": (
+                    lambda *args, **kwargs: lifecycle.append(
+                        ("history", (args, kwargs))
+                    )
+                ),
+                "mark_session_active": (
+                    lambda *args, **kwargs: lifecycle.append(
+                        ("active", (args, kwargs))
+                    )
+                ),
+                "commit_session_continuity": commit,
+                "schedule_memory_update": (
+                    lambda *args, **kwargs: lifecycle.append(
+                        ("memory", (args, kwargs))
+                    )
+                ),
+                "mark_self_state_assistant_output": (
+                    lambda **kwargs: lifecycle.append(
+                        ("self_state", kwargs)
+                    )
+                ),
+            }
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-followup-1",
+            authorization_grant_id="grant-1",
+        )
+
+        result = await self.default_executor().execute_step(
+            {"action": "send_followup", "text": "journaled"},
+            context=context,
+        )
+
+        self.assertTrue(result["continuityDurable"])
+        claim = next(payload for name, payload in lifecycle if name == "claim")
+        self.assertEqual(
+            claim["source_delivery_id"],
+            "autonomy:followup:run-followup-1",
+        )
+        names = [name for name, _payload in lifecycle]
+        self.assertLess(names.index("claim"), names.index("bind"))
+        self.assertLess(names.index("bind"), names.index("inflight"))
+        self.assertLess(names.index("inflight"), names.index("send"))
+        self.assertLess(names.index("send"), names.index("succeeded"))
+        self.assertLess(names.index("succeeded"), names.index("start"))
+        self.assertLess(names.index("active"), names.index("terminal"))
+        self.assertLess(names.index("terminal"), names.index("complete"))
+        self.assertLess(names.index("complete"), names.index("memory"))
+
+    async def test_continuity_pending_advances_cursor_without_resend_or_memory(
+        self,
+    ) -> None:
+        sends = 0
+        phase = "missing"
+        source_ids: list[str] = []
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 2
+
+            def claim_discord_autonomy(self, **kwargs: Any) -> dict[str, Any]:
+                nonlocal phase
+                source_ids.append(kwargs["source_delivery_id"])
+                if phase == "missing":
+                    phase = "accepted"
+                    should_process = True
+                else:
+                    should_process = False
+                return {
+                    "entryId": "entry-pending",
+                    "turnId": "turn-pending",
+                    "guildEpoch": 2,
+                    "phase": phase,
+                    "shouldProcess": should_process,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                nonlocal phase
+                phase = "response_ready"
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                nonlocal phase
+                phase = "delivery_inflight"
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                nonlocal phase
+                phase = "delivery_succeeded"
+
+        async def send(_channel: Any, _text: str) -> None:
+            nonlocal sends
+            sends += 1
+
+        async def partial_commit(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"state": "ready"}
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": partial_commit,
+                "authorize_action": (
+                    lambda _guild_id, _action, **_kwargs: {
+                        "allowed": True,
+                        "code": "authorized",
+                        "grantId": "grant-1",
+                    }
+                ),
+                "record_action_outcome": (
+                    lambda *_args, **_kwargs: {
+                        "recorded": True,
+                        "authorizationCurrent": True,
+                        "verified": True,
+                    }
+                ),
+            }
+        )
+        engine = self.create_engine()
+        engine.state.allowed_actions = ["assistant:send_followup"]
+        plan = AutonomyPlan(
+            goal_kind="followup",
+            summary="deliver once",
+            steps=[
+                {
+                    "domain": "assistant",
+                    "action": "send_followup",
+                    "text": "pending answer",
+                }
+            ],
+        )
+
+        with patch(
+            "evelyn_core.autonomy.secrets.token_hex",
+            return_value="run-pending-1",
+        ):
+            result = await engine.execute_next_step(plan)
+            done = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["reason"],
+            "sent_but_continuity_pending",
+        )
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["continuityDurable"])
+        self.assertEqual(result["evidence_code"], "discord_send_completed")
+        self.assertEqual(plan.cursor, 1)
+        self.assertEqual(done["reason"], "plan_complete")
+        self.assertEqual(sends, 1)
+        self.assertEqual(
+            source_ids,
+            ["autonomy:followup:run-pending-1"],
+        )
+        self.assertFalse(
+            any(
+                kind in {"memory", "self_state"}
+                for kind, _payload in self.events
+            )
+        )
+
+    async def test_definitive_discord_rejection_discards_claim_for_safe_retry(
+        self,
+    ) -> None:
+        owner = self.real_ingress_owner()
+        attempts = 0
+
+        class DiscordRejected(RuntimeError):
+            status = 400
+
+        async def send(_channel: Any, _text: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise DiscordRejected("rejected before acceptance")
+
+        async def commit(
+            _session_key: str,
+            _turn_id: str,
+            *,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            before_commit(1)
+            return durable_continuity_status(1)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+            }
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-definitive-1",
+            authorization_grant_id="grant-1",
+        )
+        executor = self.default_executor()
+
+        with self.assertRaisesRegex(
+            DiscordRejected,
+            "rejected before acceptance",
+        ):
+            await executor.send_followup_fn(
+                "retry-safe",
+                context=context,
+            )
+
+        self.assertEqual(owner.public_status()["entryCount"], 0)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.last_ping, {})
+
+        result = await executor.send_followup_fn(
+            "retry-safe",
+            context=context,
+        )
+        duplicate = await executor.send_followup_fn(
+            "retry-safe",
+            context=context,
+        )
+
+        self.assertTrue(result["continuityDurable"])
+        self.assertTrue(duplicate["continuityDurable"])
+        self.assertEqual(attempts, 2)
+        self.assertEqual(owner.public_status()["phases"]["completed"], 1)
+        self.assertEqual(
+            [kind for kind, _payload in self.events].count("history"),
+            1,
+        )
+        self.assertEqual(
+            [kind for kind, _payload in self.events].count("memory"),
+            1,
+        )
+
+    async def test_ambiguous_discord_failure_blocks_successor_without_projection(
+        self,
+    ) -> None:
+        owner = self.real_ingress_owner()
+        attempts = 0
+
+        async def timeout_send(_channel: Any, _text: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("acceptance unknown")
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "send_discord_text": timeout_send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+            }
+        )
+        executor = self.default_executor()
+        first = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-ambiguous-1",
+            authorization_grant_id="grant-1",
+        )
+        successor = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-successor-1",
+            authorization_grant_id="grant-1",
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "acceptance unknown"):
+            await executor.send_followup_fn(
+                "unknown delivery",
+                context=first,
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "conversation_ingress_reconciliation_required",
+        ):
+            await executor.send_followup_fn(
+                "must block",
+                context=successor,
+            )
+
+        status = owner.public_status()
+        self.assertEqual(attempts, 1)
+        self.assertEqual(status["phases"]["delivery_ambiguous"], 1)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.last_ping, {})
+
+    async def test_followup_final_jit_blocks_revoked_expired_replaced_or_error(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "revoked",
+                {
+                    "allowed": False,
+                    "code": "authorization_required",
+                },
+                "authorization_required",
+            ),
+            (
+                "expired",
+                {
+                    "allowed": False,
+                    "code": "authorization_required",
+                },
+                "authorization_required",
+            ),
+            (
+                "replaced",
+                {
+                    "allowed": True,
+                    "code": "authorized",
+                    "grantId": "grant-replacement",
+                },
+                "authorization_changed_during_action",
+            ),
+            (
+                "inspection_error",
+                None,
+                "authorization_audit_unavailable",
+            ),
+        )
+        for case, final_decision, expected_reason in cases:
+            with self.subTest(case=case):
+                self.events.clear()
+                self.engines.clear()
+                self.reply_slot_locks.clear()
+                self.reply_slot_admission_locks.clear()
+                self.last_ping.clear()
+                owner = self.real_ingress_owner()
+                authorization_calls: list[
+                    tuple[int, str, str]
+                ] = []
+                outcomes: list[
+                    tuple[int, str, dict[str, Any]]
+                ] = []
+                run_id = f"run-jit-{case}"
+
+                def authorize(
+                    guild_id: int,
+                    action: str,
+                    *,
+                    action_run_id: str = "",
+                ) -> dict[str, Any]:
+                    authorization_calls.append(
+                        (guild_id, action, action_run_id)
+                    )
+                    if len(authorization_calls) <= 2:
+                        return {
+                            "allowed": True,
+                            "code": "authorized",
+                            "grantId": "grant-original",
+                            "actionRunId": action_run_id,
+                        }
+                    if final_decision is None:
+                        raise OSError("authorization store unavailable")
+                    return {
+                        **final_decision,
+                        "actionRunId": action_run_id,
+                    }
+
+                def record_outcome(
+                    guild_id: int,
+                    action: str,
+                    result: dict[str, Any],
+                ) -> dict[str, bool]:
+                    outcomes.append(
+                        (guild_id, action, dict(result))
+                    )
+                    return {
+                        "recorded": True,
+                        "verified": False,
+                        "authorizationCurrent": False,
+                    }
+
+                self.deps = AutonomyRuntimeFactoryDeps(
+                    **{
+                        **self.deps.__dict__,
+                        "conversation_ingress": owner,
+                        "authorize_action": authorize,
+                        "record_action_outcome": record_outcome,
+                    }
+                )
+                engine = self.create_engine()
+                engine.state.enabled = True
+                engine.state.status = "running"
+                engine.state.allowed_actions = [
+                    "assistant:send_followup"
+                ]
+                plan = AutonomyPlan(
+                    goal_kind="followup",
+                    summary="must remain authorized",
+                    steps=[
+                        {
+                            "domain": "assistant",
+                            "action": "send_followup",
+                            "text": "must not send",
+                        }
+                    ],
+                )
+
+                with patch(
+                    "evelyn_core.autonomy.secrets.token_hex",
+                    return_value=run_id,
+                ):
+                    result = await engine.execute_next_step(plan)
+
+                self.assertEqual(result["status"], "unverified")
+                self.assertEqual(result["reason"], expected_reason)
+                self.assertEqual(plan.cursor, 0)
+                self.assertFalse(engine.state.enabled)
+                self.assertEqual(
+                    authorization_calls,
+                    [
+                        (
+                            11,
+                            "assistant:send_followup",
+                            run_id,
+                        )
+                    ]
+                    * 3,
+                )
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(
+                    outcomes[0][2]["_authorization_grant_id"],
+                    "grant-original",
+                )
+                self.assertEqual(
+                    outcomes[0][2]["_action_run_id"],
+                    run_id,
+                )
+                self.assertEqual(owner.public_status()["entryCount"], 0)
+                self.assertFalse(
+                    self.reply_slot_locks[
+                        "guild:11:reply:text:10"
+                    ].locked()
+                )
+                self.assertFalse(
+                    any(
+                        kind
+                        in {
+                            "send",
+                            "history",
+                            "session",
+                            "commit",
+                            "memory",
+                        }
+                        for kind, _payload in self.events
+                    )
+                )
+                self.assertEqual(self.last_ping, {})
+
+    async def test_ping_marks_question_then_rechecks_before_physical_send(
+        self,
+    ) -> None:
+        owner = self.real_ingress_owner()
+        lifecycle: list[str] = []
+        for method_name in (
+            "claim_discord_autonomy",
+            "bind_response",
+            "mark_delivery_inflight",
+            "mark_delivery_ambiguous",
+            "discard_ambiguous",
+        ):
+            original = getattr(owner, method_name)
+
+            def traced(
+                *args: Any,
+                _method_name: str = method_name,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                lifecycle.append(_method_name)
+                return _original(*args, **kwargs)
+
+            setattr(owner, method_name, traced)
+
+        authorization_calls: list[tuple[int, str, str]] = []
+        outcomes: list[tuple[int, str, dict[str, Any]]] = []
+        run_id = "run-ping-final-jit"
+
+        def authorize(
+            guild_id: int,
+            action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            authorization_calls.append(
+                (guild_id, action, action_run_id)
+            )
+            lifecycle.append(
+                f"authorize:{len(authorization_calls)}"
+            )
+            if len(authorization_calls) <= 2:
+                return {
+                    "allowed": True,
+                    "code": "authorized",
+                    "grantId": "grant-original",
+                    "actionRunId": action_run_id,
+                }
+            return {
+                "allowed": False,
+                "code": "authorization_required",
+                "actionRunId": action_run_id,
+            }
+
+        def select_question(**_kwargs: Any) -> dict[str, str]:
+            lifecycle.append("question_marked")
+            return {"ask_text": "must not send"}
+
+        def record_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            lifecycle.append("outcome")
+            outcomes.append((guild_id, action, dict(result)))
+            return {
+                "recorded": True,
+                "verified": False,
+                "authorizationCurrent": False,
+            }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+                "select_and_mark_proactive_question": select_question,
+            }
+        )
+        engine = self.create_engine()
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = [
+            "assistant:maybe_ping_user"
+        ]
+        plan = AutonomyPlan(
+            goal_kind="ping",
+            summary="ask only while authorized",
+            steps=[
+                {
+                    "domain": "assistant",
+                    "action": "maybe_ping_user",
+                    "text": "ignored",
+                }
+            ],
+        )
+
+        with patch(
+            "evelyn_core.autonomy.secrets.token_hex",
+            return_value=run_id,
+        ):
+            result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "authorization_required")
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(
+            authorization_calls,
+            [
+                (11, "assistant:maybe_ping_user", run_id),
+            ]
+            * 3,
+        )
+        self.assertEqual(
+            lifecycle,
+            [
+                "authorize:1",
+                "authorize:2",
+                "question_marked",
+                "claim_discord_autonomy",
+                "bind_response",
+                "mark_delivery_inflight",
+                "authorize:3",
+                "mark_delivery_ambiguous",
+                "discard_ambiguous",
+                "outcome",
+            ],
+        )
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(
+            outcomes[0][2]["_authorization_grant_id"],
+            "grant-original",
+        )
+        self.assertEqual(
+            outcomes[0][2]["_action_run_id"],
+            run_id,
+        )
+        self.assertEqual(owner.public_status()["entryCount"], 0)
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertFalse(
+            any(kind == "send" for kind, _payload in self.events)
+        )
+        self.assertEqual(self.last_ping, {})
+
+    async def test_ping_and_notify_use_action_run_delivery_ids(self) -> None:
+        source_ids: list[str] = []
+        next_entry = 0
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 1
+
+            def claim_discord_autonomy(self, **kwargs: Any) -> dict[str, Any]:
+                nonlocal next_entry
+                next_entry += 1
+                source_ids.append(kwargs["source_delivery_id"])
+                return {
+                    "entryId": f"entry-{next_entry}",
+                    "turnId": f"turn-{next_entry}",
+                    "guildEpoch": 1,
+                    "shouldProcess": True,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def begin_terminal_commit(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def complete(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+        async def commit(
+            _session_key: str,
+            _turn_id: str,
+            *,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            before_commit(next_entry)
+            return durable_continuity_status(next_entry)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+                "select_and_mark_proactive_question": (
+                    lambda **_kwargs: {"ask_text": "질문"}
+                ),
+            }
+        )
+        engine = self.create_engine()
+        ping_context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:maybe_ping_user",
+            action_run_id="run-ping-1",
+            authorization_grant_id="grant-1",
+        )
+
+        ping = await engine.executor.default_executor.execute_step(
+            {"action": "maybe_ping_user", "text": "ignored"},
+            context=ping_context,
+        )
+        await engine.notify(
+            "notify",
+            action_run_id="run-notify-1",
+        )
+
+        self.assertTrue(ping["continuityDurable"])
+        self.assertEqual(
+            source_ids,
+            [
+                "autonomy:ping:run-ping-1",
+                "autonomy:notify:run-notify-1",
+            ],
+        )
+        outcomes = [
+            payload
+            for kind, payload in self.events
+            if kind == "outcome"
+        ]
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0][:2], (11, "assistant:send_followup"))
+        self.assertEqual(
+            outcomes[0][2]["_action_run_id"],
+            "run-notify-1",
+        )
+        self.assertEqual(
+            outcomes[0][2]["_authorization_grant_id"],
+            "grant-1",
+        )
+
+    async def test_successor_waits_for_prior_exact_receipt_then_commits_once(
+        self,
+    ) -> None:
+        commit_entered = asyncio.Event()
+        release_first_commit = asyncio.Event()
+        source_ids: list[str] = []
+        turn_ids: list[str] = []
+        sends: list[str] = []
+        completed: list[tuple[str, int]] = []
+        commit_count = 0
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 1
+
+            def claim_discord_autonomy(self, **kwargs: Any) -> dict[str, Any]:
+                source_ids.append(kwargs["source_delivery_id"])
+                ordinal = len(source_ids)
+                return {
+                    "entryId": f"entry-{ordinal}",
+                    "turnId": f"turn-{ordinal}",
+                    "guildEpoch": 1,
+                    "shouldProcess": True,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def begin_terminal_commit(
+                self,
+                entry_id: str,
+                **kwargs: Any,
+            ) -> None:
+                completed.append(
+                    (entry_id, kwargs["continuity_generation"])
+                )
+
+            def complete(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+        async def send(_channel: Any, text: str) -> None:
+            sends.append(text)
+
+        async def commit(
+            _session_key: str,
+            _turn_id: str,
+            *,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            nonlocal commit_count
+            commit_count += 1
+            generation = commit_count
+            if generation == 1:
+                commit_entered.set()
+                await release_first_commit.wait()
+            before_commit(generation)
+            return durable_continuity_status(generation)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: (
+                        turn_ids.append(turn_id) or turn_id
+                    )
+                ),
+                "commit_session_continuity": commit,
+            }
+        )
+        executor = self.default_executor()
+
+        def context(run_id: str) -> AutonomyExecutionContext:
+            return AutonomyExecutionContext(
+                guild_id=11,
+                action_key="assistant:send_followup",
+                action_run_id=run_id,
+                authorization_grant_id="grant-1",
+            )
+
+        first_task = asyncio.create_task(
+            executor.send_followup_fn(
+                "first",
+                context=context("run-first"),
+            )
+        )
+        await asyncio.wait_for(commit_entered.wait(), timeout=1.0)
+
+        racing = await executor.send_followup_fn(
+            "racing",
+            context=context("run-racing"),
+        )
+        release_first_commit.set()
+        first = await asyncio.wait_for(first_task, timeout=1.0)
+        successor = await executor.send_followup_fn(
+            "successor",
+            context=context("run-successor"),
+        )
+
+        self.assertEqual(racing["status"], "blocked")
+        self.assertEqual(racing["reason"], "followup_reply_slot_busy")
+        self.assertEqual(first["continuityGeneration"], 1)
+        self.assertEqual(successor["continuityGeneration"], 2)
+        self.assertEqual(sends, ["first", "successor"])
+        self.assertEqual(
+            source_ids,
+            [
+                "autonomy:followup:run-first",
+                "autonomy:followup:run-successor",
+            ],
+        )
+        self.assertEqual(turn_ids, ["turn-1", "turn-2"])
+        self.assertEqual(completed, [("entry-1", 1), ("entry-2", 2)])
+        history = [
+            payload
+            for kind, payload in self.events
+            if kind == "history"
+        ]
+        self.assertEqual(len(history), 2)
+        self.assertEqual(
+            [(row[0][1], row[0][2]) for row in history],
+            [("[autonomy]", "first"), ("[autonomy]", "successor")],
+        )
+
+    async def test_terminal_complete_failure_returns_pending_without_resend(
+        self,
+    ) -> None:
+        phase = "missing"
+        sends = 0
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 1
+
+            def claim_discord_autonomy(self, **_kwargs: Any) -> dict[str, Any]:
+                nonlocal phase
+                should_process = phase == "missing"
+                if should_process:
+                    phase = "accepted"
+                return {
+                    "entryId": "entry-terminal",
+                    "turnId": "turn-terminal",
+                    "guildEpoch": 1,
+                    "phase": phase,
+                    "shouldProcess": should_process,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                nonlocal phase
+                phase = "response_ready"
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                nonlocal phase
+                phase = "delivery_inflight"
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                nonlocal phase
+                phase = "delivery_succeeded"
+
+            def begin_terminal_commit(self, *_args: Any, **_kwargs: Any) -> None:
+                nonlocal phase
+                phase = "terminal_committing"
+
+            def complete(self, *_args: Any, **_kwargs: Any) -> None:
+                raise RuntimeError("complete receipt failed")
+
+        async def send(_channel: Any, _text: str) -> None:
+            nonlocal sends
+            sends += 1
+
+        async def commit(
+            _session_key: str,
+            _turn_id: str,
+            *,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            before_commit(4)
+            return durable_continuity_status(4)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+            }
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-terminal",
+            authorization_grant_id="grant-1",
+        )
+        executor = self.default_executor()
+
+        first = await executor.send_followup_fn(
+            "delivered",
+            context=context,
+        )
+        duplicate = await executor.send_followup_fn(
+            "delivered",
+            context=context,
+        )
+
+        for result in (first, duplicate):
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(
+                result["reason"],
+                "sent_but_continuity_pending",
+            )
+            self.assertTrue(result["verified"])
+            self.assertFalse(result["continuityDurable"])
+        self.assertEqual(phase, "terminal_committing")
+        self.assertEqual(sends, 1)
+        self.assertEqual(
+            [kind for kind, _payload in self.events].count("history"),
+            1,
+        )
+        self.assertFalse(
+            any(
+                kind in {"memory", "self_state"}
+                for kind, _payload in self.events
+            )
+        )
+
+    async def test_physical_success_with_receipt_failure_is_pending_not_failed(
+        self,
+    ) -> None:
+        sends = 0
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 1
+
+            def claim_discord_autonomy(self, **_kwargs: Any) -> dict[str, Any]:
+                return {
+                    "entryId": "entry-receipt",
+                    "turnId": "turn-receipt",
+                    "guildEpoch": 1,
+                    "shouldProcess": True,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                raise OSError("receipt unavailable")
+
+        async def send(_channel: Any, _text: str) -> None:
+            nonlocal sends
+            sends += 1
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+            }
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-receipt-fail",
+            authorization_grant_id="grant-1",
+        )
+
+        result = await self.default_executor().send_followup_fn(
+            "physically delivered",
+            context=context,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["reason"],
+            "sent_but_continuity_pending",
+        )
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["continuityDurable"])
+        self.assertEqual(sends, 1)
+        self.assertFalse(
+            any(
+                kind in {"history", "session", "commit", "memory", "self_state"}
+                for kind, _payload in self.events
+            )
         )
 
     async def test_followup_stays_bound_to_observed_recipient_and_checkpoint(
@@ -959,6 +2412,403 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(observer_private, combined)
         self.assertNotIn(log_private, combined)
 
+    async def test_post_effect_integrity_is_audited_and_persisted_before_raise(
+        self,
+    ) -> None:
+        private = "PRIVATE_POST_EFFECT_INTEGRITY"
+        owner = self.real_ingress_owner()
+        self.history = [
+            {"role": "user", "content": "SEARCH_PENDING?"},
+        ]
+        authorization_calls: list[tuple[int, str, str]] = []
+        outcomes: list[tuple[int, str, dict[str, Any]]] = []
+        persisted: list[dict[str, Any]] = []
+
+        def authorize(
+            guild_id: int,
+            action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            authorization_calls.append(
+                (guild_id, action, action_run_id)
+            )
+            return {
+                "allowed": True,
+                "code": "authorized",
+                "grantId": "grant-original",
+                "actionRunId": action_run_id,
+            }
+
+        def record_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            self.events.append(("outcome", None))
+            outcomes.append((guild_id, action, dict(result)))
+            return {
+                "recorded": True,
+                "verified": True,
+                "authorizationCurrent": True,
+            }
+
+        async def commit(
+            *args: Any,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            self.events.append(("commit", args))
+            before_commit(17)
+            return durable_continuity_status(17)
+
+        def fail_memory_update(
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            self.events.append(("memory", (args, kwargs)))
+            raise MemoryDeletionJournalIntegrityError(private)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+                "schedule_memory_update": fail_memory_update,
+                "answer_promises_search": (
+                    lambda text: text == "SEARCH_PENDING?"
+                ),
+                "get_active_session_count": lambda: 0,
+                "get_inflight_llm_requests": lambda: 0,
+                "monotonic": time.monotonic,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+            }
+        )
+        engine = self.create_engine()
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = [
+            "assistant:send_followup",
+            "assistant:idle",
+        ]
+
+        def persist() -> None:
+            persisted.append(
+                {
+                    "enabled": engine.state.enabled,
+                    "status": engine.state.status,
+                    "lastStepResult": dict(
+                        engine.state.last_step_result
+                    ),
+                    "planCursor": (
+                        engine.state.current_plan.cursor
+                        if engine.state.current_plan is not None
+                        else None
+                    ),
+                    "lastPing": self.last_ping.get(11),
+                }
+            )
+
+        engine.persist_state = persist
+        run_id = "run-post-effect-integrity"
+
+        with (
+            patch(
+                "evelyn_core.autonomy.secrets.token_hex",
+                return_value=run_id,
+            ),
+            self.assertRaises(MemoryDeletionJournalIntegrityError),
+        ):
+            await engine.run_cycle()
+
+        self.assertEqual(
+            [kind for kind, _payload in self.events],
+            [
+                "send",
+                "history",
+                "session",
+                "commit",
+                "memory",
+                "outcome",
+            ],
+        )
+        self.assertEqual(
+            authorization_calls,
+            [(11, "assistant:send_followup", run_id)] * 4,
+        )
+        self.assertEqual(len(outcomes), 1)
+        audit_result = outcomes[0][2]
+        self.assertEqual(
+            audit_result["_authorization_grant_id"],
+            "grant-original",
+        )
+        self.assertEqual(audit_result["_action_run_id"], run_id)
+        self.assertTrue(
+            audit_result["_post_effect_integrity_failure"]
+        )
+        self.assertEqual(len(persisted), 1)
+        self.assertTrue(persisted[0]["enabled"])
+        self.assertEqual(persisted[0]["status"], "running")
+        self.assertEqual(
+            persisted[0]["lastStepResult"]["reason"],
+            "sent_followup",
+        )
+        self.assertEqual(persisted[0]["planCursor"], 1)
+        self.assertNotIn(
+            "_post_effect_integrity_failure",
+            persisted[0]["lastStepResult"],
+        )
+        self.assertIsNotNone(persisted[0]["lastPing"])
+        ingress_status = owner.public_status()
+        self.assertEqual(ingress_status["entryCount"], 1)
+        self.assertEqual(ingress_status["phases"]["completed"], 1)
+        self.assertEqual(
+            sum(
+                count
+                for phase, count in ingress_status["phases"].items()
+                if phase != "completed"
+            ),
+            0,
+        )
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertNotIn(private, str(outcomes))
+        self.assertNotIn(private, str(persisted))
+
+    async def test_post_effect_integrity_flag_survives_authorization_change(
+        self,
+    ) -> None:
+        calls = 0
+        outcomes: list[dict[str, Any]] = []
+
+        def authorize(
+            _guild_id: int,
+            _action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            return {
+                "allowed": True,
+                "code": "authorized",
+                "grantId": (
+                    "grant-original"
+                    if calls == 1
+                    else "grant-replacement"
+                ),
+                "actionRunId": action_run_id,
+            }
+
+        def record_outcome(
+            _guild_id: int,
+            _action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            outcomes.append(dict(result))
+            return {
+                "recorded": True,
+                "verified": False,
+                "authorizationCurrent": False,
+            }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+            }
+        )
+        engine = self.create_engine()
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = [
+            "assistant:send_followup"
+        ]
+
+        async def delivered_with_integrity_signal(
+            _step: dict[str, Any],
+            *,
+            context: AutonomyExecutionContext,
+        ) -> dict[str, Any]:
+            self.assertEqual(
+                context.authorization_grant_id,
+                "grant-original",
+            )
+            return {
+                "status": "ok",
+                "reason": "sent_followup",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+                "_post_effect_integrity_failure": True,
+            }
+
+        engine._execute_step_with_context = (
+            delivered_with_integrity_signal
+        )
+        plan = AutonomyPlan(
+            goal_kind="followup",
+            summary="delivered once",
+            steps=[
+                {
+                    "domain": "assistant",
+                    "action": "send_followup",
+                    "text": "fixed",
+                }
+            ],
+        )
+
+        with patch(
+            "evelyn_core.autonomy.secrets.token_hex",
+            return_value="run-integrity-auth-change",
+        ):
+            result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(
+            result["reason"],
+            "authorization_changed_during_action",
+        )
+        self.assertTrue(result["_post_effect_integrity_failure"])
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(len(outcomes), 1)
+        self.assertTrue(
+            outcomes[0]["_post_effect_integrity_failure"]
+        )
+        self.assertEqual(
+            outcomes[0]["_authorization_grant_id"],
+            "grant-original",
+        )
+        self.assertEqual(
+            outcomes[0]["_action_run_id"],
+            "run-integrity-auth-change",
+        )
+
+    async def test_notify_audits_post_effect_integrity_before_raise(
+        self,
+    ) -> None:
+        private = "PRIVATE_NOTIFY_POST_EFFECT_INTEGRITY"
+        owner = self.real_ingress_owner()
+        authorization_calls: list[tuple[int, str, str]] = []
+        outcomes: list[tuple[int, str, dict[str, Any]]] = []
+
+        def authorize(
+            guild_id: int,
+            action: str,
+            *,
+            action_run_id: str = "",
+        ) -> dict[str, Any]:
+            authorization_calls.append(
+                (guild_id, action, action_run_id)
+            )
+            return {
+                "allowed": True,
+                "code": "authorized",
+                "grantId": "grant-notify",
+                "actionRunId": action_run_id,
+            }
+
+        def record_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            self.events.append(("outcome", None))
+            outcomes.append((guild_id, action, dict(result)))
+            return {
+                "recorded": True,
+                "verified": True,
+                "authorizationCurrent": True,
+            }
+
+        async def commit(
+            *args: Any,
+            before_commit=None,
+        ) -> dict[str, Any]:
+            self.events.append(("commit", args))
+            before_commit(23)
+            return durable_continuity_status(23)
+
+        def fail_memory_update(
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            self.events.append(("memory", (args, kwargs)))
+            raise MemoryDeletionJournalIntegrityError(private)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": owner,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+                "schedule_memory_update": fail_memory_update,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+            }
+        )
+        engine = self.create_engine()
+        run_id = "run-notify-post-effect-integrity"
+
+        with self.assertRaises(MemoryDeletionJournalIntegrityError):
+            await engine.notify(
+                "fixed safe notice",
+                action_run_id=run_id,
+            )
+
+        self.assertEqual(
+            [kind for kind, _payload in self.events],
+            [
+                "send",
+                "history",
+                "session",
+                "commit",
+                "memory",
+                "outcome",
+            ],
+        )
+        self.assertEqual(
+            authorization_calls,
+            [(11, "assistant:send_followup", run_id)] * 2,
+        )
+        self.assertEqual(len(outcomes), 1)
+        audit_result = outcomes[0][2]
+        self.assertEqual(
+            audit_result["_authorization_grant_id"],
+            "grant-notify",
+        )
+        self.assertEqual(audit_result["_action_run_id"], run_id)
+        self.assertTrue(
+            audit_result["_post_effect_integrity_failure"]
+        )
+        ingress_status = owner.public_status()
+        self.assertEqual(ingress_status["entryCount"], 1)
+        self.assertEqual(ingress_status["phases"]["completed"], 1)
+        self.assertEqual(
+            sum(
+                count
+                for phase, count in ingress_status["phases"].items()
+                if phase != "completed"
+            ),
+            0,
+        )
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertIn(11, self.last_ping)
+        self.assertNotIn(private, str(outcomes))
+
     async def test_busy_followup_slot_does_not_exhaust_retry_budget(
         self,
     ) -> None:
@@ -1105,6 +2955,119 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             for kind, _payload in self.events
         ))
 
+    async def test_cycle_error_notify_send_failure_preserves_original_error_without_recursion(
+        self,
+    ) -> None:
+        send_calls = 0
+        observed: list[tuple[str, str]] = []
+
+        async def fail_send(_channel: Any, _text: str) -> None:
+            nonlocal send_calls
+            send_calls += 1
+            raise OSError("PRIVATE_NOTIFY_SEND_FAILURE")
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "send_discord_text": fail_send,
+                "record_runtime_error": (
+                    lambda code, exc: observed.append(
+                        (code, type(exc).__name__)
+                    )
+                ),
+            }
+        )
+        engine = self.create_engine()
+        engine.state.enabled = True
+
+        async def fail_cycle() -> None:
+            engine.state.enabled = False
+            raise RuntimeError("PRIVATE_ORIGINAL_CYCLE_FAILURE")
+
+        engine.run_cycle = fail_cycle
+        with (
+            patch.object(engine, "persist_state"),
+            patch(
+                "evelyn_core.autonomy.asyncio.sleep",
+                return_value=None,
+            ),
+        ):
+            await engine._run_loop()
+
+        self.assertEqual(engine.state.last_error, "autonomy_cycle_failed")
+        self.assertEqual(send_calls, 1)
+        self.assertEqual(
+            observed,
+            [("autonomy_followup_send_failed", "OSError")],
+        )
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+        self.assertFalse(
+            any(
+                kind in {"history", "session", "commit", "memory"}
+                for kind, _payload in self.events
+            )
+        )
+
+    async def test_cycle_error_notify_commit_failure_sends_once_without_recursion(
+        self,
+    ) -> None:
+        observed: list[tuple[str, str]] = []
+
+        async def fail_commit(*args: Any) -> dict[str, Any]:
+            self.events.append(("commit", args))
+            raise OSError("PRIVATE_NOTIFY_COMMIT_FAILURE")
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "commit_session_continuity": fail_commit,
+                "record_runtime_error": (
+                    lambda code, exc: observed.append(
+                        (code, type(exc).__name__)
+                    )
+                ),
+            }
+        )
+        engine = self.create_engine()
+        engine.state.enabled = True
+
+        async def fail_cycle() -> None:
+            engine.state.enabled = False
+            raise RuntimeError("PRIVATE_ORIGINAL_CYCLE_FAILURE")
+
+        engine.run_cycle = fail_cycle
+        with (
+            patch.object(engine, "persist_state"),
+            patch(
+                "evelyn_core.autonomy.asyncio.sleep",
+                return_value=None,
+            ),
+        ):
+            await engine._run_loop()
+
+        self.assertEqual(engine.state.last_error, "autonomy_cycle_failed")
+        self.assertEqual(
+            len([kind for kind, _payload in self.events if kind == "send"]),
+            1,
+        )
+        self.assertEqual(
+            len([kind for kind, _payload in self.events if kind == "commit"]),
+            1,
+        )
+        self.assertEqual(
+            observed,
+            [("autonomy_followup_finalize_failed", "OSError")],
+        )
+        self.assertFalse(
+            self.reply_slot_locks[
+                "guild:11:reply:text:10"
+            ].locked()
+        )
+
     async def test_pre_send_failure_releases_followup_slot(self) -> None:
         private = "PRIVATE_AUTONOMY_PREPARE_PATH"
         self.deps = AutonomyRuntimeFactoryDeps(
@@ -1178,6 +3141,217 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             "guild:11:reply:text:10"
         ].locked())
         self.assertEqual(self.events, [])
+
+    async def test_repeated_cancellation_drains_physical_send_with_claim_locked(
+        self,
+    ) -> None:
+        send_entered = asyncio.Event()
+        release_send = asyncio.Event()
+        events: list[str] = []
+
+        class Ingress:
+            def guild_epoch(self, _guild_id: int) -> int:
+                return 1
+
+            def claim_discord_autonomy(self, **_kwargs: Any) -> dict[str, Any]:
+                events.append("claim")
+                return {
+                    "entryId": "entry-cancel",
+                    "turnId": "turn-cancel",
+                    "guildEpoch": 1,
+                    "shouldProcess": True,
+                }
+
+            def bind_response(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                events.append("bind")
+                return {"assistantHash": "a" * 64}
+
+            def mark_delivery_inflight(self, *_args: Any, **_kwargs: Any) -> None:
+                events.append("inflight")
+
+            def mark_delivery_succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                events.append("succeeded")
+
+            def begin_terminal_commit(self, *_args: Any, **_kwargs: Any) -> None:
+                events.append("terminal")
+
+            def complete(self, *_args: Any, **_kwargs: Any) -> None:
+                events.append("complete")
+
+        async def delayed_send(_channel: Any, _text: str) -> None:
+            events.append("send_entered")
+            send_entered.set()
+            await release_send.wait()
+            events.append("send_returned")
+
+        async def commit(*_args: Any, before_commit=None) -> dict[str, Any]:
+            before_commit(3)
+            return durable_continuity_status(3)
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "conversation_ingress": Ingress(),
+                "send_discord_text": delayed_send,
+                "start_new_turn": (
+                    lambda _session_key, *, turn_id=None: turn_id
+                ),
+                "commit_session_continuity": commit,
+            }
+        )
+        context = AutonomyExecutionContext(
+            guild_id=11,
+            action_key="assistant:send_followup",
+            action_run_id="run-cancel-1",
+            authorization_grant_id="grant-1",
+        )
+        task = asyncio.create_task(
+            self.default_executor().send_followup_fn(
+                "drain me",
+                context=context,
+            )
+        )
+        await asyncio.wait_for(send_entered.wait(), timeout=1.0)
+        reply_lock = self.reply_slot_locks[
+            "guild:11:reply:text:10"
+        ]
+
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.assertTrue(reply_lock.locked())
+        self.assertNotIn("succeeded", events)
+
+        release_send.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+
+        self.assertTrue(result["_post_effect_cancellation"])
+        self.assertFalse(reply_lock.locked())
+        self.assertEqual(events.count("send_entered"), 1)
+        self.assertLess(events.index("send_returned"), events.index("succeeded"))
+        self.assertLess(events.index("succeeded"), events.index("complete"))
+
+    async def test_post_send_cancellation_drains_continuity_audits_once_and_prevents_retry(
+        self,
+    ) -> None:
+        self.history = [
+            {"role": "user", "content": "SEARCH_PENDING?"},
+        ]
+        commit_entered = asyncio.Event()
+        release_commit = asyncio.Event()
+
+        async def commit(*args: Any) -> dict[str, Any]:
+            self.events.append(("commit", args))
+            commit_entered.set()
+            await release_commit.wait()
+            return durable_continuity_status(12)
+
+        def authorize(
+            _guild_id: int,
+            action: str,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            return {
+                "allowed": action
+                in {"assistant:send_followup", "assistant:idle"},
+                "code": "authorized",
+                "grantId": "grant-1",
+            }
+
+        def record_outcome(
+            guild_id: int,
+            action: str,
+            result: dict[str, Any],
+        ) -> dict[str, bool]:
+            self.events.append(
+                ("outcome", (guild_id, action, dict(result)))
+            )
+            return {
+                "recorded": True,
+                "authorizationCurrent": True,
+                "verified": True,
+            }
+
+        def append_history(
+            session_key: str,
+            user_text: str,
+            answer: str,
+            **kwargs: Any,
+        ) -> None:
+            self.events.append(
+                (
+                    "history",
+                    ((session_key, user_text, answer), kwargs),
+                )
+            )
+            self.history.extend(
+                (
+                    {"role": "user", "content": user_text},
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "memoryReceiptRef": kwargs.get(
+                            "memory_receipt"
+                        ),
+                    },
+                )
+            )
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "answer_promises_search": (
+                    lambda text: text == "SEARCH_PENDING?"
+                ),
+                "get_active_session_count": lambda: 0,
+                "get_inflight_llm_requests": lambda: 0,
+                "monotonic": time.monotonic,
+                "authorize_action": authorize,
+                "record_action_outcome": record_outcome,
+                "commit_session_continuity": commit,
+                "append_history": append_history,
+            }
+        )
+        engine = self.create_engine()
+        persisted: list[tuple[int, str]] = []
+        engine.persist_state = lambda: persisted.append(
+            (
+                (
+                    engine.state.current_plan.cursor
+                    if engine.state.current_plan is not None
+                    else -1
+                ),
+                str(engine.state.last_step_result.get("reason") or ""),
+            )
+        )
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.allowed_actions = [
+            "assistant:send_followup",
+            "assistant:idle",
+        ]
+
+        cycle = asyncio.create_task(engine.run_cycle())
+        await asyncio.wait_for(commit_entered.wait(), timeout=1.0)
+        cycle.cancel()
+        await asyncio.sleep(0)
+
+        try:
+            self.assertFalse(cycle.done())
+        finally:
+            release_commit.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await cycle
+
+        self.assertIsNotNone(engine.state.current_plan)
+        self.assertEqual(engine.state.current_plan.cursor, 1)
+        self.assertEqual(persisted[-1], (1, "sent_followup"))
+        self.assertEqual(
+            len([kind for kind, _payload in self.events if kind == "send"]),
+            1,
+        )
 
     async def test_invalid_proactive_marker_releases_slot(self) -> None:
         private = "PRIVATE_AUTONOMY_MARKER_PATH"
@@ -1448,6 +3622,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             for kind, payload in self.events
             if kind == "history"
         )
+        self.assertEqual(history_payload[0][1], "[autonomy]")
         receipt = history_payload[1]["memory_receipt"]
         self.assertEqual(receipt["state"], "bound")
         self.assertEqual(receipt["suppliedNoteIds"], [note_id])

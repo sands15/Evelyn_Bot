@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -18,11 +21,17 @@ from evelyn_core.stt_text_runtime import (  # noqa: E402
     build_stt_text_runtime_deps,
     build_partial_stt_window_from_runtime,
     choose_full_stt_candidate_from_runtime,
+    commit_deferred_partial_transcript_from_runtime,
     commit_stable_transcript_from_runtime,
     detect_wake_word_sync_from_runtime,
     get_partial_transcript_from_runtime,
     score_stt_candidate_from_runtime,
 )
+from evelyn_core.voice_ingress_runtime import (  # noqa: E402
+    advance_voice_ingress_epoch,
+    voice_ingress_epoch_is_current,
+)
+from evelyn_core.voice_stt_flow import run_partial_stt_flow  # noqa: E402
 
 
 def _clean_text(value: str) -> str:
@@ -97,6 +106,146 @@ class SttTextRuntimeTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(second, "partial text")
         self.assertEqual(committed_first, committed_second)
+
+    def test_blocked_partial_worker_cannot_repopulate_after_reset_epoch(self) -> None:
+        async def scenario() -> None:
+            epochs = {7: 0}
+            captured_epoch = 0
+            started = threading.Event()
+            release = threading.Event()
+            private_text = "private-pre-reset-transcript"
+
+            def transcribe(_audio: np.ndarray, **_kwargs: object) -> str:
+                started.set()
+                release.wait(timeout=1.0)
+                return private_text
+
+            def get_partial(session_key: str | None, audio: Any, **kwargs: Any) -> Any:
+                return get_partial_transcript_from_runtime(
+                    session_key,
+                    audio,
+                    max_new_tokens=64,
+                    transcribe_audio16k_sync=transcribe,
+                    deps=self.deps,
+                    **kwargs,
+                )
+
+            async def run_blocking(func: Any, **_kwargs: Any) -> Any:
+                return await asyncio.to_thread(func)
+
+            task = asyncio.create_task(
+                run_partial_stt_flow(
+                    np.ones(16_000, dtype=np.float32),
+                    sampling_rate=16_000,
+                    session_key="guild:7:voice:9:user:42",
+                    timeout_sec=1.0,
+                    build_partial_stt_window=lambda audio, **_kwargs: audio,
+                    get_partial_transcript=get_partial,
+                    read_committed_text=lambda key: self.session_committed_stt_text.get(
+                        key or "",
+                        "",
+                    ),
+                    run_blocking_stt_task=run_blocking,
+                    speculate_from_committed_stt=lambda *_args: {
+                        "private": private_text
+                    },
+                    room_state={},
+                    clean_text=_clean_text,
+                    write_is_current=lambda: voice_ingress_epoch_is_current(
+                        epochs,
+                        7,
+                        captured_epoch,
+                    ),
+                    commit_deferred_partial_transcript=(
+                        lambda session_key, candidate: (
+                            commit_deferred_partial_transcript_from_runtime(
+                                session_key,
+                                candidate,
+                                deps=self.deps,
+                            )
+                        )
+                    ),
+                )
+            )
+            await asyncio.to_thread(started.wait, 1.0)
+            advance_voice_ingress_epoch(epochs, 7)
+            self.session_partial_stt_text.clear()
+            self.session_committed_stt_text.clear()
+            self.partial_stt_cache.clear()
+            release.set()
+            result = await asyncio.wait_for(task, timeout=1.0)
+
+            self.assertEqual(result.skipped_reason, "stale_voice_ingress")
+            self.assertEqual(self.session_partial_stt_text, {})
+            self.assertEqual(self.session_committed_stt_text, {})
+            self.assertEqual(self.partial_stt_cache, {})
+            self.assertNotIn(private_text, repr(result))
+
+        asyncio.run(scenario())
+
+    def test_cancelled_partial_worker_never_writes_shared_stt_state(self) -> None:
+        async def scenario() -> None:
+            started = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+
+            def transcribe(_audio: np.ndarray, **_kwargs: object) -> str:
+                started.set()
+                release.wait(timeout=1.0)
+                finished.set()
+                return "private-cancelled-transcript"
+
+            def get_partial(session_key: str | None, audio: Any, **kwargs: Any) -> Any:
+                return get_partial_transcript_from_runtime(
+                    session_key,
+                    audio,
+                    max_new_tokens=64,
+                    transcribe_audio16k_sync=transcribe,
+                    deps=self.deps,
+                    **kwargs,
+                )
+
+            async def run_blocking(func: Any, **_kwargs: Any) -> Any:
+                return await asyncio.to_thread(func)
+
+            task = asyncio.create_task(
+                run_partial_stt_flow(
+                    np.ones(16_000, dtype=np.float32),
+                    sampling_rate=16_000,
+                    session_key="guild:7:voice:9:user:42",
+                    timeout_sec=1.0,
+                    build_partial_stt_window=lambda audio, **_kwargs: audio,
+                    get_partial_transcript=get_partial,
+                    read_committed_text=lambda _key: "",
+                    run_blocking_stt_task=run_blocking,
+                    speculate_from_committed_stt=lambda *_args: None,
+                    room_state={},
+                    clean_text=_clean_text,
+                    write_is_current=lambda: True,
+                    commit_deferred_partial_transcript=(
+                        lambda session_key, candidate: (
+                            commit_deferred_partial_transcript_from_runtime(
+                                session_key,
+                                candidate,
+                                deps=self.deps,
+                            )
+                        )
+                    ),
+                )
+            )
+            await asyncio.to_thread(started.wait, 1.0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            release.set()
+            await asyncio.to_thread(finished.wait, 1.0)
+            await asyncio.sleep(0)
+
+            self.assertEqual(self.session_partial_stt_text, {})
+            self.assertEqual(self.session_committed_stt_text, {})
+            self.assertEqual(self.partial_stt_cache, {})
+
+        asyncio.run(scenario())
 
     def test_commit_stable_transcript_without_session_key(self) -> None:
         result = commit_stable_transcript_from_runtime(

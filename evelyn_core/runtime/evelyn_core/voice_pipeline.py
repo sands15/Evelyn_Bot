@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from .context_pipeline import ToolUseDecision, normalize_specialist_name
 from evelyn_core.query_intents import should_force_search_query
 from evelyn_core.text import clean_text, clean_tts_text, strip_voice_wake_word
 
@@ -61,6 +62,8 @@ class RouteDecision:
     question_hint: str | None = None
     question_reason: str | None = None
     question_source: str = "none"
+    specialist: str = "none"
+    tool_requests: tuple[ToolUseDecision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,8 @@ def build_route_decision(
     question_hint: str | None = None,
     question_reason: str | None = None,
     question_source: str = "none",
+    specialist: str = "none",
+    tool_requests: tuple[ToolUseDecision, ...] | list[ToolUseDecision] = (),
 ) -> RouteDecision:
     cleaned_ask_mode = clean_text(ask_mode) or "none"
     cleaned_question_source = clean_text(question_source) or "none"
@@ -301,6 +306,8 @@ def build_route_decision(
         question_hint=clean_text(question_hint or "") or None,
         question_reason=clean_text(question_reason or "") or None,
         question_source=cleaned_question_source,
+        specialist=normalize_specialist_name(specialist),
+        tool_requests=tuple(tool_requests),
     )
 
 
@@ -322,6 +329,8 @@ def route_decision_policy_dict(route_decision: RouteDecision) -> dict[str, Any]:
         "question_hint": route_decision.question_hint,
         "question_reason": route_decision.question_reason,
         "question_source": route_decision.question_source,
+        "specialist": route_decision.specialist,
+        "tools": [decision.to_dict() for decision in route_decision.tool_requests],
     }
 
 
@@ -348,7 +357,14 @@ def build_answer_payload_from_text(
     followup_state: dict[str, Any] | None = None,
 ) -> AnswerPayload:
     cleaned_display = clean_text(answer_text)
-    cleaned_spoken = clean_tts_text(spoken_text if spoken_text is not None else answer_text)
+    spoken_source = spoken_text
+    if spoken_source is None:
+        spoken_source = (
+            "검증된 결과를 화면에 정리했어."
+            if "evidenceEncoding=hex-canonical-json-utf8-prefix" in str(answer_text or "")
+            else answer_text
+        )
+    cleaned_spoken = clean_tts_text(spoken_source)
     return build_answer_payload(
         display_text=cleaned_display,
         spoken_text=cleaned_spoken or cleaned_display,
@@ -371,8 +387,10 @@ def build_action_result(
 
 
 def action_result_to_answer_payload(action_result: ActionResult) -> AnswerPayload:
+    spoken_text = action_result.metadata.get("spoken_text")
     return build_answer_payload_from_text(
         action_result.answer_text,
+        spoken_text=(spoken_text if isinstance(spoken_text, str) else None),
         followup_state=action_result.metadata,
     )
 

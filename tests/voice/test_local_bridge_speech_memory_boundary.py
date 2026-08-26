@@ -21,7 +21,10 @@ REPO_ROOT = next(
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
-sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
+    sys.modules.setdefault("numpy", types.SimpleNamespace(ndarray=object))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 
@@ -109,6 +112,14 @@ class LocalBridgeSpeechMemoryBoundaryTests(
                 fast_api,
                 "LOCAL_BRIDGE_SPEAK_SEQ",
                 0,
+            ), patch.object(
+                fast_api,
+                "LOCAL_BRIDGE_SPEECH_GENERATION",
+                0,
+            ), patch.object(
+                fast_api,
+                "LOCAL_BRIDGE_SPEECH_TURN_ID",
+                "",
             ), patch.object(
                 fast_api,
                 "LOCAL_BRIDGE_STATUS",
@@ -301,9 +312,14 @@ class LocalBridgeSpeechMemoryBoundaryTests(
                 {
                     "id": "synthetic-stale-request",
                     "text": "must not play",
+                    "speechGeneration": 1,
+                    "speechTurnId": "stale-turn",
+                    "prefixIndex": 0,
                     "memoryBoundary": wire_boundary,
                 }
             )
+            bridge.control_speech_generation = 1
+            bridge.active_control_speech_generation = 0
             bridge.active_turn_task = None
             bridge.last_tts_playback = {}
             bridge.last_latency = {}
@@ -332,7 +348,16 @@ class LocalBridgeSpeechMemoryBoundaryTests(
         error = RuntimeError(private_canary)
         bridge = object.__new__(local_io_bridge.LocalIoBridge)
         bridge.speak_request_queue = asyncio.Queue()
-        bridge.speak_request_queue.put_nowait({"text": "speak this"})
+        bridge.speak_request_queue.put_nowait(
+            {
+                "text": "speak this",
+                "speechGeneration": 1,
+                "speechTurnId": "failure-turn",
+                "prefixIndex": 0,
+            }
+        )
+        bridge.control_speech_generation = 1
+        bridge.active_control_speech_generation = 0
         bridge.active_turn_task = None
         bridge.last_tts_playback = {}
         bridge.last_latency = {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -39,6 +40,14 @@ def _scope_actor_ids(scope: str) -> tuple[int | None, int | None]:
     if match is None:
         return None, None
     return int(match.group("guild")), int(match.group("user"))
+
+
+def _recovered_awaiting_user_reply(
+    record: dict[str, Any],
+) -> bool:
+    return str(record.get("sourceDeliveryId") or "").startswith(
+        "autonomy:ping:"
+    )
 
 
 def _exact_history_tail(
@@ -88,14 +97,35 @@ def _verified_checkpoint_status(
     *,
     generation: int,
 ) -> bool:
+    if not isinstance(status, dict):
+        return False
+    raw_generation = status.get("checkpointGeneration")
+    persisted = status.get("persistedSessionCount")
+    restored = status.get("restoredSessionCount")
+    if (
+        isinstance(raw_generation, bool)
+        or not isinstance(raw_generation, int)
+        or raw_generation != generation
+        or isinstance(persisted, bool)
+        or not isinstance(persisted, int)
+        or persisted < 0
+        or isinstance(restored, bool)
+        or not isinstance(restored, int)
+        or restored < 0
+    ):
+        return False
     return bool(
-        isinstance(status, dict)
-        and status.get("rollbackProtected") is True
+        status.get("rollbackProtected") is True
         and status.get("checkpointIntegrity") == "verified"
         and status.get("checkpointHeadState") == "current"
-        and int(status.get("checkpointGeneration") or 0) == generation
-        and int(status.get("persistedSessionCount") or 0) >= 1
-        and (
+        and max(persisted, restored) >= 1
+        and _checkpoint_authenticity_verified(status)
+    )
+
+
+def _checkpoint_authenticity_verified(status: dict[str, Any]) -> bool:
+    return bool(
+        (
             status.get("keyedAuthenticity") is not True
             or (
                 status.get("checkpointHeadAuthenticity") == "verified"
@@ -109,10 +139,114 @@ def _verified_checkpoint_status(
     )
 
 
+def _verified_checkpoint_predecessor(
+    status: Any,
+    *,
+    generation: int,
+) -> bool:
+    if not isinstance(status, dict):
+        return False
+    raw_generation = status.get("checkpointGeneration")
+    persisted = status.get("persistedSessionCount")
+    restored = status.get("restoredSessionCount")
+    if (
+        isinstance(raw_generation, bool)
+        or not isinstance(raw_generation, int)
+        or raw_generation != generation
+        or isinstance(persisted, bool)
+        or not isinstance(persisted, int)
+        or persisted < 0
+        or isinstance(restored, bool)
+        or not isinstance(restored, int)
+        or restored < 0
+        or not _checkpoint_authenticity_verified(status)
+    ):
+        return False
+    if (
+        status.get("rollbackProtected") is True
+        and status.get("checkpointIntegrity") == "verified"
+        and status.get("checkpointHeadState") == "current"
+        and max(persisted, restored) >= 1
+    ):
+        return True
+    if (
+        status.get("rollbackProtected") is True
+        and status.get("checkpointIntegrity") == "empty"
+        and status.get("checkpointHeadState") == "empty"
+        and persisted == 0
+        and restored == 0
+    ):
+        return True
+    return bool(
+        generation == 0
+        and status.get("state") == "missing"
+        and status.get("rollbackProtected") is False
+        and status.get("checkpointIntegrity") == "empty"
+        and status.get("checkpointHeadState") == "missing"
+        and persisted == 0
+        and restored == 0
+    )
+
+
+def _capture_session_state(store: Any, scope: str) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for name in getattr(type(store), "__dataclass_fields__", {}):
+        mapping = getattr(store, name, None)
+        if isinstance(mapping, dict):
+            snapshot[name] = (
+                scope in mapping,
+                deepcopy(mapping.get(scope)),
+            )
+    return snapshot
+
+
+def _restore_session_state(
+    store: Any,
+    scope: str,
+    snapshot: dict[str, Any],
+) -> None:
+    for name, raw_state in snapshot.items():
+        mapping = getattr(store, name, None)
+        if not isinstance(mapping, dict):
+            continue
+        present, value = raw_state
+        if present:
+            mapping[scope] = value
+        else:
+            mapping.pop(scope, None)
+
+
 def reconcile_recovered_delivery_succeeded(
     record: dict[str, Any],
     *,
     deps: ConversationIngressRestartDeps,
+    before_commit: Callable[[int], Any] | None = None,
+) -> int | None:
+    scope = str(record.get("scope") or "")
+    snapshot = _capture_session_state(
+        deps.session_state_store,
+        scope,
+    )
+    try:
+        return _reconcile_recovered_delivery_succeeded_attempt(
+            record,
+            deps=deps,
+            before_commit=before_commit,
+        )
+    except Exception:
+        _restore_session_state(
+            deps.session_state_store,
+            scope,
+            snapshot,
+        )
+        raise
+
+
+def _reconcile_recovered_delivery_succeeded_attempt(
+    record: dict[str, Any],
+    *,
+    deps: ConversationIngressRestartDeps,
+    before_commit: Callable[[int], Any] | None,
 ) -> int | None:
     """Persist an already-delivered Discord turn without rerunning delivery."""
 
@@ -152,6 +286,12 @@ def reconcile_recovered_delivery_succeeded(
             user_text=user_text,
         )
     )
+    if (
+        current_turn == turn_id
+        and not pair_persisted
+        and not user_only_persisted
+    ):
+        return None
     if user_only_persisted:
         history.append(
             {
@@ -191,7 +331,9 @@ def reconcile_recovered_delivery_succeeded(
         scope,
         user_id=user_id,
         speaker="assistant",
-        awaiting_user_reply=False,
+        awaiting_user_reply=(
+            _recovered_awaiting_user_reply(record)
+        ),
         topic_id=build_topic_id(user_text, assistant_text),
         answer_text=assistant_text,
         user_text=user_text,
@@ -202,6 +344,7 @@ def reconcile_recovered_delivery_succeeded(
     status = deps.session_continuity_checkpoint.commit_completed_turn(
         scope,
         turn_id,
+        before_commit=before_commit,
     )
     receipt = require_durable_continuity_receipt(status)
     return int(receipt["generation"])
@@ -242,8 +385,55 @@ def verify_recovered_terminal_commit(
     )
 
 
+def reconcile_recovered_terminal_commit(
+    record: dict[str, Any],
+    *,
+    deps: ConversationIngressRestartDeps,
+) -> bool:
+    """Finish or recommit one exact terminal marker after restart."""
+
+    raw_generation = record.get("continuityGeneration")
+    if (
+        record.get("surface") != "discord_text"
+        or record.get("phase") != "terminal_committing"
+        or isinstance(raw_generation, bool)
+        or not isinstance(raw_generation, int)
+        or raw_generation < 1
+    ):
+        return False
+    if verify_recovered_terminal_commit(record, deps=deps):
+        return True
+    predecessor_status = deps.session_continuity_checkpoint.status()
+    if not _verified_checkpoint_predecessor(
+        predecessor_status,
+        generation=raw_generation - 1,
+    ):
+        return False
+    scope = str(record.get("scope") or "")
+    store_snapshot = _capture_session_state(
+        deps.session_state_store,
+        scope,
+    )
+    committed_generation = reconcile_recovered_delivery_succeeded(
+        {**record, "phase": "delivery_succeeded"},
+        deps=deps,
+    )
+    reconciled = bool(
+        committed_generation == raw_generation
+        and verify_recovered_terminal_commit(record, deps=deps)
+    )
+    if not reconciled:
+        _restore_session_state(
+            deps.session_state_store,
+            scope,
+            store_snapshot,
+        )
+    return reconciled
+
+
 __all__ = [
     "ConversationIngressRestartDeps",
     "reconcile_recovered_delivery_succeeded",
+    "reconcile_recovered_terminal_commit",
     "verify_recovered_terminal_commit",
 ]

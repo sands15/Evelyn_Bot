@@ -1,0 +1,199 @@
+diff --git a/src/agent/action_manager.js b/src/agent/action_manager.js
+--- a/src/agent/action_manager.js
++++ b/src/agent/action_manager.js
+@@ -9,4 +9,12 @@ export class ActionManager {
+         this.resume_name = '';
+         this.last_action_time = 0;
+         this.recent_action_counter = 0;
++        const requestedPoll = Number(process.env.MINDCRAFT_INTERRUPT_POLL_MS || 100);
++        this.interruptPollMs = Number.isFinite(requestedPoll)
++            ? Math.max(50, Math.min(300, Math.round(requestedPoll)))
++            : 100;
++        const requestedStopWait = Number(process.env.MINDCRAFT_INTERRUPT_STOP_WAIT_MS || 1200);
++        this.interruptStopWaitMs = Number.isFinite(requestedStopWait)
++            ? Math.max(250, Math.min(5000, Math.round(requestedStopWait)))
++            : 1200;
+     }
+@@ -26,12 +34,14 @@ export class ActionManager {
+-    async stop() {
+-        if (!this.executing) return;
+-        const timeout = setTimeout(() => {
+-            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
+-        }, 10000);
+-        while (this.executing) {
++    async stop(killOnTimeout = true) {
++        if (!this.executing) return true;
++        const deadline = Date.now() + this.interruptStopWaitMs;
++        const timeout = killOnTimeout ? setTimeout(() => {
++            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
++        }, 10000) : null;
++        while (this.executing && (killOnTimeout || Date.now() < deadline)) {
+             this.agent.requestInterrupt();
+             console.log('waiting for code to finish executing...');
+-            await new Promise(resolve => setTimeout(resolve, 300));
++            await new Promise(resolve => setTimeout(resolve, this.interruptPollMs));
+         }
+         clearTimeout(timeout);
++        return !this.executing;
+     } 
+@@ -87,7 +96,10 @@ export class ActionManager {
+             if (this.executing) {
+                 console.log(`action "${actionLabel}" trying to interrupt current action "${this.currentActionLabel}"`);
+             }
+-            await this.stop();
++            const stopped = await this.stop(false);
++            if (!stopped) {
++                return { success: false, message: 'Current action did not stop; new action rejected.', interrupted: true, timedout: true, busy: true };
++            }
+ 
+             // clear bot logs and reset interrupt code
+             this.agent.clearBotLogs();
+diff --git a/src/agent/agent.js b/src/agent/agent.js
+--- a/src/agent/agent.js
++++ b/src/agent/agent.js
+@@ -233,7 +233,9 @@ export class Agent {
+     requestInterrupt() {
+         this.bot.interrupt_code = true;
+-        this.bot.stopDigging();
+-        this.bot.collectBlock.cancelTask();
+-        this.bot.pathfinder.stop();
+-        this.bot.pvp.stop();
++        this.bot.stopDigging?.();
++        this.bot.collectBlock?.cancelTask?.();
++        this.bot.pathfinder?.stop?.();
++        this.bot.pvp?.stop?.();
++        this.bot.swordpvp?.stop?.();
++        this.bot.bowpvp?.stop?.();
+     }
+@@ -320,4 +320,4 @@ export class Agent {
+             if (checkInterrupt()) break;
+             let history = this.history.getHistory();
+-            let res = await this.prompter.promptConvo(history);
++            let res = await this.prompter.promptConvo(history, self_prompt);
+ 
+@@ -488,6 +490,8 @@ export class Agent {
+         });
+         this.bot.on('idle', () => {
+-            this.bot.clearControlStates();
+-            this.bot.pathfinder.stop(); // clear any lingering pathfinder
++            if (!this.bot.evelynMovementOwner) {
++                this.bot.clearControlStates();
++                this.bot.pathfinder.stop(); // clear any lingering pathfinder
++            }
+             this.bot.modes.unPauseAll();
+             setTimeout(() => {
+@@ -502,4 +502,7 @@ export class Agent {
+         // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
+-        const INTERVAL = 300;
++        const requestedInterval = Number(process.env.MINDCRAFT_MODE_INTERVAL_MS || 100);
++        const INTERVAL = Number.isFinite(requestedInterval)
++            ? Math.max(50, Math.min(300, Math.round(requestedInterval)))
++            : 100;
+         let last = Date.now();
+         setTimeout(async () => {
+diff --git a/src/agent/modes.js b/src/agent/modes.js
+--- a/src/agent/modes.js
++++ b/src/agent/modes.js
+@@ -80,9 +80,16 @@ export const modes = [
+-            else if (Date.now() - bot.lastDamageTime < 3000 && (bot.health < 5 || bot.lastDamageTaken >= bot.health)) {
++            else if (
++                Date.now() - bot.lastDamageTime < 3000 &&
++                (bot.health < 5 || bot.lastDamageTaken >= bot.health) &&
++                !(
++                    agent.actions.currentActionLabel === 'mode:evelyn_survival' &&
++                    bot.evelynSurvivalState?.phase === 'handle_hostile'
++                )
++            ) {
+                 say(agent, 'I\'m dying!');
+                 execute(this, agent, async () => {
+                     await skills.moveAway(bot, 20);
+                 });
+             }
+-            else if (agent.isIdle()) {
++            else if (agent.isIdle() && !bot.evelynMovementOwner) {
+                 bot.clearControlStates(); // clear jump if not in danger or doing anything else
+             }
+         }
+diff --git a/src/agent/self_prompter.js b/src/agent/self_prompter.js
+--- a/src/agent/self_prompter.js
++++ b/src/agent/self_prompter.js
+@@ -9,7 +9,10 @@ export class SelfPrompter {
+         this.interrupt = false;
+         this.prompt = '';
+         this.idle_time = 0;
+-        this.cooldown = 2000;
++        const requestedCooldown = Number(process.env.MINDCRAFT_SELF_PROMPT_COOLDOWN_MS || 300);
++        this.cooldown = Number.isFinite(requestedCooldown)
++            ? Math.max(250, Math.min(2000, Math.round(requestedCooldown)))
++            : 300;
+     }
+ 
+     start(prompt) {
+diff --git a/src/agent/commands/index.js b/src/agent/commands/index.js
+--- a/src/agent/commands/index.js
++++ b/src/agent/commands/index.js
+@@ -232,4 +232,4 @@ function paramToString(param) {
+-export function getCommandDocs(agent) {
++export function getCommandDocs(agent, restrictToCurrentSubgoal = false) {
+     const typeTranslations = {
+         'float':              'number',
+         'int':                'number',
+@@ -240,13 +240,20 @@ export function getCommandDocs(agent) {
+         'BlockOrItemName':   'string',
+         'boolean':           'bool'
+     }
++    const managedCommands = restrictToCurrentSubgoal
++        ? agent.goal_manager?.state?.currentSubgoal?.allowedCommands
++        : null;
++    const allowedCommands = Array.isArray(managedCommands) && managedCommands.length
++        ? new Set(managedCommands)
++        : null;
+     let docs = `\n*COMMAND DOCS\n You can use the following commands to perform actions and get information about the world. 
+     Use the commands with the syntax: !commandName or !commandName("arg1", 1.2, ...) if the command takes arguments.\n
+     Do not use codeblocks. Use double quotes for strings. Only use one command in each response, trailing commands and comments will be ignored.\n`;
+     for (let command of commandList) {
+         if (agent.blocked_actions.includes(command.name)) {
+             continue;
+         }
++        if (allowedCommands && !allowedCommands.has(command.name)) continue;
+         docs += command.name + ': ' + command.description + '\n';
+         if (command.params) {
+             docs += 'Params:\n';
+diff --git a/src/models/prompter.js b/src/models/prompter.js
+--- a/src/models/prompter.js
++++ b/src/models/prompter.js
+@@ -136,9 +136,8 @@ export class Prompter {
+-    async replaceStrings(prompt, messages, examples=null, to_summarize=[], last_goals=null) {
++    async replaceStrings(prompt, messages, examples=null, to_summarize=[], last_goals=null, restrictCommandDocs=false) {
+         prompt = prompt.replaceAll('$NAME', this.agent.name);
+ 
+         if (prompt.includes('$STATS')) {
+             let stats = await getCommand('!stats').perform(this.agent) + '\n';
+             stats += await getCommand('!entities').perform(this.agent) + '\n';
+-            stats += await getCommand('!nearbyBlocks').perform(this.agent);
+             prompt = prompt.replaceAll('$STATS', stats);
+         }
+@@ -150,7 +149,7 @@ export class Prompter {
+             prompt = prompt.replaceAll('$ACTION', this.agent.actions.currentActionLabel);
+         }
+         if (prompt.includes('$COMMAND_DOCS'))
+-            prompt = prompt.replaceAll('$COMMAND_DOCS', getCommandDocs(this.agent));
++            prompt = prompt.replaceAll('$COMMAND_DOCS', getCommandDocs(this.agent, restrictCommandDocs));
+         if (prompt.includes('$CODE_DOCS')) {
+             const code_task_content = messages.slice().reverse().find(msg =>
+                 msg.role !== 'system' && msg.content.includes('!newAction(')
+@@ -213,4 +212,4 @@ export class Prompter {
+-    async promptConvo(messages) {
++    async promptConvo(messages, restrictCommandDocs=false) {
+         this.most_recent_msg_time = Date.now();
+         let current_msg_time = this.most_recent_msg_time;
+ 
+@@ -221,7 +220,7 @@ export class Prompter {
+             }
+ 
+             let prompt = this.profile.conversing;
+-            prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
++            prompt = await this.replaceStrings(prompt, messages, this.convo_examples, [], null, restrictCommandDocs);
+             let generation;
+ 
+             try {

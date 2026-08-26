@@ -543,6 +543,107 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
         self.assertNotIn(accepted_text, rendered)
         self.assertNotIn(completed_text, rendered)
 
+    def test_guild_reset_removes_every_target_phase_and_preserves_other_owners(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root, max_entries=8)
+            target_reserved = journal.reserve_ingress(
+                surface="discord_text",
+                scope="guild:1:text:2:user:3",
+                source_delivery_id="reserved-1",
+                text_hash=final_text_sha256("reserved"),
+                turn_id="reserved-turn",
+                reservation_ref="1" * 64,
+                ttl_sec=10.0,
+            )
+            target_accepted = journal.claim(
+                surface="discord_text",
+                scope="guild:1:text:4:user:5",
+                source_delivery_id="accepted-1",
+                accepted_text="target accepted canary",
+            )
+            target_terminal = journal.claim(
+                surface="discord_text",
+                scope="guild:1:text:6:user:7",
+                source_delivery_id="terminal-1",
+                accepted_text="target terminal canary",
+            )
+            journal.mark_response_ready(
+                target_terminal["entryId"],
+                assistant_text="terminal answer",
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            journal.mark_delivery_inflight(target_terminal["entryId"])
+            journal.mark_delivery_succeeded(target_terminal["entryId"])
+            journal.begin_terminal_commit(
+                target_terminal["entryId"],
+                continuity_generation=3,
+                assistant_text="terminal answer",
+                memory_receipt_ref=not_used_memory_receipt_ref(),
+            )
+            target_completed = journal.claim(
+                surface="discord_text",
+                scope="guild:1:text:8:user:9",
+                source_delivery_id="completed-1",
+                accepted_text="target completed canary",
+            )
+            self.complete(journal, target_completed)
+            other_guild = journal.claim(
+                surface="discord_text",
+                scope="guild:2:text:2:user:3",
+                source_delivery_id="other-1",
+                accepted_text="other guild canary",
+            )
+            fast_local = journal.claim(
+                surface="fast_control",
+                scope="local:control-page",
+                source_delivery_id="fast-1",
+                accepted_text="fast local canary",
+            )
+
+            receipt = journal.reset_guild(1)
+            restarted = self.make_journal(root, max_entries=8)
+
+        self.assertTrue(receipt["durable"])
+        self.assertEqual(receipt["removedCount"], 4)
+        for claimed in (
+            target_reserved,
+            target_accepted,
+            target_terminal,
+            target_completed,
+        ):
+            self.assertIsNone(restarted.record_for(claimed["entryId"]))
+        self.assertIsNotNone(restarted.record_for(other_guild["entryId"]))
+        self.assertIsNotNone(restarted.record_for(fast_local["entryId"]))
+        rendered = json.dumps(receipt, ensure_ascii=False)
+        self.assertNotIn("target accepted canary", rendered)
+        self.assertNotIn("target terminal canary", rendered)
+        self.assertNotIn("target completed canary", rendered)
+        self.assertNotIn("other guild canary", rendered)
+        self.assertNotIn("fast local canary", rendered)
+
+    def test_guild_reset_write_failure_restores_target_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = self.make_journal(Path(temp_dir))
+            claimed = self.claim(journal)
+            generation = journal.public_status()["generation"]
+
+            with patch.object(
+                journal,
+                "_write",
+                side_effect=OSError("simulated guild reset failure"),
+            ):
+                with self.assertRaises(OSError):
+                    journal.reset_guild(1)
+
+            restored = journal.record_for(claimed["entryId"])
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["phase"], "accepted")
+        self.assertEqual(journal.public_status()["generation"], generation)
+
     def test_scope_revocation_write_failure_restores_every_reservation(
         self,
     ) -> None:
@@ -993,6 +1094,54 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
             "conversation_ingress_delivery_ambiguous_after_restart",
         )
         self.assertFalse(recovery["pending"]["automaticReplay"])
+
+    def test_restart_recovery_survives_wall_clock_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            clock = Clock(1_000.0)
+            first = self.make_journal(root, clock=clock, max_age_sec=900.0)
+            claimed = self.claim(first, delivery_id="clock-rollback")
+
+            clock.value = 950.0
+            second = self.make_journal(root, clock=clock, max_age_sec=900.0)
+            second_status = second.public_status()
+            second_record = second.record_for(claimed["entryId"])
+            recovered_payload = json.loads(
+                (root / "ingress.json").read_text(encoding="utf-8")
+            )
+
+            third = self.make_journal(root, clock=clock, max_age_sec=900.0)
+            third_status = third.public_status()
+            third_record = third.record_for(claimed["entryId"])
+
+        self.assertEqual(second_status["state"], "ready")
+        self.assertEqual(second_status["headState"], "current")
+        self.assertEqual(third_status["state"], "ready")
+        self.assertEqual(third_status["headState"], "current")
+        self.assertEqual(second_record, third_record)
+        self.assertEqual(second_record["entryId"], claimed["entryId"])
+        self.assertEqual(second_record["phase"], "accepted")
+        self.assertEqual(recovered_payload["entries"][0]["recoveredAt"], 1_000.0)
+        self.assertEqual(recovered_payload["entries"][0]["updatedAt"], 1_000.0)
+
+    def test_same_process_transition_survives_wall_clock_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            clock = Clock(1_000.0)
+            first = self.make_journal(root, clock=clock, max_age_sec=900.0)
+            claimed = self.claim(first, delivery_id="transition-clock-rollback")
+
+            clock.value = 950.0
+            completed = self.complete(first, claimed)
+            restored = self.make_journal(root, clock=clock, max_age_sec=900.0)
+            status = restored.public_status()
+            record = restored.record_for(claimed["entryId"])
+
+        self.assertEqual(completed["phase"], "completed")
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["headState"], "current")
+        self.assertEqual(record["phase"], "completed")
+        self.assertEqual(record["assistantText"], "응, 듣고 있어.")
 
     def test_stream_can_mark_first_delta_before_final_response_binding(
         self,

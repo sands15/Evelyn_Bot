@@ -70,6 +70,28 @@ class HttpSessionRuntimeTests(unittest.TestCase):
         asyncio.run(run())
         self.assertEqual(calls, ["session"])
 
+    def test_provider_closes_and_forgets_session(self) -> None:
+        import asyncio
+
+        class Session:
+            closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        session = Session()
+        provider = HttpSessionProvider(
+            client_timeout_factory=lambda **kwargs: kwargs,
+            client_session_factory=lambda **_kwargs: session,
+        )
+
+        async def run() -> None:
+            self.assertIs(await provider(), session)
+            await provider.close()
+            self.assertTrue(session.closed)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

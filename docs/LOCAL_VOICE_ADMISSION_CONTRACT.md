@@ -1,7 +1,7 @@
 # Local Voice Admission Contract
 
 Document status: **Current source contract**
-Last reviewed: 2026-08-02 KST
+Last reviewed: 2026-08-23 KST
 
 로컬 마이크 캡처 동의는 오디오를 읽을 수 있다는 허가일 뿐, 주변의 모든 말을
 Evelyn 명령으로 실행해도 된다는 허가가 아니다. 이 문서는 Windows Local I/O
@@ -90,12 +90,32 @@ claim 직전에 다시 확인한다. 누락·손상·stale·불일치·예외는
 기존 capability와 reservation을 exact revoke한다. revoke를 durable하게 증명하지
 못하면 409 성공처럼 축소하지 않고 content-free 503을 반환한다.
 
+Bridge도 segment status를 게시한 await 뒤 batch STT 직전에 캡처한 admission epoch와
+validation binding을 다시 검사한다. restart/shutdown/mic invalidation이 끼면 해당 PCM은
+STT에 보내지 않고 reservation·admission·chat side effect 없이 폐기한다.
+
 Control Page의 모든 durable consent generation 변경과 Bot API의 마지막 fence
 확인+reservation/claim은 stable `voice_capture_consent/claim_lease.lock`으로
 직렬화한다. Bot이 먼저 잠그면 이미 선형화된 journal 동작이 끝난 뒤 철회가
 commit되고, 철회가 먼저 잠그면 Bot은 새 원문을 journal에 쓰기 전에 고정 503으로
 닫힌다. 이 lock은 owner credential이나 원문을 담지 않는 1-byte OS lock이며
 retention이 삭제하지 않는다.
+
+## Physical capture lease와 전환 직렬화
+
+Bot API의 durable voice-input lease는 `local_mic|discord_voice` 중 정확히 하나만
+physical capture owner로 허용한다. Local ON의 lease acquire+control publish, chat/UI
+OFF request publish, authenticated Bridge status 수락과 physical-stop 뒤 release,
+Discord acquire/release, retirement prepare/complete의 authoritative transition point는
+같은 per-event-loop lock으로 직렬화한다. OFF 대기 전체를 잠그는 것은 아니며, exact
+revision/action의 stop ACK를 받은 status transition이 release를 소유한다.
+
+lease load/write와 Discord status read는 Fast continuity와 같은 warm killable artifact
+child 및 bounded deadline을 사용한다. mutation outcome이 불명확하면 temporary cleanup 뒤
+canonical disk를 먼저 읽고 exact requested payload와 durable sync가 확인된 경우만 성공으로
+수렴한다. 그 외에는 process-local blocked latch와 고정 503으로 닫고 mutation을 재실행하지
+않는다. async 경계는 blocking lease operation을 `to_thread`로 격리하며, caller cancellation도
+worker 완료를 shield-drain한 뒤 재전파해 lock 밖 late mutation을 남기지 않는다.
 
 ## 일회성 capability
 
@@ -211,7 +231,12 @@ reservation revoke를 검증했다. TTS 재생이 필요한 일반 Local Bridge 
 완료로 사용하지 않는다. exact bridge instance·turn·assistant hash의 authenticated
 software-playback ACK 뒤에만 assistant history, continuity와 background action을 한 번
 확정하고, 실패·부분 재생·취소·bridge rotation은 exact ingress를 폐기해 자동 재생하지
-않는다. ACK는 signed status artifact에 저장하지 않는다. 그러나 실제 마이크·스피커에서
+않는다. required speaker verification은 exact `matched=True`만 interrupt를 허용하고
+정책 미적용 `status=skipped`만 예외다. ACK는 signed status artifact에 저장하지 않는다.
+voice input lease의 pre/post-replace·read stall, event-loop 생존, cancellation drain,
+overlapping heartbeat와 stale ON/OFF race도 deterministic fault worker와 HTTP 회귀로
+검증했다.
+그러나 실제 마이크·스피커에서
 10개 accepted turn, 2개 barge-in, 15초 silence를 연속 수행한 live local E2E는
 아직 사용자 청취 확인과 함께 실행하지 않았다. 따라서 이 문서는 live hardware
 완료 증거가 아니라 현재 코드의 fail-closed 계약이다.

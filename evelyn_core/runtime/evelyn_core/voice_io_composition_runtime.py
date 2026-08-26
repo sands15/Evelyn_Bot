@@ -376,12 +376,14 @@ class VoiceIoComposition:
         speech_chunker: Any,
         on_sentence: Callable[[str], Awaitable[None]] | None,
         question_stream_state: dict[str, int] | None = None,
+        speech_commit_gate: Any | None = None,
     ) -> bool:
         return await emit_stream_delta_chunks_payload(
             delta_text,
             speech_chunker=speech_chunker,
             on_sentence=on_sentence,
             question_stream_state=question_stream_state,
+            speech_commit_gate=speech_commit_gate,
         )
 
     async def flush_streamed_answer_chunks(
@@ -392,6 +394,7 @@ class VoiceIoComposition:
         on_sentence: Callable[[str], Awaitable[None]] | None,
         emitted_any: bool,
         question_stream_state: dict[str, int] | None = None,
+        speech_commit_gate: Any | None = None,
     ) -> None:
         await flush_streamed_answer_chunks_payload(
             answer,
@@ -399,6 +402,7 @@ class VoiceIoComposition:
             on_sentence=on_sentence,
             emitted_any=emitted_any,
             question_stream_state=question_stream_state,
+            speech_commit_gate=speech_commit_gate,
         )
 
     async def emit_delivery_plan_chunks(
@@ -456,6 +460,7 @@ class VoiceIoComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        memory_owner_scope: str | None = None,
         source: str = "voice",
         debug_text: str | None = None,
         metrics: dict | None = None,
@@ -471,6 +476,7 @@ class VoiceIoComposition:
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            memory_owner_scope=memory_owner_scope,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -488,6 +494,7 @@ class VoiceIoComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        memory_owner_scope: str | None = None,
         source: str = "voice",
         debug_text: str | None = None,
         metrics: dict | None = None,
@@ -503,6 +510,7 @@ class VoiceIoComposition:
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            memory_owner_scope=memory_owner_scope,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -577,6 +585,7 @@ class VoiceIoComposition:
         segment_id: int,
         ingress_during_reply: bool = False,
         owner_user_id_on_ingress: int | None = None,
+        voice_ingress_epoch: int,
         voice_listener_binding: Any = None,
         release_ingress_worker: Callable[[], Any] | None = None,
     ) -> None:
@@ -593,6 +602,7 @@ class VoiceIoComposition:
             segment_id=segment_id,
             ingress_during_reply=ingress_during_reply,
             owner_user_id_on_ingress=owner_user_id_on_ingress,
+            voice_ingress_epoch=voice_ingress_epoch,
             voice_listener_binding=voice_listener_binding,
             release_ingress_worker=release_ingress_worker,
             deps=self.deps.member_audio_pipeline(),

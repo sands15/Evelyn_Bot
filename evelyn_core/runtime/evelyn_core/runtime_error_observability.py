@@ -36,6 +36,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "conversation_continuity_checkpoint_rejected",
         "conversation_continuity_commit_failed",
         "conversation_continuity_commit_latency_high",
+        "conversation_continuity_commit_stalled",
         "continuity_auth_bootstrap_required",
         "continuity_auth_failed",
         "continuity_auth_key_required",
@@ -290,6 +291,7 @@ def _safe_continuity_commit_metrics(
         value.get("warningCode"),
         fallback="",
     )
+    in_flight = value.get("inFlight") is True
     return {
         "schema": "conversation_continuity.commit-metrics.v1",
         "state": state,
@@ -311,6 +313,23 @@ def _safe_continuity_commit_metrics(
             value.get("lastTargetVerified")
             if isinstance(value.get("lastTargetVerified"), bool)
             else None
+        ),
+        "inFlight": in_flight,
+        "inFlightCount": (
+            _safe_count(value.get("inFlightCount"))
+            if in_flight
+            else 0
+        ),
+        "stallAgeMs": (
+            _safe_number(value.get("stallAgeMs"))
+            if in_flight
+            else None
+        ),
+        "stalled": bool(
+            in_flight and value.get("stalled") is True
+        ),
+        "artifactDeadlineMs": _safe_number(
+            value.get("artifactDeadlineMs")
         ),
         "warningThresholdMs": _safe_number(
             value.get("warningThresholdMs")
@@ -367,15 +386,48 @@ def _read_source(
             }
             else None
         )
-        commit_warning = bool(
-            commit_metrics
+        if commit_metrics and commit_metrics["inFlight"]:
+            observed_age_ms = max(
+                0.0,
+                float(commit_metrics["stallAgeMs"] or 0.0),
+                age_sec * 1000.0,
+            )
+            commit_metrics["stallAgeMs"] = round(
+                observed_age_ms,
+                3,
+            )
+            deadline_ms = commit_metrics["artifactDeadlineMs"]
+            commit_metrics["stalled"] = bool(
+                deadline_ms is not None
+                and deadline_ms > 0.0
+                and observed_age_ms >= deadline_ms
+            )
+            if commit_metrics["stalled"]:
+                commit_metrics["state"] = "warning"
+                commit_metrics["warningCode"] = (
+                    "conversation_continuity_commit_stalled"
+                )
+        commit_warning_code = (
+            str(commit_metrics["warningCode"])
+            if commit_metrics
             and commit_metrics["state"] == "warning"
             and commit_metrics["warningCode"]
-            == "conversation_continuity_commit_latency_high"
-            and not stale
+            in {
+                "conversation_continuity_commit_latency_high",
+                "conversation_continuity_commit_stalled",
+            }
+            else ""
         )
-        source_state = "stale" if stale else (
-            "degraded" if commit_warning else "ready"
+        commit_warning = bool(
+            commit_warning_code
+            and (
+                commit_warning_code
+                == "conversation_continuity_commit_stalled"
+                or not stale
+            )
+        )
+        source_state = "degraded" if commit_warning else (
+            "stale" if stale else "ready"
         )
         source = {
             "id": spec["id"],
@@ -396,9 +448,7 @@ def _read_source(
         return (
             source,
             (
-                "conversation_continuity_commit_latency_high"
-                if commit_warning
-                else None
+                commit_warning_code if commit_warning else None
             ),
         )
     except (OSError, OverflowError, TypeError, ValueError) as exc:
@@ -562,7 +612,10 @@ def collect_runtime_error_observability(
         state = "error"
     elif recent_errors or any(
         warning["code"]
-        == "conversation_continuity_commit_latency_high"
+        in {
+            "conversation_continuity_commit_latency_high",
+            "conversation_continuity_commit_stalled",
+        }
         for warning in warnings
     ):
         state = "attention"

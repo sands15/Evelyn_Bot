@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import unittest
@@ -339,7 +341,7 @@ console.log(JSON.stringify({{
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
+    def test_idle_tail_uses_root_driven_overlap_across_all_seven_segments(self) -> None:
         controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
         expected = [
             "Param_Angle_Rotation15",
@@ -355,14 +357,144 @@ console.log(JSON.stringify({{
         self.assertIn("updateIdleTail(coreModel, now, elapsed)", controller)
         self.assertIn("idleTailAngles", controller)
         self.assertIn("idleTailVelocities", controller)
-        self.assertIn("const rootTarget", controller)
         self.assertIn("const springForce", controller)
-        self.assertIn("Math.exp(-parameter.damping * frameSeconds)", controller)
-        self.assertIn("previousAngle * parameter.follow + travelingBend", controller)
+        self.assertIn("const IDLE_TAIL_TIME_SCALE = 3.75", controller)
+        self.assertIn("parameter.spring\n        * IDLE_TAIL_TIME_SCALE\n        * IDLE_TAIL_TIME_SCALE", controller)
+        self.assertIn("-parameter.damping * IDLE_TAIL_TIME_SCALE * frameSeconds", controller)
+        self.assertIn("const rootTarget = Math.sin(drivePhase) * 6.5", controller)
+        self.assertIn("state.idleTailAngles[index - 1] * parameter.follow", controller)
+        self.assertIn("state.idleTailAngles[index] - state.idleTailAngles[index - 1]", controller)
+        self.assertIn("const physicsValue = coreModel.getParameterValueById(parameterId)", controller)
+        self.assertIn("physicsValue + (idleValue - physicsValue) * state.idleTailWeight", controller)
+        self.assertIn("coreModel.setParameterValueById(parameterId, value)", controller)
+        self.assertNotIn("coreModel.addParameterValueById(resolveCoreParameterId(parameter.id), value)", controller)
+        self.assertNotIn("parameter.phase", controller)
+        self.assertNotIn("parameter.amplitude", controller)
         self.assertNotIn("tipFlick", controller)
-        self.assertRegex(controller, r'Rotation15", follow: 0\.00')
-        self.assertRegex(controller, r'Rotation14", follow: 0\.78')
+        tail_block = controller.split("const IDLE_TAIL_PARAMETERS", 1)[1].split("]);", 1)[0]
+        motion_parameters = [
+            tuple(map(float, values))
+            for values in re.findall(
+                r"follow: ([0-9.]+), gain: ([0-9.]+), spring: ([0-9.]+), damping: ([0-9.]+)",
+                tail_block,
+            )
+        ]
+        self.assertEqual(len(motion_parameters), 7)
+        self.assertEqual(motion_parameters[0][0], 0)
+        self.assertTrue(all(follow > 1 for follow, _gain, _spring, _damping in motion_parameters[1:]))
+        self.assertGreater(motion_parameters[-1][1], motion_parameters[0][1])
         self.assertIn("tailTipParameter", controller)
+
+    def test_idle_tail_reversal_propagates_from_root_to_tip_and_forms_s_and_7_shapes(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        tail_block = controller.split("const IDLE_TAIL_PARAMETERS", 1)[1].split("]);", 1)[0]
+        parameters = [
+            tuple(map(float, values))
+            for values in re.findall(
+                r"follow: ([0-9.]+), gain: ([0-9.]+), spring: ([0-9.]+), damping: ([0-9.]+)",
+                tail_block,
+            )
+        ]
+        time_scale = float(
+            re.search(r"const IDLE_TAIL_TIME_SCALE = ([0-9.]+)", controller).group(1)
+        )
+        headings = [0.0] * 7
+        velocities = [0.0] * 7
+        frames: list[tuple[list[float], list[float]]] = []
+        frame_seconds = 1 / 60
+        for frame in range(60 * 90):
+            now = frame * frame_seconds * 1000
+            drive_phase = now * 0.00045 * time_scale + math.sin(now * 0.000055 + 0.4) * 0.12
+            root_target = math.sin(drive_phase) * 6.5
+            for index, (follow, _gain, spring, damping) in enumerate(parameters):
+                target = root_target if index == 0 else headings[index - 1] * follow
+                velocities[index] += (
+                    (target - headings[index])
+                    * spring
+                    * time_scale
+                    * time_scale
+                    * frame_seconds
+                )
+                velocities[index] *= math.exp(-damping * time_scale * frame_seconds)
+                headings[index] = max(-13.5, min(13.5, headings[index] + velocities[index] * frame_seconds))
+            if frame >= 60 * 30:
+                frames.append((headings.copy(), velocities.copy()))
+
+        peaks = [max(abs(frame[0][index]) for frame in frames) for index in range(7)]
+        self.assertLess(max(peaks), 13.5)
+        local_peaks = [
+            max(
+                abs(
+                    (frame[0][index] if index == 0 else frame[0][index] - frame[0][index - 1])
+                    * parameters[index][1]
+                )
+                for frame in frames
+            )
+            for index in range(7)
+        ]
+        self.assertLess(max(local_peaks), 8)
+        root_crossings = [
+            index
+            for index in range(1, len(frames))
+            if frames[index - 1][0][0] < 0 <= frames[index][0][0]
+            and frames[index][1][0] > 0
+        ]
+        root_periods = [
+            (root_crossings[index] - root_crossings[index - 1]) * frame_seconds
+            for index in range(1, len(root_crossings))
+        ]
+        self.assertTrue(root_periods)
+        self.assertGreater(min(root_periods), 3.4)
+        self.assertLess(max(root_periods), 4.1)
+        reversal_lags: list[float] = []
+        reversal_frame = next(
+            index
+            for index in range(1, len(frames))
+            if frames[index - 1][1][0] > 0 >= frames[index][1][0]
+        )
+        for segment in range(7):
+            segment_reversal = next(
+                index
+                for index in range(reversal_frame, len(frames))
+                if frames[index][1][segment] <= 0
+            )
+            reversal_lags.append((segment_reversal - reversal_frame) * frame_seconds)
+        self.assertEqual(reversal_lags, sorted(reversal_lags))
+        self.assertTrue(
+            all(
+                reversal_lags[index] - reversal_lags[index - 1] > 0.04
+                for index in range(1, len(reversal_lags))
+            )
+        )
+        self.assertGreater(reversal_lags[-1], 0.3)
+        self.assertLess(reversal_lags[-1], 0.5)
+
+        longest_runs = {"s": 0, "seven": 0}
+        current_shape: str | None = None
+        current_run = 0
+        for headings, _velocities in frames:
+            signs = [1 if angle > 0.5 else -1 if angle < -0.5 else 0 for angle in headings]
+            nonzero = [sign for sign in signs if sign]
+            transitions = sum(
+                nonzero[index] != nonzero[index - 1]
+                for index in range(1, len(nonzero))
+            )
+            shape = None
+            if len(nonzero) >= 4 and transitions == 1 and 1 in nonzero and -1 in nonzero:
+                shape = "s"
+            elif len(nonzero) >= 6 and transitions == 0:
+                shape = "seven"
+            if shape == current_shape:
+                current_run += 1
+            else:
+                if current_shape:
+                    longest_runs[current_shape] = max(longest_runs[current_shape], current_run)
+                current_shape = shape
+                current_run = 1
+        if current_shape:
+            longest_runs[current_shape] = max(longest_runs[current_shape], current_run)
+        self.assertGreater(longest_runs["s"] * frame_seconds, 0.25)
+        self.assertGreater(longest_runs["seven"] * frame_seconds, 1.5)
 
     def test_pixi_8_texture_binding_compatibility_patch_is_present(self) -> None:
         engine = (

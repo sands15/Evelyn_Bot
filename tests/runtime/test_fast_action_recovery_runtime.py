@@ -157,6 +157,79 @@ class FastActionRecoveryRuntimeTests(unittest.TestCase):
                 "검증된 최종 결과",
             )
 
+    def test_cancelled_background_action_stays_recoverable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = self.owner(root)
+            journal = self.journal(root)
+
+            async def execute():
+                started = asyncio.Event()
+
+                async def runner(_text: str, _source: str) -> str:
+                    started.set()
+                    await asyncio.Event().wait()
+                    return "unreachable"
+
+                fast_api.register_background_action_handler(
+                    kind="long_check",
+                    matcher=lambda text: text == "긴 작업",
+                    runner=runner,
+                    start_reply="확인해 볼게.",
+                )
+                prepared = fast_api.prepare_registered_background_action(
+                    "긴 작업",
+                    source="control_page",
+                )
+                self.assertIsNotNone(prepared)
+                task, task_runner = prepared
+                background = fast_api.launch_background_action(
+                    task,
+                    task_runner,
+                )
+                await asyncio.wait_for(started.wait(), timeout=1.0)
+                background.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await background
+                await asyncio.sleep(0)
+                return task
+
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "FAST_ACTION_RECOVERY_JOURNAL",
+                    journal,
+                ),
+            ):
+                task = asyncio.run(execute())
+
+            self.assertEqual(task.status, "failed")
+            self.assertEqual(
+                task.error,
+                "background_action_cancelled",
+            )
+            self.assertEqual(
+                fast_api.ACTION_COORDINATOR.snapshot()["activeCount"],
+                0,
+            )
+            self.assertEqual(
+                journal.public_status()["pendingCount"],
+                1,
+            )
+            self.assertEqual(
+                journal.recovery_decision(
+                    continuity_generation=0,
+                )["state"],
+                "recovery_required",
+            )
+
     def test_prelaunch_failure_commits_terminal_turn_and_clears_marker(
         self,
     ) -> None:

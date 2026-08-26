@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .continuity_commit_contract import (
+    CONTINUITY_COMMIT_FAILED,
+    await_continuity_commit_without_early_unlock,
     require_durable_continuity_receipt,
 )
 from .conversation_memory_exposure import (
@@ -74,18 +76,44 @@ async def answer_control_page_search_text_from_runtime(
                 session_key,
                 user_text,
                 guild_id=guild_id,
+                precommit_user_only=True,
             )
             turn_id = started_turn.turn_id
+            try:
+                accepted_continuity_status = (
+                    await await_continuity_commit_without_early_unlock(
+                        deps.commit_session_continuity(
+                            session_key,
+                            turn_id,
+                        )
+                    )
+                )
+                accepted_continuity_receipt = (
+                    require_durable_continuity_receipt(
+                        accepted_continuity_status
+                    )
+                )
+            except MemoryDeletionJournalIntegrityError:
+                raise
+            except Exception as exc:
+                deps.log(
+                    "[CONTROL PAGE] search_accepted_turn_commit_failed "
+                    f"errorType={type(exc).__name__}"
+                )
+                raise RuntimeError(
+                    CONTINUITY_COMMIT_FAILED
+                ) from None
+            accepted_history_snapshot = [
+                dict(message)
+                for message in started_turn.history
+            ]
             turn_scope = deps.turn_scope_factory(turn_id)
             deps.replace_room_turn_scope(session_key, turn_scope)
             turn_task = deps.attach_current_task(turn_scope)
 
         reset_memory_exposure_position()
         history_outcome = filter_conversation_history_for_memory_exposure(
-            deps.get_conversation_history(
-                session_key=session_key,
-                guild_id=guild_id,
-            ),
+            accepted_history_snapshot,
             memory_index_dir=deps.memory_index_dir,
         )
         exposure_position = capture_combined_memory_exposure(
@@ -115,6 +143,12 @@ async def answer_control_page_search_text_from_runtime(
                 "session_key": session_key,
                 "guild_id": guild_id,
                 "selected_path": "control_page_search_direct",
+                "accepted_user_turn_precommitted": True,
+                "continuity_turn_state": "unanswered_user",
+                "continuity_commit": "durable",
+                "continuity_generation": int(
+                    accepted_continuity_receipt["generation"]
+                ),
             },
             "marks": {},
         }
@@ -133,6 +167,7 @@ async def answer_control_page_search_text_from_runtime(
                 user_text=user_text,
                 tool_name="search",
                 tool_result_text=action_result.answer_text,
+                tool_result_metadata=getattr(action_result, "metadata", None),
                 guild_id=guild_id,
                 session_key=session_key,
                 source="control_page",
@@ -183,6 +218,7 @@ async def answer_control_page_search_text_from_runtime(
                     reply,
                     guild_id=guild_id,
                     memory_receipt=response_receipt_ref,
+                    complete_turn_id=turn_id,
                 )
                 deps.mark_session_active(
                     session_key,
@@ -197,10 +233,17 @@ async def answer_control_page_search_text_from_runtime(
                     answer_text=reply,
                     user_text=user_text,
                 )
+                metrics["meta"]["continuity_turn_state"] = (
+                    "completed"
+                )
                 try:
-                    continuity_status = await deps.commit_session_continuity(
-                        session_key,
-                        turn_id,
+                    continuity_status = (
+                        await await_continuity_commit_without_early_unlock(
+                            deps.commit_session_continuity(
+                                session_key,
+                                turn_id,
+                            )
+                        )
                     )
                     continuity_receipt = (
                         require_durable_continuity_receipt(
@@ -215,14 +258,20 @@ async def answer_control_page_search_text_from_runtime(
                     raise
                 except Exception as exc:
                     metrics["meta"]["continuity_commit"] = "failed"
+                    metrics["meta"]["continuity_turn_state"] = (
+                        "unanswered_user"
+                    )
                     metrics["meta"]["continuity_error"] = (
-                        "conversation_continuity_commit_failed"
+                        CONTINUITY_COMMIT_FAILED
                     )
                     deps.log(
                         "[CONTROL PAGE] search_continuity_commit_failed "
                         f"session={session_key} "
                         f"errorType={type(exc).__name__}"
                     )
+                    raise RuntimeError(
+                        CONTINUITY_COMMIT_FAILED
+                    ) from None
                 tts_task = deps.schedule_local_control_tts(
                     reply,
                     turn_id=turn_id,

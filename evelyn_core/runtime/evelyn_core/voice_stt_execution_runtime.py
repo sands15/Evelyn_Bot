@@ -10,6 +10,7 @@ class VoiceSttExecutionDeps:
     run_full_stt_with_optional_rescore: Callable[..., Awaitable[Any]]
     build_partial_stt_window: Callable[..., Any]
     get_partial_transcript: Callable[..., Any]
+    commit_deferred_partial_transcript: Callable[..., tuple[str, str]]
     read_committed_text: Callable[[str | None], str]
     run_blocking_stt_task: Callable[..., Awaitable[Any]]
     speculate_from_committed_stt: Callable[..., Any]
@@ -55,8 +56,50 @@ async def run_voice_stt_execution_from_runtime(
     wake_detected: bool,
     metrics: dict[str, Any],
     deps: VoiceSttExecutionDeps,
+    stream_result: Any | None = None,
+    source_is_current: Callable[[], bool] | None = None,
 ) -> VoiceSttExecutionResult | None:
+    def execution_is_current() -> bool:
+        if source_is_current is None:
+            return True
+        try:
+            return bool(source_is_current())
+        except Exception:
+            return False
+
     display_name = getattr(member, "display_name", None)
+    if stream_result is not None and bool(getattr(stream_result, "authoritative", False)):
+        text = deps.clean_text(str(getattr(stream_result, "final_text", "") or ""))
+        partial_text = deps.clean_text(str(getattr(stream_result, "partial_text", "") or ""))
+        committed_partial_text = deps.clean_text(
+            str(getattr(stream_result, "committed_text", "") or "")
+        )
+        if not text:
+            return None
+        stt_meta = {
+            "enabled": True,
+            "selected": "completed_batch_final",
+            "batch_call_count": int(getattr(stream_result, "call_count", 1) or 1),
+        }
+        deps.mark_turn_stage(
+            metrics,
+            "stt_full_done",
+            event_name="stt_full_done",
+            text_len=len(text),
+        )
+        deps.log_voice_stage(
+            metrics,
+            "완료 PCM STT final 재사용",
+            extra=f"text_len={len(text)} calls={stt_meta['batch_call_count']}",
+            key="stt_done",
+        )
+        return VoiceSttExecutionResult(
+            text=text,
+            stt_meta=stt_meta,
+            partial_text=partial_text,
+            committed_partial_text=committed_partial_text,
+        )
+
     deps.print_fn(
         f"[FULL STT ENTER] speaker={display_name} sampling_rate={stt_sampling_rate} "
         f"samples={audio16k.size} wake_detected={wake_detected}"
@@ -80,13 +123,19 @@ async def run_voice_stt_execution_from_runtime(
             clean_text=deps.clean_text,
             metrics=metrics,
             print_fn=deps.print_fn,
+            write_is_current=execution_is_current,
+            commit_deferred_partial_transcript=(
+                deps.commit_deferred_partial_transcript
+            ),
         )
+        if not execution_is_current():
+            return None
         partial_text = partial_result.partial_text
         committed_partial_text = partial_result.committed_text
         metrics.setdefault("meta", {}).update(
             {
-                "partial_stt_text": partial_text,
-                "committed_stt_text": committed_partial_text,
+                "partial_stt_chars": len(partial_text),
+                "committed_stt_chars": len(committed_partial_text),
             }
         )
         speculative = partial_result.speculative_policy
@@ -98,6 +147,8 @@ async def run_voice_stt_execution_from_runtime(
             f"[STT PARTIAL] errorType={type(exc).__name__}"
         )
 
+    if not execution_is_current():
+        return None
     try:
         full_stt_result = await deps.run_full_stt_with_optional_rescore(
             audio16k,
@@ -133,6 +184,8 @@ async def run_voice_stt_execution_from_runtime(
         )
         return None
 
+    if not execution_is_current():
+        return None
     text = full_stt_result.text
     stt_meta = full_stt_result.stt_meta
     deps.mark_turn_stage(metrics, "stt_full_done", event_name="stt_full_done", text_len=len(text))

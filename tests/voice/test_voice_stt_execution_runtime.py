@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -54,6 +56,7 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             run_full_stt_with_optional_rescore=run_full,
             build_partial_stt_window=lambda *_args, **_kwargs: None,
             get_partial_transcript=lambda *_args, **_kwargs: None,
+            commit_deferred_partial_transcript=lambda *_args, **_kwargs: ("", ""),
             read_committed_text=lambda key: f"committed:{key}",
             run_blocking_stt_task=lambda *_args, **_kwargs: None,
             speculate_from_committed_stt=lambda *_args, **_kwargs: None,
@@ -78,7 +81,12 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             rescore_timeout_sec=6.0,
         )
 
-    async def run_execution(self, *, deps: VoiceSttExecutionDeps | None = None):
+    async def run_execution(
+        self,
+        *,
+        deps: VoiceSttExecutionDeps | None = None,
+        source_is_current: Any = None,
+    ):
         return await run_voice_stt_execution_from_runtime(
             member=SimpleNamespace(id=7, display_name="정훈"),
             guild_id=11,
@@ -94,6 +102,7 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             wake_detected=True,
             metrics=self.metrics,
             deps=deps or self.deps,
+            source_is_current=source_is_current,
         )
 
     async def test_success_returns_partial_and_full_results(self) -> None:
@@ -104,9 +113,51 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.stt_meta, {"model": "fake"})
         self.assertEqual(result.partial_text, "부분")
         self.assertEqual(result.committed_partial_text, "부분 확정")
-        self.assertEqual(self.metrics["meta"]["partial_stt_text"], "부분")
+        self.assertEqual(self.metrics["meta"]["partial_stt_chars"], 2)
+        self.assertEqual(self.metrics["meta"]["committed_stt_chars"], 5)
         self.assertEqual(self.metrics["meta"]["speculative_policy"], {"route": "fast"})
         self.assertTrue(any(kind == "remember" for kind, _payload in self.events))
+
+    async def test_precomputed_batch_final_skips_partial_full_and_rescore(self) -> None:
+        stream_result = SimpleNamespace(
+            authoritative=True,
+            final_text="이블린 오늘 날씨 알려줘",
+            partial_text="",
+            committed_text="",
+            call_count=1,
+        )
+
+        result = await run_voice_stt_execution_from_runtime(
+            member=SimpleNamespace(id=7, display_name="정훈"),
+            guild_id=11,
+            speaker_name="정훈",
+            pcm_bytes=b"pcm",
+            debug_meta={"source": "discord_voice"},
+            session_key="voice:11:7",
+            room_session_key="room:11",
+            audio16k=self.audio,
+            stt_sampling_rate=16000,
+            duration_sec=2.25,
+            wake_probe="이블린",
+            wake_detected=True,
+            metrics=self.metrics,
+            deps=self.deps,
+            stream_result=stream_result,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.text, stream_result.final_text)
+        self.assertEqual(result.stt_meta["selected"], "completed_batch_final")
+        self.assertEqual(result.stt_meta["batch_call_count"], 1)
+        self.assertEqual(result.partial_text, "")
+        self.assertEqual(result.committed_partial_text, "")
+        self.assertFalse(any(kind in {"partial", "full"} for kind, _payload in self.events))
+        self.assertFalse(
+            any(
+                kind == "print" and "[FULL STT ENTER]" in str(payload)
+                for kind, payload in self.events
+            )
+        )
 
     async def test_partial_failure_is_non_fatal(self) -> None:
         self.partial_error = RuntimeError("partial failed")
@@ -117,6 +168,63 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.partial_text, "")
         printed = [args[0] for kind, args in self.events if kind == "print"]
         self.assertTrue(any(text.startswith("[STT PARTIAL]") for text in printed))
+
+    async def test_stale_after_partial_await_skips_speculative_and_full_stt(
+        self,
+    ) -> None:
+        partial_started = asyncio.Event()
+        release_partial = asyncio.Event()
+        current = True
+
+        async def run_partial(_audio: Any, **kwargs: Any) -> Any:
+            self.events.append(("partial", kwargs))
+            partial_started.set()
+            await release_partial.wait()
+            return self.partial_result
+
+        task = asyncio.create_task(
+            self.run_execution(
+                deps=replace(self.deps, run_partial_stt_flow=run_partial),
+                source_is_current=lambda: current,
+            )
+        )
+        await asyncio.wait_for(partial_started.wait(), timeout=1.0)
+        current = False
+        release_partial.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+
+        self.assertIsNone(result)
+        self.assertFalse(
+            any(kind in {"remember", "full"} for kind, _payload in self.events)
+        )
+
+    async def test_stale_after_full_stt_await_never_saves_debug_audio(self) -> None:
+        full_started = asyncio.Event()
+        release_full = asyncio.Event()
+        current = True
+
+        async def run_full(_audio: Any, **kwargs: Any) -> Any:
+            self.events.append(("full", kwargs))
+            full_started.set()
+            await release_full.wait()
+            return SimpleNamespace(text="", stt_meta={"private": "metadata"})
+
+        task = asyncio.create_task(
+            self.run_execution(
+                deps=replace(
+                    self.deps,
+                    run_full_stt_with_optional_rescore=run_full,
+                ),
+                source_is_current=lambda: current,
+            )
+        )
+        await asyncio.wait_for(full_started.wait(), timeout=1.0)
+        current = False
+        release_full.set()
+        result = await asyncio.wait_for(task, timeout=1.0)
+
+        self.assertIsNone(result)
+        self.assertFalse(any(kind == "debug" for kind, _payload in self.events))
 
     async def test_full_failure_logs_and_stops(self) -> None:
         self.full_error = RuntimeError("full failed")

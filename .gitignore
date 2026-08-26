@@ -44,6 +44,9 @@ node_modules/
 
 bot_profiles/*-cache.json
 bot_profiles/voiceprints/
+external/mindcraft/_tmp_ms_profiles/
+external/mindcraft_evelyn/tmp-ms-profile-*/
+tmp-ms-profile-*/
 archive/logs/
 archive/scratch/
 archive/nested-git/
@@ -56,3 +59,6 @@ third_party/Voyager/skill_library/skill/vectordb/
 third_party/Voyager/skill_library/skill/policy_state.json
 third_party/Voyager/skill_library/*/skill/vectordb/
 third_party/Voyager/skill_library/*/skill/policy_state.json
+/temp_*.mjs
+/external/mindcraft_evelyn/*-ms-code.mjs
+/evelyn_core/evelin/

@@ -25,6 +25,9 @@ from evelyn_core.fast_action_runtime import (  # noqa: E402
     is_local_mic_status_request,
     render_local_mic_status,
 )
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
+)
 
 
 class FastActionRuntimeTests(unittest.TestCase):
@@ -47,6 +50,21 @@ class FastActionRuntimeTests(unittest.TestCase):
         self.assertNotIn("볼게", spoken)
         self.assertIn("마이크 입력은 꺼져 있어.", spoken)
 
+    def test_incremental_filter_holds_no_space_late_unsafe_suffix(self) -> None:
+        stream_filter = SafeIncrementalSpeechFilter()
+
+        self.assertEqual(stream_filter.push("안전한 앞부분이야."), [])
+        self.assertEqual(stream_filter.push("확인해볼게."), [])
+        spoken = "".join(stream_filter.finish())
+
+        self.assertEqual(
+            spoken,
+            enforce_action_reply_contract(
+                "안전한 앞부분이야.확인해볼게."
+            ),
+        )
+        self.assertEqual(spoken, UNBACKED_PROGRESS_FALLBACK)
+
     def test_detects_natural_local_mic_status_question(self) -> None:
         self.assertTrue(is_local_mic_status_request("마이크 입력이 되고 있어?"))
         self.assertTrue(is_local_mic_status_request("내 목소리 들어오고 있어?"))
@@ -66,6 +84,7 @@ class FastActionRuntimeTests(unittest.TestCase):
         self.assertEqual(detect_minecraft_runtime_command("마인크래프트에서 나무 캐줘"), "goal")
         self.assertEqual(detect_minecraft_runtime_command("/minecraft connect"), "start")
         self.assertEqual(detect_minecraft_runtime_command("/minecraft goal diamond"), "goal")
+        self.assertIsNone(detect_minecraft_runtime_command("/minecraft goal"))
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 상태 알려줘"))
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 종료해"))
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 좋아해?"))
@@ -212,6 +231,51 @@ class FastActionRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["activeCount"], 0)
         self.assertEqual([event["type"] for event in snapshot["events"]], ["started", "completed"])
         self.assertEqual(coordinator.events_after(1)[0]["reply"], "작업을 마쳤어.")
+
+    def test_history_cap_never_evicts_a_running_task_before_terminal_result(self) -> None:
+        coordinator = FastActionCoordinator(history_limit=4, time_fn=lambda: 100.0)
+        tasks = [
+            coordinator.start(
+                kind="unit",
+                source="control_page",
+                user_text=f"task {index}",
+                start_reply="started",
+            )
+            for index in range(5)
+        ]
+
+        self.assertIs(coordinator.get(tasks[0].task_id), tasks[0])
+        completed = coordinator.complete(tasks[0].task_id, "finished")
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(coordinator.snapshot()["activeCount"], 4)
+        self.assertEqual(coordinator.internal_snapshot()["events"][-1]["type"], "completed")
+
+    def test_action_coordinator_preserves_cancelled_terminal_and_receipt(self) -> None:
+        coordinator = FastActionCoordinator(time_fn=lambda: 100.0)
+        task = coordinator.start(
+            kind="iterative_task",
+            source="control_page",
+            user_text="파일을 고쳐줘",
+            start_reply="작업을 시작했어.",
+        )
+
+        cancelled = coordinator.cancel(
+            task.task_id,
+            "사용자가 파일 변경 승인을 취소했어.",
+            memory_receipt=not_used_memory_receipt_ref(),
+        )
+        internal = coordinator.internal_snapshot()
+
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.error, "")
+        self.assertEqual(internal["activeCount"], 0)
+        self.assertEqual(internal["events"][-1]["type"], "cancelled")
+        self.assertEqual(internal["events"][-1]["status"], "cancelled")
+        self.assertEqual(
+            internal["events"][-1]["_memoryReceiptRef"]["state"],
+            "not_used",
+        )
 
 
 if __name__ == "__main__":

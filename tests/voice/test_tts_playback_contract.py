@@ -1,6 +1,7 @@
 import sys
 import unittest
 import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.tts_playback import (  # noqa: E402
     PreparedPlaybackStarter,
     PreparedTtsPlaybackQueue,
+    SpeechCommitContractError,
+    SpeechCommitGate,
     SpeechChunker,
     OmniVoicePCMStream,
     QueuedAudioSource,
@@ -47,6 +50,10 @@ from evelyn_core.tts_playback import (  # noqa: E402
     update_tts_playback_tracking,
 )
 from evelyn_core.config import TTS_CHUNK_TAIL_SILENCE_MS  # noqa: E402
+from evelyn_core.observability_metrics import (  # noqa: E402
+    VOICE_LATENCY_TRACE_METRICS_KEY,
+    VoiceLatencyTrace,
+)
 
 
 class TtsPlaybackContractTests(unittest.TestCase):
@@ -86,6 +93,23 @@ class TtsPlaybackContractTests(unittest.TestCase):
         frame = source.read()
 
         self.assertEqual(frame, discord_pcm_silence_bytes(TTS_CHUNK_TAIL_SILENCE_MS)[: len(frame)])
+
+    def test_omnivoice_packet_callback_waits_for_send_receipt(self) -> None:
+        callbacks: list[str] = []
+        source = OmniVoicePCMStream(
+            on_first_frame=lambda: callbacks.append("frame"),
+            on_first_packet_sent=lambda: callbacks.append("packet"),
+        )
+        source.feed_pcm24_mono(b"\x01\x00" * 480)
+        source.finish()
+
+        frame = source.read()
+
+        self.assertTrue(any(frame))
+        self.assertEqual(callbacks, ["frame"])
+        source.mark_packet_sent(frame)
+        source.mark_packet_sent(frame)
+        self.assertEqual(callbacks, ["frame", "packet"])
 
     def test_resolve_cached_tts_audio_path_returns_matching_file(self) -> None:
         path = Path(__file__)
@@ -565,8 +589,10 @@ class TtsPlaybackContractTests(unittest.TestCase):
             def is_paused(self) -> bool:
                 return False
 
-            def play(self, _source: object, *, after: object) -> None:
+            def play(self, source: object, *, after: object) -> None:
                 self.play_called = True
+                while chunk := source.read():
+                    source.mark_packet_sent(chunk)
                 after(None)
 
         class FakeSource:
@@ -574,6 +600,16 @@ class TtsPlaybackContractTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.cleaned = False
+                self._read = False
+
+            def read(self) -> bytes:
+                if self._read:
+                    return b""
+                self._read = True
+                return b"nonzero-pcm"
+
+            def is_opus(self) -> bool:
+                return False
 
             def cleanup(self) -> None:
                 self.cleaned = True
@@ -605,6 +641,362 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(metrics["meta"]["playback_completed"], True)
         self.assertFalse(manager.is_active(123))
         self.assertIn(123, manager.tracker.last_audio_end_at)
+
+    def test_play_audio_source_does_not_report_start_without_nonzero_pcm_effect(self) -> None:
+        class FakeVc:
+            source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+                while source.read():
+                    pass
+                self.source = None
+                after(None)
+
+        class SilentSource:
+            def __init__(self) -> None:
+                self._chunks = iter((b"\x00" * 8, b""))
+
+            def read(self) -> bytes:
+                return next(self._chunks)
+
+            def is_opus(self) -> bool:
+                return False
+
+        async def runner() -> tuple[bool, list[str]]:
+            starts: list[str] = []
+            completed = await play_audio_source(
+                FakeVc(),
+                SilentSource(),
+                on_play_start=lambda: starts.append("started"),
+            )
+            return completed, starts
+
+        completed, starts = asyncio.run(runner())
+
+        self.assertTrue(completed)
+        self.assertEqual(starts, [])
+
+    def test_play_audio_source_marshals_receipt_before_completion(self) -> None:
+        class FakeVc:
+            source = None
+
+            def __init__(self) -> None:
+                self.worker: threading.Thread | None = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+
+                def play_on_worker() -> None:
+                    chunk = source.read()
+                    source.mark_packet_sent(chunk)
+                    after(None)
+
+                self.worker = threading.Thread(target=play_on_worker)
+                self.worker.start()
+
+        class AudibleSource:
+            def read(self) -> bytes:
+                return b"nonzero-pcm"
+
+            def is_opus(self) -> bool:
+                return False
+
+        async def runner() -> tuple[list[tuple[str, int]], int]:
+            loop_thread_id = threading.get_ident()
+            events: list[tuple[str, int]] = []
+            vc = FakeVc()
+            await play_audio_source(
+                vc,
+                AudibleSource(),
+                on_play_start=lambda: events.append(
+                    ("started", threading.get_ident())
+                ),
+            )
+            events.append(("completed", threading.get_ident()))
+            if vc.worker is not None:
+                vc.worker.join(timeout=1.0)
+            return events, loop_thread_id
+
+        events, loop_thread_id = asyncio.run(runner())
+
+        self.assertEqual(
+            events,
+            [
+                ("started", loop_thread_id),
+                ("completed", loop_thread_id),
+            ],
+        )
+
+    def test_failed_packet_send_cannot_qualify_interrupt(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            def __init__(self) -> None:
+                self.guild = FakeGuild()
+                self.source = None
+                self.playing = False
+                self.frame_read = threading.Event()
+                self.release_send = threading.Event()
+                self.worker: threading.Thread | None = None
+
+            def is_playing(self) -> bool:
+                return self.playing
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+                self.playing = True
+
+                def fail_send_on_worker() -> None:
+                    source.read()
+                    self.frame_read.set()
+                    self.release_send.wait(timeout=1.0)
+                    after(RuntimeError("packet send failed"))
+
+                self.worker = threading.Thread(target=fail_send_on_worker)
+                self.worker.start()
+
+            def stop(self) -> None:
+                self.playing = False
+                self.source = None
+                self.release_send.set()
+
+        class AudibleSource:
+            error = None
+
+            def read(self) -> bytes:
+                return b"nonzero-pcm"
+
+            def is_opus(self) -> bool:
+                return False
+
+            def finish(self) -> None:
+                pass
+
+        async def runner() -> tuple[bool, dict, FakeVc]:
+            manager = TtsPlaybackManager()
+            vc = FakeVc()
+            metrics: dict = {"meta": {}}
+            playback_task = asyncio.create_task(
+                manager.play_source_once(
+                    TtsSourcePlaybackRequest(
+                        vc,
+                        AudibleSource(),
+                        guild_id=123,
+                        turn_id="turn-send-failure",
+                        metrics=metrics,
+                    )
+                )
+            )
+            await asyncio.to_thread(vc.frame_read.wait, 1.0)
+            await asyncio.sleep(0)
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await playback_task
+            if vc.worker is not None:
+                vc.worker.join(timeout=1.0)
+            return stopped, metrics, vc
+
+        stopped, metrics, vc = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn("qualified_tts_interrupt", metrics["meta"])
+        self.assertIsNotNone(vc.worker)
+        self.assertFalse(vc.worker.is_alive())
+
+    def test_queued_packet_send_failure_emits_no_receipt(self) -> None:
+        class FakeVc:
+            source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+                source.read()
+                self.source = None
+                after(RuntimeError("packet send failed"))
+
+        class AudibleStream:
+            error = None
+
+            def __init__(self) -> None:
+                self._read = False
+
+            def read(self) -> bytes:
+                if self._read:
+                    return b""
+                self._read = True
+                return b"nonzero-pcm"
+
+            def is_exhausted(self) -> bool:
+                return self._read
+
+            def cleanup(self) -> None:
+                pass
+
+        async def runner() -> list[str]:
+            starts: list[str] = []
+            source = QueuedAudioSource()
+            source.add_source(AudibleStream())
+            source.finish()
+            with self.assertRaisesRegex(RuntimeError, "packet send failed"):
+                await play_audio_source(
+                    FakeVc(),
+                    source,
+                    on_play_start=lambda: starts.append("started"),
+                )
+            return starts
+
+        self.assertEqual(asyncio.run(runner()), [])
+
+    def test_silent_source_cannot_complete_one_shot_playback(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            def __init__(self) -> None:
+                self.guild = FakeGuild()
+                self.source = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+                while source.read():
+                    pass
+                self.source = None
+                after(None)
+
+        class SilentSource:
+            error = None
+
+            def __init__(self) -> None:
+                self._chunks = iter((b"\x00" * 8, b""))
+
+            def read(self) -> bytes:
+                return next(self._chunks)
+
+            def is_opus(self) -> bool:
+                return False
+
+        async def runner() -> tuple[bool, dict, TtsPlaybackManager]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": {}}
+            completed = await manager.play_source_once(
+                TtsSourcePlaybackRequest(
+                    FakeVc(),
+                    SilentSource(),
+                    guild_id=123,
+                    turn_id="turn-silent",
+                    metrics=metrics,
+                )
+            )
+            return completed, metrics, manager
+
+        completed, metrics, manager = asyncio.run(runner())
+
+        self.assertFalse(completed)
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn(123, manager.tracker.last_audio_end_at)
+
+    def test_unread_source_cannot_qualify_interrupt_or_complete_playback(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            def __init__(self) -> None:
+                self.guild = FakeGuild()
+                self.source = None
+                self.play_called = asyncio.Event()
+                self.playing = False
+
+            def is_playing(self) -> bool:
+                return self.playing
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                self.source = source
+                self.playing = True
+                self.play_called.set()
+
+            def stop(self) -> None:
+                self.playing = False
+
+        class FakeSource:
+            error = None
+
+            def read(self) -> bytes:
+                return b"nonzero-pcm-that-is-never-read"
+
+            def is_opus(self) -> bool:
+                return False
+
+            def finish(self) -> None:
+                pass
+
+        async def runner() -> tuple[bool, dict, TtsPlaybackManager]:
+            manager = TtsPlaybackManager()
+            vc = FakeVc()
+            metrics: dict = {"meta": {}}
+            playback_task = asyncio.create_task(
+                manager.play_source_once(
+                    TtsSourcePlaybackRequest(
+                        vc,
+                        FakeSource(),
+                        guild_id=123,
+                        turn_id="turn-unread",
+                        metrics=metrics,
+                    )
+                )
+            )
+            await vc.play_called.wait()
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await playback_task
+            return stopped, metrics, manager
+
+        stopped, metrics, manager = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn("qualified_tts_interrupt", metrics["meta"])
+        self.assertNotIn(123, manager.tracker.last_audio_end_at)
 
     def test_play_source_once_blocks_stale_validation_before_vc_play(self) -> None:
         class FakeGuild:
@@ -672,6 +1064,7 @@ class TtsPlaybackContractTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.guild = FakeGuild()
                 self.play_called = False
+                self.worker: threading.Thread | None = None
 
             def is_playing(self) -> bool:
                 return False
@@ -679,21 +1072,32 @@ class TtsPlaybackContractTests(unittest.TestCase):
             def is_paused(self) -> bool:
                 return False
 
-            def play(self, _source: object, *, after: object) -> None:
+            def play(self, source: object, *, after: object) -> None:
                 self.play_called = True
-                after(None)
+
+                def consume() -> None:
+                    while chunk := source.read():
+                        source.mark_packet_sent(chunk)
+                    after(None)
+
+                self.worker = threading.Thread(target=consume, daemon=True)
+                self.worker.start()
 
         class FakeSource:
             error = None
 
             def __init__(self) -> None:
                 self.cleaned = False
+                self._chunks = iter((b"nonzero-pcm", b""))
 
             async def wait_until_ready(self, timeout: float = 1.0) -> bool:
                 return True
 
             def read(self) -> bytes:
-                return b""
+                return next(self._chunks)
+
+            def is_opus(self) -> bool:
+                return False
 
             def is_exhausted(self) -> bool:
                 return True
@@ -707,7 +1111,10 @@ class TtsPlaybackContractTests(unittest.TestCase):
             sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
             await sentence_queue.put("hello")
             await sentence_queue.put(None)
-            metrics: dict = {"meta": {}}
+            metrics: dict = {
+                "meta": {},
+                VOICE_LATENCY_TRACE_METRICS_KEY: VoiceLatencyTrace(),
+            }
             synthesized: list[tuple[str, int]] = []
 
             async def synthesize_source(sentence: str, chunk_index: int) -> FakeSource:
@@ -734,11 +1141,101 @@ class TtsPlaybackContractTests(unittest.TestCase):
         vc, metrics, synthesized, manager = asyncio.run(runner())
 
         self.assertTrue(vc.play_called)
+        self.assertIsNotNone(vc.worker)
+        vc.worker.join(timeout=1.0)
+        self.assertFalse(vc.worker.is_alive())
         self.assertEqual(synthesized, [("hello", 1)])
         self.assertEqual(metrics["meta"]["playback_started"], True)
         self.assertEqual(metrics["meta"]["playback_completed"], True)
+        self.assertIn(
+            "playback_first_write",
+            metrics[VOICE_LATENCY_TRACE_METRICS_KEY].public_summary()[
+                "markers_ms"
+            ],
+        )
         self.assertFalse(manager.is_active(123))
         self.assertIn(123, manager.tracker.last_audio_end_at)
+
+    def test_silent_stream_cannot_report_started_or_completed(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            def __init__(self) -> None:
+                self.guild = FakeGuild()
+                self.worker: threading.Thread | None = None
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source: object, *, after: object) -> None:
+                def consume() -> None:
+                    while chunk := source.read():
+                        source.mark_packet_sent(chunk)
+                    after(None)
+
+                self.worker = threading.Thread(target=consume, daemon=True)
+                self.worker.start()
+
+        class SilentSource:
+            error = None
+
+            def __init__(self) -> None:
+                self._chunks = iter((b"\x00" * 8, b""))
+
+            async def wait_until_ready(self, timeout: float = 1.0) -> bool:
+                return True
+
+            def read(self) -> bytes:
+                return next(self._chunks)
+
+            def is_exhausted(self) -> bool:
+                return True
+
+            def cleanup(self) -> None:
+                pass
+
+        async def runner() -> tuple[FakeVc, dict, TtsPlaybackManager]:
+            manager = TtsPlaybackManager()
+            vc = FakeVc()
+            sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            sentence_queue.put_nowait("hello")
+            sentence_queue.put_nowait(None)
+            metrics: dict = {"meta": {}}
+
+            async def synthesize_source(
+                _sentence: str,
+                _chunk_index: int,
+            ) -> SilentSource:
+                return SilentSource()
+
+            await manager.stream_sentences(
+                TtsStreamingPlaybackRequest(
+                    vc=vc,
+                    sentence_queue=sentence_queue,
+                    synthesize_source=synthesize_source,
+                    guild_id=123,
+                    turn_id="turn-silent-stream",
+                    metrics=metrics,
+                    ready_timeout_sec=0.1,
+                    prefetch_chunks=1,
+                    lookahead_chunks=1,
+                    lookahead_timeout_ms=50,
+                )
+            )
+            return vc, metrics, manager
+
+        vc, metrics, manager = asyncio.run(runner())
+
+        self.assertIsNotNone(vc.worker)
+        vc.worker.join(timeout=1.0)
+        self.assertFalse(vc.worker.is_alive())
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn(123, manager.tracker.last_audio_end_at)
 
     def test_stream_sentences_blocks_stale_validation_before_vc_play(self) -> None:
         class FakeGuild:
@@ -1378,6 +1875,54 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(events[-1][0], "discord_playback_exception")
         self.assertEqual(events[-1][1]["stage"], "after_play")
 
+    def test_play_audio_source_cancellation_stops_only_matching_source(self) -> None:
+        class FakeVc:
+            def __init__(self) -> None:
+                self.source = None
+                self.stop_count = 0
+                self.started = asyncio.Event()
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, source, *, after) -> None:
+                self.source = source
+                self.started.set()
+
+            def stop(self) -> None:
+                self.stop_count += 1
+                self.source = None
+
+        async def runner(*, replace_source: bool):
+            vc = FakeVc()
+            source = object()
+            replacement = object()
+            task = asyncio.create_task(
+                play_audio_source(vc, source, timeout_sec=30.0)  # type: ignore[arg-type]
+            )
+            await vc.started.wait()
+            if replace_source:
+                vc.source = replacement
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return vc, source, replacement
+
+        matching, source, _replacement = asyncio.run(
+            runner(replace_source=False)
+        )
+        self.assertEqual(matching.stop_count, 1)
+        self.assertIsNone(matching.source)
+
+        replaced, _source, replacement = asyncio.run(
+            runner(replace_source=True)
+        )
+        self.assertEqual(replaced.stop_count, 0)
+        self.assertIs(replaced.source, replacement)
+
     def test_late_timeout_does_not_stop_newer_playback(self) -> None:
         replacement = object()
 
@@ -1428,6 +1973,124 @@ class TtsPlaybackContractTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(chunks), 1)
         self.assertEqual(chunks[0], "오늘은 여기까지 하면 된다고 생각해.")
+
+    def test_speech_chunker_does_not_force_an_unsafe_character_cut(self) -> None:
+        self.assertEqual(SpeechChunker().push("가" * 120, max_chunks=None), [])
+
+    def test_speech_commit_gate_binds_current_immutable_prefixes(self) -> None:
+        generation = object()
+        gate = SpeechCommitGate(
+            turn_id="turn-1",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+        )
+
+        first = gate.push(
+            "오늘은 여기까지 하면 된다고 생각해. 다음은 나중에 보자."
+        )
+        tail = gate.finish(
+            "오늘은 여기까지 하면 된다고 생각해. 다음은 나중에 보자."
+        )
+
+        commits = first + tail
+        self.assertEqual([item.prefix_index for item in commits], [0, 1])
+        self.assertTrue(all(item.turn_id == "turn-1" for item in commits))
+        self.assertTrue(all(item.response_generation is generation for item in commits))
+        self.assertTrue(all(len(item.prefix_hash) == 64 for item in commits))
+        self.assertEqual(
+            gate.committed_prefix,
+            "오늘은 여기까지 하면 된다고 생각해. 다음은 나중에 보자.",
+        )
+
+    def test_speech_commit_gate_fails_closed_for_stale_generation(self) -> None:
+        gate = SpeechCommitGate(
+            turn_id="turn-stale",
+            response_generation=object(),
+            generation_is_current=lambda _value: False,
+        )
+
+        self.assertEqual(
+            gate.push("오늘은 여기까지 하면 된다고 생각해."),
+            [],
+        )
+        self.assertTrue(gate.stale)
+        self.assertTrue(gate.closed)
+
+    def test_memory_bound_speech_waits_for_explicit_handoff(self) -> None:
+        generation = object()
+        handoff_ready = False
+        answer = "오늘은 여기까지 하면 된다고 생각해."
+        gate = SpeechCommitGate(
+            turn_id="turn-memory",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+            commit_allowed=lambda: handoff_ready,
+            memory_bound=True,
+        )
+
+        self.assertEqual(gate.push(answer), [])
+        self.assertEqual(gate.finish(answer), [])
+        self.assertFalse(gate.closed)
+        handoff_ready = True
+        commits = gate.finish(answer)
+
+        self.assertEqual([item.text for item in commits], [answer])
+        self.assertTrue(gate.closed)
+
+    def test_speech_commit_gate_rejects_rewritten_final_prefix(self) -> None:
+        generation = object()
+        gate = SpeechCommitGate(
+            turn_id="turn-rewrite",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+        )
+        gate.push("오늘은 여기까지 하면 된다고 생각해.")
+
+        with self.assertRaisesRegex(
+            SpeechCommitContractError,
+            "immutable final prefix",
+        ):
+            gate.finish("오늘은 전혀 다른 답을 하겠어.")
+
+    def test_speech_commit_gate_binds_post_policy_candidates_and_final(self) -> None:
+        generation = object()
+        gate = SpeechCommitGate(
+            turn_id="turn-shaped",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+        )
+
+        gate.observe_safe_delta("첫 문장이야.")
+        first = gate.commit_candidate("첫 문장이야.")
+        gate.observe_safe_delta("둘째 문장이야.")
+        second = gate.commit_candidate("둘째 문장이야.")
+        gate.validate_final("첫 문장이야. 둘째 문장이야.")
+
+        self.assertEqual(
+            [commit.prefix_index for commit in first + second],
+            [0, 1],
+        )
+        self.assertNotEqual(first[0].prefix_hash, second[0].prefix_hash)
+        self.assertTrue(gate.closed)
+
+    def test_memory_bound_candidate_requires_current_handoff(self) -> None:
+        generation = object()
+        handoff_ready = False
+        gate = SpeechCommitGate(
+            turn_id="turn-shaped-memory",
+            response_generation=generation,
+            generation_is_current=lambda value: value is generation,
+            commit_allowed=lambda: handoff_ready,
+            memory_bound=True,
+        )
+
+        gate.observe_safe_delta("기억을 반영한 답이야.")
+        self.assertEqual(gate.commit_candidate("기억을 반영한 답이야."), [])
+        handoff_ready = True
+        commits = gate.commit_candidate("기억을 반영한 답이야.")
+        gate.validate_final("기억을 반영한 답이야.")
+
+        self.assertEqual([commit.text for commit in commits], ["기억을 반영한 답이야."])
 
     def test_split_tts_sentences_preserves_tail_until_forced(self) -> None:
         chunks, tail = split_tts_sentences("그리고", force=False)

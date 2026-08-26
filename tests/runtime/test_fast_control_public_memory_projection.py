@@ -21,7 +21,10 @@ REPO_ROOT = next(
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
-sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
+try:
+    import numpy as _numpy  # noqa: F401
+except ImportError:
+    sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
 from evelyn_core import memory_deletion_journal as journal  # noqa: E402

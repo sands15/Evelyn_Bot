@@ -180,6 +180,13 @@ STT_SERVICE_SETTINGS = (
         minimum=1.0,
         maximum=300.0,
     ),
+    SettingSpec(
+        "STT_VLLM_GPU_MEMORY_UTILIZATION",
+        kind="float",
+        default=0.35,
+        minimum=0.1,
+        maximum=0.9,
+    ),
     SettingSpec("HF_TOKEN", default="", secret=True, allow_empty=True),
 )
 

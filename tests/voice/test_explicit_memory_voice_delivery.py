@@ -20,7 +20,11 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.voice_orchestration import (  # noqa: E402
     deliver_voice_reply,
 )
-from evelyn_core.memory_confirmation_contract import memory_owner_scope  # noqa: E402
+from evelyn_core.memory_confirmation_contract import (  # noqa: E402
+    memory_owner_scope,
+    memory_owner_scope_for_local_surface,
+    memory_reset_scope,
+)
 
 
 class ExplicitMemoryVoiceDeliveryTests(
@@ -542,7 +546,169 @@ class ExplicitMemoryVoiceDeliveryTests(
                 guild_id=7,
                 person_key="person-key",
             ),
+            reset_scope=memory_reset_scope(7),
         )
+
+    async def test_local_speaker_memory_command_uses_local_owner(self) -> None:
+        owner_scope = memory_owner_scope_for_local_surface()
+        spoken: list[str] = []
+        metrics: dict = {"meta": {}}
+
+        async def speak_answer(_vc, answer: str, **_kwargs) -> None:
+            spoken.append(answer)
+
+        with patch(
+            "evelyn_core.voice_orchestration."
+            "execute_explicit_memory_confirmation",
+            return_value=(True, "기억에 저장했어.", None, ""),
+        ) as execute:
+            result = await deliver_voice_reply(
+                voice_reply=SimpleNamespace(
+                    wake_only_turn=False,
+                    history_user_text="/remember local fact",
+                    prompt_user_text="unused",
+                    turn_type="statement",
+                    selected_path="pipeline",
+                ),
+                canned_wake_reply="unused",
+                vc=SimpleNamespace(local_speaker_output=True),
+                accepted_turn_id="turn-local-memory-1",
+                session_key="guild:0:voice:none:user:42",
+                guild_id=0,
+                room_key="voice:none",
+                person_key="user:42",
+                session_memory_key="session:user:42",
+                metrics=metrics,
+                turn_scope=object(),
+                on_final_answer=None,
+                speak_answer=speak_answer,
+                ask_llm_and_speak_streaming=lambda *_args, **_kwargs: None,
+                record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
+                log_voice_stage=lambda *_args, **_kwargs: None,
+                strip_omnivoice_tags=lambda value: value,
+                report_delivery_error=lambda exc: self.fail(str(exc)),
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(spoken, ["기억에 저장했어."])
+        execute.assert_called_once_with(
+            "/remember local fact",
+            action_id="turn-local-memory-1",
+            evidence_turn_id="turn-local-memory-1",
+            source="control-page-user",
+            owner_scope=owner_scope,
+            reset_scope=memory_reset_scope(None),
+        )
+        self.assertNotIn(owner_scope, repr(metrics))
+
+    async def test_configured_local_speaker_uses_matching_guild_reset_scope(
+        self,
+    ) -> None:
+        owner_scope = memory_owner_scope_for_local_surface(
+            configured_guild_id=77,
+            configured_user_id=88,
+        )
+        reset_scope = memory_reset_scope(77)
+
+        async def speak_answer(*_args, **_kwargs) -> None:
+            return None
+
+        with (
+            patch(
+                "evelyn_core.voice_orchestration."
+                "_LOCAL_VOICE_MEMORY_OWNER_SCOPE",
+                owner_scope,
+            ),
+            patch(
+                "evelyn_core.voice_orchestration."
+                "_LOCAL_VOICE_MEMORY_RESET_SCOPE",
+                reset_scope,
+            ),
+            patch(
+                "evelyn_core.voice_orchestration."
+                "execute_explicit_memory_confirmation",
+                return_value=(True, "기억에 저장했어.", None, ""),
+            ) as execute,
+        ):
+            await deliver_voice_reply(
+                voice_reply=SimpleNamespace(
+                    wake_only_turn=False,
+                    history_user_text="/remember configured fact",
+                    prompt_user_text="unused",
+                    turn_type="statement",
+                    selected_path="pipeline",
+                ),
+                canned_wake_reply="unused",
+                vc=SimpleNamespace(local_speaker_output=True),
+                accepted_turn_id="turn-configured-memory-1",
+                session_key="guild:77:voice:none:user:88",
+                guild_id=0,
+                room_key="voice:none",
+                person_key="user:88",
+                session_memory_key="session:user:88",
+                metrics={"meta": {}},
+                turn_scope=object(),
+                on_final_answer=None,
+                speak_answer=speak_answer,
+                ask_llm_and_speak_streaming=(
+                    lambda *_args, **_kwargs: None
+                ),
+                record_voice_pipeline_failure=(
+                    lambda *_args, **_kwargs: None
+                ),
+                log_voice_stage=lambda *_args, **_kwargs: None,
+                strip_omnivoice_tags=lambda value: value,
+                report_delivery_error=lambda exc: self.fail(str(exc)),
+            )
+
+        execute.assert_called_once_with(
+            "/remember configured fact",
+            action_id="turn-configured-memory-1",
+            evidence_turn_id="turn-configured-memory-1",
+            source="control-page-user",
+            owner_scope=owner_scope,
+            reset_scope=reset_scope,
+        )
+
+    async def test_local_speaker_streaming_passes_private_memory_owner(self) -> None:
+        owner_scope = memory_owner_scope_for_local_surface()
+        calls: list[dict] = []
+        metrics: dict = {"meta": {}}
+
+        async def stream(*_args, **kwargs) -> str:
+            calls.append(kwargs)
+            return "이어갈게."
+
+        result = await deliver_voice_reply(
+            voice_reply=SimpleNamespace(
+                wake_only_turn=False,
+                history_user_text="전에 기억한 내용을 이어가줘",
+                prompt_user_text="전에 기억한 내용을 이어가줘",
+                turn_type="conversation",
+                selected_path="main_llm",
+            ),
+            canned_wake_reply="unused",
+            vc=SimpleNamespace(local_speaker_output=True),
+            accepted_turn_id="turn-local-recall-1",
+            session_key="guild:0:voice:none:user:42",
+            guild_id=0,
+            room_key="voice:none",
+            person_key="user:42",
+            session_memory_key="session:user:42",
+            metrics=metrics,
+            turn_scope=object(),
+            on_final_answer=None,
+            speak_answer=lambda *_args, **_kwargs: None,
+            ask_llm_and_speak_streaming=stream,
+            record_voice_pipeline_failure=lambda *_args, **_kwargs: None,
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            strip_omnivoice_tags=lambda value: value,
+            report_delivery_error=lambda exc: self.fail(str(exc)),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(calls[0]["memory_owner_scope"], owner_scope)
+        self.assertNotIn(owner_scope, repr(metrics))
 
     async def test_explicit_memory_cancel_emits_one_terminal_summary_and_reraises(
         self,

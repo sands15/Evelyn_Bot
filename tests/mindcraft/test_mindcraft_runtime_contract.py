@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import tempfile
@@ -28,6 +29,9 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.process_identity_path = (
             Path(self.temp_dir.name) / "process_identity.json"
         )
+        self.child_runtime_path = (
+            Path(self.temp_dir.name) / "child_runtime.json"
+        )
         for active_patch in (
             patch.object(
                 mindcraft_service,
@@ -38,6 +42,11 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                 mindcraft_service,
                 "MINDCRAFT_PROCESS_IDENTITY_PATH",
                 self.process_identity_path,
+            ),
+            patch.object(
+                mindcraft_service,
+                "MINDCRAFT_CHILD_RUNTIME_PATH",
+                self.child_runtime_path,
             ),
         ):
             active_patch.start()
@@ -297,6 +306,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                     {
                         "runtime": "mindcraft",
                         "connected": True,
+                        "connected_at": mindcraft_service.time.time() - 3.1,
                         "connection_state": "connected",
                         "phase": "survival",
                         "position": {"x": 1, "y": 64, "z": 2},
@@ -350,6 +360,15 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertEqual(payload["current_task_stage"], "obtain_logs")
         self.assertEqual(payload["configuration"]["schema"], "runtime_config.owner.v1")
         self.assertEqual(payload["errorCount"], 0)
+        self.assertEqual(
+            payload["child_runtime"],
+            {
+                "schema": "mindcraft_runtime.child-events.v1",
+                "events": [],
+                "updated_at": None,
+                "content_free": True,
+            },
+        )
         readiness = payload["functional_readiness"]
         self.assertEqual(
             readiness["schema"],
@@ -373,6 +392,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                     {
                         "runtime": "mindcraft",
                         "connected": True,
+                        "connected_at": mindcraft_service.time.time() - 3.1,
                         "connection_state": "connected",
                         "phase": "survival",
                         "last_error": canary,
@@ -431,6 +451,365 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("survival_controller", persisted)
         self.assertNotIn(canary, json.dumps(payload, sort_keys=True))
         self.assertNotIn(canary, json.dumps(persisted, sort_keys=True))
+
+    def test_content_free_survival_controller_is_projected(self) -> None:
+        canary = "PRIVATE_SURVIVAL_STATE_CANARY"
+        projected = mindcraft_service._project_mindcraft_telemetry(
+            {
+                "survival_controller": {
+                    "phase": "shelter_until_safe_dawn",
+                    "last_decision": "shelter_until_safe_dawn",
+                    "last_success": False,
+                    "last_error": "survival_action_failed",
+                    "recovery_progress": True,
+                    "recovery_handoff_until": 123.5,
+                    "wake_reason": "projectile",
+                    "wake_to_decision_ms": 17.4,
+                    "decision_to_action_ms": 2,
+                    "reflex_reason": "projectile",
+                    "reflex_to_action_ms": 1.6,
+                    "bootstrap_phase": "candidate_unreached",
+                    "bootstrap_candidate_count": 1,
+                    "bootstrap_logs_before": 2,
+                    "bootstrap_logs_after": 2,
+                    "shelter_success_count": 7,
+                    "last_reflex_at": 455.25,
+                    "updated_at": 456.5,
+                    "content_free": True,
+                    "snapshot": {"private": canary},
+                }
+            }
+        )
+
+        self.assertEqual(
+            projected["survival_controller"],
+            {
+                "phase": "shelter_until_safe_dawn",
+                "last_decision": "shelter_until_safe_dawn",
+                "last_success": False,
+                "last_error": "survival_action_failed",
+                "recovery_progress": True,
+                "recovery_handoff_until": 123.5,
+                "wake_reason": "projectile",
+                "wake_to_decision_ms": 17,
+                "decision_to_action_ms": 2,
+                "reflex_reason": "projectile",
+                "reflex_to_action_ms": 2,
+                "bootstrap_phase": "candidate_unreached",
+                "bootstrap_candidate_count": 1,
+                "bootstrap_logs_before": 2,
+                "bootstrap_logs_after": 2,
+                "shelter_success_count": 7,
+                "last_reflex_at": 455.25,
+                "updated_at": 456.5,
+                "content_free": True,
+            },
+        )
+        self.assertNotIn(canary, json.dumps(projected, sort_keys=True))
+
+        rejected = mindcraft_service._project_mindcraft_telemetry(
+            {
+                "survival_controller": {
+                    "bootstrap_phase": canary,
+                    "bootstrap_candidate_count": 5,
+                    "bootstrap_logs_before": -1,
+                    "bootstrap_logs_after": 65,
+                    "shelter_success_count": -1,
+                    "content_free": True,
+                }
+            }
+        )["survival_controller"]
+        self.assertIsNone(rejected["bootstrap_phase"])
+        self.assertIsNone(rejected["bootstrap_candidate_count"])
+        self.assertIsNone(rejected["bootstrap_logs_before"])
+        self.assertIsNone(rejected["bootstrap_logs_after"])
+        self.assertIsNone(rejected["shelter_success_count"])
+        self.assertNotIn(canary, json.dumps(rejected, sort_keys=True))
+
+    def test_child_output_drain_persists_only_bounded_fixed_categories(self) -> None:
+        canary = "PRIVATE_PROMPT_COORDINATE_CANARY x=123 z=456"
+        runtime = mindcraft_service.MindcraftRuntime(
+            child_runtime_path=self.child_runtime_path
+        )
+        generation = runtime._reset_child_runtime()
+        process = Mock()
+        process.stdout = io.BytesIO(
+            "\n".join(
+                (
+                    f"Error in spawn event: {canary}",
+                    f"at Agent.requestInterrupt (/private/agent.js:251) {canary}",
+                    f"UnhandledPromiseRejectionWarning: {canary}",
+                    f"uncaughtException: {canary}",
+                    f"Code execution refused stop after 10 seconds. {canary}",
+                    f"Infinite action loop detected, shutting down. {canary}",
+                    f"[LoginGuard] Disconnected: {canary}",
+                    f"[LoginGuard] Kicked: {canary}",
+                    "Agent process exited with code 1 and signal null",
+                )
+            ).encode("utf-8")
+        )
+
+        runtime._drain_child_output(process, generation)
+
+        persisted = json.loads(self.child_runtime_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [event["category"] for event in persisted["events"]],
+            [
+                "spawn_event_failed",
+                "interrupt_plugin_not_ready",
+                "unhandled_rejection",
+                "uncaught_exception",
+                "action_stop_timeout",
+                "rapid_loop",
+                "mineflayer_end",
+                "mineflayer_kicked",
+                "child_exit",
+            ],
+        )
+        self.assertEqual(persisted["events"][-1]["exit_code"], 1)
+        self.assertIsNone(persisted["events"][-1]["signal"])
+        self.assertEqual(
+            mindcraft_service._classify_mindcraft_child_output(
+                b"Agent process exited with code null and signal SIGTERM"
+            ),
+            ("child_exit", None, "SIGTERM"),
+        )
+        self.assertTrue(persisted["content_free"])
+        self.assertNotIn(canary, json.dumps(persisted, sort_keys=True))
+
+        generation = runtime._reset_child_runtime()
+        process.stdout = io.BytesIO(
+            ("Infinite action loop detected\n" * 20).encode("ascii")
+        )
+        runtime._drain_child_output(process, generation)
+        bounded = json.loads(self.child_runtime_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            len(bounded["events"]),
+            mindcraft_service._MINDCRAFT_CHILD_EVENT_LIMIT,
+        )
+
+    def test_device_code_marker_projects_only_valid_ephemeral_status(self) -> None:
+        canary = "PRIVATE_AUTH_CANARY"
+        runtime = mindcraft_service.MindcraftRuntime(
+            child_runtime_path=self.child_runtime_path
+        )
+        generation = runtime._reset_child_runtime()
+        process = Mock()
+        process.poll.return_value = None
+        process.stdout = io.BytesIO(
+            "\n".join(
+                (
+                    f"[EVELYN_MSA_DEVICE_CODE] ABCD2345 900 {canary}",
+                    "[EVELYN_MSA_DEVICE_CODE] ABCD-234 900",
+                    "[EVELYN_MSA_DEVICE_CODE] ABCD2345 99999",
+                    "[EVELYN_MSA_DEVICE_CODE] ABCD2345 900",
+                )
+            ).encode("ascii")
+        )
+
+        with (
+            patch.object(mindcraft_service.time, "time", return_value=1_000.0),
+            patch.object(mindcraft_service.time, "monotonic", return_value=100.0),
+        ):
+            runtime._drain_child_output(process, generation)
+            runtime._process = process
+            with (
+                patch.object(runtime, "reconcile_world_lease", return_value=True),
+                patch.object(
+                    mindcraft_service,
+                    "_read_mindcraft_status",
+                    return_value={
+                        "connected": False,
+                        "updated_at": 1_000.0,
+                    },
+                ),
+            ):
+                status = runtime.build_status()
+
+        self.assertEqual(
+            status["microsoft_auth"],
+            {
+                "state": "device_code_pending",
+                "user_code": "ABCD2345",
+                "verification_url": "https://www.microsoft.com/link",
+                "expires_at": 1_900.0,
+            },
+        )
+        persisted = self.child_runtime_path.read_text(encoding="utf-8")
+        self.assertNotIn("ABCD2345", persisted)
+        self.assertNotIn(canary, persisted)
+
+    def test_device_code_challenge_clears_on_expiry_and_reset(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime(
+            child_runtime_path=self.child_runtime_path
+        )
+        generation = runtime._reset_child_runtime()
+        process = Mock()
+        process.poll.return_value = None
+        process.stdout = io.BytesIO(
+            b"[EVELYN_MSA_DEVICE_CODE] ABCD2345 900\n"
+        )
+        with (
+            patch.object(mindcraft_service.time, "time", return_value=1_000.0),
+            patch.object(mindcraft_service.time, "monotonic", return_value=100.0),
+        ):
+            runtime._drain_child_output(process, generation)
+
+        with patch.object(
+            mindcraft_service.time,
+            "monotonic",
+            return_value=1_000.0,
+        ):
+            self.assertIsNone(
+                runtime._microsoft_auth_challenge_snapshot(
+                    running=True,
+                    connected=False,
+                )
+            )
+
+        generation = runtime._reset_child_runtime()
+        process.stdout = io.BytesIO(
+            b"[EVELYN_MSA_DEVICE_CODE] WXYZ6789 900\n"
+        )
+        with (
+            patch.object(mindcraft_service.time, "time", return_value=2_000.0),
+            patch.object(mindcraft_service.time, "monotonic", return_value=200.0),
+        ):
+            runtime._drain_child_output(process, generation)
+        runtime._reset_child_runtime()
+        self.assertIsNone(
+            runtime._microsoft_auth_challenge_snapshot(
+                running=True,
+                connected=False,
+            )
+        )
+
+    def test_device_code_challenge_clears_when_telemetry_connects(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime(
+            child_runtime_path=self.child_runtime_path
+        )
+        generation = runtime._reset_child_runtime()
+        process = Mock()
+        process.poll.return_value = None
+        process.stdout = io.BytesIO(
+            b"[EVELYN_MSA_DEVICE_CODE] ABCD2345 900\n"
+        )
+        with (
+            patch.object(mindcraft_service.time, "time", return_value=1_000.0),
+            patch.object(mindcraft_service.time, "monotonic", return_value=100.0),
+        ):
+            runtime._drain_child_output(process, generation)
+            runtime._process = process
+            with (
+                patch.object(runtime, "reconcile_world_lease", return_value=True),
+                patch.object(
+                    mindcraft_service,
+                    "_read_mindcraft_status",
+                    return_value={
+                        "connected": True,
+                        "connected_at": 997.0,
+                        "updated_at": 1_000.0,
+                    },
+                ),
+            ):
+                status = runtime.build_status()
+
+        self.assertNotIn("microsoft_auth", status)
+        self.assertIsNone(
+            runtime._microsoft_auth_challenge_snapshot(
+                running=True,
+                connected=False,
+            )
+        )
+
+    def test_child_output_pipe_is_drained_without_raw_retention(self) -> None:
+        canary = "PRIVATE_PIPE_CANARY"
+        runtime = mindcraft_service.MindcraftRuntime(
+            child_runtime_path=self.child_runtime_path
+        )
+        generation = runtime._reset_child_runtime()
+        process = mindcraft_service.subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys;"
+                    "sys.stdout.buffer.write(b'x' * 262144);"
+                    f"sys.stdout.buffer.write(b'\\nError in spawn event: {canary}\\n');"
+                    "sys.stdout.buffer.flush()"
+                ),
+            ],
+            stdout=mindcraft_service.subprocess.PIPE,
+            stderr=mindcraft_service.subprocess.STDOUT,
+        )
+        try:
+            runtime._start_child_output_drain(process, generation)
+            drain = runtime._child_output_thread
+            self.assertIsNotNone(drain)
+            process.wait(timeout=5)
+            drain.join(timeout=5)
+            self.assertFalse(drain.is_alive())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+        persisted = json.loads(self.child_runtime_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [event["category"] for event in persisted["events"]],
+            ["spawn_event_failed", "child_exit"],
+        )
+        self.assertEqual(persisted["events"][-1]["exit_code"], 0)
+        self.assertNotIn(canary, json.dumps(persisted, sort_keys=True))
+
+    def test_connection_readiness_requires_three_stable_seconds_and_no_fatal_child_event(
+        self,
+    ) -> None:
+        telemetry = {"connected": True, "connected_at": 100.0}
+        empty_child_runtime = {
+            "events": [],
+            "content_free": True,
+        }
+        self.assertFalse(
+            mindcraft_service._stable_minecraft_connection(
+                running=True,
+                telemetry_fresh=True,
+                telemetry=telemetry,
+                child_runtime=empty_child_runtime,
+                now=102.9,
+            )
+        )
+        self.assertTrue(
+            mindcraft_service._stable_minecraft_connection(
+                running=True,
+                telemetry_fresh=True,
+                telemetry=telemetry,
+                child_runtime=empty_child_runtime,
+                now=103.0,
+            )
+        )
+        self.assertFalse(
+            mindcraft_service._stable_minecraft_connection(
+                running=True,
+                telemetry_fresh=True,
+                telemetry=telemetry,
+                child_runtime={
+                    "events": [
+                        {"category": "interrupt_plugin_not_ready"}
+                    ]
+                },
+                now=110.0,
+            )
+        )
+        self.assertFalse(
+            mindcraft_service._stable_minecraft_connection(
+                running=True,
+                telemetry_fresh=True,
+                telemetry={"connected": True},
+                child_runtime=empty_child_runtime,
+                now=110.0,
+            )
+        )
 
     def test_status_blocks_http_only_or_unverified_task_runtime(
         self,
@@ -710,6 +1089,9 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         overlay_patch = (REPO_ROOT / "external" / "mindcraft_evelyn" / "evelyn.patch").read_text(
             encoding="utf-8"
         )
+        upstream_modes = (
+            REPO_ROOT / "external" / "mindcraft" / "src" / "agent" / "modes.js"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("startsWith('/')", runtime_source)
         self.assertIn("MINDCRAFT_ALLOW_OUTBOUND_CHAT", runtime_source)
@@ -717,19 +1099,36 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("blocked outbound whisper", runtime_source)
         self.assertIn("bot.once('inject_allowed', installChatGuard)", runtime_source)
         self.assertIn("survival_controller", runtime_source)
+        self.assertIn("'acquire_food'", runtime_source)
         self.assertIn("goal_manager", runtime_source)
         self.assertIn("mindcraft.task-contract.v1", runtime_source)
         self.assertIn("effect_verification", runtime_source)
         self.assertIn("MINEFLAYER_PROFILES_FOLDER", overlay_patch)
         self.assertIn("process.env.MINECRAFT_USERNAME", overlay_patch)
+        self.assertIn("onMsaCode", overlay_patch)
+        self.assertIn("[EVELYN_MSA_DEVICE_CODE]", overlay_patch)
+        self.assertNotIn("verification_uri", overlay_patch)
         self.assertIn("self_prompter.start(process.env.MINDCRAFT_GOAL || init_message)", overlay_patch)
         self.assertIn("init_message && !save_data?.self_prompt", overlay_patch)
         self.assertIn("createEvelynSurvivalMode", overlay_patch)
+        self.assertLess(
+            upstream_modes.index("name: 'self_preservation'"),
+            upstream_modes.index("name: 'unstuck'"),
+        )
+        self.assertIn(
+            "+    createEvelynSurvivalMode({ execute }),\n"
+            "     {\n"
+            "         name: 'unstuck'",
+            overlay_patch,
+        )
         self.assertIn("minimumY", overlay_patch)
         self.assertIn("EvelynGoalManager", overlay_patch)
         self.assertIn("prepareForPrompt", overlay_patch)
         self.assertIn("gateCommand", overlay_patch)
         self.assertIn("handleMessage('system', msg, 1)", overlay_patch)
+        self.assertIn("diff --git a/main.js b/main.js", overlay_patch)
+        self.assertIn("process.once('SIGTERM', gracefulShutdown)", overlay_patch)
+        self.assertIn("Mindcraft.shutdown()", overlay_patch)
 
         profile = json.loads(
             (REPO_ROOT / "external" / "mindcraft_evelyn" / "profiles" / "evelyn.json").read_text(
@@ -745,6 +1144,11 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             {"api": "evelyn-planner", "model": "Qwen3-14B-Q4_K_M.gguf"},
         )
         self.assertEqual(profile["embedding"], {"api": "evelyn-planner", "model": "hash-v1"})
+        self.assertEqual(profile["cooldown"], 300)
+        self.assertLess(
+            profile["conversing"].index("$COMMAND_DOCS"),
+            profile["conversing"].index("$STATS"),
+        )
         self.assertTrue(profile["modes"]["evelyn_survival"])
         self.assertFalse(profile["modes"]["cowardice"])
         self.assertFalse(profile["modes"]["self_defense"])
@@ -776,6 +1180,14 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             / "agent"
             / "evelyn_combat.js"
         ).read_text(encoding="utf-8")
+        combat_experience_source = (
+            REPO_ROOT
+            / "external"
+            / "mindcraft_evelyn"
+            / "src"
+            / "agent"
+            / "evelyn_combat_experience.js"
+        ).read_text(encoding="utf-8")
         package = json.loads(
             (REPO_ROOT / "external" / "mindcraft_evelyn" / "package.json").read_text(
                 encoding="utf-8"
@@ -804,6 +1216,11 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("assessCombat", combat_source)
         self.assertIn("fightWithCustomPvp", combat_source)
         self.assertIn("selectCombatTarget", combat_source)
+        self.assertIn("selectCombatPreset", survival_source)
+        self.assertIn("createCombatHistoryWriter", combat_experience_source)
+        self.assertIn("COMBAT_HISTORY_SCHEMA_VERSION = 1", combat_experience_source)
+        self.assertIn("successes >= 2", combat_experience_source)
+        self.assertIn("consecutiveFailures >= FAILURE_QUARANTINE", combat_experience_source)
         self.assertEqual(package["dependencies"]["@nxg-org/mineflayer-custom-pvp"], "1.7.16")
         self.assertNotIn("mineflayer-pvp", package["dependencies"])
         self.assertIn("bot.loadPlugin(customPvp)", combat_patch)
@@ -815,6 +1232,31 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("verify_combat_runtime.mjs", dockerfile)
         self.assertIn("-            await attackEntity(bot, enemy, false)", combat_patch)
         self.assertIn("evelyn_combat.js", dockerfile)
+        self.assertIn("evelyn_combat_experience.js", dockerfile)
+        self.assertIn("combat_experience.test.mjs", dockerfile)
+        self.assertIn("combat_mode.test.mjs", dockerfile)
+        self.assertIn(
+            "COPY external/mindcraft_evelyn/tests/escape_controller.test.mjs "
+            "/app/mindcraft/tests/escape_controller.test.mjs",
+            dockerfile,
+        )
+        self.assertIn(
+            "      /app/mindcraft/tests/escape_controller.test.mjs",
+            dockerfile,
+        )
+        self.assertIn("goal_manager.test.mjs", dockerfile)
+        self.assertIn(
+            "COPY external/mindcraft_evelyn/tests/survival_hostile_reflex.test.mjs "
+            "/app/mindcraft/tests/survival_hostile_reflex.test.mjs",
+            dockerfile,
+        )
+        self.assertIn(
+            "      /app/mindcraft/tests/survival_hostile_reflex.test.mjs",
+            dockerfile,
+        )
+        self.assertIn("survival_mode.test.mjs", dockerfile)
+        self.assertIn("latency.patch", dockerfile)
+        self.assertIn("verify_latency_runtime.mjs", dockerfile)
         self.assertIn("evelyn_escape_controller.js", dockerfile)
         self.assertIn("combat.patch", dockerfile)
         self.assertIn("buildEscapeCandidates", escape_source)
@@ -856,6 +1298,10 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("MINDCRAFT_LLM_BROKER_TOKEN_FILE", source)
         self.assertIn("mindcraft.llm-request.v1", source)
         self.assertIn("mindcraft.llm-delivery-ack.v1", source)
+        self.assertIn("BROKER_REQUEST_TIMEOUT_MS = 135 * 1000", source)
+        self.assertIn("BROKER_MAX_ACK_BYTES = 4096", source)
+        self.assertIn("readBoundedJson(response, BROKER_MAX_ACK_BYTES)", source)
+        self.assertNotIn("response.json()", source)
         self.assertNotIn("http://router_llm:9822/v1/chat/completions", source)
         self.assertNotIn("http://minecraft_llm:9823/v1/chat/completions", source)
         self.assertIn("Planner output violated command policy", source)
@@ -1076,8 +1522,10 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("VOYAGER_CODEX_GATEWAY_TOKEN_FILE", voyager)
         self.assertNotIn("codex_gateway_token:/gateway-token", voyager)
         self.assertIn('"load_memory": False', runtime_source)
-        self.assertIn("stdout=subprocess.DEVNULL", runtime_source)
-        self.assertIn("stderr=subprocess.DEVNULL", runtime_source)
+        self.assertIn("stdout=subprocess.PIPE", runtime_source)
+        self.assertIn("stderr=subprocess.STDOUT", runtime_source)
+        self.assertIn("_MINDCRAFT_CHILD_OUTPUT_READ_LIMIT", runtime_source)
+        self.assertIn('"interrupt_plugin_not_ready"', runtime_source)
 
     def test_goal_manager_overlay_and_container_contract(self) -> None:
         manager_source = (
@@ -1090,6 +1538,9 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         dockerfile = (REPO_ROOT / "docker" / "Dockerfile.mindcraft").read_text(encoding="utf-8")
         compose = (REPO_ROOT / "docker-compose.fast-control.yml").read_text(encoding="utf-8")
+        evelyn_patch = (
+            REPO_ROOT / "external" / "mindcraft_evelyn" / "evelyn.patch"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("prepareForPrompt", manager_source)
         self.assertIn("predicateSatisfied", manager_source)
@@ -1104,6 +1555,31 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("connection_handler.js", dockerfile)
         self.assertIn('MINDCRAFT_GOAL_MANAGER_MODE: "gated"', compose)
         self.assertIn("goal_manager_state.json", compose)
+        self.assertIn("MINDCRAFT_COMBAT_HISTORY_PATH", compose)
+        self.assertIn("combat_history.json", compose)
+        self.assertIn('MINDCRAFT_SELF_PROMPT_COOLDOWN_MS: "300"', compose)
+        self.assertIn('MINDCRAFT_MODE_INTERVAL_MS: "100"', compose)
+        self.assertIn('MINDCRAFT_INTERRUPT_POLL_MS: "100"', compose)
+        self.assertIn('MINDCRAFT_INTERRUPT_STOP_WAIT_MS: "1200"', compose)
+        self.assertIn("exitAfterCombatHistoryFlush", evelyn_patch)
+        self.assertIn("process.once('SIGINT', () => this.cleanKill", evelyn_patch)
+        self.assertIn("process.once('SIGTERM', () => this.cleanKill", evelyn_patch)
+        self.assertIn("return exitAfterCombatHistoryFlush(this.bot, code)", evelyn_patch)
+
+        latency_patch = (
+            REPO_ROOT / "external" / "mindcraft_evelyn" / "latency.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn("currentSubgoal?.allowedCommands", latency_patch)
+        self.assertIn("promptConvo(history, self_prompt)", latency_patch)
+        self.assertIn("restrictToCurrentSubgoal = false", latency_patch)
+        self.assertIn("stats += await getCommand('!nearbyBlocks').perform(this.agent)", latency_patch)
+        self.assertIn("-            stats += await getCommand('!nearbyBlocks').perform(this.agent);", latency_patch)
+        self.assertIn("MINDCRAFT_SELF_PROMPT_COOLDOWN_MS", latency_patch)
+        self.assertIn("MINDCRAFT_MODE_INTERVAL_MS", latency_patch)
+        self.assertIn("MINDCRAFT_INTERRUPT_POLL_MS", latency_patch)
+        self.assertIn("MINDCRAFT_INTERRUPT_STOP_WAIT_MS", latency_patch)
+        self.assertIn("return !this.executing", latency_patch)
+        self.assertIn("Current action did not stop; new action rejected.", latency_patch)
 
     def test_runtime_lint_gate_is_installed_and_fail_closed(
         self,

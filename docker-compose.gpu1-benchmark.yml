@@ -1,0 +1,9 @@
+services:
+  minecraft_llm:
+    ports:
+      - "127.0.0.1:9823:9823"
+
+  stt:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "1"
+      CUDA_VISIBLE_DEVICES: "1"

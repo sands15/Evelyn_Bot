@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .continuity_commit_contract import (
+    CONTINUITY_COMMIT_FAILED,
+    await_continuity_commit_without_early_unlock,
     require_durable_continuity_receipt,
 )
 from .conversation_memory_receipt import (
@@ -59,9 +61,39 @@ async def answer_control_page_text_from_runtime(
     session_key = deps.session_key_for_guild(guild_id)
     state_lock = deps.get_session_lock(session_key)
     async with state_lock:
-        started_turn = deps.begin_user_text_turn(session_key, user_text, guild_id=guild_id)
+        started_turn = deps.begin_user_text_turn(
+            session_key,
+            user_text,
+            guild_id=guild_id,
+            precommit_user_only=True,
+        )
         turn_id = started_turn.turn_id
         topic_id = started_turn.topic_id
+        try:
+            accepted_continuity_status = (
+                await await_continuity_commit_without_early_unlock(
+                    deps.commit_session_continuity(
+                        session_key,
+                        turn_id,
+                    )
+                )
+            )
+            accepted_continuity_receipt = (
+                require_durable_continuity_receipt(
+                    accepted_continuity_status
+                )
+            )
+        except MemoryDeletionJournalIntegrityError:
+            raise
+        except Exception as exc:
+            deps.log(
+                (
+                    "[CONTROL PAGE] "
+                    "accepted_turn_commit_failed errorType="
+                ),
+                type(exc).__name__,
+            )
+            raise RuntimeError(CONTINUITY_COMMIT_FAILED) from None
     turn_scope = deps.turn_scope_factory(turn_id)
     deps.replace_room_turn_scope(session_key, turn_scope)
     turn_task = deps.attach_current_task(turn_scope)
@@ -77,6 +109,12 @@ async def answer_control_page_text_from_runtime(
             "turn_type": "control_page_text",
             "selected_path": "control_page_local",
             "needs_tts": False,
+            "accepted_user_turn_precommitted": True,
+            "continuity_turn_state": "unanswered_user",
+            "continuity_commit": "durable",
+            "continuity_generation": int(
+                accepted_continuity_receipt["generation"]
+            ),
         },
         "marks": {},
     }
@@ -149,12 +187,18 @@ async def answer_control_page_text_from_runtime(
                     memory_receipt=(
                         response_receipt_ref
                     ),
+                    complete_turn_id=turn_id,
                 )
+                text_metrics.setdefault("meta", {})[
+                    "continuity_turn_state"
+                ] = "completed"
                 try:
                     continuity_status = (
-                        await deps.commit_session_continuity(
-                            session_key,
-                            started_turn.turn_id,
+                        await await_continuity_commit_without_early_unlock(
+                            deps.commit_session_continuity(
+                                session_key,
+                                started_turn.turn_id,
+                            )
                         )
                     )
                     continuity_receipt = (
@@ -176,8 +220,11 @@ async def answer_control_page_text_from_runtime(
                     text_metrics.setdefault("meta", {}).update(
                         {
                             "continuity_commit": "failed",
+                            "continuity_turn_state": (
+                                "unanswered_user"
+                            ),
                             "continuity_error": (
-                                "conversation_continuity_commit_failed"
+                                CONTINUITY_COMMIT_FAILED
                             ),
                         }
                     )
@@ -189,6 +236,9 @@ async def answer_control_page_text_from_runtime(
                         ),
                         type(exc).__name__,
                     )
+                    raise RuntimeError(
+                        CONTINUITY_COMMIT_FAILED
+                    ) from None
         deps.log_voice_bottleneck_summary(
             text_metrics,
             label="text_turn",

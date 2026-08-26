@@ -1,6 +1,6 @@
 # CURRENT_EVELYN_ARCHITECTURE.md
 
-Status note, 2026-08-08:
+Status note, 2026-08-21:
 
 - This file is the current Minecraft/Mindcraft architecture snapshot plus the
   legacy Voyager compatibility path.
@@ -10,7 +10,7 @@ Status note, 2026-08-08:
   `CURRENT_EVELYN_PIPELINE.md`.
 - For documentation status, see `docs/DOCUMENTATION_INDEX.md`.
 
-Last updated: 2026-08-08
+Last updated: 2026-08-21
 Branch baseline: `structural-change`
 
 ## 1. High-level shape
@@ -19,7 +19,8 @@ Evelyn의 현재 Minecraft autonomy stack은 **하나의 봇 프로세스**가 �
 
 1. **Local action-planning layer**
    - `external/mindcraft_evelyn/src/models/evelyn_planner.js`
-   - local Minecraft Qwen endpoint and shared local router
+   - authenticated Bot API broker -> isolated Minecraft Qwen endpoint
+   - shared local router remains a separate model path
    - optional Codex adapter is default-off and not part of normal startup
 
 2. **Mindcraft orchestration layer**
@@ -49,23 +50,25 @@ HTTP service가 살아 있어도 local planner나 Minecraft control plane이 fun
 
 ### Active Compose runtime sequence
 
-1. Visible launcher starts `router_llm`, `minecraft_llm`, and Compose service
-   `voyager` only.
+1. Visible launcher starts Compose service `voyager`; Compose resolves its
+   `bot_api`, `router_llm`, and `minecraft_llm` dependencies.
 2. `mindcraft_service.py` opens the HTTP control surface on `8765`.
 3. An authorized Discord or monolithic Control Page action issues a
    process-owned world lease.
 4. `/start` accepts only an exact proof of that fresh lease, then starts the
    Mindcraft child.
-5. Mindcraft uses local Qwen for conversation, code requests, planning and
-   recovery; hash embedding stays local.
+5. Mindcraft sends conversation, code, planning and recovery Qwen requests to
+   the authenticated Bot API broker. The broker is the single bounded FIFO
+   admission owner for that isolated model; hash embedding stays local.
 6. Mineflayer connects to the authorized Minecraft world and executes only the
    gated normal-player command set.
 7. Service serves `/health`, `/status`, and `/observe` from fresh child and
    world telemetry.
 
 The legacy `voyager_service.py` + `upstream_voyager_runner.py` path remains a
-compatibility implementation and also defaults to the local action model. Both
-paths apply the same lease proof and service-side stale-heartbeat stop contract.
+compatibility implementation but now defaults to `disabled`; the old direct
+local action backend fails closed when explicitly selected. Active paths keep
+the same lease proof and service-side stale-heartbeat stop contract.
 
 ## 3. Core local ownership boundaries
 

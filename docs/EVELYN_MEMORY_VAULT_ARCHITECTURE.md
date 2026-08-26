@@ -101,10 +101,12 @@ bot_memory/
       project_preferences.md
 
     daily/
-      2026-05-28.md
+      guild-7/
+        2026-05-28.md
 
     episodes/
-      2026-05-28-tts-stability.md
+      guild-7/
+        2026-05-28-daily-consolidation.md
       2026-05-28-relic-readme.md
       2026-05-28-voyager-recovery.md
 
@@ -174,6 +176,13 @@ Raw-ish human-readable daily notes.
 Daily notes preserve continuity without pretending every event is durable.
 They are useful for review and later consolidation, but they should not be
 dumped directly into prompts.
+
+Automatic daily notes are partitioned by exact guild path
+`daily/guild-<id>/<date>.md`. The daily source and every deterministic or
+semantic derivative carry the same opaque reset scope and an exact
+guild-bound source reference. A legacy shared daily file cannot prove which
+guild owns each block, so guild reset fails closed before mutation instead of
+claiming partial deletion.
 
 ### 3. Episodic Memory
 
@@ -639,7 +648,7 @@ target document. The runtime has an activation path:
 activate_memory_vault_for_guild(guild_id)
   -> bootstrap core/project/concept/procedure Markdown notes
   -> mirror legacy guild JSONL summaries/facts/questions
-  -> consolidate large daily Markdown notes into episode notes
+  -> consolidate that guild's daily Markdown note into a guild-scoped episode
   -> rebuild SQLite/FTS/vector/graph indexes
   -> refresh memory_index/hot_context.json and prompt_blocks/core_prompt.txt
 ```
@@ -667,9 +676,9 @@ Semantic consolidation is a separate worker step:
 ```text
 run_semantic_memory_consolidation_once(guild_id)
   -> require dependencies.sub_llm.available
-  -> read daily Markdown note
+  -> read daily/guild-<id>/<date>.md
   -> ask the sub LLM for JSON notes
-  -> write episode/concept/procedure/project Markdown notes
+  -> write guild-bound episode/concept/procedure/project Markdown notes
   -> rebuild indexes
 ```
 

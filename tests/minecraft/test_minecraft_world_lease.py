@@ -214,6 +214,8 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             self.owner.authorization_token,
             json.dumps(result),
         )
+        self.assertNotIn("expiresMonotonic", json.dumps(status))
+        self.assertNotIn("expiresMonotonic", json.dumps(result))
         enable = next(
             call
             for call in self.runtime.calls
@@ -240,6 +242,10 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             secret_payload["authorizationToken"],
             self.owner.authorization_token,
+        )
+        self.assertEqual(
+            secret_payload["expiresMonotonic"],
+            self.owner._lease.expires_monotonic,
         )
 
     def test_event_append_flushes_and_fsyncs_before_success(self) -> None:
@@ -355,6 +361,37 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
                 ttl_sec=60.0,
             )
         self.assertFalse(any(call[0] == "enable" for call in self.runtime.calls))
+
+    async def test_lease_deadline_secret_failure_withholds_capability(
+        self,
+    ) -> None:
+        original_write = lease_module.atomic_json_write
+
+        def fail_lease_secret(path: Path, payload: dict, **kwargs) -> None:
+            if (
+                Path(path) == self.owner.secret_path
+                and payload.get("leaseId")
+            ):
+                raise OSError("lease secret unavailable")
+            original_write(path, payload, **kwargs)
+
+        with patch.object(
+            lease_module,
+            "atomic_json_write",
+            side_effect=fail_lease_secret,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "minecraft_world_lease_secret_unavailable",
+            ):
+                await self.connect()
+
+        self.assertIsNone(self.owner._lease)
+        self.assertFalse(self.owner.status()["active"])
+        self.assertEqual(self.owner.delegation_token(), "")
+        self.assertFalse(self.owner.secret_path.exists())
+        self.assertFalse(any(call[0] == "enable" for call in self.runtime.calls))
+        self.assertIn(("disable", 7), self.runtime.calls)
 
     def test_initialization_status_failure_withholds_capability(self) -> None:
         owner = MinecraftWorldLeaseOwner(
@@ -505,6 +542,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=replacement.secret_path,
             owner_claim_path=replacement.owner_claim_path,
             now=self.clock,
+            monotonic=replacement.monotonic,
         )
         self.assertFalse(valid)
         self.assertIn(
@@ -577,6 +615,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
                     secret_path=self.owner.secret_path,
                     owner_claim_path=self.owner.owner_claim_path,
                     now=self.clock,
+                    monotonic=self.owner.monotonic,
                 )
             finally:
                 allow_claim_swap.set()
@@ -1377,6 +1416,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=self.owner.secret_path,
             owner_claim_path=self.owner.owner_claim_path,
             now=self.clock,
+            monotonic=self.owner.monotonic,
         )
         self.assertFalse(valid)
         self.assertEqual(error, "minecraft_world_lease_owner_conflict")
@@ -1447,6 +1487,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=self.owner.secret_path,
             owner_claim_path=self.owner.owner_claim_path,
             now=self.clock,
+            monotonic=self.owner.monotonic,
         )
         self.assertFalse(valid)
         self.assertEqual(error, "minecraft_world_lease_heartbeat_stale")
@@ -1580,6 +1621,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=successor.secret_path,
             owner_claim_path=successor.owner_claim_path,
             now=self.clock,
+            monotonic=successor.monotonic,
         )
         self.assertTrue(valid, error)
         contender = MinecraftOwnerLock(successor.world_action_lock_path)
@@ -1623,6 +1665,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=self.owner.secret_path,
             owner_claim_path=self.owner.owner_claim_path,
             now=self.clock,
+            monotonic=self.owner.monotonic,
         )
         self.assertFalse(valid)
         self.assertEqual(error, "minecraft_world_lease_secret_missing")
@@ -1652,6 +1695,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             secret_path=self.owner.secret_path,
             owner_claim_path=self.owner.owner_claim_path,
             now=self.clock,
+            monotonic=self.owner.monotonic,
         )
         self.assertFalse(valid)
         self.assertEqual(error, "minecraft_world_lease_owner_conflict")
@@ -1768,6 +1812,57 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         reasons = [row["reasonCode"] for row in self.read_events()]
         self.assertIn("lease_expired", reasons)
 
+    async def test_monotonic_ttl_blocks_goal_after_wall_clock_rollback(
+        self,
+    ) -> None:
+        monotonic = FakeClock(0.0)
+        self.owner.monotonic = monotonic
+        await self.connect()
+        self.runtime.calls.clear()
+
+        self.clock.value = 900.0
+        monotonic.value = 61.0
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.set_goal(7, "post-ttl-effect")
+
+        self.assertFalse(
+            any(call[0] == "goal" for call in self.runtime.calls)
+        )
+        self.assertFalse(self.owner.status()["active"])
+
+    async def test_old_proof_fails_after_monotonic_expiry_and_wall_rollback(
+        self,
+    ) -> None:
+        monotonic = FakeClock(0.0)
+        self.owner.monotonic = monotonic
+        await self.connect()
+        old_proof = next(
+            call[1][2]
+            for call in self.runtime.calls
+            if call[0] == "enable"
+        )
+
+        self.clock.value = 999.0
+        monotonic.value = 30.0
+        self.assertTrue(self.owner._write_status())
+        monotonic.value = 61.0
+
+        valid, error = validate_world_lease_request(
+            {"worldLease": old_proof},
+            status_path=self.owner.status_path,
+            secret_path=self.owner.secret_path,
+            owner_claim_path=self.owner.owner_claim_path,
+            now=self.clock,
+            monotonic=monotonic,
+        )
+
+        self.assertFalse(valid)
+        self.assertEqual(error, "minecraft_world_lease_expired")
+
     async def test_goal_requires_active_matching_lease(self) -> None:
         with self.assertRaisesRegex(
             RuntimeError,
@@ -1776,9 +1871,25 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             await self.owner.set_goal(7, "diamond")
 
         await self.connect()
+        lease_id = self.owner.status()["lease"]["leaseId"]
+        self.runtime.calls.clear()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.set_goal(
+                7,
+                "private_goal_text",
+                expected_lease_id="stale-lease",
+            )
+        self.assertFalse(
+            any(call[0] == "goal" for call in self.runtime.calls)
+        )
+
         result = await self.owner.set_goal(
             7,
             "private_goal_text",
+            expected_lease_id=lease_id,
         )
 
         self.assertTrue(result["outcome_verified"])
@@ -1962,6 +2073,37 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.owner.disconnect(8)
 
+    async def test_exact_disconnect_rejects_replaced_same_guild_lease(
+        self,
+    ) -> None:
+        await self.owner.connect(
+            7,
+            issuer_ref="discord_user:1",
+            source="discord_command",
+        )
+        old_lease_id = self.owner.status()["lease"]["leaseId"]
+        await self.owner.connect(
+            7,
+            issuer_ref="discord_user:2",
+            source="discord_command",
+        )
+        current_lease_id = self.owner.status()["lease"]["leaseId"]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.owner.disconnect(
+                7,
+                expected_lease_id=old_lease_id,
+            )
+
+        self.assertNotEqual(old_lease_id, current_lease_id)
+        self.assertEqual(
+            self.owner.status()["lease"]["leaseId"],
+            current_lease_id,
+        )
+
         self.assertTrue(self.owner.status()["active"])
 
     async def test_disconnect_stop_audit_keeps_revoked_lease_id(self) -> None:
@@ -2088,6 +2230,49 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sum(row["event"] == "goal_failed" for row in events),
             1,
+        )
+
+    async def test_connect_rechecks_lease_expiry_after_enable(self) -> None:
+        monotonic = FakeClock(0.0)
+        self.owner.monotonic = monotonic
+
+        async def expiring_enable(
+            guild_id: int,
+            *,
+            goal: str | None = None,
+            world_lease: dict | None = None,
+        ) -> dict:
+            self.runtime.calls.append(
+                (
+                    "enable",
+                    (guild_id, goal, dict(world_lease or {})),
+                )
+            )
+            self.clock.value = 999.0
+            monotonic.value = 61.0
+            return {
+                "connected": True,
+                "goal": goal,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
+
+        self.owner.enable_mode = expiring_enable
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await self.connect()
+
+        self.assertIn(("disable", 7), self.runtime.calls)
+        self.assertFalse(self.owner.status()["active"])
+        events = self.read_events()
+        self.assertFalse(
+            any(row["event"] == "runtime_start_verified" for row in events)
+        )
+        self.assertFalse(
+            any(row["event"] == "goal_verified" for row in events)
         )
 
     async def test_cancelled_connect_completes_shielded_safe_stop(self) -> None:

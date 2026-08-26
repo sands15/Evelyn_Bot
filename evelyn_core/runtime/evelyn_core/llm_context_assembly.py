@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .config import VOICE_HISTORY_LIMIT
 from .context_pipeline import (
     ContextBuilder,
     ContextPolicy,
@@ -37,7 +38,26 @@ from .memory_exposure import (
     current_memory_exposure_position,
     reset_memory_exposure_position,
 )
+from .observability_metrics import mark_voice_latency_stage
 from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
+
+
+def bound_voice_prompt_history(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int = VOICE_HISTORY_LIMIT,
+) -> list[dict[str, Any]]:
+    """Keep the stable system prefix plus a small recent voice tail."""
+
+    if not messages:
+        return []
+    has_system = messages[0].get("role") == "system"
+    system = [dict(messages[0])] if has_system else []
+    candidates = messages[1:] if has_system else messages
+    turns = [message for message in candidates if message.get("role") != "system"]
+    bounded_limit = max(0, int(limit))
+    bounded = turns[-bounded_limit:] if bounded_limit else []
+    return [*system, *(dict(message) for message in bounded)]
 
 
 @dataclass(frozen=True)
@@ -124,6 +144,7 @@ async def prepare_llm_messages_from_runtime(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    memory_owner_scope: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -150,6 +171,7 @@ async def prepare_llm_messages_from_runtime(
     route_memory_exposure_position = (
         current_memory_exposure_position()
     )
+    mark_voice_latency_stage(metrics, "route_done")
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
         metrics.setdefault("meta", {}).update(
@@ -164,9 +186,11 @@ async def prepare_llm_messages_from_runtime(
         )
     messages = list(deps.get_conversation_history(session_key=session_key, guild_id=guild_id))
     meta = metrics.get("meta") if metrics is not None else {}
-    if source == "voice" and (meta or {}).get(
-        "accepted_voice_turn_precommitted"
-    ) is True:
+    accepted_user_turn_precommitted = bool(
+        source == "voice"
+        and (meta or {}).get("accepted_voice_turn_precommitted") is True
+    ) or (meta or {}).get("accepted_user_turn_precommitted") is True
+    if accepted_user_turn_precommitted:
         accepted_turn_id = str((meta or {}).get("turn_id") or "").strip()
         current_turn_id = str(
             deps.session_state_snapshot(session_key).get("turn_id") or ""
@@ -220,6 +244,15 @@ async def prepare_llm_messages_from_runtime(
     history_memory_receipt_ref = dict(
         history_outcome.memory_receipt_ref
     )
+    history_message_count = len(messages)
+    if source in {"voice", "local_mic", "local_bridge"}:
+        messages = bound_voice_prompt_history(messages)
+        if metrics is not None:
+            metrics.setdefault("meta", {})["voice_prompt_history"] = {
+                "before": history_message_count,
+                "after": len(messages),
+                "limit": VOICE_HISTORY_LIMIT,
+            }
     if route_memory_exposure_position is not None:
         route_memory_receipt_ref = memory_receipt_ref_from_receipt(
             {
@@ -289,24 +322,8 @@ async def prepare_llm_messages_from_runtime(
             )
     else:
         cognitive_state = cached_cognitive_state
-        if (
-            cached_cognitive_state is not None
-            and guild_id is not None
-            and runtime_opts.get("memory_update_mode") != "defer"
-        ):
-            deps.schedule_cognitive_refresh(
-                guild_id,
-                user_text,
-                reason=f"{source}:{route}",
-                session_key=session_key,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source=source,
-                turn_scope=turn_scope,
-            )
         if metrics is not None:
-            metrics.setdefault("meta", {})["cognitive_mode"] = "background"
+            metrics.setdefault("meta", {})["cognitive_mode"] = "cached"
     if metrics is not None and should_block_on_cognitive:
         metrics.setdefault("marks", {})["cognitive_hotpath_ms"] = (time.monotonic() - cognitive_started_at) * 1000.0
 
@@ -321,6 +338,14 @@ async def prepare_llm_messages_from_runtime(
         cognitive_state=cognitive_state,
     )
     tool_use_decisions = deps.build_tool_use_decisions(user_text, context_policy)
+    context_policy.tool_requests = tool_use_decisions
+    if any(decision.tool_name == "memory_recall" for decision in tool_use_decisions):
+        context_policy.needs_memory = True
+    if any(
+        decision.tool_name in {"runtime_status", "local_file_or_log_read"}
+        for decision in tool_use_decisions
+    ):
+        context_policy.needs_runtime_state = True
     if any(decision.tool_name in {"vision_capture_or_watch", "vision_ocr"} for decision in tool_use_decisions):
         context_policy.needs_vision = True
         context_policy.priority = "accuracy"
@@ -343,7 +368,10 @@ async def prepare_llm_messages_from_runtime(
         if decision.tool_name != "local_file_or_log_read" or not decision.auto_allowed:
             continue
         try:
-            local_context = deps.build_local_tool_diagnostic_context(user_text, project_root=deps.project_root)
+            local_context = deps.build_local_tool_diagnostic_context(
+                deps.clean_text(decision.query) or user_text,
+                project_root=deps.project_root,
+            )
             decision.status = "executed" if deps.clean_text(local_context) else "executed_empty"
             decision.evidence = deps.clean_text(local_context)[:800] if deps.clean_text(local_context) else "No matching local diagnostic snippets were selected."
         except Exception as exc:
@@ -371,15 +399,25 @@ async def prepare_llm_messages_from_runtime(
     }
     if guild_id is not None and context_policy.needs_memory:
         memory_started_at = time.monotonic()
+        memory_query = next(
+            (
+                deps.clean_text(decision.query)
+                for decision in tool_use_decisions
+                if decision.tool_name == "memory_recall"
+                and deps.clean_text(decision.query)
+            ),
+            user_text,
+        )
         memory_context = deps.build_memory_context(
             guild_id,
-            user_text,
+            memory_query,
             cognitive_state=cognitive_state,
             session_key=session_key,
             session_state=deps.session_state_snapshot(session_key),
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            owner_scope=memory_owner_scope,
             receipt=memory_receipt,
         )
         memory_grounding_state = validated_memory_grounding_state(
@@ -555,7 +593,7 @@ async def prepare_llm_messages_from_runtime(
     context_packet = deps.build_basic_context_packet(
         current_user_input="",
         memory_context=memory_context if context_policy.needs_memory else "",
-        runtime_state=runtime_context if context_policy.needs_runtime_state else dependency_context,
+        runtime_state=runtime_context if context_policy.needs_runtime_state else "",
         conversation_state=conversation_context,
         skill_context=skill_context,
         vision_context=vision_context,
@@ -626,4 +664,5 @@ async def prepare_llm_messages_from_runtime(
         )
     else:
         deps.log(f"[LLM ROUTE] source={source} route={route} via=fallback text={deps.visible_text(route_text)!r}")
+    mark_voice_latency_stage(metrics, "context_done")
     return messages, cognitive_state, route, context_policy

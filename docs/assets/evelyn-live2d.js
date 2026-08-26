@@ -9,6 +9,7 @@
   const MODEL_STATE_STORAGE_KEY = "evelynLive2dModelStateV1";
   const SPEECH_EXPRESSION_COOLDOWN_MS = 9000;
   const NATURAL_BREATH_CYCLE_SECONDS = 9.6;
+  const IDLE_TAIL_TIME_SCALE = 3.75;
   const CHEST_WARP_REFERENCE_DRAWABLE = "Bra";
   const CHEST_WARP_DRAWABLE_IDS = new Set([
     "ArtMesh120",
@@ -62,13 +63,13 @@
     F2: "ulmak",
   });
   const IDLE_TAIL_PARAMETERS = Object.freeze([
-    { id: "Param_Angle_Rotation15", follow: 0.00, bend: 0.00, phase: 0.00, spring: 10.0, damping: 6.8 },
-    { id: "Param_Angle_Rotation9", follow: 0.82, bend: 1.10, phase: 0.36, spring: 9.4, damping: 6.5 },
-    { id: "Param_Angle_Rotation10", follow: 0.82, bend: 1.25, phase: 0.74, spring: 8.9, damping: 6.3 },
-    { id: "Param_Angle_Rotation11", follow: 0.81, bend: 1.40, phase: 1.14, spring: 8.4, damping: 6.1 },
-    { id: "Param_Angle_Rotation12", follow: 0.80, bend: 1.55, phase: 1.56, spring: 7.9, damping: 5.9 },
-    { id: "Param_Angle_Rotation13", follow: 0.79, bend: 1.70, phase: 2.00, spring: 7.4, damping: 5.7 },
-    { id: "Param_Angle_Rotation14", follow: 0.78, bend: 1.85, phase: 2.46, spring: 6.9, damping: 5.5 },
+    { id: "Param_Angle_Rotation15", follow: 0.00, gain: 1.0, spring: 10.0, damping: 6.8 },
+    { id: "Param_Angle_Rotation9", follow: 1.04, gain: 2.0, spring: 28.2, damping: 6.5 },
+    { id: "Param_Angle_Rotation10", follow: 1.06, gain: 2.5, spring: 26.7, damping: 6.3 },
+    { id: "Param_Angle_Rotation11", follow: 1.08, gain: 3.0, spring: 25.2, damping: 6.1 },
+    { id: "Param_Angle_Rotation12", follow: 1.10, gain: 3.5, spring: 23.7, damping: 5.9 },
+    { id: "Param_Angle_Rotation13", follow: 1.12, gain: 4.0, spring: 22.2, damping: 5.7 },
+    { id: "Param_Angle_Rotation14", follow: 1.15, gain: 4.0, spring: 20.7, damping: 5.5 },
   ]);
 
   const state = {
@@ -109,6 +110,7 @@
     idleTailWeight: 1,
     idleTailAngles: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
     idleTailVelocities: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
+    idleTailParameters: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
     lastTailRootParameter: 0,
     lastTailTipParameter: 0,
     resizeObserver: null,
@@ -189,25 +191,38 @@
     state.idleTailWeight += (targetWeight - state.idleTailWeight) * smoothing;
 
     const frameSeconds = clamp(elapsed / 60, 1 / 240, 1 / 20);
-    const drivePhase = now * 0.00045 + Math.sin(now * 0.000055 + 0.4) * 0.12;
-    const rootTarget = Math.sin(drivePhase) * 8.8;
+    const drivePhase = now * 0.00045 * IDLE_TAIL_TIME_SCALE
+      + Math.sin(now * 0.000055 + 0.4) * 0.12;
+    const rootTarget = Math.sin(drivePhase) * 6.5;
 
     IDLE_TAIL_PARAMETERS.forEach(function (parameter, index) {
-      const previousAngle = index > 0 ? state.idleTailAngles[index - 1] : 0;
-      const travelingBend = index > 0
-        ? Math.sin(drivePhase - parameter.phase) * parameter.bend
-        : 0;
       const targetAngle = index === 0
         ? rootTarget
-        : previousAngle * parameter.follow + travelingBend;
-      const springForce = (targetAngle - state.idleTailAngles[index]) * parameter.spring;
+        : state.idleTailAngles[index - 1] * parameter.follow;
+      const springForce = (targetAngle - state.idleTailAngles[index])
+        * parameter.spring
+        * IDLE_TAIL_TIME_SCALE
+        * IDLE_TAIL_TIME_SCALE;
       state.idleTailVelocities[index] += springForce * frameSeconds;
-      state.idleTailVelocities[index] *= Math.exp(-parameter.damping * frameSeconds);
+      state.idleTailVelocities[index] *= Math.exp(
+        -parameter.damping * IDLE_TAIL_TIME_SCALE * frameSeconds
+      );
       state.idleTailAngles[index] += state.idleTailVelocities[index] * frameSeconds;
       state.idleTailAngles[index] = clamp(state.idleTailAngles[index], -13.5, 13.5);
 
-      const value = state.idleTailAngles[index] * state.idleTailWeight;
-      setCoreParameter(coreModel, parameter.id, value);
+      const localAngle = index === 0
+        ? state.idleTailAngles[0]
+        : state.idleTailAngles[index] - state.idleTailAngles[index - 1];
+      try {
+        const parameterId = resolveCoreParameterId(parameter.id);
+        const physicsValue = coreModel.getParameterValueById(parameterId);
+        const idleValue = clamp(localAngle * parameter.gain, -8, 8);
+        const value = physicsValue + (idleValue - physicsValue) * state.idleTailWeight;
+        coreModel.setParameterValueById(parameterId, value);
+        state.idleTailParameters[index] = coreModel.getParameterValueById(parameterId);
+      } catch (_error) {
+        // A model revision may omit an optional tail segment.
+      }
     });
   }
 
@@ -747,6 +762,12 @@
         catTailPartOpacity: Number(state.lastCatTailPartOpacity.toFixed(3)),
         catAccessoriesVisible: state.catAccessoriesVisible,
         idleTailWeight: Number(state.idleTailWeight.toFixed(3)),
+        tailHeadings: state.idleTailAngles.map(function (angle) {
+          return Number(angle.toFixed(3));
+        }),
+        tailParameters: state.idleTailParameters.map(function (value) {
+          return Number(value.toFixed(3));
+        }),
         tailRootParameter: Number(state.lastTailRootParameter.toFixed(3)),
         tailTipParameter: Number(state.lastTailTipParameter.toFixed(3)),
         expression: state.activeExpression,

@@ -222,6 +222,13 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
                 control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE,
                 "clear",
             ) as clear_cache,
+            patch.object(
+                control_page_server,
+                "_reconcile_stopped_discord_voice_input_owner",
+                new=AsyncMock(
+                    return_value={"ok": True, "retired": True}
+                ),
+            ) as reconcile,
         ):
             response = await control_page_server.discord_mode_apply_handler(_Request())
             payload = json.loads(response.text or "{}")
@@ -231,6 +238,63 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ready", payload)
         self.assertNotIn(private, repr(payload))
         client.apply.assert_called_once_with("stop_discord_bot", "one-time-token")
+        reconcile.assert_awaited_once_with()
+        clear_cache.assert_called_once_with()
+
+    async def test_discord_stop_fails_closed_when_owner_is_unreconciled(
+        self,
+    ) -> None:
+        private = "PRIVATE_UNSIGNED_HOST_RESPONSE"
+        client = Mock()
+        client.apply.return_value = {
+            "ok": True,
+            "status": "stopped",
+        }
+
+        class _Request:
+            async def json(self) -> dict[str, object]:
+                return {
+                    "enabled": False,
+                    "confirmToken": "one-time-token",
+                }
+
+        with (
+            patch.object(
+                control_page_server,
+                "HostSupervisorClient",
+                return_value=client,
+            ),
+            patch.object(
+                control_page_server,
+                "_reconcile_stopped_discord_voice_input_owner",
+                new=AsyncMock(
+                    return_value={
+                        "ok": False,
+                        "error": (
+                            "voice_input_lease_retirement_unverified"
+                        ),
+                        "httpStatus": 503,
+                        "detail": private,
+                    }
+                ),
+            ) as reconcile,
+            patch.object(
+                control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE,
+                "clear",
+            ) as clear_cache,
+        ):
+            response = await (
+                control_page_server.discord_mode_apply_handler(_Request())
+            )
+            payload = json.loads(response.text or "{}")
+
+        self.assertEqual(response.status, 503)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["state"], "stopped_unreconciled")
+        self.assertFalse(payload["automaticRetry"])
+        self.assertNotIn(private, repr(payload))
+        reconcile.assert_awaited_once_with()
         clear_cache.assert_called_once_with()
 
     async def test_cached_health_returns_browser_safe_projection(self) -> None:

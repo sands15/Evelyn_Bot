@@ -27,6 +27,7 @@ HOST_ACTION_BY_SERVICE_ID = {
     "local_io_bridge": "restart_local_bridge",
     "discord_bot": "start_discord_bot",
     "main_llm": "start_main_llm",
+    "voyager": "start_voyager",
     "stt": "start_stt",
     "tts": "start_tts",
 }

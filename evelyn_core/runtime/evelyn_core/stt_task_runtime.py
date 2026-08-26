@@ -31,11 +31,35 @@ async def run_blocking_stt_task_from_runtime(
         increment_voice_pipeline_counter("stt_busy_drop_count")
         raise RuntimeError(f"stt_busy:{stage}")
 
-    async with lock:
+    await lock.acquire()
+    release_deferred = False
+    try:
+        worker = asyncio.ensure_future(to_thread(func))
+
+        def release_after_worker(done: asyncio.Future[Any]) -> None:
+            try:
+                done.result()
+            except BaseException:
+                pass
+            if lock.locked():
+                lock.release()
+
         try:
-            return await wait_for(to_thread(func), timeout=max(0.5, timeout_sec))
+            return await wait_for(
+                asyncio.shield(worker),
+                timeout=max(0.5, timeout_sec),
+            )
         except asyncio.TimeoutError:
+            release_deferred = True
+            worker.add_done_callback(release_after_worker)
             set_stt_cooldown_until(monotonic() + max(0.0, stt_cooldown_after_timeout_sec))
             increment_voice_pipeline_counter("stt_timeout_count")
             record_voice_pipeline_failure("stt_timeout", f"{stage} timed out after {timeout_sec:.1f}s", metrics, stage=stage)
             raise
+        except asyncio.CancelledError:
+            release_deferred = True
+            worker.add_done_callback(release_after_worker)
+            raise
+    finally:
+        if not release_deferred and lock.locked():
+            lock.release()

@@ -1,3 +1,32 @@
+diff --git a/.gitignore b/.gitignore
+index d838f96..d7df4e0 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,3 +28,4 @@ tasks/construction_tasks/train/**
+ server_data*
+ **/.DS_Store
+ src/mindcraft-py/__pycache__/
++_tmp_ms_profiles/
+diff --git a/main.js b/main.js
+--- a/main.js
++++ b/main.js
+@@ -74,7 +74,15 @@
+ Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
+-
++let shuttingDown = false;
++function gracefulShutdown() {
++    if (shuttingDown) return;
++    shuttingDown = true;
++    Mindcraft.shutdown();
++}
++process.once('SIGTERM', gracefulShutdown);
++process.once('SIGINT', gracefulShutdown);
++
+ for (let profile of settings.profiles) {
+     const profile_json = JSON.parse(readFileSync(profile, 'utf8'));
+     settings.profile = profile_json;
+     Mindcraft.createAgent(settings);
+ }
 diff --git a/profiles/defaults/survival.json b/profiles/defaults/survival.json
 index 4504bf9..369b494 100644
 --- a/profiles/defaults/survival.json
@@ -22,20 +51,23 @@ diff --git a/src/agent/agent.js b/src/agent/agent.js
 index f5a8e3d..af937fb 100644
 --- a/src/agent/agent.js
 +++ b/src/agent/agent.js
-@@ -9,6 +9,8 @@ import { NPCContoller } from './npc/controller.js';
+@@ -9,6 +9,9 @@ import { NPCContoller } from './npc/controller.js';
  import { MemoryBank } from './memory_bank.js';
  import { SelfPrompter } from './self_prompter.js';
  import convoManager from './conversation.js';
 +import { EvelynGoalManager } from './evelyn_goal_manager.js';
++import { exitAfterCombatHistoryFlush } from './evelyn_survival_mode.js';
 +import { claimMindcraftRecoveryIssuance, discardMindcraftRecoveryIssuance } from '../utils/evelyn_history_boundary.js';
  import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
  import { addBrowserViewer } from './vision/browser_viewer.js';
  import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
-@@ -78,15 +79,16 @@ export class Agent {
+@@ -78,15 +79,18 @@ export class Agent {
  
          console.log(this.name, 'logging into minecraft...');
          this.bot = initBot(this.name);
 +        this.goal_manager = new EvelynGoalManager(this);
++        process.once('SIGINT', () => this.cleanKill('Agent process stopping.', 0));
++        process.once('SIGTERM', () => this.cleanKill('Agent process stopping.', 0));
          
          // Connection Handler
          const onDisconnect = (event, reason) => {
@@ -47,7 +79,8 @@ index f5a8e3d..af937fb 100644
 -            const { type } = handleDisconnection(this.name, reason);
 +            const { type } = handleDisconnection(this.name, reason, event);
       
-             process.exit(1);
+-            process.exit(1);
++            void exitAfterCombatHistoryFlush(this.bot, 1);
          };
 @@ -83,7 +84,7 @@ export class Agent {
          this.bot.on('error', (err) => {
@@ -187,9 +220,18 @@ index f5a8e3d..af937fb 100644
          this.self_prompter.update(delta);
          await this.checkTaskDone();
      }
-@@ -531,7 +555,17 @@ export class Agent {
+@@ -531,7 +555,26 @@ export class Agent {
  
      cleanKill(msg='Killing agent process...', code=1) {
++        if (this.bot?.evelynCombatExitPromise) return this.bot.evelynCombatExitPromise;
++        this._disconnectHandled = true;
++        try {
++            if (typeof this.bot?.quit === 'function') this.bot.quit('Evelyn shutdown');
++            else if (typeof this.bot?.end === 'function') this.bot.end('Evelyn shutdown');
++            else this.bot?._client?.end?.('Evelyn shutdown');
++        } catch (error) {
++            console.warn('[Evelyn] cleanKill disconnect skipped:', error?.message || error);
++        }
          this.history.add('system', msg);
 -        this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
 +        try {
@@ -204,7 +246,8 @@ index f5a8e3d..af937fb 100644
 +            console.warn('[Evelyn] cleanKill chat skipped:', error?.message || error);
 +        }
          this.history.save();
-         process.exit(code);
+-        process.exit(code);
++        return exitAfterCombatHistoryFlush(this.bot, code);
      }
 diff --git a/src/agent/self_prompter.js b/src/agent/self_prompter.js
 index c21b6a9..2d34fb4 100644
@@ -274,7 +317,7 @@ index 2dd2ea5..90b79b3 100644
  const armorManager = plugin;
  let mc_version = settings.minecraft_version;
  let mcdata = null;
-@@ -54,11 +55,12 @@ export const WOOL_COLORS = [
+@@ -54,11 +55,21 @@ export const WOOL_COLORS = [
  
  export function initBot(username) {
      const options = {
@@ -285,10 +328,19 @@ index 2dd2ea5..90b79b3 100644
          auth: settings.auth,
          version: mc_version,
 +        profilesFolder: process.env.MINEFLAYER_PROFILES_FOLDER || './bot_profiles',
++        onMsaCode: ({ user_code: userCode, expires_in: expiresIn }) => {
++            const ttlSec = Number(expiresIn);
++            if (typeof userCode === 'string' &&
++                /^[A-Z0-9]{8}$/.test(userCode) &&
++                Number.isInteger(ttlSec) &&
++                ttlSec >= 60 && ttlSec <= 1800) {
++                console.info(`[EVELYN_MSA_DEVICE_CODE] ${userCode} ${ttlSec}`);
++            }
++        },
          checkTimeoutInterval: 60000,  // 60s keep-alive check (default 30s) — reduces disconnects on slow servers
      }
      if (!mc_version || mc_version === "auto") {
-@@ -66,6 +68,7 @@ export function initBot(username) {
+@@ -66,6 +77,7 @@ export function initBot(username) {
      }
  
      const bot = createBot(options);
@@ -296,7 +348,7 @@ index 2dd2ea5..90b79b3 100644
  
      // Throttle position packets to avoid kicks on Paper/Spigot servers
      // Paper enforces stricter packet rate limits than vanilla, causing ECONNRESET
-@@ -100,18 +103 @@ export function initBot(username) {
+@@ -100,18 +112 @@ export function initBot(username) {
 -    // Suppress PartialReadError for non-critical packets
 -    // Paper servers sometimes send packets that node-minecraft-protocol
 -    // can't fully parse (scoreboard, resource_pack, custom_payload, etc.)
@@ -340,17 +392,27 @@ index 23f82f1..42e89ab 100644
  
  async function say(agent, message) {
      agent.bot.modes.behavior_log += message + '\n';
-@@ -14,5 +15,6 @@ async function say(agent, message) {
- // to perform longer actions, use the execute function which won't block the update loop
- const modes_list = [
+@@ -87,6 +88,7 @@ const modes_list = [
+             }
+         }
+     },
 +    createEvelynSurvivalMode({ execute }),
      {
-         name: 'self_preservation',
-         description: 'Respond to drowning, burning, and damage at low health. Interrupts all actions.',
+         name: 'unstuck',
+         description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
 diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
 index cd873cb..3db2fb1 100644
 --- a/src/agent/library/skills.js
 +++ b/src/agent/library/skills.js
+@@ -454,7 +454,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
+             if (!blocktypes.includes(block.name)) {
+                 return false;
+             }
+-            if (exclude) {
++            if (exclude && block.position) {
+                 for (let position of exclude) {
+                     if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
+                         return false;
 @@ -1404,7 +1404,12 @@ export async function moveAway(bot, distance) {
      const pos = bot.entity.position;
      let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
@@ -365,7 +427,7 @@ index cd873cb..3db2fb1 100644
  
      if (bot.modes.isOn('cheat')) {
          const move = new pf.Movements(bot);
-@@ -1449,8 +1454,13 @@ export async function avoidEnemies(bot, distance=16) {
+@@ -1453,8 +1458,13 @@ export async function avoidEnemies(bot, distance=16) {
       **/
      bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
      let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);

@@ -237,6 +237,8 @@ class VoiceGateway:
 
         if original_received_binary_message is not None:
             async def tapped_received_binary_message(msg) -> None:
+                if self.ws is not ws:
+                    return await original_received_binary_message(msg)
                 if (
                     not self._replaying_pending_dave
                     and isinstance(msg, (bytes, bytearray))
@@ -246,6 +248,8 @@ class VoiceGateway:
                     self._pending_dave_frames.append(("binary", bytes(msg)))
 
                 result = await original_received_binary_message(msg)
+                if self.ws is not ws:
+                    return result
 
                 try:
                     if isinstance(msg, (bytes, bytearray)):
@@ -261,6 +265,8 @@ class VoiceGateway:
             log.warning("VoiceGateway.bind_ws could not find received_binary_message on ws=%r", ws)
 
         async def tapped_received_message(msg) -> None:
+            if self.ws is not ws:
+                return await original_received_message(msg)
             parsed = None
 
             if isinstance(msg, dict):
@@ -285,6 +291,8 @@ class VoiceGateway:
                 self._pending_dave_frames.append(("json", parsed))
 
             result = await original_received_message(msg)
+            if self.ws is not ws:
+                return result
 
             try:
                 if isinstance(msg, (bytes, bytearray)) and parsed is None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
@@ -19,7 +19,13 @@ from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
     is_explicit_memory_confirmation_command,
 )
-from .memory_confirmation_contract import memory_owner_scope
+from .cross_surface_continuity import CrossSurfaceContinuityConfig
+from .memory_confirmation_contract import (
+    memory_owner_scope,
+    memory_owner_scope_for_local_surface,
+    memory_reset_scope,
+)
+from .memory_writebehind import run_registered_memory_thread
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_metrics,
     not_used_memory_receipt_ref,
@@ -29,9 +35,39 @@ from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
 )
+from .main_llm_runtime import (
+    SPECIALIST_EVIDENCE_MAX_CHARS,
+    SPECIALIST_EVIDENCE_SCHEMA,
+    TASK_LOOP_INVALID_RESULT,
+    append_registered_route_evidence,
+    route_decision_evidence_route,
+    task_loop_completed_evidence,
+    task_loop_terminal_outcome,
+)
+from .task_loop_runtime import parse_task_request
 from .voice_reply_side_effects import bind_voice_reply_memory_boundary
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 from .voice_barge_in import remember_voice_utterance_for_merge
+
+
+_LOCAL_VOICE_CROSS_SURFACE_CONFIG = CrossSurfaceContinuityConfig.from_env()
+_LOCAL_VOICE_MEMORY_OWNER_SCOPE = memory_owner_scope_for_local_surface(
+    configured_guild_id=(
+        _LOCAL_VOICE_CROSS_SURFACE_CONFIG.guild_id
+        if _LOCAL_VOICE_CROSS_SURFACE_CONFIG.scope_ready
+        else None
+    ),
+    configured_user_id=(
+        _LOCAL_VOICE_CROSS_SURFACE_CONFIG.user_id
+        if _LOCAL_VOICE_CROSS_SURFACE_CONFIG.scope_ready
+        else None
+    ),
+)
+_LOCAL_VOICE_MEMORY_RESET_SCOPE = memory_reset_scope(
+    _LOCAL_VOICE_CROSS_SURFACE_CONFIG.guild_id
+    if _LOCAL_VOICE_CROSS_SURFACE_CONFIG.scope_ready
+    else None
+)
 
 
 _VALIDATION_BINDING_KEYS = (
@@ -62,9 +98,8 @@ def _observability_text(
     value: Any,
     metrics: Mapping[str, Any] | None,
 ) -> Any:
-    if not _validation_bound(metrics):
-        return value
-    return f"<validation-text chars={len(str(value or ''))}>"
+    label = "validation-text" if _validation_bound(metrics) else "transcript"
+    return f"<{label} chars={len(str(value or ''))}>"
 
 
 def _observability_error(
@@ -163,6 +198,7 @@ class VoiceTranscriptReplyContext:
     room_key: str | None
     person_key: str | None
     session_memory_key: str | None
+    voice_ingress_is_current: Callable[[], bool]
     release_ingress_worker: Callable[[], Any] | None = None
 
 
@@ -214,6 +250,7 @@ class VoiceTurnRequest:
     room_key: str | None = None
     person_key: str | None = None
     session_memory_key: str | None = None
+    memory_owner_scope: str | None = field(default=None, repr=False)
     source: str = "text"
     debug_text: str | None = None
     metrics: MutableMapping[str, Any] | None = None
@@ -272,35 +309,45 @@ class VoiceTurnOrchestrator:
         except Exception as exc:
             mark_voice_turn_error_layer(request, "voice_turn_orchestrator.route_context", exc)
             raise
+        if request.turn_scope is not None:
+            request.turn_scope.raise_if_cancelled()
 
         on_first_chunk = request.on_first_chunk
+        task_route = (
+            clean_text(str(route_context.route_decision.route or ""))
+            == "task_executor"
+        )
         safe_debug_text = (
             _observability_text(request.debug_text, request.metrics)
             if request.debug_text is not None
             else None
         )
 
-        try:
-            short_circuit_answer, on_first_chunk = await self._deps.maybe_handle_short_circuit_route(
-                route_decision=route_context.route_decision,
-                source=request.source,
-                guild_id=request.guild_id,
-                user_text=request.user_text,
-                session_key=request.session_key,
-                room_key=request.room_key,
-                person_key=request.person_key,
-                session_memory_key=request.session_memory_key,
-                debug_text=safe_debug_text,
-                on_sentence=request.on_sentence,
-                on_first_chunk=on_first_chunk,
-                awaiting_user_reply=route_context.awaiting_user_reply,
-                metrics=request.metrics,
-                messages=route_context.messages,
-                cognitive_state=route_context.cognitive_state,
-            )
-        except Exception as exc:
-            mark_voice_turn_error_layer(request, "voice_turn_orchestrator.short_circuit", exc)
-            raise
+        short_circuit_answer = None
+        if not task_route:
+            try:
+                short_circuit_answer, on_first_chunk = await self._deps.maybe_handle_short_circuit_route(
+                    route_decision=route_context.route_decision,
+                    source=request.source,
+                    guild_id=request.guild_id,
+                    user_text=request.user_text,
+                    session_key=request.session_key,
+                    room_key=request.room_key,
+                    person_key=request.person_key,
+                    session_memory_key=request.session_memory_key,
+                    debug_text=safe_debug_text,
+                    on_sentence=request.on_sentence,
+                    on_first_chunk=on_first_chunk,
+                    awaiting_user_reply=route_context.awaiting_user_reply,
+                    metrics=request.metrics,
+                    messages=route_context.messages,
+                    cognitive_state=route_context.cognitive_state,
+                )
+            except Exception as exc:
+                mark_voice_turn_error_layer(request, "voice_turn_orchestrator.short_circuit", exc)
+                raise
+            if request.turn_scope is not None:
+                request.turn_scope.raise_if_cancelled()
 
         if short_circuit_answer is not None and not is_user_echo_answer(request.user_text, short_circuit_answer):
             return VoiceTurnResult(
@@ -322,39 +369,98 @@ class VoiceTurnOrchestrator:
                 debug_text=safe_debug_text,
                 metrics=request.metrics,
                 cognitive_state=route_context.cognitive_state,
+                turn_scope=request.turn_scope,
                 messages=route_context.messages,
             )
         except Exception as exc:
             mark_voice_turn_error_layer(request, "voice_turn_orchestrator.skill_route", exc)
             raise
+        if request.turn_scope is not None:
+            request.turn_scope.raise_if_cancelled()
 
-        if skill_route_answer and not is_user_echo_answer(request.user_text, skill_route_answer):
-            if on_first_chunk is not None:
-                on_first_chunk()
-                on_first_chunk = None
-            try:
-                await self._deps.emit_delivery_plan_chunks(
-                    self._deps.build_delivery_plan(
-                        self._deps.build_answer_payload_from_text(skill_route_answer),
-                        include_voice=request.on_sentence is not None and route_context.route_decision.needs_tts,
-                        split_chunks=self._deps.split_tts_sentences,
-                    ),
-                    on_sentence=request.on_sentence,
+        route_name = (
+            "task_executor"
+            if task_route
+            else route_decision_evidence_route(route_context.route_decision)
+        )
+        task_goal = parse_task_request(request.user_text) if task_route else None
+        task_outcome = (
+            task_loop_terminal_outcome(skill_route_answer or "", goal=task_goal)
+            if task_route
+            else None
+        )
+        if task_route and task_outcome is None:
+            if not task_loop_completed_evidence(
+                skill_route_answer or "",
+                goal=task_goal,
+            ):
+                task_outcome = TASK_LOOP_INVALID_RESULT
+        if task_route or (
+            skill_route_answer
+            and not is_user_echo_answer(request.user_text, skill_route_answer)
+        ):
+            if task_outcome is not None:
+                if request.metrics is not None:
+                    request.metrics.setdefault("meta", {})["specialist_evidence_finalizer"] = {
+                        "schema": SPECIALIST_EVIDENCE_SCHEMA,
+                        "route": route_name,
+                        "chars": min(len(task_outcome), SPECIALIST_EVIDENCE_MAX_CHARS),
+                        "finalizer": "typed_task_outcome",
+                    }
+                if on_first_chunk is not None:
+                    on_first_chunk()
+                    on_first_chunk = None
+                try:
+                    await self._deps.emit_delivery_plan_chunks(
+                        self._deps.build_delivery_plan(
+                            self._deps.build_answer_payload_from_text(
+                                task_outcome,
+                                spoken_text="검증된 작업 결과를 화면에 정리했어.",
+                            ),
+                            include_voice=(
+                                request.on_sentence is not None
+                                and route_context.route_decision.needs_tts
+                            ),
+                            split_chunks=self._deps.split_tts_sentences,
+                        ),
+                        on_sentence=request.on_sentence,
+                    )
+                except Exception as exc:
+                    mark_voice_turn_error_layer(request, "voice_turn_orchestrator.delivery", exc)
+                    raise
+                return VoiceTurnResult(
+                    answer_text=task_outcome,
+                    route_context=route_context,
+                    handled_by="task_loop_outcome",
                 )
-            except Exception as exc:
-                mark_voice_turn_error_layer(request, "voice_turn_orchestrator.delivery", exc)
-                raise
-            return VoiceTurnResult(
-                answer_text=skill_route_answer,
-                route_context=route_context,
-                handled_by="skill_route",
+            route_context = replace(
+                route_context,
+                messages=append_registered_route_evidence(
+                    route_context.messages,
+                    route=route_name,
+                    evidence=skill_route_answer or "",
+                ),
             )
+            if request.metrics is not None:
+                request.metrics.setdefault("meta", {})["specialist_evidence_finalizer"] = {
+                    "schema": SPECIALIST_EVIDENCE_SCHEMA,
+                    "route": route_name,
+                    "chars": min(
+                        len(clean_text(skill_route_answer or "")),
+                        SPECIALIST_EVIDENCE_MAX_CHARS,
+                    ),
+                    "finalizer": "main_llm",
+                }
 
-        if not route_context.route_decision.needs_main_llm:
+        if not task_route and not route_context.route_decision.needs_main_llm:
             answer = route_context.route_decision.user_visible_preface
             if not answer or is_user_echo_answer(request.user_text, answer):
                 answer = ""
-        if not route_context.route_decision.needs_main_llm and answer:
+        if (
+            not task_route
+            and not route_context.route_decision.needs_main_llm
+            and answer
+        ):
             if on_first_chunk is not None:
                 on_first_chunk()
                 on_first_chunk = None
@@ -389,6 +495,8 @@ class VoiceTurnOrchestrator:
         except Exception as exc:
             mark_voice_turn_error_layer(request, "voice_turn_orchestrator.main_llm", exc)
             raise
+        if request.turn_scope is not None:
+            request.turn_scope.raise_if_cancelled()
 
         return VoiceTurnResult(
             answer_text=answer,
@@ -404,6 +512,7 @@ class VoiceTurnOrchestrator:
             room_key=request.room_key,
             person_key=request.person_key,
             session_memory_key=request.session_memory_key,
+            memory_owner_scope=request.memory_owner_scope,
             source=request.source,
             debug_text=(
                 _observability_text(request.debug_text, request.metrics)
@@ -462,7 +571,7 @@ def activate_accepted_voice_turn(
     start_new_turn: Callable[..., str],
 ) -> VoiceAcceptedTurnActivation:
     accepted_turn_id = source_turn_id
-    if ingress_source != "discord_voice":
+    if ingress_source not in {"discord_voice", "local_mic"}:
         accepted_turn_id = start_new_turn(
             session_key,
             turn_id=source_turn_id,
@@ -549,8 +658,11 @@ def accept_voice_reply_execution(
     replace_room_turn_scope: Callable[..., Any],
     attach_current_task: Callable[[Any], Any],
     set_room_reply_in_progress: Callable[..., Any],
+    voice_ingress_is_current: Callable[[], bool] | None = None,
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
-) -> VoiceAcceptedReplyExecution:
+) -> VoiceAcceptedReplyExecution | None:
+    if voice_ingress_is_current is not None and not voice_ingress_is_current():
+        return None
     activation = activate_accepted_voice_turn(
         session_key=session_key,
         room_session_key=room_session_key,
@@ -574,7 +686,7 @@ def accept_voice_reply_execution(
             "owner_user_id": user_id,
         }
     )
-    if ingress_source == "discord_voice":
+    if ingress_source in {"discord_voice", "local_mic"}:
         checkpoint_accepted_voice_turn(
             session_key=session_key,
             user_id=user_id,
@@ -948,8 +1060,9 @@ def prepare_accepted_voice_reply_delivery_runtime(
     speaker_display_name: str,
     visible_text: Callable[[str], str],
     print_fn: Callable[..., Any],
+    voice_ingress_is_current: Callable[[], bool],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
-) -> VoiceReplyDeliveryRuntime:
+) -> VoiceReplyDeliveryRuntime | None:
     accepted_execution = accept_voice_reply_execution(
         session_key=session_key,
         room_session_key=room_session_key,
@@ -979,7 +1092,10 @@ def prepare_accepted_voice_reply_delivery_runtime(
         replace_room_turn_scope=replace_room_turn_scope,
         attach_current_task=attach_current_task,
         set_room_reply_in_progress=set_room_reply_in_progress,
+        voice_ingress_is_current=voice_ingress_is_current,
     )
+    if accepted_execution is None:
+        return None
     return prepare_voice_reply_delivery_runtime(
         accepted_execution=accepted_execution,
         room_session_key=room_session_key,
@@ -1326,6 +1442,7 @@ async def prepare_and_execute_accepted_voice_reply(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    voice_ingress_is_current: Callable[[], bool],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
@@ -1363,7 +1480,10 @@ async def prepare_and_execute_accepted_voice_reply(
         speaker_display_name=speaker_display_name,
         visible_text=visible_text,
         print_fn=print_fn,
+        voice_ingress_is_current=voice_ingress_is_current,
     )
+    if delivery_runtime is None:
+        return None
     if release_ingress_worker is not None:
         release_ingress_worker()
     return await execute_accepted_voice_reply(
@@ -1446,6 +1566,7 @@ async def handle_prepared_voice_reply(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    voice_ingress_is_current: Callable[[], bool],
     log_voice_bottleneck_summary: Callable[..., Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
     release_ingress_worker: Callable[[], Any] | None = None,
@@ -1508,6 +1629,7 @@ async def handle_prepared_voice_reply(
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
+        voice_ingress_is_current=voice_ingress_is_current,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         record_runtime_error=record_runtime_error,
         release_ingress_worker=release_ingress_worker,
@@ -1578,6 +1700,7 @@ async def process_voice_reply_from_transcript(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    voice_ingress_is_current: Callable[[], bool],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
     record_runtime_error: Callable[..., Any] | None = None,
     release_ingress_worker: Callable[[], Any] | None = None,
@@ -1663,6 +1786,7 @@ async def process_voice_reply_from_transcript(
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
+        voice_ingress_is_current=voice_ingress_is_current,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         record_runtime_error=record_runtime_error,
         release_ingress_worker=release_ingress_worker,
@@ -1740,6 +1864,7 @@ async def process_voice_reply_from_transcript_context(
         get_room_turn_scope=deps.get_room_turn_scope,
         detach_task=deps.detach_task,
         clear_room_turn_scope=deps.clear_room_turn_scope,
+        voice_ingress_is_current=context.voice_ingress_is_current,
         record_runtime_error=deps.record_runtime_error,
         release_ingress_worker=context.release_ingress_worker,
     )
@@ -1799,6 +1924,11 @@ async def deliver_voice_reply(
             raise RuntimeError("tts_playback_not_completed")
 
     try:
+        local_voice_memory_owner_scope = (
+            _LOCAL_VOICE_MEMORY_OWNER_SCOPE
+            if bool(getattr(vc, "local_speaker_output", False))
+            else None
+        )
         memory_command_matched = False
         memory_command_reply = ""
         memory_write_receipt = None
@@ -1811,16 +1941,30 @@ async def deliver_voice_reply(
                 memory_command_reply,
                 memory_write_receipt,
                 memory_command_error,
-            ) = await asyncio.to_thread(
+            ) = await run_registered_memory_thread(
+                guild_id,
                 execute_explicit_memory_confirmation,
                 voice_reply.history_user_text,
+                task_kind="explicit-confirmation",
                 action_id=accepted_turn_id,
                 evidence_turn_id=accepted_turn_id,
-                source="discord-user",
-                owner_scope=memory_owner_scope(
-                    guild_id=guild_id,
-                    person_key=person_key,
+                source=(
+                    "control-page-user"
+                    if local_voice_memory_owner_scope is not None
+                    else "discord-user"
                 ),
+                owner_scope=(
+                    local_voice_memory_owner_scope
+                    or memory_owner_scope(
+                        guild_id=guild_id,
+                        person_key=person_key,
+                    )
+                ),
+                reset_scope=memory_reset_scope(
+                    guild_id
+                )
+                if local_voice_memory_owner_scope is None
+                else _LOCAL_VOICE_MEMORY_RESET_SCOPE,
             )
         if memory_command_matched:
             answer = memory_command_reply
@@ -1974,6 +2118,7 @@ async def deliver_voice_reply(
                     room_key=room_key,
                     person_key=person_key,
                     session_memory_key=session_memory_key,
+                    memory_owner_scope=local_voice_memory_owner_scope,
                     source="voice",
                     debug_text=_observability_text(
                         voice_reply.history_user_text,
@@ -2064,6 +2209,7 @@ def build_voice_ingress_item(
     segment_id: int,
     ingress_during_reply: bool,
     owner_user_id_on_ingress: int | None,
+    voice_ingress_epoch: int,
     queue_depth_at_enqueue: int,
     enqueued_at: float,
 ) -> dict[str, Any]:
@@ -2089,6 +2235,7 @@ def build_voice_ingress_item(
         "segment_id": segment_id,
         "ingress_during_reply": ingress_during_reply,
         "owner_user_id_on_ingress": owner_user_id_on_ingress,
+        "voice_ingress_epoch": voice_ingress_epoch,
         "enqueued_at": enqueued_at,
     }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
+
+import runtime_lifecycle as runtime_lifecycle_module
 
 from evelyn_core.control_page_composition_runtime import (
     ControlPageComposition,
@@ -88,7 +91,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             stop_control_page_background_tasks=Mock(),
             stop_vision_watch_task=Mock(),
             stop_local_mic_service=Mock(),
-            launch_runtime_restart_sequence=Mock(return_value="launcher"),
+            launch_runtime_restart_sequence=Mock(return_value="local"),
             exit_process=Mock(),
             schedule_stack_shutdown=Mock(return_value=True),
             schedule_local_shutdown=Mock(return_value=True),
@@ -147,9 +150,126 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         startup.get_stt_model.assert_called_once_with()
         startup.warmup_stt_sync.assert_called_once_with()
-        startup.warmup_llm.assert_awaited_once_with()
+        startup.warmup_llm.assert_not_awaited()
         startup.warmup_tts_server.assert_awaited_once_with()
         self.assertEqual(composition.voice_path_warmup_done["voice:1:2"], 123.0)
+
+    async def test_main_backend_epoch_change_invalidates_startup_ready(self) -> None:
+        epoch = {"value": "epoch-one"}
+        startup = self.build_startup_deps(
+            main_llm_backend_epoch=lambda: epoch["value"],
+        )
+        composition = self.build_composition(startup=startup)
+        composition.ensure_opus_loaded = Mock()
+        composition.set_tts_presence = AsyncMock()
+
+        await composition.ensure_startup_components_ready()
+        self.assertTrue(composition.startup_components_ready())
+        self.assertIsNotNone(
+            composition.startup_main_warmup_evidence()
+        )
+
+        epoch["value"] = "epoch-two"
+        self.assertFalse(composition.startup_components_ready())
+        self.assertIsNone(
+            composition.startup_main_warmup_evidence()
+        )
+        await composition.ensure_startup_components_ready()
+
+        self.assertTrue(composition.startup_components_ready())
+        self.assertEqual(startup.warmup_llm.await_count, 2)
+
+    async def test_epoch_change_during_main_warmup_fails_closed(self) -> None:
+        startup = self.build_startup_deps(
+            main_llm_backend_epoch=Mock(
+                side_effect=["epoch-one", "epoch-two"]
+            ),
+        )
+        composition = self.build_composition(startup=startup)
+
+        with self.assertRaisesRegex(RuntimeError, "main_llm_epoch_changed"):
+            await composition.warmup_voice_path(
+                reason="startup",
+                key="startup",
+                include_stt=False,
+                include_llm=True,
+                include_tts=False,
+            )
+
+        self.assertNotIn("startup", composition.voice_path_warmup_done)
+
+    async def test_stable_epoch_warmup_proof_does_not_expire(self) -> None:
+        clock = {"value": 100.0}
+        startup = self.build_startup_deps(
+            monotonic=lambda: clock["value"],
+        )
+        composition = self.build_composition(startup=startup)
+        composition.ensure_opus_loaded = Mock()
+        composition.set_tts_presence = AsyncMock()
+
+        await composition.ensure_startup_components_ready()
+        self.assertTrue(composition.startup_components_ready())
+
+        clock["value"] = 1_000_000.0
+        self.assertTrue(composition.startup_components_ready())
+        await composition.ensure_startup_components_ready()
+
+        self.assertTrue(composition.startup_components_ready())
+        self.assertEqual(startup.warmup_llm.await_count, 1)
+        startup.warmup_stt_sync.assert_called_once_with()
+        startup.warmup_tts_server.assert_awaited_once_with()
+
+    async def test_concurrent_epoch_change_rewarms_once(self) -> None:
+        epoch = {"value": "epoch-one"}
+        startup = self.build_startup_deps(
+            main_llm_backend_epoch=lambda: epoch["value"],
+        )
+        composition = self.build_composition(startup=startup)
+        composition.ensure_opus_loaded = Mock()
+        composition.set_tts_presence = AsyncMock()
+
+        await composition.ensure_startup_components_ready()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def rewarm() -> object:
+            entered.set()
+            await release.wait()
+            return object()
+
+        startup.warmup_llm.side_effect = rewarm
+        epoch["value"] = "epoch-two"
+        first = asyncio.create_task(
+            composition.ensure_startup_components_ready()
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            composition.ensure_startup_components_ready()
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+        self.assertEqual(startup.warmup_llm.await_count, 2)
+        startup.warmup_stt_sync.assert_called_once_with()
+        startup.warmup_tts_server.assert_awaited_once_with()
+        self.assertTrue(composition.startup_components_ready())
+
+    def test_core_warmup_owns_only_the_core_prompt_abi(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        wiring = source.split("llm_warmup=lambda: LlmWarmupRuntimeDeps(", 1)[1].split(
+            "bot_user=lambda: bot.user",
+            1,
+        )[0]
+        self.assertIn("system_prompts=(SYSTEM_PROMPT,)", wiring)
+        self.assertIn("expected_prompt_abi_ids=(", wiring)
+        self.assertIn("compile_main_prompt(", wiring)
+        self.assertIn("model_name=MODEL_NAME", wiring)
+        self.assertIn("clean_text(SYSTEM_PROMPT)", wiring)
+        self.assertIn("content_format=MAIN_LLM_CHAT_CONTENT_FORMAT", wiring)
+        self.assertIn("stable_system_prefix=clean_text(SYSTEM_PROMPT)", wiring)
+        self.assertIn(").abi.prompt_abi_id", wiring)
+        self.assertNotIn("FAST_MAIN_LLM_USER_PREFIX", wiring)
 
     async def test_initialize_restores_presence_when_warmup_fails(self) -> None:
         composition = self.build_composition()
@@ -191,8 +311,8 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             stop_control_page_background_tasks=lambda: events.append("stop_control"),
             stop_vision_watch_task=lambda: events.append("stop_vision"),
             stop_local_mic_service=lambda: events.append("stop_mic"),
-            launch_runtime_restart_sequence=lambda *args, **kwargs: events.append(
-                ("launch", args, kwargs)
+            launch_runtime_restart_sequence=lambda *args, **kwargs: (
+                events.append(("launch", args, kwargs)) or "local"
             ),
             exit_process=lambda code: events.append(("exit", code)),
         )
@@ -223,6 +343,489 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
                 "fallback_target": REPO_ROOT / "evelyn_core" / "start.bat",
             },
         )
+        self.assertEqual(events[-1], ("exit", 0))
+
+    def test_missing_primary_launcher_runs_batch_fallback_with_cmd(self) -> None:
+        missing_primary = REPO_ROOT / "missing-primary.bat"
+        fallback_batch = REPO_ROOT / "evelyn_core" / "start.bat"
+
+        with patch.object(
+            runtime_lifecycle_module.subprocess,
+            "Popen",
+        ) as popen:
+            runtime_lifecycle_module.launch_restart_process(
+                missing_primary,
+                REPO_ROOT,
+                {},
+                fallback_target=fallback_batch,
+            )
+
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command,
+            ["cmd.exe", "/c", str(fallback_batch)],
+        )
+        self.assertNotEqual(command[0], sys.executable)
+
+    def test_missing_primary_launcher_runs_python_fallback_with_python(
+        self,
+    ) -> None:
+        missing_primary = REPO_ROOT / "missing-primary.bat"
+        fallback_python = REPO_ROOT / "main.py"
+
+        with patch.object(
+            runtime_lifecycle_module.subprocess,
+            "Popen",
+        ) as popen:
+            runtime_lifecycle_module.launch_restart_process(
+                missing_primary,
+                REPO_ROOT,
+                {},
+                fallback_target=fallback_python,
+            )
+
+        self.assertEqual(
+            popen.call_args.args[0],
+            [sys.executable, str(fallback_python)],
+        )
+
+    def test_missing_primary_and_fallback_fail_before_process_spawn(
+        self,
+    ) -> None:
+        missing_primary = REPO_ROOT / "missing-primary.bat"
+        missing_fallback = REPO_ROOT / "missing-fallback.py"
+
+        with patch.object(
+            runtime_lifecycle_module.subprocess,
+            "Popen",
+        ) as popen:
+            with self.assertRaises(FileNotFoundError):
+                runtime_lifecycle_module.launch_restart_process(
+                    missing_primary,
+                    REPO_ROOT,
+                    {},
+                    fallback_target=missing_fallback,
+                )
+
+        popen.assert_not_called()
+
+    def test_main_wires_mode_preserving_python_restart_fallback(self) -> None:
+        main_source = (REPO_ROOT / "main.py").read_text(
+            encoding="utf-8",
+        )
+
+        self.assertIn(
+            'fallback_target=PROJECT_ROOT / "main.py"',
+            main_source,
+        )
+        self.assertNotIn(
+            'fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat"',
+            main_source,
+        )
+        self.assertIn(
+            "container_restart_enabled=runtime_uses_container_restart()",
+            main_source,
+        )
+
+    def test_container_restart_delegates_to_docker_without_windows_launcher(
+        self,
+    ) -> None:
+        with (
+            patch.dict(
+                runtime_lifecycle_module.os.environ,
+                {"EVELYN_RUNTIME_ROLE": "discord_bot"},
+                clear=False,
+            ),
+            patch.object(
+                runtime_lifecycle_module.subprocess,
+                "Popen",
+            ) as popen,
+        ):
+            mode = runtime_lifecycle_module.launch_runtime_restart_sequence(
+                REPO_ROOT,
+                local_only_mode=False,
+                discord_enabled=True,
+                control_page_port=8799,
+                fallback_target=REPO_ROOT / "evelyn_core" / "start.bat",
+            )
+
+        self.assertEqual(mode, "container")
+        popen.assert_not_called()
+
+    async def test_container_restart_uses_failure_exit_for_docker_relaunch(
+        self,
+    ) -> None:
+        process = self.build_process_deps(
+            local_only_mode=False,
+            discord_enabled=True,
+            container_restart_enabled=True,
+            launch_runtime_restart_sequence=Mock(
+                return_value="container"
+            ),
+        )
+
+        await self.build_composition(process=process).restart_bot_process()
+
+        process.exit_process.assert_called_once_with(75)
+
+    async def test_container_restart_waits_for_docker_policy_admission(
+        self,
+    ) -> None:
+        monotonic = Mock(side_effect=[100.0, 102.0])
+        sleep = AsyncMock()
+        process = self.build_process_deps(
+            local_only_mode=False,
+            discord_enabled=True,
+            container_restart_enabled=True,
+            launch_runtime_restart_sequence=Mock(
+                return_value="container"
+            ),
+            monotonic=monotonic,
+            container_restart_min_uptime_sec=10.0,
+            sleep=sleep,
+        )
+
+        await self.build_composition(process=process).restart_bot_process()
+
+        self.assertEqual(
+            [call.args for call in sleep.await_args_list],
+            [(1.0,), (8.0,)],
+        )
+        process.exit_process.assert_called_once_with(75)
+
+    def test_restart_request_arms_watchdog_before_work_is_scheduled(
+        self,
+    ) -> None:
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+            container_restart_min_uptime_sec=0.0,
+        )
+        composition = self.build_composition(process=process)
+
+        work = composition.restart_bot_process()
+        try:
+            self.assertTrue(exit_called.wait(timeout=1.0))
+        finally:
+            work.close()
+
+        process.launch_runtime_restart_sequence.assert_called_once()
+        self.assertEqual(exit_codes, [0])
+
+    def test_restart_watchdogs_keep_process_alive_until_terminal_exit(
+        self,
+    ) -> None:
+        created_timers: list[threading.Timer] = []
+        real_timer = threading.Timer
+
+        def capture_timer(*args, **kwargs) -> threading.Timer:
+            timer = real_timer(*args, **kwargs)
+            created_timers.append(timer)
+            return timer
+
+        process = self.build_process_deps(
+            terminal_exit_deadline_sec=10.0,
+        )
+        composition = self.build_composition(process=process)
+        with patch.object(
+            threading,
+            "Timer",
+            side_effect=capture_timer,
+        ):
+            work = composition.restart_bot_process()
+
+        try:
+            self.assertEqual(len(created_timers), 2)
+            self.assertTrue(
+                all(not timer.daemon for timer in created_timers)
+            )
+        finally:
+            for timer in created_timers:
+                timer.cancel()
+            work.close()
+
+    async def test_container_admission_cannot_be_bypassed_by_task_cancel(
+        self,
+    ) -> None:
+        admission_entered = asyncio.Event()
+        release_admission = asyncio.Event()
+        exit_codes: list[int] = []
+
+        async def sleep(delay: float) -> None:
+            if delay == 1.0:
+                return
+            admission_entered.set()
+            await release_admission.wait()
+
+        process = self.build_process_deps(
+            local_only_mode=False,
+            discord_enabled=True,
+            container_restart_enabled=True,
+            launch_runtime_restart_sequence=Mock(
+                return_value="container"
+            ),
+            monotonic=Mock(side_effect=[100.0, 100.0]),
+            container_restart_min_uptime_sec=10.0,
+            sleep=sleep,
+            exit_process=exit_codes.append,
+        )
+        task = asyncio.create_task(
+            self.build_composition(
+                process=process
+            ).restart_bot_process()
+        )
+        await admission_entered.wait()
+
+        task.cancel()
+        await asyncio.sleep(0)
+
+        self.assertEqual(exit_codes, [])
+        process.launch_runtime_restart_sequence.assert_not_called()
+
+        release_admission.set()
+        await task
+
+        process.launch_runtime_restart_sequence.assert_called_once()
+        self.assertEqual(exit_codes, [75])
+
+    async def test_cancelled_admission_sleeper_defers_to_soft_launcher_timer(
+        self,
+    ) -> None:
+        admission_child_cancelled = asyncio.Event()
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+
+        async def sleep(delay: float) -> None:
+            if delay == 1.0:
+                return
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+            admission_child_cancelled.set()
+            await asyncio.sleep(0)
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            local_only_mode=False,
+            discord_enabled=True,
+            container_restart_enabled=True,
+            launch_runtime_restart_sequence=Mock(
+                return_value="container"
+            ),
+            monotonic=Mock(side_effect=[100.0, 100.0]),
+            container_restart_min_uptime_sec=0.1,
+            terminal_exit_deadline_sec=0.05,
+            sleep=sleep,
+            exit_process=exit_process,
+        )
+        task = asyncio.create_task(
+            self.build_composition(
+                process=process
+            ).restart_bot_process()
+        )
+        await admission_child_cancelled.wait()
+        await asyncio.sleep(0)
+
+        self.assertEqual(exit_codes, [])
+        process.launch_runtime_restart_sequence.assert_not_called()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(exit_codes, [])
+        process.launch_runtime_restart_sequence.assert_not_called()
+        self.assertTrue(
+            await asyncio.to_thread(exit_called.wait, 1.0)
+        )
+
+        process.launch_runtime_restart_sequence.assert_called_once()
+        self.assertEqual(exit_codes, [75])
+
+    async def test_concurrent_restart_requests_share_one_terminal_owner(
+        self,
+    ) -> None:
+        cleanup_entered = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def shutdown_lease(_reason: str) -> None:
+            cleanup_entered.set()
+            await release_cleanup.wait()
+
+        process = self.build_process_deps(
+            shutdown_minecraft_world_lease=shutdown_lease,
+        )
+        composition = self.build_composition(process=process)
+        first = asyncio.create_task(composition.restart_bot_process())
+        await cleanup_entered.wait()
+        second = asyncio.create_task(composition.restart_bot_process())
+        await asyncio.sleep(0)
+        release_cleanup.set()
+        await asyncio.gather(first, second)
+
+        process.flush_session_continuity.assert_called_once_with()
+        process.launch_runtime_restart_sequence.assert_called_once()
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_restart_and_shutdown_share_first_terminal_owner(
+        self,
+    ) -> None:
+        process = self.build_process_deps()
+        composition = self.build_composition(process=process)
+        restart_work = composition.restart_bot_process()
+
+        await composition.shutdown_bot_process()
+        await restart_work
+
+        process.flush_session_continuity.assert_called_once_with()
+        process.launch_runtime_restart_sequence.assert_called_once_with(
+            REPO_ROOT,
+            local_only_mode=True,
+            discord_enabled=False,
+            control_page_port=8799,
+            fallback_target=REPO_ROOT / "evelyn_core" / "start.bat",
+        )
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_shutdown_and_restart_share_first_terminal_owner(
+        self,
+    ) -> None:
+        process = self.build_process_deps()
+        composition = self.build_composition(process=process)
+        shutdown_work = composition.shutdown_bot_process()
+
+        await composition.restart_bot_process()
+        await shutdown_work
+
+        process.flush_session_continuity.assert_called_once_with()
+        process.launch_runtime_restart_sequence.assert_not_called()
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_shutdown_watchdog_arm_failure_releases_terminal_claim(
+        self,
+    ) -> None:
+        process = self.build_process_deps()
+        composition = self.build_composition(process=process)
+
+        with patch.object(
+            threading.Timer,
+            "start",
+            side_effect=RuntimeError("timer unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "timer unavailable",
+            ):
+                composition.shutdown_bot_process()
+
+        await composition.shutdown_bot_process()
+
+        process.flush_session_continuity.assert_called_once_with()
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_shutdown_watchdog_spawn_then_arm_failure_is_cancelled(
+        self,
+    ) -> None:
+        real_start = threading.Timer.start
+        timers: list[threading.Timer] = []
+        exit_codes: list[int] = []
+
+        def start_then_raise(timer: threading.Timer) -> None:
+            timers.append(timer)
+            real_start(timer)
+            raise KeyboardInterrupt("timer arm interrupted")
+
+        process = self.build_process_deps(
+            exit_process=exit_codes.append,
+            terminal_exit_deadline_sec=0.02,
+        )
+        composition = self.build_composition(process=process)
+
+        with patch.object(
+            threading.Timer,
+            "start",
+            new=start_then_raise,
+        ):
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "timer arm interrupted",
+            ):
+                composition.shutdown_bot_process()
+
+        for timer in timers:
+            timer.join(timeout=1.0)
+            self.assertFalse(timer.is_alive())
+        self.assertEqual(exit_codes, [])
+
+        await composition.shutdown_bot_process()
+
+        self.assertEqual(exit_codes, [0])
+
+    async def test_restart_launcher_spawn_then_arm_failure_is_cancelled(
+        self,
+    ) -> None:
+        real_start = threading.Timer.start
+        timers: list[threading.Timer] = []
+        exit_codes: list[int] = []
+
+        def fail_second_start(timer: threading.Timer) -> None:
+            timers.append(timer)
+            real_start(timer)
+            if len(timers) == 2:
+                raise KeyboardInterrupt("launcher arm interrupted")
+
+        process = self.build_process_deps(
+            exit_process=exit_codes.append,
+            terminal_exit_deadline_sec=0.05,
+        )
+        composition = self.build_composition(process=process)
+
+        with patch.object(
+            threading.Timer,
+            "start",
+            new=fail_second_start,
+        ):
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "launcher arm interrupted",
+            ):
+                composition.restart_bot_process()
+
+        for timer in timers:
+            timer.join(timeout=1.0)
+            self.assertFalse(timer.is_alive())
+        process.launch_runtime_restart_sequence.assert_not_called()
+        self.assertEqual(exit_codes, [])
+
+        await composition.shutdown_bot_process()
+
+        self.assertEqual(exit_codes, [0])
+
+    async def test_restart_setup_failure_releases_terminal_claim(
+        self,
+    ) -> None:
+        process = self.build_process_deps(
+            container_restart_enabled=True,
+            container_restart_min_uptime_sec="invalid",
+        )
+        composition = self.build_composition(process=process)
+
+        with self.assertRaises(ValueError):
+            composition.restart_bot_process()
+
+        await composition.shutdown_bot_process()
+
+        process.flush_session_continuity.assert_called_once_with()
+        process.launch_runtime_restart_sequence.assert_not_called()
+        process.exit_process.assert_called_once_with(0)
 
     async def test_shutdown_attempts_all_voice_cleanup_and_always_exits(self) -> None:
         events: list[object] = []
@@ -255,6 +858,206 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1], ("exit", 0))
         process.stop_control_page_background_tasks.assert_called_once_with()
         process.stop_local_mic_service.assert_called_once_with()
+
+    def test_shutdown_terminal_callback_survives_permanently_stalled_continuity_flush(
+        self,
+    ) -> None:
+        flush_entered = threading.Event()
+        release_flush = threading.Event()
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+        worker_errors: list[BaseException] = []
+
+        def stalled_flush() -> None:
+            flush_entered.set()
+            release_flush.wait()
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            flush_session_continuity=stalled_flush,
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+        )
+        composition = self.build_composition(process=process)
+
+        def run_shutdown() -> None:
+            try:
+                asyncio.run(composition.shutdown_bot_process())
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=run_shutdown, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(flush_entered.wait(timeout=1.0))
+            terminal_called_before_release = exit_called.wait(timeout=1.0)
+        finally:
+            release_flush.set()
+            worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertTrue(terminal_called_before_release)
+        self.assertEqual(exit_codes, [0])
+
+    def test_restart_watchdog_delegates_to_docker_before_stalled_flush_returns(
+        self,
+    ) -> None:
+        flush_entered = threading.Event()
+        release_flush = threading.Event()
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+        worker_errors: list[BaseException] = []
+        launcher = Mock(return_value="container")
+
+        def stalled_flush() -> None:
+            flush_entered.set()
+            release_flush.wait()
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            flush_session_continuity=stalled_flush,
+            launch_runtime_restart_sequence=launcher,
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+            container_restart_min_uptime_sec=0.0,
+        )
+        composition = self.build_composition(process=process)
+
+        def run_restart() -> None:
+            try:
+                asyncio.run(composition.restart_bot_process())
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=run_restart, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(flush_entered.wait(timeout=1.0))
+            launcher_called_before_release = launcher.called or (
+                exit_called.wait(timeout=1.0) and launcher.called
+            )
+            terminal_called_before_release = exit_called.wait(timeout=1.0)
+        finally:
+            release_flush.set()
+            worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertTrue(launcher_called_before_release)
+        self.assertTrue(terminal_called_before_release)
+        launcher.assert_called_once()
+        self.assertEqual(exit_codes, [75])
+
+    def test_restart_watchdog_exits_even_when_launcher_itself_stalls(
+        self,
+    ) -> None:
+        launcher_entered = threading.Event()
+        release_launcher = threading.Event()
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+        worker_errors: list[BaseException] = []
+
+        def stalled_launcher(*_args, **_kwargs) -> str:
+            launcher_entered.set()
+            release_launcher.wait()
+            return "container"
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            launch_runtime_restart_sequence=stalled_launcher,
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+            container_restart_min_uptime_sec=0.0,
+        )
+        composition = self.build_composition(process=process)
+
+        def run_restart() -> None:
+            try:
+                asyncio.run(composition.restart_bot_process())
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=run_restart, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(launcher_entered.wait(timeout=1.0))
+            terminal_called_before_release = exit_called.wait(timeout=1.0)
+        finally:
+            release_launcher.set()
+            worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertTrue(terminal_called_before_release)
+        self.assertEqual(exit_codes, [75])
+
+    async def test_restart_launcher_failure_still_forces_failure_exit(
+        self,
+    ) -> None:
+        private_error = "PRIVATE launcher token"
+        process = self.build_process_deps(
+            launch_runtime_restart_sequence=Mock(
+                side_effect=RuntimeError(private_error)
+            ),
+        )
+
+        await self.build_composition(process=process).restart_bot_process()
+
+        process.exit_process.assert_called_once_with(75)
+        process.log.assert_called_once_with(
+            "[RESTART] launch_failed errorType=RuntimeError"
+        )
+        self.assertNotIn(private_error, repr(process.log.call_args_list))
+
+    async def test_restart_launcher_and_logger_failure_still_exits_once(
+        self,
+    ) -> None:
+        private_error = "PRIVATE launcher token"
+        logged: list[str] = []
+
+        def broken_log(message: str) -> None:
+            logged.append(message)
+            raise BrokenPipeError("PRIVATE log sink")
+
+        process = self.build_process_deps(
+            launch_runtime_restart_sequence=Mock(
+                side_effect=RuntimeError(private_error)
+            ),
+            log=broken_log,
+        )
+
+        await self.build_composition(process=process).restart_bot_process()
+
+        process.exit_process.assert_called_once_with(75)
+        self.assertEqual(
+            logged,
+            ["[RESTART] launch_failed errorType=RuntimeError"],
+        )
+        self.assertNotIn(private_error, repr(logged))
+
+    async def test_unknown_restart_mode_fails_closed(self) -> None:
+        process = self.build_process_deps(
+            launch_runtime_restart_sequence=Mock(
+                return_value="unexpected"
+            ),
+        )
+
+        await self.build_composition(process=process).restart_bot_process()
+
+        process.exit_process.assert_called_once_with(75)
+        process.log.assert_called_once_with(
+            "[RESTART] launcher_mode_invalid"
+        )
 
     async def test_local_only_mode_starts_services_and_waits(self) -> None:
         process = self.build_process_deps()
@@ -297,14 +1100,160 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         process.wait_forever.assert_not_awaited()
 
     def test_shutdown_schedulers_preserve_project_root_and_delay(self) -> None:
+        stack_process = self.build_process_deps()
+        local_process = self.build_process_deps()
+        stack_composition = self.build_composition(process=stack_process)
+        local_composition = self.build_composition(process=local_process)
+
+        self.assertTrue(
+            stack_composition.schedule_evelyn_stack_shutdown(delay_ms=4000)
+        )
+        self.assertTrue(
+            local_composition.schedule_evelyn_local_shutdown(delay_ms=2000)
+        )
+
+        stack_process.schedule_stack_shutdown.assert_called_once_with(
+            REPO_ROOT,
+            delay_ms=4000,
+        )
+        local_process.schedule_local_shutdown.assert_called_once_with(
+            REPO_ROOT,
+            delay_ms=2000,
+        )
+        for watchdog in (
+            stack_composition._scheduled_terminal_watchdogs
+            + local_composition._scheduled_terminal_watchdogs
+        ):
+            watchdog.cancel()
+
+    async def test_successful_scheduled_shutdown_blocks_async_terminal_owners(
+        self,
+    ) -> None:
         process = self.build_process_deps()
         composition = self.build_composition(process=process)
 
-        self.assertTrue(composition.schedule_evelyn_stack_shutdown(delay_ms=4000))
-        self.assertTrue(composition.schedule_evelyn_local_shutdown(delay_ms=2000))
+        self.assertTrue(composition.schedule_evelyn_stack_shutdown())
+        await composition.restart_bot_process()
+        await composition.shutdown_bot_process()
 
-        process.schedule_stack_shutdown.assert_called_once_with(REPO_ROOT, delay_ms=4000)
-        process.schedule_local_shutdown.assert_called_once_with(REPO_ROOT, delay_ms=2000)
+        process.flush_session_continuity.assert_not_called()
+        process.launch_runtime_restart_sequence.assert_not_called()
+        process.exit_process.assert_not_called()
+        for watchdog in composition._scheduled_terminal_watchdogs:
+            watchdog.cancel()
+
+    def test_successful_scheduled_shutdown_has_fail_stop_watchdog(
+        self,
+    ) -> None:
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+        )
+        composition = self.build_composition(process=process)
+
+        self.assertTrue(composition.schedule_evelyn_stack_shutdown())
+        self.assertTrue(exit_called.wait(timeout=1.0))
+
+        self.assertEqual(exit_codes, [0])
+
+    def test_stalled_shutdown_scheduler_is_already_watchdog_bounded(
+        self,
+    ) -> None:
+        schedule_entered = threading.Event()
+        release_schedule = threading.Event()
+        exit_called = threading.Event()
+        exit_codes: list[int] = []
+        results: list[bool] = []
+
+        def stalled_schedule(*_args, **_kwargs) -> bool:
+            schedule_entered.set()
+            release_schedule.wait()
+            return True
+
+        def exit_process(code: int) -> None:
+            exit_codes.append(code)
+            exit_called.set()
+
+        process = self.build_process_deps(
+            schedule_stack_shutdown=stalled_schedule,
+            exit_process=exit_process,
+            terminal_exit_deadline_sec=0.05,
+        )
+        composition = self.build_composition(process=process)
+        worker = threading.Thread(
+            target=lambda: results.append(
+                composition.schedule_evelyn_stack_shutdown()
+            ),
+            daemon=True,
+        )
+        worker.start()
+        try:
+            self.assertTrue(schedule_entered.wait(timeout=1.0))
+            terminal_called_before_release = exit_called.wait(
+                timeout=1.0
+            )
+        finally:
+            release_schedule.set()
+            worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(terminal_called_before_release)
+        self.assertEqual(exit_codes, [0])
+        self.assertEqual(results, [True])
+
+    async def test_async_terminal_owner_blocks_scheduled_shutdown(self) -> None:
+        process = self.build_process_deps()
+        composition = self.build_composition(process=process)
+        restart_work = composition.restart_bot_process()
+
+        self.assertFalse(composition.schedule_evelyn_stack_shutdown())
+        await restart_work
+
+        process.schedule_stack_shutdown.assert_not_called()
+        process.launch_runtime_restart_sequence.assert_called_once()
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_failed_scheduled_shutdown_releases_terminal_claim(self) -> None:
+        process = self.build_process_deps(
+            schedule_stack_shutdown=Mock(return_value=False),
+        )
+        composition = self.build_composition(process=process)
+
+        self.assertFalse(composition.schedule_evelyn_stack_shutdown())
+        await composition.restart_bot_process()
+
+        process.launch_runtime_restart_sequence.assert_called_once()
+        process.exit_process.assert_called_once_with(0)
+
+    async def test_scheduler_watchdog_arm_failure_releases_terminal_claim(
+        self,
+    ) -> None:
+        process = self.build_process_deps()
+        composition = self.build_composition(process=process)
+
+        with patch.object(
+            threading.Timer,
+            "start",
+            side_effect=RuntimeError("timer unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "timer unavailable",
+            ):
+                composition.schedule_evelyn_stack_shutdown()
+
+        await composition.shutdown_bot_process()
+
+        process.schedule_stack_shutdown.assert_not_called()
+        process.flush_session_continuity.assert_called_once_with()
+        process.exit_process.assert_called_once_with(0)
 
     def test_control_page_reads_live_startup_ready_state(self) -> None:
         ready = False

@@ -32,6 +32,7 @@ class MainSynthesisSkillTests(unittest.IsolatedAsyncioTestCase):
                     "user_text": "광주광역시 날씨 찾아줘",
                     "tool_name": "search",
                     "tool_result_text": "광주광역시 현재 날씨: 흐림, 18도",
+                    "search_metadata": {"search_result_schema": "evelyn.search-cards.v1"},
                     "synthesize_tool_result_with_main_llm_fn": fake_synthesis,
                     "messages": [{"role": "system", "content": "ctx"}],
                     "cognitive_state": {"action": "search_then_answer"},
@@ -44,6 +45,10 @@ class MainSynthesisSkillTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.metadata["synthesized"])
         self.assertEqual(calls[0]["tool_name"], "search")
         self.assertIn("광주광역시 현재 날씨", calls[0]["tool_result_text"])
+        self.assertEqual(
+            calls[0]["tool_result_metadata"],
+            {"search_result_schema": "evelyn.search-cards.v1"},
+        )
         self.assertEqual(calls[0]["source"], "control_page")
 
 

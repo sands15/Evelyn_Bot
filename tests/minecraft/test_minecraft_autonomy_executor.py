@@ -230,19 +230,40 @@ class MinecraftAutonomyExecutorTests(
             await executor.deps.get_runtime_status(),
             self.runtime,
         )
-        await executor.deps.execute_action(7, {"request": True})
-        await executor.deps.cancel_action(7, "action-run-1")
-        await executor.deps.force_disconnect(7)
-        owner.execute_action.assert_awaited_once_with(7, {"request": True})
-        owner.cancel_action.assert_awaited_once_with(7, "action-run-1")
-        owner.disconnect.assert_awaited_once_with(7)
+        await executor.deps.execute_action(
+            7,
+            {"request": True},
+            "lease-1",
+        )
+        await executor.deps.cancel_action(
+            7,
+            "action-run-1",
+            "lease-1",
+        )
+        await executor.deps.force_disconnect(7, "lease-1")
+        owner.execute_action.assert_awaited_once_with(
+            7,
+            {"request": True},
+            expected_lease_id="lease-1",
+        )
+        owner.cancel_action.assert_awaited_once_with(
+            7,
+            "action-run-1",
+            expected_lease_id="lease-1",
+        )
+        owner.disconnect.assert_awaited_once_with(
+            7,
+            expected_lease_id="lease-1",
+        )
 
     async def _verified_result(
         self,
         guild_id: int,
         request: dict,
+        expected_lease_id: str,
     ) -> dict:
         self.assertEqual(guild_id, 7)
+        self.assertEqual(expected_lease_id, "lease-1")
         return {
             "schema": MINECRAFT_ACTION_RESULT_SCHEMA,
             "status": "completed",
@@ -354,6 +375,49 @@ class MinecraftAutonomyExecutorTests(
         self.execute_action.assert_not_awaited()
         self.assertEqual(self.executor._inflight_action_run_id, "")
 
+    async def test_disconnect_cancelled_action_rejects_late_success_result(
+        self,
+    ) -> None:
+        await self.executor.connect()
+        action_started = asyncio.Event()
+        release_action = asyncio.Event()
+
+        async def delayed_result(
+            guild_id: int,
+            request: dict,
+            expected_lease_id: str,
+        ) -> dict:
+            action_started.set()
+            await release_action.wait()
+            return await self._verified_result(
+                guild_id,
+                request,
+                expected_lease_id,
+            )
+
+        self.execute_action.side_effect = delayed_result
+        self.cancel_action.return_value = self.cancelled_ack()
+        action = asyncio.create_task(
+            self.executor.execute_step(
+                self.step(),
+                context=self.context(),
+            )
+        )
+        await action_started.wait()
+
+        await self.executor.disconnect()
+        release_action.set()
+        result = await action
+
+        self.cancel_action.assert_awaited_once_with(
+            7,
+            "action-run-1",
+            "lease-1",
+        )
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "minecraft_action_result_stale")
+        self.assertFalse(result["verified"])
+
     async def test_connected_executor_accepts_exact_stopped_repeat_gateway(
         self,
     ) -> None:
@@ -438,6 +502,7 @@ class MinecraftAutonomyExecutorTests(
                         "actionRunId": "other-run",
                         "authorizationGrantId": "grant-1",
                     },
+                    "lease-1",
                 ),
                 "actionRunId": "other-run",
             },
@@ -455,8 +520,16 @@ class MinecraftAutonomyExecutorTests(
     async def test_lease_change_during_action_is_not_verified(self) -> None:
         await self.executor.connect()
 
-        async def change_lease(_guild_id: int, _request: dict) -> dict:
-            result = await self._verified_result(7, _request)
+        async def change_lease(
+            _guild_id: int,
+            _request: dict,
+            expected_lease_id: str,
+        ) -> dict:
+            result = await self._verified_result(
+                7,
+                _request,
+                expected_lease_id,
+            )
             self.lease["lease"]["leaseId"] = "lease-2"
             return result
 
@@ -476,7 +549,11 @@ class MinecraftAutonomyExecutorTests(
         await self.executor.connect()
         started = asyncio.Event()
 
-        async def wait_forever(_guild_id: int, _request: dict) -> dict:
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
             started.set()
             await asyncio.Future()
 
@@ -496,13 +573,18 @@ class MinecraftAutonomyExecutorTests(
         self.cancel_action.assert_awaited_once_with(
             7,
             "action-run-1",
+            "lease-1",
         )
 
     async def test_unverified_cancel_retains_correlation(self) -> None:
         await self.executor.connect()
         started = asyncio.Event()
 
-        async def wait_forever(_guild_id: int, _request: dict) -> dict:
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
             started.set()
             await asyncio.Future()
 
@@ -540,13 +622,68 @@ class MinecraftAutonomyExecutorTests(
             "",
         )
 
+    async def test_failed_disconnect_blocks_reconnect_until_exact_cleanup(self) -> None:
+        await self.executor.connect()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
+            started.set()
+            await release.wait()
+            return await self._verified_result(
+                _guild_id,
+                _request,
+                _expected_lease_id,
+            )
+
+        self.execute_action.side_effect = wait_forever
+        self.cancel_action.side_effect = RuntimeError(
+            "minecraft_world_lease_owner_unavailable"
+        )
+        self.force_disconnect.side_effect = RuntimeError(
+            "minecraft_world_lease_owner_unavailable"
+        )
+        action = asyncio.create_task(
+            self.executor.execute_step(
+                self.step(),
+                context=self.context(),
+            )
+        )
+        await started.wait()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await self.executor.disconnect()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await self.executor.connect()
+
+        self.cancel_action.side_effect = None
+        self.cancel_action.return_value = self.cancelled_ack()
+        await self.executor.disconnect()
+        release.set()
+        result = await action
+        self.assertEqual(result["reason"], "minecraft_action_result_stale")
+
     async def test_engine_stop_cannot_report_idle_when_cancel_unverified(
         self,
     ) -> None:
         await self.executor.connect()
         started = asyncio.Event()
 
-        async def wait_forever(_guild_id: int, _request: dict) -> dict:
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
             started.set()
             await asyncio.Future()
 
@@ -595,7 +732,11 @@ class MinecraftAutonomyExecutorTests(
         await self.executor.connect()
         started = asyncio.Event()
 
-        async def wait_forever(_guild_id: int, _request: dict) -> dict:
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
             started.set()
             await asyncio.Future()
 
@@ -616,11 +757,62 @@ class MinecraftAutonomyExecutorTests(
         with self.assertRaises(asyncio.CancelledError):
             await task
 
-        self.force_disconnect.assert_awaited_once_with(7)
+        self.force_disconnect.assert_awaited_once_with(7, "lease-1")
         self.assertEqual(
             self.executor._inflight_action_run_id,
             "",
         )
+
+    async def test_stale_cancel_fallback_cannot_disconnect_replaced_lease(
+        self,
+    ) -> None:
+        await self.executor.connect()
+        started = asyncio.Event()
+
+        async def wait_forever(
+            _guild_id: int,
+            _request: dict,
+            _expected_lease_id: str,
+        ) -> dict:
+            started.set()
+            await asyncio.Future()
+
+        async def reject_old_action(
+            _guild_id: int,
+            _action_run_id: str,
+            _expected_lease_id: str,
+        ) -> dict:
+            self.lease["lease"]["leaseId"] = "lease-2"
+            raise RuntimeError("minecraft_world_action_not_found")
+
+        async def exact_disconnect(
+            _guild_id: int,
+            expected_lease_id: str,
+        ) -> dict:
+            if self.lease["lease"]["leaseId"] != expected_lease_id:
+                raise RuntimeError("minecraft_world_lease_mismatch")
+            self.fail("stale cleanup disconnected the replacement lease")
+
+        self.execute_action.side_effect = wait_forever
+        self.cancel_action.side_effect = reject_old_action
+        self.force_disconnect.side_effect = exact_disconnect
+        task = asyncio.create_task(
+            self.executor.execute_step(
+                self.step(),
+                context=self.context(),
+            )
+        )
+        await started.wait()
+        task.cancel()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await task
+
+        self.force_disconnect.assert_awaited_once_with(7, "lease-1")
+        self.assertEqual(self.lease["lease"]["leaseId"], "lease-2")
 
 
 if __name__ == "__main__":

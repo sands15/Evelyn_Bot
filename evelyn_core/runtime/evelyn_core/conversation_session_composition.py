@@ -90,13 +90,20 @@ class ConversationSessionComposition:
         guild_id: int | None = None,
         user_id: int | None = None,
         turn_id: str | None = None,
+        precommit_user_only: bool = False,
     ) -> Any:
+        precommit_kwargs = (
+            {"precommit_user_only": True}
+            if precommit_user_only
+            else {}
+        )
         return begin_user_text_turn_from_runtime(
             session_key,
             user_text,
             guild_id=guild_id,
             user_id=user_id,
             turn_id=turn_id,
+            **precommit_kwargs,
             deps=self.deps.session(),
         )
 
@@ -131,10 +138,16 @@ class ConversationSessionComposition:
         awaiting_user_reply: bool,
         topic_id: str | None = None,
         memory_receipt: Any = None,
+        complete_turn_id: str | None = None,
     ) -> Any:
         receipt_kwargs = (
             {"memory_receipt": memory_receipt}
             if memory_receipt is not None
+            else {}
+        )
+        completion_kwargs = (
+            {"complete_turn_id": complete_turn_id}
+            if complete_turn_id is not None
             else {}
         )
         return finish_assistant_text_turn_from_runtime(
@@ -146,6 +159,7 @@ class ConversationSessionComposition:
             guild_id=guild_id,
             user_id=user_id,
             **receipt_kwargs,
+            **completion_kwargs,
             deps=self.deps.session(),
         )
 

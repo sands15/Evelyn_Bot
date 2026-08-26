@@ -26,8 +26,8 @@ COPY docker/requirements.stt.txt /tmp/requirements.stt.txt
 RUN python3 -m venv --system-site-packages "$VIRTUAL_ENV" \
     && pip install --upgrade pip \
     && pip install \
-        torch==2.11.0+cu128 \
-        torchaudio==2.11.0+cu128 \
+        torch==2.9.1+cu128 \
+        torchaudio==2.9.1+cu128 \
         --index-url https://download.pytorch.org/whl/cu128 \
     && pip install -r /tmp/requirements.stt.txt
 

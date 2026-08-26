@@ -15,7 +15,12 @@ from .continuity_authenticity import (
     ContinuityAuthenticity,
     ContinuityAuthenticityError,
 )
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import (
+    artifact_target_allowed,
+    atomic_json_write,
+    durable_artifact_process_scope,
+    read_bounded_text,
+)
 from .text import clean_text
 
 
@@ -41,6 +46,7 @@ FAST_ACTION_RECOVERY_NOTICE = (
 )
 DEFAULT_FAST_ACTION_RECOVERY_MAX_ACTIONS = 40
 DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES = 128 * 1024
+DEFAULT_FAST_ACTION_ARTIFACT_DEADLINE_SEC = 5.0
 _ACTION_ID_PATTERN = re.compile(r"^fast-action-[1-9][0-9]{0,11}$")
 _ACTION_STATES = frozenset(
     {"running", "terminal_committing"}
@@ -119,6 +125,10 @@ class FastActionRecoveryJournal:
             DEFAULT_FAST_ACTION_RECOVERY_MAX_ACTIONS
         ),
         authenticity: ContinuityAuthenticity | None = None,
+        artifact_process: Any | None = None,
+        artifact_deadline_sec: float = (
+            DEFAULT_FAST_ACTION_ARTIFACT_DEADLINE_SEC
+        ),
     ) -> None:
         self.path = Path(path)
         self.head_path = Path(
@@ -139,6 +149,11 @@ class FastActionRecoveryJournal:
         )
         self.authenticity = (
             authenticity or ContinuityAuthenticity()
+        )
+        self.artifact_process = artifact_process
+        self.artifact_deadline_sec = max(
+            0.1,
+            float(artifact_deadline_sec),
         )
         self._lock = threading.RLock()
         self._actions: dict[str, dict[str, Any]] = {}
@@ -407,18 +422,14 @@ class FastActionRecoveryJournal:
 
     def _load_head(self) -> dict[str, Any] | None:
         path = self.head_path
-        if not path.exists() and not path.is_symlink():
-            return None
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size
-            > DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES
-        ):
-            raise ValueError("fast_action_head_invalid")
-        payload = json.loads(
-            path.read_text(encoding="utf-8")
+        raw_text = read_bounded_text(
+            path,
+            maximum_bytes=DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES,
+            missing_ok=True,
         )
+        if raw_text is None:
+            return None
+        payload = json.loads(raw_text)
         schema = (
             clean_text(payload.get("schema"))
             if isinstance(payload, dict)
@@ -577,14 +588,22 @@ class FastActionRecoveryJournal:
             }.get(exc.code, "failed")
 
     def _load(self) -> None:
+        with durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.artifact_deadline_sec,
+        ):
+            self._load_scoped()
+
+    def _load_scoped(self) -> None:
         head: dict[str, Any] | None = None
         try:
             head = self._load_head()
-            path_missing = (
-                not self.path.exists()
-                and not self.path.is_symlink()
+            raw_text = read_bounded_text(
+                self.path,
+                maximum_bytes=DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES,
+                missing_ok=True,
             )
-            if path_missing:
+            if raw_text is None:
                 if head is not None:
                     raise ValueError(
                         "fast_action_journal_missing_after_head"
@@ -604,16 +623,6 @@ class FastActionRecoveryJournal:
                 )
                 self._write()
                 return
-            if (
-                self.path.is_symlink()
-                or not self.path.is_file()
-                or self.path.stat().st_size
-                > DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES
-            ):
-                raise ValueError(
-                    "fast_action_journal_invalid"
-                )
-            raw_text = self.path.read_text(encoding="utf-8")
             payload = json.loads(raw_text)
             (
                 actions,
@@ -750,17 +759,25 @@ class FastActionRecoveryJournal:
                 head=head,
             )
 
+    def _revalidate_after_write_failure(self) -> None:
+        if (
+            self.artifact_process is not None
+            and self._load_state in {"auth_error", "error"}
+        ):
+            self._load()
+
     @staticmethod
     def _write_target_allowed(path: Path) -> bool:
-        return bool(
-            not path.is_symlink()
-            and (
-                not path.exists()
-                or path.is_file()
-            )
-        )
+        return artifact_target_allowed(path)
 
     def _write(self) -> None:
+        with durable_artifact_process_scope(
+            self.artifact_process,
+            timeout_sec=self.artifact_deadline_sec,
+        ):
+            self._write_scoped()
+
+    def _write_scoped(self) -> None:
         generation = self._generation + 1
         payload = self._payload(
             generation=generation,
@@ -841,6 +858,7 @@ class FastActionRecoveryJournal:
             continuity_generation
         )
         with self._lock:
+            self._revalidate_after_write_failure()
             if self._load_state in {
                 "auth_error",
                 "corrupt",
@@ -884,6 +902,11 @@ class FastActionRecoveryJournal:
         if generation < 1:
             raise ValueError("fast_action_generation_invalid")
         with self._lock:
+            self._revalidate_after_write_failure()
+            if self._load_state != "ready":
+                raise RuntimeError(
+                    "fast_action_recovery_unavailable"
+                )
             entry = self._actions.get(validated_id)
             if entry is None:
                 raise KeyError("fast_action_recovery_missing")
@@ -902,6 +925,11 @@ class FastActionRecoveryJournal:
             return self.public_status()
         validated_id = _action_id(action_id)
         with self._lock:
+            self._revalidate_after_write_failure()
+            if self._load_state != "ready":
+                raise RuntimeError(
+                    "fast_action_recovery_unavailable"
+                )
             previous = self._actions.pop(
                 validated_id,
                 None,
@@ -923,6 +951,11 @@ class FastActionRecoveryJournal:
             return self.public_status()
         validated_id = _action_id(action_id)
         with self._lock:
+            self._revalidate_after_write_failure()
+            if self._load_state != "ready":
+                raise RuntimeError(
+                    "fast_action_recovery_unavailable"
+                )
             entry = self._actions.get(validated_id)
             if entry is None:
                 return self.public_status()
@@ -1090,9 +1123,14 @@ class FastActionRecoveryJournal:
                 "fast_action_recovery_code_invalid"
             )
         with self._lock:
+            self._revalidate_after_write_failure()
             if self._load_state == "auth_error":
                 raise RuntimeError(
                     "fast_action_recovery_auth_unavailable"
+                )
+            if self._load_state == "error":
+                raise RuntimeError(
+                    "fast_action_recovery_unavailable"
                 )
             previous = (
                 dict(self._actions),

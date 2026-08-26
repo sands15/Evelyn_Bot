@@ -7,6 +7,16 @@ import sys
 from pathlib import Path
 
 
+CONTAINER_RUNTIME_ROLE = "discord_bot"
+
+
+def runtime_uses_container_restart() -> bool:
+    return (
+        str(os.environ.get("EVELYN_RUNTIME_ROLE") or "").strip()
+        == CONTAINER_RUNTIME_ROLE
+    )
+
+
 def runtime_prefers_local_restart(*, local_only_mode: bool, discord_enabled: bool) -> bool:
     return bool(local_only_mode or not discord_enabled)
 
@@ -43,10 +53,16 @@ def launch_restart_process(
     env = os.environ.copy()
     env.update(env_overrides)
     command: list[str]
-    if restart_bat.exists():
+    if restart_bat.is_file():
         command = ["cmd.exe", "/c", str(restart_bat)]
-    else:
+    elif not fallback_target.is_file():
+        raise FileNotFoundError("Restart fallback target is missing")
+    elif fallback_target.suffix.lower() in {".bat", ".cmd"}:
+        command = ["cmd.exe", "/c", str(fallback_target)]
+    elif fallback_target.suffix.lower() == ".py":
         command = [sys.executable, str(fallback_target)]
+    else:
+        raise ValueError("Unsupported restart fallback target type")
     subprocess.Popen(
         command,
         cwd=str(project_dir),
@@ -99,6 +115,9 @@ def launch_runtime_restart_sequence(
     control_page_port: int,
     fallback_target: Path,
 ) -> str:
+    if runtime_uses_container_restart():
+        print("[RESTART] mode=container launcher=docker_restart_policy")
+        return "container"
     restart_bat, env_overrides, restart_mode = resolve_restart_launcher(
         project_root,
         local_restart=runtime_prefers_local_restart(
@@ -126,6 +145,8 @@ def schedule_evelyn_local_shutdown(project_root: Path, *, delay_ms: int = 1500) 
 
 
 __all__ = [
+    "CONTAINER_RUNTIME_ROLE",
+    "runtime_uses_container_restart",
     "runtime_prefers_local_restart",
     "resolve_restart_launcher",
     "launch_restart_process",

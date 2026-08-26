@@ -17,6 +17,7 @@ from evelyn_core.context_pipeline import (
     build_basic_context_packet,
     build_conversation_state_context,
     build_context_policy_for_turn,
+    build_required_evidence_failure_reply,
     build_tool_use_decisions,
     build_vision_context_hint,
     has_unanswered_user_turn,
@@ -25,6 +26,53 @@ from evelyn_core.context_pipeline import (
 
 
 class ContextPipelineToolPolicyTests(unittest.TestCase):
+    def test_every_nonexecuted_required_status_is_a_hard_gate(self) -> None:
+        for status in (
+            "planned",
+            "needs_local_tool",
+            "needs_permission_or_external_tool",
+            "executed_empty",
+            "executed_withheld",
+            "failed",
+            "failed_or_unavailable",
+            "skipped_no_memory_scope",
+        ):
+            with self.subTest(status=status):
+                reply = build_required_evidence_failure_reply(
+                    [
+                        ToolUseDecision(
+                            tool_name="memory_recall",
+                            reason="required",
+                            required_before_answer=True,
+                            status=status,
+                        )
+                    ]
+                )
+                self.assertIn("추측해서 답하지 않을게", reply)
+
+    def test_optional_or_deferred_evidence_does_not_gate(self) -> None:
+        optional = ToolUseDecision(
+            tool_name="memory_recall",
+            reason="optional",
+            required_before_answer=False,
+            status="failed",
+        )
+        deferred_web = ToolUseDecision(
+            tool_name="web_current_info",
+            reason="search executor owns this next",
+            required_before_answer=True,
+            status="needs_permission_or_external_tool",
+        )
+
+        self.assertEqual(build_required_evidence_failure_reply([optional]), "")
+        self.assertEqual(
+            build_required_evidence_failure_reply(
+                [deferred_web],
+                deferred_tool_names={"web_current_info"},
+            ),
+            "",
+        )
+
     def test_unanswered_turn_detection_uses_latest_conversational_row(self) -> None:
         self.assertTrue(
             has_unanswered_user_turn(

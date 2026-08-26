@@ -201,6 +201,67 @@ async function main() {
   }
 
   const initial = await evaluate("window.EvelynLive2D.snapshot()");
+  const tailSamples = await evaluate(`
+    new Promise((resolve) => {
+      const values = [];
+      const startedAt = performance.now();
+      const sample = () => {
+        const frame = window.EvelynLive2D.snapshot();
+        values.push({
+          t: performance.now() - startedAt,
+          headings: frame.tailHeadings,
+          parameters: frame.tailParameters,
+          weight: frame.idleTailWeight,
+          speaking: frame.speaking,
+        });
+      };
+      sample();
+      const timer = setInterval(sample, 20);
+      setTimeout(() => {
+        clearInterval(timer);
+        sample();
+        resolve(values);
+      }, 8500);
+    })
+  `);
+  const rootZeroCrossings = tailSamples
+    .slice(1)
+    .map((sample, index) => ({ previous: tailSamples[index], sample }))
+    .filter(({ previous, sample }) => (
+      previous.headings[0] < 0
+      && sample.headings[0] >= 0
+      && sample.headings[0] > previous.headings[0]
+    ))
+    .map(({ sample }) => sample.t);
+  const tailCycleSeconds = rootZeroCrossings.length >= 2
+    ? (rootZeroCrossings[1] - rootZeroCrossings[0]) / 1000
+    : 0;
+  const rootPeakIndex = tailSamples.findIndex((sample, index) => (
+    index >= 3
+    && index + 3 < tailSamples.length
+    && sample.headings[0] - tailSamples[index - 3].headings[0] > 0.03
+    && tailSamples[index + 3].headings[0] - sample.headings[0] < -0.03
+  ));
+  const tailReversalLags = rootPeakIndex >= 0
+    ? initial.tailHeadings.map((_heading, segment) => {
+      const windowEnd = Math.min(tailSamples.length, rootPeakIndex + 36);
+      let peakIndex = rootPeakIndex;
+      for (let index = rootPeakIndex + 1; index < windowEnd; index += 1) {
+        if (tailSamples[index].headings[segment] > tailSamples[peakIndex].headings[segment]) {
+          peakIndex = index;
+        }
+      }
+      return (tailSamples[peakIndex].t - tailSamples[rootPeakIndex].t) / 1000;
+    })
+    : [];
+  const tailParameterErrors = tailSamples.flatMap((sample) => (
+    sample.headings.map((heading, segment) => {
+      const localHeading = segment === 0 ? heading : heading - sample.headings[segment - 1];
+      const gains = [1, 2, 2.5, 3, 3.5, 4, 4];
+      const expected = Math.max(-8, Math.min(8, localHeading * gains[segment]));
+      return Math.abs(sample.parameters[segment] - expected);
+    })
+  ));
   const breathSamples = await evaluate(`
     new Promise((resolve) => {
       const values = [];
@@ -271,6 +332,9 @@ async function main() {
 
   const result = {
     ready: initial.ready,
+    tailCycleSeconds,
+    tailReversalLags,
+    tailParameterMaximumError: Math.max(...tailParameterErrors),
     breathConfigured: initial.breathConfigured,
     breathMinimum: Math.min(...breathSamples),
     breathMaximum: Math.max(...breathSamples),
@@ -331,6 +395,24 @@ async function main() {
   };
 
   if (!result.ready) throw new Error("Live2D snapshot is not ready");
+  if (!(result.tailCycleSeconds > 3.4 && result.tailCycleSeconds < 4.1)) {
+    throw new Error(`Idle tail cycle is outside the reference range: ${JSON.stringify(result)}`);
+  }
+  if (
+    tailSamples.some((sample) => sample.speaking || sample.weight < 0.99)
+    || !(result.tailParameterMaximumError < 0.02)
+  ) {
+    throw new Error(`Idle tail parameters did not reach the Cubism model: ${JSON.stringify(result)}`);
+  }
+  if (
+    result.tailReversalLags.length !== 7
+    || result.tailReversalLags.some((lag, index) => (
+      index > 0 && lag < result.tailReversalLags[index - 1]
+    ))
+    || !(result.tailReversalLags[6] > 0.3 && result.tailReversalLags[6] < 0.5)
+  ) {
+    throw new Error(`Idle tail reversal did not propagate root-to-tip: ${JSON.stringify(result)}`);
+  }
   if (!result.breathConfigured || !(result.breathRange > 0.1)) {
     throw new Error(`Natural chest breathing did not advance: ${JSON.stringify(result)}`);
   }

@@ -71,6 +71,7 @@ class AutonomyRuntimeCompositionDeps:
     record_runtime_error: (
         Callable[[str, BaseException], Any] | None
     ) = None
+    conversation_ingress: Any | None = None
 
 
 class AutonomyRuntimeComposition:
@@ -139,6 +140,7 @@ class AutonomyRuntimeComposition:
             log=deps.log,
             build_minecraft_executor=deps.build_minecraft_executor,
             record_runtime_error=deps.record_runtime_error,
+            conversation_ingress=deps.conversation_ingress,
         )
 
     def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:

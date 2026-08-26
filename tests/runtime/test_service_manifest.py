@@ -73,8 +73,30 @@ class ServiceManifestTests(unittest.TestCase):
                 "model_loaded": True,
                 "model_id": "k2-fsa/OmniVoice",
                 "model_revision": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+                "runtime_revision": "omnivoice-0.1.5",
+                "flashinfer_revision": "28bc0889d92110491d726a9c79f26a895db5a074",
+                "inference_backend": "flashinfer_cuda_graph",
+                "flashinfer_python_version": "0.6.15.post1",
+                "flashinfer_jit_cache_version": "0.6.15.post1+cu129",
+                "torch_version": "2.8.0+cu129",
+                "torch_cuda_version": "12.9",
+                "flashinfer_jit_disabled": True,
+                "flashinfer_cuda_graph_buckets": [2.0, 4.0, 8.0],
+                "max_concurrent": 1,
+                "num_step": 12,
             },
         )
+        assert health.expect_json is not None
+        self.assertIs(type(health.expect_json["flashinfer_jit_disabled"]), bool)
+        self.assertIs(type(health.expect_json["max_concurrent"]), int)
+        self.assertIs(type(health.expect_json["num_step"]), int)
+        self.assertTrue(
+            all(
+                type(value) is float
+                for value in health.expect_json["flashinfer_cuda_graph_buckets"]
+            )
+        )
+        self.assertEqual(service.launcher, "../start_tts.bat")
 
     def test_codex_health_requires_the_verified_tool_boundary(self) -> None:
         manifest = load_service_manifest(force=True)

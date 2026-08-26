@@ -56,7 +56,7 @@ if not defined VOYAGER_SERVICE_ALREADY_RUNNING (
 if /I not "%VOYAGER_AUTO_START%"=="true" goto :done
 if defined VOYAGER_NO_AUTOSTART goto :done
 echo [Evelyn] Direct Voyager auto-start is disabled by the world-action lease policy.
-echo [Evelyn] Use the Control Page Minecraft tool or Discord /minecraft connect.
+echo [Evelyn] Use the Control Page Minecraft tool or the Discord guild-prefix minecraft-connect command.
 
 :done
 endlocal

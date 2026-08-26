@@ -157,40 +157,6 @@
                  }
              },
          )
---- a/omnivoice_server/routers/health.py
-+++ b/omnivoice_server/routers/health.py
-@@ -2,6 +2,7 @@
- 
- from __future__ import annotations
- 
-+import os
- import time
- 
- import psutil
-@@ -14,6 +15,7 @@
-     cfg = request.app.state.cfg
-     model_svc = request.app.state.model_svc
-     ram_mb = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
-+    model_revision = os.environ.get("OMNIVOICE_MODEL_REVISION", "")
- 
-     if not model_svc.is_loaded:
-         return JSONResponse(
-@@ -23,6 +25,7 @@
-                 "status": "starting",
-                 "ready": False,
-                 "model_loaded": False,
-+                "model_revision": model_revision,
-                 "memory_rss_mb": ram_mb,
-             },
-         )
-@@ -36,6 +39,7 @@
-         "model_loaded": True,
-         "uptime_s": uptime_s,
-         "model_id": cfg.model_id,
-+        "model_revision": model_revision,
-         "memory_rss_mb": ram_mb,
-     }
- 
 --- a/omnivoice_server/routers/voices.py
 +++ b/omnivoice_server/routers/voices.py
 @@ -33,6 +33,14 @@

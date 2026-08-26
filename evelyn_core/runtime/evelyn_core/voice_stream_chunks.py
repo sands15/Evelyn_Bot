@@ -5,7 +5,7 @@ from typing import Awaitable, Callable
 
 from .question_shaping import filter_stream_chunk_for_question_limits
 from .text import clean_tts_text
-from .tts_playback import ChunkWindow, SpeechChunker
+from .tts_playback import ChunkWindow, SpeechChunker, SpeechCommitGate
 from .voice_pipeline import DeliveryPlan
 
 
@@ -53,6 +53,7 @@ async def emit_stream_delta_chunks(
     speech_chunker: SpeechChunker,
     on_sentence: Callable[[str], Awaitable[None]] | None,
     question_stream_state: dict[str, int] | None = None,
+    speech_commit_gate: SpeechCommitGate | None = None,
 ) -> bool:
     emitted_any = False
     if on_sentence is not None:
@@ -73,6 +74,15 @@ async def emit_stream_delta_chunks(
                 )
                 if not chunk:
                     continue
+            if speech_commit_gate is not None:
+                if not speech_commit_gate.observe_safe_delta(chunk):
+                    continue
+                commits = speech_commit_gate.commit_candidate(chunk)
+                for commit in commits:
+                    chunk = commit.text
+                    emitted_any = True
+                    await on_sentence(chunk)
+                continue
             emitted_any = True
             await on_sentence(chunk)
     return emitted_any
@@ -85,6 +95,7 @@ async def flush_streamed_answer_chunks(
     on_sentence: Callable[[str], Awaitable[None]] | None,
     emitted_any: bool,
     question_stream_state: dict[str, int] | None = None,
+    speech_commit_gate: SpeechCommitGate | None = None,
 ) -> None:
     if on_sentence is None:
         return
@@ -105,10 +116,20 @@ async def flush_streamed_answer_chunks(
             )
             question_stream_state["question_removed_count"] = int(question_stream_state.get("question_removed_count", 0)) + (
                 1 if question_meta.get("question_removed") else 0
-            )
+                )
             if not chunk:
                 continue
+        if speech_commit_gate is not None:
+            if not speech_commit_gate.observe_safe_delta(chunk):
+                continue
+            commits = speech_commit_gate.commit_candidate(chunk)
+            for commit in commits:
+                chunk = commit.text
+                await on_sentence(chunk)
+            continue
         await on_sentence(chunk)
+    if speech_commit_gate is not None:
+        speech_commit_gate.validate_final(answer)
 
 
 async def emit_delivery_plan_chunks(

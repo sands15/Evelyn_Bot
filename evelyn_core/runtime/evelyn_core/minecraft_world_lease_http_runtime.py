@@ -11,19 +11,22 @@ MinecraftRequest = Callable[
     [str, str, dict[str, Any] | None],
     Awaitable[tuple[dict[str, Any] | None, str]],
 ]
+MinecraftServiceStarter = Callable[[], Awaitable[None]]
 
 
 class MinecraftWorldLeaseHttpRuntime:
-    """Thin non-spawning adapter for an already managed Minecraft service."""
+    """HTTP adapter that may bootstrap only an authorized lease-bound start."""
 
     def __init__(
         self,
         *,
         request: MinecraftRequest,
         is_offline_error: Callable[[str], bool],
+        ensure_service: MinecraftServiceStarter | None = None,
     ) -> None:
         self.request = request
         self.is_offline_error = is_offline_error
+        self.ensure_service = ensure_service
 
     async def _request(
         self,
@@ -53,6 +56,16 @@ class MinecraftWorldLeaseHttpRuntime:
             payload["goal"] = str(goal)
         if world_lease:
             payload["worldLease"] = dict(world_lease)
+        try:
+            return await self._request("POST", "/start", payload)
+        except RuntimeError as exc:
+            if (
+                str(exc) != "minecraft_service_unavailable"
+                or self.ensure_service is None
+                or not world_lease
+            ):
+                raise
+        await self.ensure_service()
         return await self._request("POST", "/start", payload)
 
     async def stop(self) -> dict[str, Any]:
@@ -189,5 +202,6 @@ class MinecraftWorldLeaseHttpRuntime:
 
 __all__ = [
     "MinecraftRequest",
+    "MinecraftServiceStarter",
     "MinecraftWorldLeaseHttpRuntime",
 ]

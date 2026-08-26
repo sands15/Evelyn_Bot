@@ -161,7 +161,24 @@ class MemoryMaintenanceComposition:
                 await deps.sleep(0.2)
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
-                result = await deps.to_thread(deps.run_vault_maintenance_once, guild_id)
+                worker = asyncio.create_task(
+                    deps.to_thread(deps.run_vault_maintenance_once, guild_id)
+                )
+                cancellation: asyncio.CancelledError | None = None
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError as exc:
+                        cancellation = exc
+                    except Exception:
+                        pass
+                if cancellation is not None:
+                    try:
+                        worker.result()
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise cancellation
+                result = worker.result()
                 pending_count = _pending_recomposition_count(
                     result
                 )

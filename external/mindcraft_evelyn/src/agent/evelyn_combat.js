@@ -142,6 +142,36 @@ export function assessCombat(snapshot) {
         snapshot.hasMeleeWeapon ? 4 : 0,
     );
     const hasRangedWeapon = Boolean(snapshot.hasBow && finite(snapshot.arrowCount) > 0);
+    const timeOfDay = finite(snapshot.timeOfDay, -1);
+    if (snapshot?.singleZombieEmergencyMelee === true) {
+        const distance = finite(snapshot.hostileDistance, Infinity);
+        const listedDistance = finite(hostiles[0]?.distance, Infinity);
+        const admitted = (
+            hostiles.length === 1 &&
+            String(hostiles[0]?.name || '').toLowerCase() === 'zombie' &&
+            health > 0 &&
+            weaponPower > 0 &&
+            snapshot.hasMeleeWeapon === true &&
+            snapshot.inWater !== true &&
+            distance <= 8 &&
+            listedDistance <= 8
+        );
+        return admitted
+            ? {
+                tactic: 'fight',
+                reason: 'single_zombie_escape_fallback',
+                capacity: health,
+                threat: hostileThreat('zombie'),
+                hostileCount: 1,
+            }
+            : {
+                tactic: 'flee',
+                reason: 'emergency_melee_context_changed',
+                capacity: health,
+                threat: Infinity,
+                hostileCount: hostiles.length,
+            };
+    }
     if (health <= 6) {
         return {tactic: 'flee', reason: 'critical_health', capacity: health, threat: Infinity, hostileCount: hostiles.length};
     }
@@ -150,6 +180,9 @@ export function assessCombat(snapshot) {
     }
     if (weaponPower <= 0 && !hasRangedWeapon) {
         return {tactic: 'flee', reason: 'unarmed', capacity: health, threat: Infinity, hostileCount: hostiles.length};
+    }
+    if (timeOfDay >= 11000 && armorPoints === 0 && !snapshot.hasShield && !hasRangedWeapon) {
+        return {tactic: 'flee', reason: 'unprotected_night', capacity: health, threat: Infinity, hostileCount: hostiles.length};
     }
 
     let rawThreat = 0;
@@ -194,10 +227,13 @@ export function selectCombatTarget(hostiles = []) {
         })[0] || null;
 }
 
-export function selectCombatMode(snapshot, target) {
+export function selectCombatMode(snapshot, target, preset = null) {
     const targetName = String(target?.entity?.name || target?.name || '').toLowerCase();
     const distance = finite(target?.distance, finite(snapshot?.hostileDistance, 0));
     const bowReady = Boolean(snapshot?.hasBow && finite(snapshot?.arrowCount) > 0);
+    if (preset === 'disengage') return null;
+    if (preset === 'bow') return bowReady ? 'bow' : null;
+    if (preset === 'melee' || preset === 'shield_close') return 'melee';
     if (bowReady && (distance > 4.5 || RANGED_HOSTILES.has(targetName) || targetName === 'creeper')) {
         return 'bow';
     }
@@ -226,6 +262,18 @@ async function equipBestMeleeWeapon(bot) {
     return true;
 }
 
+export async function equipCombatShield(bot) {
+    if (bot.supportFeature?.('doesntHaveOffHandSlot')) return false;
+    const offhandSlot = bot.getEquipmentDestSlot?.('off-hand');
+    if (Number.isInteger(offhandSlot) && bot.inventory?.slots?.[offhandSlot]?.name === 'shield') {
+        return true;
+    }
+    const shield = (bot.inventory?.items?.() || []).find((item) => item?.name === 'shield');
+    if (!shield) return false;
+    await bot.equip(shield, 'off-hand');
+    return true;
+}
+
 function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -233,42 +281,143 @@ function wait(ms) {
 export async function fightWithCustomPvp(bot, {
     snapshotProvider,
     hostileProvider,
+    combatPreset = null,
+    combatPlanProvider = null,
     timeoutMs = 20000,
 } = {}) {
     if (!bot.swordpvp || !bot.bowpvp) {
-        return {success: false, reason: 'custom_pvp_unavailable', assessment: null};
+        return {
+            success: false,
+            reason: 'custom_pvp_unavailable',
+            assessment: null,
+            executedPreset: null,
+        };
     }
 
     const deadline = Date.now() + timeoutMs;
     let activeTargetId = null;
     let activeMode = null;
     let lastAssessment = null;
+    let lockedPlan = null;
+    let executedPreset = null;
     try {
         while (Date.now() < deadline && bot.health > 0 && !bot.interrupt_code) {
             const snapshot = snapshotProvider();
             lastAssessment = assessCombat(snapshot);
             if (lastAssessment.tactic === 'none') {
-                return {success: true, reason: 'hostiles_cleared', assessment: lastAssessment};
+                return {
+                    success: true,
+                    reason: 'hostiles_cleared',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
             }
             if (lastAssessment.tactic !== 'fight') {
-                return {success: false, reason: `disengage_${lastAssessment.reason}`, assessment: lastAssessment};
+                return {
+                    success: false,
+                    reason: 'combat_context_changed',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
             }
 
-            const target = selectCombatTarget(hostileProvider());
+            const currentHostiles = hostileProvider();
+            const target = selectCombatTarget(currentHostiles);
             if (!target) {
-                return {success: true, reason: 'hostiles_cleared', assessment: lastAssessment};
+                return {
+                    success: true,
+                    reason: 'hostiles_cleared',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
             }
-            const mode = selectCombatMode(snapshot, target);
+            if (
+                snapshot.singleZombieEmergencyMelee === true &&
+                (
+                    currentHostiles.length !== 1 ||
+                    String(target.entity?.name || '').toLowerCase() !== 'zombie' ||
+                    finite(target.distance, Infinity) > 8
+                )
+            ) {
+                return {
+                    success: false,
+                    reason: 'combat_context_changed',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
+            }
+            const proposedPlan = typeof combatPlanProvider === 'function'
+                ? combatPlanProvider(snapshot, target)
+                : {preset: combatPreset, contextKey: String(combatPreset || 'default')};
+            const plan = {
+                preset: typeof proposedPlan?.preset === 'string' ? proposedPlan.preset : null,
+                contextKey: String(proposedPlan?.contextKey || ''),
+            };
+            if (
+                lockedPlan &&
+                (lockedPlan.preset !== plan.preset || lockedPlan.contextKey !== plan.contextKey)
+            ) {
+                return {
+                    success: false,
+                    reason: 'combat_context_changed',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
+            }
+            if (!lockedPlan) lockedPlan = plan;
+            const mode = selectCombatMode(snapshot, target, plan.preset);
+            if (!mode) {
+                return {
+                    success: false,
+                    reason: 'combat_context_changed',
+                    assessment: lastAssessment,
+                    executedPreset,
+                };
+            }
             if (target.entity.id !== activeTargetId || mode !== activeMode) {
                 stopCombatControllers(bot);
                 if (mode === 'bow') {
                     await bot.bowpvp.attack(target.entity, snapshot.rangedWeapon || 'bow');
                 } else {
+                    if (plan.preset === 'shield_close' && !await equipCombatShield(bot)) {
+                        return {
+                            success: false,
+                            reason: 'shield_unavailable',
+                            assessment: lastAssessment,
+                            executedPreset,
+                        };
+                    }
                     if (!await equipBestMeleeWeapon(bot)) {
-                        return {success: false, reason: 'melee_weapon_missing', assessment: lastAssessment};
+                        return {
+                            success: false,
+                            reason: 'melee_weapon_missing',
+                            assessment: lastAssessment,
+                            executedPreset,
+                        };
+                    }
+                    if (snapshot.singleZombieEmergencyMelee === true) {
+                        const freshSnapshot = snapshotProvider();
+                        const freshHostiles = hostileProvider();
+                        const freshTarget = selectCombatTarget(freshHostiles);
+                        if (
+                            assessCombat(freshSnapshot).reason !== 'single_zombie_escape_fallback' ||
+                            freshHostiles.length !== 1 ||
+                            !freshTarget ||
+                            freshTarget.entity?.id !== target.entity?.id ||
+                            String(freshTarget.entity?.name || '').toLowerCase() !== 'zombie' ||
+                            finite(freshTarget.distance, Infinity) > 8
+                        ) {
+                            return {
+                                success: false,
+                                reason: 'combat_context_changed',
+                                assessment: lastAssessment,
+                                executedPreset,
+                            };
+                        }
                     }
                     await bot.swordpvp.attack(target.entity);
                 }
+                executedPreset = plan.preset || mode;
                 activeTargetId = target.entity.id;
                 activeMode = mode;
             }
@@ -280,12 +429,14 @@ export async function fightWithCustomPvp(bot, {
                 ? 'bot_dead'
                 : (bot.interrupt_code ? 'interrupted' : 'combat_timeout'),
             assessment: lastAssessment,
+            executedPreset,
         };
     } catch (error) {
         return {
             success: false,
-            reason: `custom_pvp_error:${error?.message || error}`,
+            reason: 'custom_pvp_error',
             assessment: lastAssessment,
+            executedPreset,
         };
     } finally {
         stopCombatControllers(bot);

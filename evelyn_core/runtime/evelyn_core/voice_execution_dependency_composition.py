@@ -41,6 +41,7 @@ class VoiceExecutionDependencyCompositionDeps:
     prepare_llm_messages: Callable[..., Awaitable[Any]]
     apply_fast_path_question_policy: Callable[..., Any]
     synthesize_tool_result_with_main_llm: Callable[..., Awaitable[str]]
+    execute_selected_specialist: Callable[..., Awaitable[str | None]]
     observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
     skill_registry: Any
     recent_skill_dispatches: MutableMapping[str, float]
@@ -67,7 +68,6 @@ class VoiceExecutionDependencyCompositionDeps:
     sanitize_model_output: Callable[[str], str]
     parse_response_action_tag: Callable[[str], Any]
     extract_answer_from_reasoning: Callable[[str, str], str]
-    ask_llm_once: Callable[..., Awaitable[str]]
     resolve_promised_search_final_answer: Callable[..., Awaitable[str]]
     record_question_trace: Callable[..., Any]
     emit_stream_delta_chunks: Callable[..., Awaitable[bool]]
@@ -107,6 +107,7 @@ class VoiceExecutionDependencyComposition:
             answer_current_datetime_query=answer_current_datetime_query,
             answer_gpu_runtime_status_query=answer_gpu_runtime_status_query,
             synthesize_tool_result_with_main_llm=deps.synthesize_tool_result_with_main_llm,
+            execute_selected_specialist=deps.execute_selected_specialist,
             observe_live_minecraft_state=deps.observe_live_minecraft_state,
             skill_registry=deps.skill_registry,
             recent_skill_dispatches=deps.recent_skill_dispatches,
@@ -151,7 +152,7 @@ class VoiceExecutionDependencyComposition:
             sanitize_model_output=deps.sanitize_model_output,
             parse_response_action_tag=deps.parse_response_action_tag,
             extract_answer_from_reasoning=deps.extract_answer_from_reasoning,
-            ask_llm_once=deps.ask_llm_once,
+            execute_main_llm_once=deps.execute_main_llm_once,
             resolve_promised_search_final_answer=deps.resolve_promised_search_final_answer,
             enforce_question_limits=enforce_question_limits,
             record_question_trace=deps.record_question_trace,

@@ -115,12 +115,17 @@ def build_help_command_text(*, prefix: str, control_authorized: bool) -> str:
         f"- {prefix}이블린페이지",
         f"- {prefix}상태 / {prefix}접두사",
         f"- {prefix}자율시작 / {prefix}자율정지 / {prefix}자율상태",
+        f"- {prefix}마크상태",
         f"- {prefix}관찰채널 목록|추가 #채널|제거 #채널",
         f"- {prefix}명령채널 목록|추가 #채널|제거 #채널",
         f"- {prefix}초기화",
     ]
     if control_authorized:
         lines.append(f"- {prefix}재시작 / {prefix}종료")
+        lines.append(
+            f"- {prefix}마크접속 / {prefix}마크종료 / "
+            f"{prefix}마크목표 <목표>"
+        )
     return "\n".join(lines)
 
 
@@ -216,11 +221,9 @@ def build_minecraft_connect_reply(observed: dict[str, Any]) -> str:
     target = f"{observed.get('position')}" if observed.get("position") else "위치 미확인"
     stage = clean_text(str(observed.get("objective_stage") or "")) or "unknown"
     goal = clean_text(str(observed.get("objective_goal") or "")) or "progress_to_diamond"
-    last_error = clean_text(str(observed.get("last_error") or observed.get("wait_last_error") or ""))
     if connected:
         return "✅ Voyager 기반 마인크래프트 자율 모드 시작 완료." + f"\n- goal: {goal}\n- stage: {stage}\n- position: {target}"
-    detail = f" last_error={last_error}" if last_error else ""
-    return "❌ 마인크래프트 접속 실패: Voyager 서비스는 올라왔지만 게임 연결 확인에 실패했어." + detail
+    return "❌ 마인크래프트 접속 실패: Voyager 서비스는 올라왔지만 게임 연결 확인에 실패했어."
 
 
 def build_minecraft_status_command_text(status: dict[str, Any]) -> str:
@@ -266,8 +269,12 @@ def build_minecraft_status_command_text(status: dict[str, Any]) -> str:
     )
 
 
-def build_minecraft_goal_missing_reply() -> str:
-    return "목표를 같이 적어줘. 예: 마크목표 diamond 또는 마크목표 iron_pickaxe"
+def build_minecraft_goal_missing_reply(prefix: str = "!") -> str:
+    return (
+        "목표를 같이 적어줘. 예: "
+        f"{prefix}마크목표 diamond 또는 "
+        f"{prefix}마크목표 iron_pickaxe"
+    )
 
 
 def build_minecraft_goal_updated_reply(goal_text: str, status: dict[str, Any]) -> str:

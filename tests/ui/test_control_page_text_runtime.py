@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +31,18 @@ from evelyn_core.memory_exposure import (  # noqa: E402
     MemoryExposurePosition,
     capture_memory_exposure_position,
     reset_memory_exposure_position,
+)
+from evelyn_core.session_continuity import (  # noqa: E402
+    SessionContinuityCheckpoint,
+)
+from evelyn_core.session_memory_state import (  # noqa: E402
+    SessionStateStore,
+    build_topic_id,
+)
+from evelyn_core.session_turn_runtime import (  # noqa: E402
+    SessionTurnRuntimeDeps,
+    begin_user_text_turn_from_runtime,
+    finish_assistant_text_turn_from_runtime,
 )
 from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
@@ -139,10 +153,17 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.replaced[0][0], "control:7")
         self.assertEqual(self.finished[0][0][:3], ("control:7", "질문", "원본 답변 추가 질문?"))
         self.assertTrue(self.finished[0][1]["awaiting_user_reply"])
-        self.assertEqual(self.commits, ["commit"])
+        self.assertEqual(self.commits, ["commit", "commit"])
         self.assertEqual(
             self.commit_targets,
-            [("control:7", "turn-1")],
+            [
+                ("control:7", "turn-1"),
+                ("control:7", "turn-1"),
+            ],
+        )
+        self.assertEqual(
+            self.finished[0][1]["complete_turn_id"],
+            "turn-1",
         )
         self.assertEqual(self.scheduled[0][0], ("원본 답변 추가 질문?",))
         self.assertEqual(self.scheduled[0][1]["turn_id"], "turn-1")
@@ -247,7 +268,13 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             r"C:\Users\Admin\checkpoint.json"
         )
 
+        commit_count = 0
+
         async def partial_commit(*_args):
+            nonlocal commit_count
+            commit_count += 1
+            if commit_count == 1:
+                return durable_continuity_status(5)
             return {
                 "state": "ready",
                 "rollbackProtected": True,
@@ -262,14 +289,17 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        result = await answer_control_page_text_from_runtime(
-            None,
-            "질문",
-            deps=deps,
-        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            await answer_control_page_text_from_runtime(
+                None,
+                "질문",
+                deps=deps,
+            )
         metrics = self.summaries[0][0]["meta"]
 
-        self.assertIn("display:", result)
         self.assertEqual(
             metrics["continuity_commit"],
             "failed",
@@ -279,6 +309,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "conversation_continuity_commit_failed",
         )
         self.assertNotIn(private, str(self.summaries))
+        self.assertEqual(self.scheduled, [])
 
     async def test_failure_logs_error_summary_and_always_clears_scope(self) -> None:
         self.ask_error = RuntimeError("LLM failed")
@@ -292,7 +323,273 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["extra"], "control_page=true error=true")
         self.assertEqual(len(self.detached), 1)
         self.assertEqual(len(self.cleared), 1)
-        self.assertEqual(self.commits, [])
+        self.assertEqual(self.commits, ["commit"])
+
+    async def test_llm_failure_restores_precommitted_unanswered_user_turn(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStateStore.create_empty()
+            checkpoint = SessionContinuityCheckpoint(
+                store=store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "status.json",
+                system_prompt="system",
+            )
+            session_deps = SessionTurnRuntimeDeps(
+                session_state_store=store,
+                system_prompt="system",
+                memory_index_dir=root / "memory_index",
+                active_conversation_awaiting_reply_sec=120.0,
+                active_conversation_text_question_sec=120.0,
+                active_conversation_text_sec=90.0,
+                max_history_items=12,
+                session_topic_ids=store.topic_ids,
+                build_topic_id_fn=build_topic_id,
+                new_turn_id_fn=lambda: "turn-accepted",
+            )
+            registry = TurnScopeRegistry()
+            lock = asyncio.Lock()
+
+            async def fail_llm(*_args: Any, **_kwargs: Any) -> str:
+                raise RuntimeError("LLM failed")
+
+            deps = ControlPageTextRuntimeDeps(
+                memory_index_dir=root / "memory_index",
+                effective_guild_id=lambda _guild: 0,
+                session_key_for_guild=lambda _guild_id: "control:0",
+                get_session_lock=lambda _key: lock,
+                begin_user_text_turn=lambda *args, **kwargs: (
+                    begin_user_text_turn_from_runtime(
+                        *args,
+                        **kwargs,
+                        deps=session_deps,
+                    )
+                ),
+                turn_scope_factory=TurnScope,
+                replace_room_turn_scope=registry.replace_room_scope,
+                attach_current_task=registry.attach_current_task,
+                monotonic=lambda: 10.0,
+                resolve_pending_proactive_question_for_turn=(
+                    lambda *_args, **_kwargs: {"resolved": False}
+                ),
+                ask_llm_streaming=fail_llm,
+                clean_text=lambda text: text.strip(),
+                strip_omnivoice_tags=lambda text: text,
+                session_state_snapshot=store.snapshot,
+                maybe_append_proactive_question=(
+                    lambda answer, **_kwargs: (answer, False)
+                ),
+                finish_assistant_text_turn=lambda *args, **kwargs: (
+                    finish_assistant_text_turn_from_runtime(
+                        *args,
+                        **kwargs,
+                        deps=session_deps,
+                    )
+                ),
+                commit_session_continuity=(
+                    checkpoint.commit_completed_turn_async
+                ),
+                log_voice_bottleneck_summary=(
+                    lambda *_args, **_kwargs: None
+                ),
+                schedule_local_control_tts=(
+                    lambda *_args, **_kwargs: None
+                ),
+                format_display_text=lambda text, **_kwargs: text,
+                fallback_answer_for=lambda _text: "fallback",
+                detach_task=registry.detach_task,
+                clear_room_turn_scope=registry.clear_room_scope,
+                log=lambda *_args, **_kwargs: None,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "LLM failed"):
+                await answer_control_page_text_from_runtime(
+                    None,
+                    "잊지 말고 이어가 줘",
+                    deps=deps,
+                )
+
+            restored_store = SessionStateStore.create_empty()
+            restored = SessionContinuityCheckpoint(
+                store=restored_store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "restored-status.json",
+                system_prompt="system",
+            ).restore()
+
+            self.assertEqual(restored["state"], "restored")
+            self.assertEqual(
+                restored_store.histories["control:0"],
+                [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "잊지 말고 이어가 줘"},
+                ],
+            )
+            self.assertEqual(
+                restored_store.current_turn_id("control:0"),
+                "turn-accepted",
+            )
+
+            finish_assistant_text_turn_from_runtime(
+                "control:0",
+                "잊지 말고 이어가 줘",
+                "다시 이어갈게",
+                awaiting_user_reply=False,
+                topic_id=store.topic_ids["control:0"],
+                complete_turn_id="turn-accepted",
+                deps=session_deps,
+            )
+            await checkpoint.commit_completed_turn_async(
+                "control:0",
+                "turn-accepted",
+            )
+            completed_store = SessionStateStore.create_empty()
+            completed = SessionContinuityCheckpoint(
+                store=completed_store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "completed-status.json",
+                system_prompt="system",
+            ).restore()
+
+            self.assertEqual(completed["state"], "restored")
+            self.assertEqual(
+                [
+                    (row["role"], row["content"])
+                    for row in completed_store.histories["control:0"]
+                ],
+                [
+                    ("system", "system"),
+                    ("user", "잊지 말고 이어가 줘"),
+                    ("assistant", "다시 이어갈게"),
+                ],
+            )
+
+    async def test_cancelled_precommit_holds_state_lock_until_disk_commit_drains(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStateStore.create_empty()
+            checkpoint = SessionContinuityCheckpoint(
+                store=store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "status.json",
+                system_prompt="system",
+            )
+            session_deps = SessionTurnRuntimeDeps(
+                session_state_store=store,
+                system_prompt="system",
+                memory_index_dir=root / "memory_index",
+                active_conversation_awaiting_reply_sec=120.0,
+                active_conversation_text_question_sec=120.0,
+                active_conversation_text_sec=90.0,
+                max_history_items=12,
+                session_topic_ids=store.topic_ids,
+                build_topic_id_fn=build_topic_id,
+                new_turn_id_fn=lambda: "turn-cancelled",
+            )
+            commit_started = threading.Event()
+            release_commit = threading.Event()
+            state_lock = asyncio.Lock()
+
+            def pause_physical_commit(_generation: int) -> None:
+                commit_started.set()
+                if not release_commit.wait(timeout=2.0):
+                    raise TimeoutError("test_commit_release_timed_out")
+
+            async def slow_commit(
+                session_key: str,
+                turn_id: str,
+            ) -> dict[str, Any]:
+                return await checkpoint.commit_completed_turn_async(
+                    session_key,
+                    turn_id,
+                    before_commit=pause_physical_commit,
+                )
+
+            base_deps = self.build_deps()
+            deps = ControlPageTextRuntimeDeps(
+                **{
+                    **base_deps.__dict__,
+                    "get_session_lock": lambda _key: state_lock,
+                    "begin_user_text_turn": lambda *args, **kwargs: (
+                        begin_user_text_turn_from_runtime(
+                            *args,
+                            **kwargs,
+                            deps=session_deps,
+                        )
+                    ),
+                    "session_state_snapshot": store.snapshot,
+                    "finish_assistant_text_turn": (
+                        lambda *args, **kwargs: (
+                            finish_assistant_text_turn_from_runtime(
+                                *args,
+                                **kwargs,
+                                deps=session_deps,
+                            )
+                        )
+                    ),
+                    "commit_session_continuity": slow_commit,
+                }
+            )
+            answer_task = asyncio.create_task(
+                answer_control_page_text_from_runtime(
+                    None,
+                    "취소돼도 기억해 줘",
+                    deps=deps,
+                )
+            )
+            successor_acquired = asyncio.Event()
+            successor_task: asyncio.Task[None] | None = None
+            try:
+                self.assertTrue(
+                    await asyncio.to_thread(
+                        commit_started.wait,
+                        1.0,
+                    )
+                )
+                answer_task.cancel()
+
+                async def acquire_successor_lock() -> None:
+                    async with state_lock:
+                        successor_acquired.set()
+
+                successor_task = asyncio.create_task(
+                    acquire_successor_lock()
+                )
+                await asyncio.sleep(0)
+                self.assertFalse(answer_task.done())
+                self.assertFalse(successor_acquired.is_set())
+
+                release_commit.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(answer_task, timeout=2.0)
+                await asyncio.wait_for(successor_task, timeout=1.0)
+
+                restored_store = SessionStateStore.create_empty()
+                restored = SessionContinuityCheckpoint(
+                    store=restored_store,
+                    checkpoint_path=root / "active.json",
+                    status_path=root / "restored-status.json",
+                    system_prompt="system",
+                ).restore()
+                self.assertEqual(restored["state"], "restored")
+                self.assertEqual(
+                    restored_store.histories["control:0"][-1],
+                    {
+                        "role": "user",
+                        "content": "취소돼도 기억해 줘",
+                    },
+                )
+            finally:
+                release_commit.set()
+                answer_task.cancel()
+                pending = [answer_task]
+                if successor_task is not None:
+                    pending.append(successor_task)
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def test_bound_receipt_version_mismatch_reaches_no_sink(
         self,
@@ -331,7 +628,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(self.finished, [])
-        self.assertEqual(self.commits, [])
+        self.assertEqual(self.commits, ["commit"])
         self.assertEqual(self.scheduled, [])
         self.assertEqual(len(self.detached), 1)
         self.assertEqual(len(self.cleared), 1)

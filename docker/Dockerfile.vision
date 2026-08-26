@@ -44,9 +44,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --gid 10001 evelyn \
     && useradd --uid 10001 --gid 10001 --no-create-home evelyn
 
+ARG EVELYN_SOURCE_REVISION=unversioned
+
 COPY docker/falcon_ocr_snapshot.lock.json /app/docker/falcon_ocr_snapshot.lock.json
 COPY evelyn_core/runtime /app/evelyn_core/runtime
 COPY tools/provision_falcon_ocr_snapshot.py /app/tools/provision_falcon_ocr_snapshot.py
+
+ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}
 
 USER 10001:10001
 

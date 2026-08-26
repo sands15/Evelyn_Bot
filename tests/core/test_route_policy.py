@@ -8,7 +8,12 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.context_pipeline import ContextPolicy, build_context_policy_for_turn  # noqa: E402
+from evelyn_core.context_pipeline import (  # noqa: E402
+    ContextPolicy,
+    ToolUseDecision,
+    build_context_policy_for_turn,
+    build_tool_use_decisions,
+)
 from evelyn_core.voice_pipeline import build_route_decision, route_decision_policy_dict  # noqa: E402
 
 
@@ -124,6 +129,101 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(policy.needs_minecraft_state, True)
         self.assertEqual(policy.needs_skill_graph, True)
         self.assertEqual(policy.priority, "action")
+
+    def test_router_plan_is_authoritative_over_keyword_markers(self) -> None:
+        policy = build_context_policy_for_turn(
+            user_text="기억에서 찾아줘",
+            source="text",
+            route="sub_hint",
+            route_meta={
+                "source": "router",
+                "context_policy": {
+                    "needs_memory": True,
+                    "needs_search": False,
+                    "specialist": "none",
+                    "tools": [
+                        {
+                            "tool": "memory_recall",
+                            "query": "관련 기억",
+                            "required_before_answer": True,
+                        }
+                    ],
+                },
+            },
+        )
+
+        decisions = build_tool_use_decisions("기억에서 찾아줘", policy)
+
+        self.assertTrue(policy.tool_plan_authoritative)
+        self.assertEqual([item.tool_name for item in decisions], ["memory_recall"])
+        self.assertNotIn("web_current_info", {item.tool_name for item in decisions})
+        self.assertEqual(decisions[0].query, "관련 기억")
+
+    def test_route_decision_carries_same_typed_tools_and_specialist(self) -> None:
+        tool = ToolUseDecision(
+            tool_name="memory_recall",
+            reason="router_plan",
+            query="지난 설계",
+            required_before_answer=True,
+        )
+
+        decision = build_route_decision(
+            action="answer",
+            route="sub_hint",
+            source="text",
+            prompt_text="이어가자",
+            specialist="deep_reasoning",
+            tool_requests=(tool,),
+        )
+        public = route_decision_policy_dict(decision)
+
+        self.assertEqual(decision.tool_requests, (tool,))
+        self.assertEqual(public["specialist"], "deep_reasoning")
+        self.assertEqual(public["tools"][0]["tool_name"], "memory_recall")
+        self.assertEqual(public["tools"][0]["query"], "지난 설계")
+
+    def test_router_tool_mapping_drops_unknown_or_dangerous_tools(self) -> None:
+        policy = ContextPolicy.from_mapping(
+            {
+                "tool_plan_authoritative": True,
+                "tools": [
+                    {"tool": "runtime_shutdown", "auto_allowed": True},
+                    {"tool": "arbitrary_shell", "auto_allowed": True},
+                    {"tool": "runtime_status", "auto_allowed": False},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [item.tool_name for item in policy.tool_requests],
+            ["runtime_status"],
+        )
+        self.assertTrue(policy.tool_requests[0].auto_allowed)
+
+    def test_router_plan_bounds_deduplicates_and_normalizes_specialist(self) -> None:
+        policy = ContextPolicy.from_mapping(
+            {
+                "specialist": "arbitrary_model",
+                "tools": [
+                    {"tool": "memory_recall", "query": "a"},
+                    {
+                        "tool": "memory_recall",
+                        "query": "b",
+                        "required_before_answer": True,
+                    },
+                    {"tool": "runtime_status"},
+                    {"tool": "vision_capture_or_watch"},
+                    {"tool": "vision_ocr"},
+                    {"tool": "web_current_info"},
+                ],
+            }
+        )
+
+        self.assertEqual(policy.specialist, "none")
+        self.assertEqual(len(policy.tool_requests), 4)
+        self.assertEqual(policy.tool_requests[0].tool_name, "memory_recall")
+        self.assertEqual(policy.tool_requests[0].query, "a")
+        self.assertTrue(policy.tool_requests[0].required_before_answer)
 
 
 if __name__ == "__main__":
