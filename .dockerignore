@@ -19,6 +19,7 @@
 
 !evelyn_core/
 !evelyn_core/**
+evelyn_core/evelin/
 
 !evelyn_voice/
 !evelyn_voice/**
@@ -57,3 +58,7 @@ external/mindcraft_evelyn/tmp-ms-profile-*/
 external/mindcraft_evelyn/node_modules/
 external/mindcraft_evelyn/*-ms-code.mjs
 tmp-ms-profile-*/
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo

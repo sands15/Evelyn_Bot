@@ -923,7 +923,7 @@ type: decision-log
 
 ## 2026-08-27 — Mindcraft dependency는 pristine pin과 parent overlay를 단일 source of truth로 유지
 
-- 상태: 승인·clean-overlay 검증 완료, recovery checkpoint 진행 중
+- 상태: 구현·clean overlay·immutable recovery checkpoint 검증 완료
 - 결정: `external/mindcraft`는 pinned commit 그대로 clean하게 유지하고 Evelyn의 patch, overlay와
   generated auth-cache ignore는 `external/mindcraft_evelyn/`에서만 소유한다. clean 재구성 gate는
   Docker build와 같은 순서의 GNU `patch --dry-run -p1`/apply 뒤 parent overlay copy를 사용한다.

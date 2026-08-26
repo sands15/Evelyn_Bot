@@ -778,6 +778,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.stt
+      args:
+        EVELYN_SOURCE_REVISION: "${EVELYN_SOURCE_REVISION:-unversioned}"
+        EVELYN_STT_DOCKERFILE_SHA256: "${EVELYN_STT_DOCKERFILE_SHA256:-unversioned}"
+        EVELYN_STT_REQUIREMENTS_SHA256: "${EVELYN_STT_REQUIREMENTS_SHA256:-unversioned}"
     restart: "no"
     gpus: all
     environment:

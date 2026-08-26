@@ -279,10 +279,10 @@ session/owner/delivery cleanup과 분리됐다. Main gateway는 단일 cancel-sa
 
 ### P0-3. 복구 가능한 소스 기준점 만들기
 
-상태: **[~] 2026-08-27 clean-clone profile-root 재현 계약 정정, checkpoint/tag/bundle 재생성 중**.
-P0-1/P0-2 선행 gate, restricted capsule, focused/canonical과 최종 clean overlay는 검증됐다.
-첫 local checkpoint 산출물은 final overlay가 semantic whitespace 훼손을 발견해 승격·push 전에 폐기했고,
-정정된 staged tree로 checkpoint/tag/bundle을 다시 만든다.
+상태: **[x] 2026-08-27 immutable checkpoint/tag/bundle과 clean-clone canonical 검증 완료**.
+commit `d1c8863b...`, annotated tag `evelyn-recovery-2026-08-26`, bundle SHA-256
+`dd8e4bc5...8dcb`가 같은 tree `931ccee6...eecd`를 가리킨다. 새 bundle clone은 root/submodule
+clean 상태에서 canonical `4573 passed, 22 skipped, 1391 subtests passed`를 통과했고 remote push는 0개다.
 
 #### 문제·검증된 원인·영향
 
@@ -431,10 +431,12 @@ repository와 pinned submodule이 clean하며, capsule·commit·tag·bundle의 �
 
 ### P0-4. revised STT image를 GPU1에서 headless 검증·승격
 
-상태: **[!] 2026-08-26 구현·image build와 제한된 GPU1/Docker live 검증 승인됨, 선행 gate 대기**.
-P0-1 terminal 복구, P0-2 canonical green, P0-3 checkpoint/tag/bundle이 선행 gate다. 이 단계는
+상태: **[~] 2026-08-27 headless benchmark·진단·image recipe source 구현 및 canonical green,
+제한된 GPU1/Docker live preflight 대기**.
+P0-1 terminal 복구, P0-2 canonical green, P0-3 checkpoint/tag/bundle 선행 gate는 모두 닫혔다. 이 단계는
 microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B와 revised STT image의
-기준선을 먼저 고정한다. 통과 뒤에만 P0-5 Qwen3.8 교체로 간다.
+기준선을 먼저 고정한다. 통과 뒤에만 P0-5 Qwen3.8 교체로 간다. 고정 private corpus directory는
+현재 absent(`0/50`)이므로 합성 자료로 대체하지 않고 외부 입력 gate로 유지한다.
 
 #### 목표·범위·비범위
 
@@ -480,9 +482,12 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
   exact model/backend/GPU identity와 첫 request가 3/3 성공해야 한다.
 - 종료 후 Docker desired state와 GPU1 baseline ±256MiB 연속 3회, owned process/container/temp/audio
   0개를 확인한다. source test만으로 live 완료를 주장하지 않는다.
-- 예상 source diff는 기존 P1-1에 고정한 benchmark tool/test 2개와 검증 후 current-state/risk/
-  quickstart/NOW/decision/worklog/plan뿐이다. production ASR source, dependency, schema/API/config diff는
-  0이다. **미해결 설계 질문은 0개다.**
+- 실제 source diff는 GPU overlap tool/test, private ASR corpus tool/test, diagnostic Compose와 계약 test,
+  STT Dockerfile-specific context, two-stage recipe, direct dependency pins와 dependency hygiene test,
+  current-state/dependency/benchmark/NOW/decision/worklog/plan 문서다. production ASR Python source,
+  endpoint/model/memory fraction, schema/API, launcher/admission 동작 diff는 0이다. image recipe와
+  diagnostic override는 새 image가 live gate를 통과하기 전 production 기준선을 바꾸지 않는다.
+  **미해결 설계 질문은 0개다.**
 
 완료 조건: revised STT image가 headless corpus, Qwen3-14B overlap, restart와 cleanup gate를 모두
 통과해 exact rollback image와 함께 기준선으로 고정된다.
@@ -494,10 +499,9 @@ microphone, speaker, Discord, Minecraft를 시작하지 않고 현행 Qwen3-14B�
 선행 gate다. 승인 범위에는
 아래에 고정한 외부 model 다운로드, side-by-side llama.cpp build, Docker GPU1/STT A/B와
 승격·복구만 포함한다. Minecraft server/bot, Discord, microphone, speaker는 기동하지 않는다.
-승인 직후 currentness 확인의 attempt 5는 이후 workload를 완주했지만 host proof에서 실패했고,
-Attempt 6도 workload 전 identity discovery에서 fail-closed했다. P0-2 focused 회귀 2개는 모두
-재현됐으며 P0-3 tag는 없다. 따라서 model/build/source/Docker 변경을 시작하지 않고 P0-1
-Attempt 7 terminal 복구를 기다린다.
+P0-1 Attempt 7 terminal/host proof, P0-2 회귀와 canonical, P0-3 annotated tag/bundle은 모두
+검증됐다. P0-5는 P0-4 revised STT 기준선의 corpus·overlap·restart·cleanup gate가 닫힐 때까지
+model/build/source/Docker 변경을 시작하지 않는다.
 
 #### 문제·검증된 원인·영향
 

@@ -249,15 +249,38 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertNotIn("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN", discord_bot)
         self.assertEqual(source.count("EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN"), 2)
 
-    def test_gpu1_benchmark_override_exposes_qwen_only_for_diagnostics(self) -> None:
+    def test_gpu1_benchmark_override_exposes_llms_only_for_diagnostics(self) -> None:
         source = GPU1_BENCHMARK_COMPOSE.read_text(encoding="utf-8")
 
         self.assertEqual(source.count("  stt:\n"), 1)
-        self.assertNotIn("main_llm:", source)
+        self.assertEqual(source.count("  main_llm:\n"), 1)
+        self.assertIn('"127.0.0.1:9820:9820"', source)
         self.assertEqual(source.count("  minecraft_llm:\n"), 1)
         self.assertIn('"127.0.0.1:9823:9823"', source)
+        self.assertIn(':/llama:ro', source)
         self.assertIn('NVIDIA_VISIBLE_DEVICES: "1"', source)
         self.assertIn('CUDA_VISIBLE_DEVICES: "1"', source)
+        self.assertIn('HF_HUB_OFFLINE: "1"', source)
+        self.assertIn('HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"', source)
+        self.assertIn('HF_HOME: "/tmp/huggingface-empty"', source)
+        self.assertIn('HF_HUB_CACHE: "/root/.cache/huggingface"', source)
+        self.assertIn('HF_TOKEN: ""', source)
+        self.assertIn('HUGGING_FACE_HUB_TOKEN: ""', source)
+        self.assertIn('TRANSFORMERS_OFFLINE: "1"', source)
+        self.assertIn('stt_benchmark_logs:/app/logs', source)
+        self.assertIn('/hub:/root/.cache/huggingface:ro', source)
+
+        production = COMPOSE.read_text(encoding="utf-8")
+        stt_block = production.split("\n  stt:\n", 1)[1].split(
+            "\n  codex_gateway:", 1
+        )[0]
+        for build_arg in (
+            "EVELYN_SOURCE_REVISION",
+            "EVELYN_STT_DOCKERFILE_SHA256",
+            "EVELYN_STT_REQUIREMENTS_SHA256",
+        ):
+            expected = f'        {build_arg}: "${{{build_arg}:-unversioned}}"'
+            self.assertEqual(stt_block.count(expected), 1)
 
     def test_production_python_qwen_access_is_broker_owned(self) -> None:
         runtime_root = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core"

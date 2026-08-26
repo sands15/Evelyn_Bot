@@ -3256,30 +3256,25 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
 
 ## 2026-08-16 GPU1 Qwen specialist + STT concurrency benchmark
 
-- `tools/gpu1_latency_benchmark.py`는 fixed 1,773자 Fast Main prompt, Qwen specialist
-  256-token 요청과 repository의 1.64초 PCM16 STT fixture를 같은 barrier에서 시작하고,
-  physical GPU1의 used/free/total memory와 utilization을 기본 50ms마다 수집한다.
-  1 warmup + 5 measured iteration의 raw timing/GPU sample과 p95를
-  `evelyn.gpu1-latency-budget.v1` atomic report로 쓴다. prompt는 hash만, audio는 PCM hash와
-  duration/sample count만 남기며 raw/base64 audio와 transcript는 report에 넣지 않는다.
-- 기본 예산은 Fast Main TTFT p95 1,000ms, Qwen timeout 0 및 성공 p95 6,000ms,
-  STT endpoint-to-final p95 1,200ms, physical GPU1 free memory 최소 2,048MiB, request/GPU
-  sampling error 0이다. 5개 미만 표본도 실패다.
-- `docker-compose.gpu1-benchmark.yml`은 승인된 benchmark에서만 STT를 GPU0에서 physical
-  GPU1으로 옮긴다. normal Compose 배치는 변경하지 않았다. source/offline 집중 검증은
-  통과했고 runtime 872개(skip 4), voice 716개(skip 5), hygiene 8개가 모두 통과했다. core
-  전체는 842개 중 836개 통과·skip 1이며 이번 변경과 무관한 기존 dirty-tree source-boundary
-  assertion 5개가 남았다.
-- 2026-08-16 사용자 승인 뒤 Main GPU0, Qwen specialist+STT physical GPU1으로 실제
-  1 warmup+5 measured overlap을 실행했다. Fast Main TTFT p95 422.6ms, Qwen 성공 p95
-  2,233.2ms/timeout 0, STT endpoint-to-final p95 626.1ms, GPU1 peak used 14,039MiB/min
-  free 10,284MiB/peak utilization 98%, GPU sample 102와 request/GPU error 0으로 pass report를
-  만들었다. 테스트 컨테이너와 Docker Desktop은 종료했고 GPU1 사용량은 0MiB로 복귀했다.
-- 처음 추가했던 fresh receipt 기반 Qwen/Discord/Local admission은 운영 중 초과를 감지하지
-  못하고 normal STT GPU0 배치까지 강등하는 정적 결합이라 사용자 지시로 제거했다. Compose,
-  Windows launcher와 runtime call path는 report를 읽지 않는다. 요청별 Qwen 6초 timeout과 기존
-  STT 오류 fallback은 유지한다. 제거 후 집중 106개와 Fast Control/voice composition 인접
-  115개, Python 구문과 merged Compose parse가 통과했으며 Docker/GPU service는 다시 실행하지 않았다. 실행 계약과 report 경로는
+- historical v1 runner는 당시 fixed 1,773자 Fast Main prompt, Qwen specialist 256-token 요청과
+  repository의 1.64초 PCM16 STT fixture를 같은 barrier에서 시작하고 physical GPU1을 50ms마다
+  수집했다. prompt/audio는 hash와 크기만 남기고 raw audio와 transcript는 기록하지 않았다.
+- 2026-08-16 사용자 승인 뒤 Main GPU0, Qwen specialist+STT physical GPU1의 실제 1 warmup+5
+  measured overlap은 Fast Main TTFT p95 422.6ms, Qwen p95 2,233.2ms/timeout 0, STT final p95
+  626.1ms, GPU1 min free 10,284MiB/peak utilization 98%, GPU sample 102와 error 0으로 통과했다.
+  테스트 컨테이너와 Docker Desktop은 종료했고 GPU1 사용량은 0MiB로 복귀했다.
+- 2026-08-27 current source의 P0-4 v2 mode는 old/new STT image를 각각 warmup 2+measured 20으로
+  고정하고 raw baseline SHA, clean source, unique Compose project, exact container/image/model/runtime,
+  physical GPU, read-only mount, STT cache·dependency identity의 pre/post stability를 fail-close한다.
+  별도 private positive 40/negative 10 batch+stream runner는 aggregate와 고정 실패 코드만 남기고
+  기본적으로 bound manifest/audio 51개를 원자적 quarantine 뒤 삭제한다.
+- 진단 Compose는 Main/Qwen을 loopback 9820/9823에만 열고 STT cache의 `hub/`만 read-only/offline으로
+  mount하며 log는 attempt-owned named volume을 쓴다. STT 전용 build context, digest-pinned CUDA base,
+  two-stage runtime와 direct Python pin/package-set hash는 source에 구현됐지만 새 image build/load와 GPU
+  live는 아직 실행하지 않았다. private corpus directory도 absent(`0/50`)이므로 v2 promotion은 아직
+  통과하지 않았다.
+- benchmark report는 production admission, Windows launcher, Discord와 Local Voice가 읽지 않는다.
+  historical v1 결과는 revised image A/B·corpus·restart 증거로 재사용하지 않는다. 실행 계약은
   [[GPU1_CONCURRENCY_BENCHMARK]]가 소유한다.
 
 ## 2026-08-21 Main LLM TTFT source optimization

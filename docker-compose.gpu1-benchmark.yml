@@ -1,9 +1,28 @@
 services:
+  main_llm:
+    ports:
+      - "127.0.0.1:9820:9820"
+
   minecraft_llm:
     ports:
       - "127.0.0.1:9823:9823"
+    volumes:
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama:ro
 
   stt:
     environment:
       NVIDIA_VISIBLE_DEVICES: "1"
       CUDA_VISIBLE_DEVICES: "1"
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HOME: "/tmp/huggingface-empty"
+      HF_HUB_CACHE: "/root/.cache/huggingface"
+      HF_TOKEN: ""
+      HUGGING_FACE_HUB_TOKEN: ""
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - stt_benchmark_logs:/app/logs
+      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}/hub:/root/.cache/huggingface:ro
+
+volumes:
+  stt_benchmark_logs:

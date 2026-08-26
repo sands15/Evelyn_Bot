@@ -26,6 +26,21 @@ streaming API, while Vision remains isolated and can use 5.14.1. Source and
 resolver contracts are updated, but the revised STT image has not yet been
 built, loaded, or GPU-smoke-tested.
 
+The 2026-08-27 revised STT recipe pins the CUDA 12.8 amd64 runtime base by digest,
+pip 26.2.1, the Torch/Torchaudio 2.9.1 and Torchvision 0.24.1 cu128 family, plus
+every direct requirement. `numpy==2.2.6` preserves vLLM's Numba `<2.3` boundary.
+A builder stage runs `pip check` and emits a sorted `pip freeze --all` manifest and
+SHA-256; the runtime stage copies only that venv, manifest and Evelyn runtime package,
+without compiler, Git or Curl. A Dockerfile-specific allowlist context excludes docs,
+runtime artifacts, raw assets and Python bytecode. Diagnostic Compose mounts only the
+host Hugging Face `hub/` directory read-only, disables online/token discovery and uses a
+named log volume. These controls make a built image and package set auditable; transitive
+wheels and Ubuntu repository snapshots are not fully hash-locked, so the image is not
+described as bit-reproducible. Candidate image labels bind the clean source revision, raw
+Dockerfile and requirements SHA-256, and fixed CUDA base digest; the live receipt must still
+verify BuildKit metadata/provenance before promotion. Build/load and live model smoke remain
+pending.
+
 Root/CPU runtimes use Torch 2.13. Vision remains on its matched CUDA 12.8
 Torch 2.11/Torchvision 0.26 family, while STT deliberately uses the older
 vLLM-compatible pair. Neither CUDA service may claim the root remediation

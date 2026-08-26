@@ -1,0 +1,17 @@
+*
+
+!docker/
+docker/*
+!docker/Dockerfile.stt
+!docker/requirements.stt.txt
+
+!evelyn_core/
+evelyn_core/*
+!evelyn_core/runtime/
+evelyn_core/runtime/*
+!evelyn_core/runtime/evelyn_core/
+!evelyn_core/runtime/evelyn_core/**
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
