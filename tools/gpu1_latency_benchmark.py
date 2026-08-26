@@ -131,6 +131,8 @@ def _run_text(command: list[str], *, timeout_sec: float = 15.0) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         timeout=timeout_sec,
     )
     if len(completed.stdout.encode("utf-8")) > 1024 * 1024:
@@ -996,6 +998,8 @@ def _gpu_samples(
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 timeout=2.0,
             )
             values = [float(item.strip()) for item in completed.stdout.splitlines()[0].split(",")]

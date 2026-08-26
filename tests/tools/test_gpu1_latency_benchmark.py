@@ -31,6 +31,20 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.qwen_url, "http://127.0.0.1:9823/v1/chat/completions")
         self.assertEqual(args.stt_url, "http://127.0.0.1:8892/v1/stt/transcribe")
 
+    def test_command_output_is_decoded_as_utf8_on_windows(self) -> None:
+        completed = benchmark.subprocess.CompletedProcess(
+            ["docker", "inspect"],
+            0,
+            stdout='{"Source":"C:/Users/Admin/Documents/이블린"}\n',
+            stderr="",
+        )
+        with patch.object(benchmark.subprocess, "run", return_value=completed) as run:
+            output = benchmark._run_text(["docker", "inspect"])
+
+        self.assertIn("이블린", output)
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "strict")
+
     def test_docker_desktop_mount_sources_normalize_to_windows_paths(self) -> None:
         expected = benchmark._canonical_host_path("C:/Users/Admin/.cache/huggingface/hub")
         for source in (
