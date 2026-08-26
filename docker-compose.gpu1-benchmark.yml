@@ -1,11 +1,19 @@
 services:
   main_llm:
     container_name: evelyn-p04-main-llm
+    gpus: !override
+      - driver: nvidia
+        device_ids: ["0"]
+        capabilities: [gpu]
     ports:
       - "127.0.0.1:9820:9820"
 
   minecraft_llm:
     container_name: evelyn-p04-qwen-llm
+    gpus: !override
+      - driver: nvidia
+        device_ids: ["1"]
+        capabilities: [gpu]
     ports:
       - "127.0.0.1:9823:9823"
     volumes:
@@ -13,6 +21,10 @@ services:
 
   stt:
     container_name: evelyn-p04-stt
+    gpus: !override
+      - driver: nvidia
+        device_ids: ["1"]
+        capabilities: [gpu]
     environment:
       NVIDIA_VISIBLE_DEVICES: "1"
       CUDA_VISIBLE_DEVICES: "1"
