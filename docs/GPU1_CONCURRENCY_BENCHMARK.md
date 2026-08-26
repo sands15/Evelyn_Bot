@@ -44,7 +44,8 @@ Live 실행은 이미 승인된 P0-4 범위 안에서도 다음 순서를 지킨
    existing image ID와 GPU baseline을 기록한다.
 2. attempt마다 unique lower-case Compose project를 만들고 `main_llm`, `minecraft_llm`, `stt` 세 service만
    `--no-deps --no-build --pull never`로 시작한다. `bot_api`, Discord, microphone, speaker와 Minecraft는
-   시작하지 않는다.
+   시작하지 않는다. diagnostic container 이름은 `evelyn-p04-main-llm`, `evelyn-p04-qwen-llm`,
+   `evelyn-p04-stt`로 production의 기존 stopped/running container와 분리한다.
 3. old image 2+20 report를 별도 output에 쓴 뒤 exact project를 내리고 GPU1 baseline 복귀를 3회 확인한다.
 4. STT service만 새 recipe로 build/load한다. exact image/source/dependency/cache/health를 확인한 뒤 private
    positive 40 + negative 10 corpus, cancel/successor를 먼저 통과해야 candidate 2+20과 cold restart 3회를

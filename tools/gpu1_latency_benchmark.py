@@ -104,9 +104,9 @@ _CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _COMPOSE_PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z", re.ASCII)
 _MAX_REPORT_BYTES = 4 * 1024 * 1024
 _P0_4_CONTAINERS = {
-    "main": ("evelyn-main-llm", "main_llm", "0"),
-    "qwen": ("evelyn-minecraft-llm", "minecraft_llm", "1"),
-    "stt": ("evelyn-stt", "stt", "1"),
+    "main": ("evelyn-p04-main-llm", "main_llm", "0"),
+    "qwen": ("evelyn-p04-qwen-llm", "minecraft_llm", "1"),
+    "stt": ("evelyn-p04-stt", "stt", "1"),
 }
 _MAIN_SAMPLE_KEYS = frozenset({"ok", "ttftMs", "totalMs", *LLAMA_TIMING_METRIC_NAMES})
 

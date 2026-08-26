@@ -457,7 +457,9 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             normal = self.probe_side_effect(args)
             bad_payload = self.inspected_containers(args)
             if failure == "cache_source":
-                stt = next(row for row in bad_payload if row["Name"] == "/evelyn-stt")
+                stt = next(
+                    row for row in bad_payload if row["Name"] == "/evelyn-p04-stt"
+                )
                 cache = next(
                     mount
                     for mount in stt["Mounts"]
@@ -466,7 +468,9 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                 cache["Source"] = str(Path("C:/wrong/huggingface/hub"))
             elif failure == "qwen_mount_type":
                 qwen = next(
-                    row for row in bad_payload if row["Name"] == "/evelyn-minecraft-llm"
+                    row
+                    for row in bad_payload
+                    if row["Name"] == "/evelyn-p04-qwen-llm"
                 )
                 qwen["Mounts"][0]["Type"] = "volume"
 

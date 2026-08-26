@@ -1,15 +1,18 @@
 services:
   main_llm:
+    container_name: evelyn-p04-main-llm
     ports:
       - "127.0.0.1:9820:9820"
 
   minecraft_llm:
+    container_name: evelyn-p04-qwen-llm
     ports:
       - "127.0.0.1:9823:9823"
     volumes:
       - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama:ro
 
   stt:
+    container_name: evelyn-p04-stt
     environment:
       NVIDIA_VISIBLE_DEVICES: "1"
       CUDA_VISIBLE_DEVICES: "1"

@@ -254,8 +254,10 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertEqual(source.count("  stt:\n"), 1)
         self.assertEqual(source.count("  main_llm:\n"), 1)
+        self.assertIn("container_name: evelyn-p04-main-llm", source)
         self.assertIn('"127.0.0.1:9820:9820"', source)
         self.assertEqual(source.count("  minecraft_llm:\n"), 1)
+        self.assertIn("container_name: evelyn-p04-qwen-llm", source)
         self.assertIn('"127.0.0.1:9823:9823"', source)
         self.assertIn(':/llama:ro', source)
         self.assertIn('NVIDIA_VISIBLE_DEVICES: "1"', source)
@@ -269,6 +271,7 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('TRANSFORMERS_OFFLINE: "1"', source)
         self.assertIn('stt_benchmark_logs:/app/logs', source)
         self.assertIn('/hub:/root/.cache/huggingface:ro', source)
+        self.assertIn("container_name: evelyn-p04-stt", source)
 
         production = COMPOSE.read_text(encoding="utf-8")
         stt_block = production.split("\n  stt:\n", 1)[1].split(

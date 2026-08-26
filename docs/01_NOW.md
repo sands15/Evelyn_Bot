@@ -43,7 +43,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   최소 build context, digest-pinned two-stage STT recipe와 package-set hash가 구현됐다.
   P0-4 focused는 `75 passed, 29 subtests`, voice 전체는 `816 passed, 5 skipped, 98 subtests`,
   canonical은 `4601 passed, 22 skipped, 1409 subtests`로 통과했다. Docker/GPU live는 아직
-  실행하지 않았다. [[GPU1_CONCURRENCY_BENCHMARK]]
+  workload를 실행하지 않았다. 첫 preflight에서 stopped production container 이름 충돌을 발견해
+  아무것도 삭제하지 않고 Docker OFF로 복구했으며 diagnostic 이름을 분리한 뒤 canonical을 같은
+  `4601/22/1409`로 다시 통과했다. [[GPU1_CONCURRENCY_BENCHMARK]]
 - 2026-08-16 historical GPU1 v1 live는 1+5에서 Fast Main/Qwen/STT p95
   `422.6/2233.2/626.1ms`, min free `10,284MiB`, error 0이었다. 현재 v2 승격 증거는 아니다.
 - Main graph-on/SWA1/ubatch2048와 OmniVoice CUDA 12.9/FlashInfer 0.6.15는 source/live 근거가
