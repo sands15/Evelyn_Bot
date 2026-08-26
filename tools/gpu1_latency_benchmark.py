@@ -337,14 +337,20 @@ def _get_json(url: str) -> dict[str, Any]:
     return payload
 
 
-def _gpu_uuid(*, index: int | None = None, container_id: str | None = None) -> str:
+def _gpu_uuid(*, index: int, container_id: str | None = None) -> str:
     prefix = (
-        ["nvidia-smi", "--id", str(index)]
+        ["nvidia-smi"]
         if container_id is None
         else ["docker", "exec", container_id, "nvidia-smi"]
     )
     value = _command_line(
-        [*prefix, "--query-gpu=uuid", "--format=csv,noheader,nounits"]
+        [
+            *prefix,
+            "--id",
+            str(index),
+            "--query-gpu=uuid",
+            "--format=csv,noheader,nounits",
+        ]
     )
     _required(_GPU_UUID.fullmatch(value) is not None)
     return value
@@ -403,6 +409,7 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
             container_id = item.get("Id")
             state = item.get("State")
             config = item.get("Config")
+            host_config = item.get("HostConfig")
             labels = config.get("Labels") if isinstance(config, dict) else None
             _required(isinstance(container_id, str))
             _required(
@@ -422,11 +429,38 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
                 and labels.get("com.docker.compose.oneoff") == "False"
             )
             environment = _environment_map(config.get("Env"))
+            device_requests = (
+                host_config.get("DeviceRequests")
+                if isinstance(host_config, dict)
+                else None
+            )
+            device_request = (
+                device_requests[0]
+                if isinstance(device_requests, list) and len(device_requests) == 1
+                else None
+            )
+            capabilities = (
+                device_request.get("Capabilities")
+                if isinstance(device_request, dict)
+                else None
+            )
             _required(
                 environment.get("NVIDIA_VISIBLE_DEVICES") == gpu_index
                 and environment.get("CUDA_VISIBLE_DEVICES") == gpu_index
+                and isinstance(device_request, dict)
+                and device_request.get("Driver") == "nvidia"
+                and device_request.get("Count") == 0
+                and device_request.get("DeviceIDs") == [gpu_index]
+                and isinstance(capabilities, list)
+                and any(
+                    isinstance(group, list) and "gpu" in group
+                    for group in capabilities
+                )
             )
-            observed_gpu_uuid = _gpu_uuid(container_id=container_id)
+            observed_gpu_uuid = _gpu_uuid(
+                index=int(gpu_index),
+                container_id=container_id,
+            )
             expected_gpu_uuid = main_gpu_uuid if role == "main" else shared_gpu_uuid
             _required(observed_gpu_uuid == expected_gpu_uuid)
             containers[role] = {
@@ -435,6 +469,7 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
                 "service": service,
                 "startedAt": state["StartedAt"],
                 "restartCount": 0,
+                "gpuDeviceId": gpu_index,
                 "gpuUuid": observed_gpu_uuid,
             }
 

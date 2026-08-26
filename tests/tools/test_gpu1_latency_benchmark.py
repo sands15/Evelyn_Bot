@@ -236,6 +236,16 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                         },
                         "Env": environment,
                     },
+                    "HostConfig": {
+                        "DeviceRequests": [
+                            {
+                                "Driver": "nvidia",
+                                "Count": 0,
+                                "DeviceIDs": [gpu],
+                                "Capabilities": [["gpu"]],
+                            }
+                        ]
+                    },
                     "Mounts": (
                         [
                             {
@@ -434,6 +444,9 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(observed["containers"]["stt"]["imageId"], args.stt_image_id)
         self.assertEqual(observed["gpus"]["shared"]["uuid"], args.gpu_uuid)
+        self.assertEqual(observed["containers"]["main"]["gpuDeviceId"], "0")
+        self.assertEqual(observed["containers"]["qwen"]["gpuDeviceId"], "1")
+        self.assertEqual(observed["containers"]["stt"]["gpuDeviceId"], "1")
         self.assertEqual(
             observed["main"]["modelSha256"], benchmark.P0_4_MAIN_MODEL_SHA256
         )
@@ -464,6 +477,7 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             "project_leak",
             "image_label",
             "cache_source",
+            "gpu_request",
             "qwen_mount_type",
             "qwen_model_content",
             "runtime_source",
@@ -487,6 +501,11 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                     if row["Name"] == "/evelyn-p04-qwen-llm"
                 )
                 qwen["Mounts"][0]["Type"] = "volume"
+            elif failure == "gpu_request":
+                stt = next(
+                    row for row in bad_payload if row["Name"] == "/evelyn-p04-stt"
+                )
+                stt["HostConfig"]["DeviceRequests"][0]["DeviceIDs"] = ["0"]
 
             def run(command, *, timeout_sec=15.0):
                 if failure == "image_label" and command[:3] == [
@@ -499,17 +518,11 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                         "org.opencontainers.image.revision"
                     ] = "0" * 40
                     return json.dumps(image)
-                if failure == "cache_source" and command[:3] == [
-                    "docker",
-                    "container",
-                    "inspect",
-                ]:
-                    return json.dumps(bad_payload)
-                if failure == "qwen_mount_type" and command[:3] == [
-                    "docker",
-                    "container",
-                    "inspect",
-                ]:
+                if failure in {
+                    "cache_source",
+                    "gpu_request",
+                    "qwen_mount_type",
+                } and command[:3] == ["docker", "container", "inspect"]:
                     return json.dumps(bad_payload)
                 if failure == "project_leak" and command[:2] == ["docker", "ps"]:
                     return normal(command, timeout_sec=timeout_sec) + "f" * 64 + "\n"
