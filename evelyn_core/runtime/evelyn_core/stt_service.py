@@ -47,10 +47,20 @@ STREAM_DECODER_PROFILE = "realtime-ko"
 STT_VLLM_GPU_MEMORY_UTILIZATION = float(
     _STT_CONFIG.get("STT_VLLM_GPU_MEMORY_UTILIZATION", 0.35)
 )
+STT_VLLM_MAX_MODEL_LEN = 8192
+STT_VLLM_MAX_NUM_SEQS = 1
+STT_VLLM_AUDIO_PER_PROMPT = 1
+_EXPECTED_VLLM_ENGINE_CONFIGURATION = {
+    "maxModelLen": STT_VLLM_MAX_MODEL_LEN,
+    "gpuMemoryUtilization": STT_VLLM_GPU_MEMORY_UTILIZATION,
+    "maxNumSeqs": STT_VLLM_MAX_NUM_SEQS,
+    "audioPerPrompt": STT_VLLM_AUDIO_PER_PROMPT,
+}
 
 app = FastAPI(title="Evelyn STT Service", version="0.1")
 _model: Any | None = None
 _loaded_at: float | None = None
+_engine_configuration: dict[str, int | float] | None = None
 _model_lock = Lock()
 _inference_lock = Lock()
 
@@ -133,8 +143,21 @@ def gpu_snapshot() -> dict[str, Any]:
     }
 
 
+def _read_vllm_engine_configuration(model: Any) -> dict[str, int | float]:
+    configuration = model.model.llm_engine.vllm_config
+    multimodal = configuration.model_config.get_multimodal_config()
+    return {
+        "maxModelLen": int(configuration.model_config.max_model_len),
+        "gpuMemoryUtilization": float(
+            configuration.cache_config.gpu_memory_utilization
+        ),
+        "maxNumSeqs": int(configuration.scheduler_config.max_num_seqs),
+        "audioPerPrompt": int(multimodal.get_limit_per_prompt("audio")),
+    }
+
+
 def get_model() -> Any:
-    global _model, _loaded_at
+    global _model, _loaded_at, _engine_configuration
     if _model is not None:
         return _model
     with _model_lock:
@@ -154,15 +177,23 @@ def get_model() -> Any:
 
         print(f"[STT SERVICE LOAD] start model={STT_MODEL_NAME} backend=vllm", flush=True)
         try:
-            _model = Qwen3ASRModel.LLM(
+            candidate = Qwen3ASRModel.LLM(
                 model=STT_MODEL_NAME,
                 max_inference_batch_size=1,
                 max_new_tokens=256,
+                max_model_len=STT_VLLM_MAX_MODEL_LEN,
+                max_num_seqs=STT_VLLM_MAX_NUM_SEQS,
+                limit_mm_per_prompt={"audio": STT_VLLM_AUDIO_PER_PROMPT},
                 **load_kwargs,
             )
+            observed_configuration = _read_vllm_engine_configuration(candidate)
+            if observed_configuration != _EXPECTED_VLLM_ENGINE_CONFIGURATION:
+                raise RuntimeError("stt_vllm_engine_contract_mismatch")
         except Exception as exc:
             _RUNTIME_ERRORS.record("stt_model_load_failed", exc)
             raise
+        _model = candidate
+        _engine_configuration = observed_configuration
         _loaded_at = time.time()
         print(f"[STT SERVICE LOAD] done model={STT_MODEL_NAME} gpu={gpu_snapshot()}", flush=True)
         return _model
@@ -232,11 +263,21 @@ def startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    ready = (
+        _model is not None
+        and _engine_configuration == _EXPECTED_VLLM_ENGINE_CONFIGURATION
+    )
     return {
         "ok": Qwen3ASRModel is not None and find_spec("vllm") is not None,
-        "ready": _model is not None,
+        "ready": ready,
         "model": STT_MODEL_NAME,
         "backend": "vllm",
+        "maxAudioSec": STT_MAX_AUDIO_SEC,
+        "engine": (
+            None
+            if _engine_configuration is None
+            else dict(_engine_configuration)
+        ),
         "loadedAt": _loaded_at,
         "loadOnStart": STT_LOAD_ON_START,
         "gpu": gpu_snapshot(),

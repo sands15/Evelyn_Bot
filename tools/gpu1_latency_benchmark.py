@@ -75,6 +75,16 @@ P0_4_QWEN_TIMEOUT_MS = 6_000.0
 P0_4_STT_FINAL_BUDGET_MS = 1_200.0
 P0_4_GPU_MIN_FREE_MB = 2_048.0
 P0_4_STT_MEMORY_UTILIZATION = 0.35
+P0_4_STT_MAX_AUDIO_SEC = 30.0
+P0_4_STT_MAX_MODEL_LEN = 8192
+P0_4_STT_MAX_NUM_SEQS = 1
+P0_4_STT_AUDIO_PER_PROMPT = 1
+P0_4_STT_ENGINE_CONFIGURATION = {
+    "maxModelLen": P0_4_STT_MAX_MODEL_LEN,
+    "gpuMemoryUtilization": P0_4_STT_MEMORY_UTILIZATION,
+    "maxNumSeqs": P0_4_STT_MAX_NUM_SEQS,
+    "audioPerPrompt": P0_4_STT_AUDIO_PER_PROMPT,
+}
 P0_4_MAIN_MODEL_PATH = (
     "/llama/models/gemma4-12b-batiai-iq4xs/"
     "google-gemma-4-12B-it-IQ4_XS.gguf"
@@ -400,6 +410,18 @@ def _get_json(url: str) -> dict[str, Any]:
     return payload
 
 
+def _p0_4_engine_configuration_valid(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(P0_4_STT_ENGINE_CONFIGURATION)
+        and type(value.get("maxModelLen")) is int
+        and type(value.get("gpuMemoryUtilization")) is float
+        and type(value.get("maxNumSeqs")) is int
+        and type(value.get("audioPerPrompt")) is int
+        and value == P0_4_STT_ENGINE_CONFIGURATION
+    )
+
+
 def _gpu_uuid(*, index: int, container_id: str | None = None) -> str:
     prefix = (
         ["nvidia-smi"]
@@ -583,6 +605,7 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
             for name, expected in (
                 ("STT_MODEL_NAME", P0_4_STT_MODEL),
                 ("STT_LOAD_ON_START", "true"),
+                ("STT_MAX_AUDIO_SEC", "30"),
                 ("STT_VLLM_GPU_MEMORY_UTILIZATION", "0.35"),
                 ("HF_HUB_OFFLINE", "1"),
                 ("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1"),
@@ -669,15 +692,29 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
         backend_proof = _container_stt_backend_proof(stt_id)
         _required(backend_proof == _expected_stt_backend_proof(args.phase))
         if args.phase == "old-stt":
-            _required("backend" not in health)
+            _required("backend" not in health and "engine" not in health)
             observed_stt_backend = P0_4_OLD_STT_BACKEND
             observed_stt_memory_utilization = None
+            observed_stt_max_model_len = None
+            observed_stt_max_num_seqs = None
+            observed_stt_audio_per_prompt = None
+            observed_stt_max_audio_sec = float(stt_environment["STT_MAX_AUDIO_SEC"])
         else:
-            _required(health.get("backend") == P0_4_STT_BACKEND)
+            _required(
+                health.get("backend") == P0_4_STT_BACKEND
+                and _p0_4_engine_configuration_valid(health.get("engine"))
+                and health.get("maxAudioSec") == P0_4_STT_MAX_AUDIO_SEC
+            )
             observed_stt_backend = P0_4_STT_BACKEND
             observed_stt_memory_utilization = float(
-                stt_environment["STT_VLLM_GPU_MEMORY_UTILIZATION"]
+                health["engine"]["gpuMemoryUtilization"]
             )
+            observed_stt_max_model_len = int(health["engine"]["maxModelLen"])
+            observed_stt_max_num_seqs = int(health["engine"]["maxNumSeqs"])
+            observed_stt_audio_per_prompt = int(
+                health["engine"]["audioPerPrompt"]
+            )
+            observed_stt_max_audio_sec = float(health["maxAudioSec"])
 
         main_id = containers["main"]["id"]
         main_epoch_identities = [
@@ -807,6 +844,10 @@ def _observe_p0_4_environment(args: argparse.Namespace) -> dict[str, Any]:
                 "model": health["model"],
                 "backend": observed_stt_backend,
                 "memoryUtilization": observed_stt_memory_utilization,
+                "maxModelLen": observed_stt_max_model_len,
+                "maxNumSeqs": observed_stt_max_num_seqs,
+                "audioPerPrompt": observed_stt_audio_per_prompt,
+                "maxAudioSec": observed_stt_max_audio_sec,
                 "backendProof": backend_proof,
                 "modelCacheRevision": cache_revision,
                 "modelContentSha256": snapshot_sha256,
@@ -1432,12 +1473,26 @@ def _p0_report_violations(
         if expected_phase == "old-stt"
         else P0_4_STT_MEMORY_UTILIZATION
     )
+    expected_stt_max_model_len = (
+        None if expected_phase == "old-stt" else P0_4_STT_MAX_MODEL_LEN
+    )
+    expected_stt_max_num_seqs = (
+        None if expected_phase == "old-stt" else P0_4_STT_MAX_NUM_SEQS
+    )
+    expected_stt_audio_per_prompt = (
+        None if expected_phase == "old-stt" else P0_4_STT_AUDIO_PER_PROMPT
+    )
     stt_identity_valid = (
         isinstance(stt_identity, dict)
         and stt_identity.get("model") == P0_4_STT_MODEL
         and stt_identity.get("backend") == expected_stt_backend
         and stt_identity.get("memoryUtilization")
         == expected_stt_memory_utilization
+        and stt_identity.get("maxModelLen") == expected_stt_max_model_len
+        and stt_identity.get("maxNumSeqs") == expected_stt_max_num_seqs
+        and stt_identity.get("audioPerPrompt")
+        == expected_stt_audio_per_prompt
+        and stt_identity.get("maxAudioSec") == P0_4_STT_MAX_AUDIO_SEC
         and stt_identity.get("backendProof")
         == _expected_stt_backend_proof(expected_phase)
         and _COMMIT.fullmatch(str(stt_identity.get("modelCacheRevision") or ""))
@@ -1561,6 +1616,14 @@ def _binding_comparison_violations(
         and old_stt.get("backendProof") == _expected_stt_backend_proof("old-stt")
         and new_stt.get("backend") == P0_4_STT_BACKEND
         and new_stt.get("memoryUtilization") == P0_4_STT_MEMORY_UTILIZATION
+        and new_stt.get("maxModelLen") == P0_4_STT_MAX_MODEL_LEN
+        and new_stt.get("maxNumSeqs") == P0_4_STT_MAX_NUM_SEQS
+        and new_stt.get("audioPerPrompt") == P0_4_STT_AUDIO_PER_PROMPT
+        and old_stt.get("maxModelLen") is None
+        and old_stt.get("maxNumSeqs") is None
+        and old_stt.get("audioPerPrompt") is None
+        and old_stt.get("maxAudioSec") == P0_4_STT_MAX_AUDIO_SEC
+        and new_stt.get("maxAudioSec") == P0_4_STT_MAX_AUDIO_SEC
         and new_stt.get("backendProof") == _expected_stt_backend_proof("new-stt")
     ):
         violations.append("stt_operational_baseline_transition_mismatch")
@@ -1574,6 +1637,7 @@ def _binding_comparison_violations(
         "gpuName",
         "cacheReadOnly",
         "offline",
+        "maxAudioSec",
     )
     if any(
         old_stt.get(key) != new_stt.get(key)

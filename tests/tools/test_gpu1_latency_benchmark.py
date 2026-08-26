@@ -165,6 +165,22 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                     if args.phase == "old-stt"
                     else benchmark.P0_4_STT_MEMORY_UTILIZATION
                 ),
+                "maxModelLen": (
+                    None
+                    if args.phase == "old-stt"
+                    else benchmark.P0_4_STT_MAX_MODEL_LEN
+                ),
+                "maxNumSeqs": (
+                    None
+                    if args.phase == "old-stt"
+                    else benchmark.P0_4_STT_MAX_NUM_SEQS
+                ),
+                "audioPerPrompt": (
+                    None
+                    if args.phase == "old-stt"
+                    else benchmark.P0_4_STT_AUDIO_PER_PROMPT
+                ),
+                "maxAudioSec": benchmark.P0_4_STT_MAX_AUDIO_SEC,
                 "backendProof": benchmark._expected_stt_backend_proof(args.phase),
                 "modelCacheRevision": args.model_cache_revision,
                 "modelContentSha256": "d" * 64,
@@ -217,6 +233,7 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                 environment += [
                     "STT_MODEL_NAME=Qwen/Qwen3-ASR-1.7B",
                     "STT_LOAD_ON_START=true",
+                    "STT_MAX_AUDIO_SEC=30",
                     "STT_VLLM_GPU_MEMORY_UTILIZATION=0.35",
                     "HF_HUB_OFFLINE=1",
                     "HF_HUB_DISABLE_IMPLICIT_TOKEN=1",
@@ -515,6 +532,8 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
         new_health = {
             **common,
             "backend": benchmark.P0_4_STT_BACKEND,
+            "engine": dict(benchmark.P0_4_STT_ENGINE_CONFIGURATION),
+            "maxAudioSec": benchmark.P0_4_STT_MAX_AUDIO_SEC,
         }
         old_proof = benchmark._expected_stt_backend_proof("old-stt")
         new_proof = benchmark._expected_stt_backend_proof("new-stt")
@@ -535,6 +554,28 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
                 {**new_proof, "serviceFactories": ["from_pretrained"]},
             ),
             ("new-stt", new_health, {**new_proof, "apiFromPretrained": False}),
+            (
+                "new-stt",
+                {
+                    **new_health,
+                    "engine": {
+                        **benchmark.P0_4_STT_ENGINE_CONFIGURATION,
+                        "maxModelLen": 65_536,
+                    },
+                },
+                new_proof,
+            ),
+            (
+                "new-stt",
+                {
+                    **new_health,
+                    "engine": {
+                        **benchmark.P0_4_STT_ENGINE_CONFIGURATION,
+                        "maxNumSeqs": True,
+                    },
+                },
+                new_proof,
+            ),
             (
                 "new-stt",
                 {key: value for key, value in new_health.items() if key != "backend"},
@@ -578,6 +619,8 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
             "ready": True,
             "model": benchmark.P0_4_STT_MODEL,
             "backend": benchmark.P0_4_STT_BACKEND,
+            "engine": dict(benchmark.P0_4_STT_ENGINE_CONFIGURATION),
+            "maxAudioSec": benchmark.P0_4_STT_MAX_AUDIO_SEC,
             "loadOnStart": True,
             "gpu": {"cuda": True, "name": "NVIDIA GeForce RTX 3090"},
         }
@@ -717,8 +760,16 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(old["binding"]["phase"], "old-stt")
         self.assertEqual(old["binding"]["stt"]["backend"], "transformers")
         self.assertIsNone(old["binding"]["stt"]["memoryUtilization"])
+        self.assertIsNone(old["binding"]["stt"]["maxModelLen"])
+        self.assertIsNone(old["binding"]["stt"]["maxNumSeqs"])
+        self.assertIsNone(old["binding"]["stt"]["audioPerPrompt"])
+        self.assertEqual(old["binding"]["stt"]["maxAudioSec"], 30.0)
         self.assertEqual(new["binding"]["stt"]["backend"], "vllm")
         self.assertEqual(new["binding"]["stt"]["memoryUtilization"], 0.35)
+        self.assertEqual(new["binding"]["stt"]["maxModelLen"], 8192)
+        self.assertEqual(new["binding"]["stt"]["maxNumSeqs"], 1)
+        self.assertEqual(new["binding"]["stt"]["audioPerPrompt"], 1)
+        self.assertEqual(new["binding"]["stt"]["maxAudioSec"], 30.0)
         comparison = benchmark.compare_stt_baseline(
             old,
             new,
@@ -760,8 +811,14 @@ class Gpu1LatencyBenchmarkTests(unittest.TestCase):
         for phase, field, value in (
             ("old-stt", "backend", benchmark.P0_4_STT_BACKEND),
             ("old-stt", "memoryUtilization", 0.35),
+            ("old-stt", "maxModelLen", 8192),
+            ("old-stt", "maxNumSeqs", 1),
+            ("old-stt", "audioPerPrompt", 1),
             ("new-stt", "backend", benchmark.P0_4_OLD_STT_BACKEND),
             ("new-stt", "memoryUtilization", None),
+            ("new-stt", "maxModelLen", 65_536),
+            ("new-stt", "maxNumSeqs", 2),
+            ("new-stt", "audioPerPrompt", 2),
         ):
             changed_old = copy.deepcopy(old)
             changed_new = copy.deepcopy(new)

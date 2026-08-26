@@ -171,6 +171,75 @@ class SttStreamServiceTests(unittest.TestCase):
             )
         )
 
+    @staticmethod
+    def _vllm_model(*, max_model_len=8192, max_num_seqs=1, audio_per_prompt=1):
+        multimodal = SimpleNamespace(
+            get_limit_per_prompt=lambda modality: (
+                audio_per_prompt if modality == "audio" else 0
+            )
+        )
+        model_config = SimpleNamespace(
+            max_model_len=max_model_len,
+            get_multimodal_config=lambda: multimodal,
+        )
+        configuration = SimpleNamespace(
+            model_config=model_config,
+            cache_config=SimpleNamespace(gpu_memory_utilization=0.35),
+            scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        )
+        engine = SimpleNamespace(
+            vllm_config=configuration,
+            model_config=SimpleNamespace(
+                max_model_len=65_536,
+            ),
+        )
+        return SimpleNamespace(model=SimpleNamespace(llm_engine=engine))
+
+    def test_loader_pins_and_observes_serial_vllm_engine_contract(self):
+        service = _load_service_module()
+        calls = {}
+        expected_model = self._vllm_model()
+
+        class Api:
+            @staticmethod
+            def LLM(**kwargs):
+                calls.update(kwargs)
+                return expected_model
+
+        service.Qwen3ASRModel = Api
+
+        self.assertIs(service.get_model(), expected_model)
+        self.assertEqual(calls["max_model_len"], 8192)
+        self.assertEqual(calls["max_num_seqs"], 1)
+        self.assertEqual(calls["limit_mm_per_prompt"], {"audio": 1})
+        self.assertEqual(calls["gpu_memory_utilization"], 0.35)
+        self.assertEqual(
+            service.health()["engine"],
+            {
+                "maxModelLen": 8192,
+                "gpuMemoryUtilization": 0.35,
+                "maxNumSeqs": 1,
+                "audioPerPrompt": 1,
+            },
+        )
+        self.assertTrue(service.health()["ready"])
+        self.assertEqual(service.health()["maxAudioSec"], 30.0)
+
+    def test_loader_rejects_engine_that_did_not_apply_fixed_contract(self):
+        service = _load_service_module()
+
+        class Api:
+            @staticmethod
+            def LLM(**_kwargs):
+                return SttStreamServiceTests._vllm_model(max_model_len=65_536)
+
+        service.Qwen3ASRModel = Api
+
+        with self.assertRaisesRegex(RuntimeError, "stt_vllm_engine_contract_mismatch"):
+            service.get_model()
+        self.assertIsNone(service._model)
+        self.assertFalse(service.health()["ready"])
+
     def test_sequence_fence_and_finish_revision(self):
         started = self.start_stream()
         stream_id = started["streamId"]

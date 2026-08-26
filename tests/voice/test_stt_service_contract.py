@@ -41,6 +41,13 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn("audio_f32_base64", source)
         self.assertIn("Qwen3ASRModel.LLM", source)
         self.assertIn('"gpu_memory_utilization": STT_VLLM_GPU_MEMORY_UTILIZATION', source)
+        self.assertIn("max_model_len=STT_VLLM_MAX_MODEL_LEN", source)
+        self.assertIn("max_num_seqs=STT_VLLM_MAX_NUM_SEQS", source)
+        self.assertIn(
+            'limit_mm_per_prompt={"audio": STT_VLLM_AUDIO_PER_PROMPT}',
+            source,
+        )
+        self.assertIn("_read_vllm_engine_configuration(candidate)", source)
         self.assertNotIn("from vllm import", source)
 
     def test_stt_health_exposes_safe_configuration_and_error_counters(self) -> None:
