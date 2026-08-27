@@ -955,3 +955,22 @@ type: decision-log
   launcher/admission은 변경하지 않는다. old/new 2+20 diagnostic PASS는 image-ready 근거이지
   promotion 자격 자체가 아니며, private corpus·cancel·restart·cleanup이 닫힐 때까지 새 STT
   image 승격과 P0-5 Qwen3.8 시작을 모두 차단한다.
+
+## 2026-08-27 — Discord capture credential은 Windows 사용자 경계에 암호화 보존
+
+- 상태: source·비라이브 회귀 검증 완료, 최초 live 저장/인증 대기
+- 결정: Discord capture credential은 repository, 환경변수, argv, Docker metadata와 문서에 저장하지
+  않는다. Windows CurrentUser DPAPI와 현재 사용자/SYSTEM 전용 ACL의 host cache에 암호문만 두고,
+  기존 redirected stdin handoff 뒤 평문 byte buffer를 즉시 zeroing한다.
+- 결정: 명확한 Discord login rejection일 때만 exact cache를 제거한다. Docker, gateway, network, TTL과
+  일반 capture 실패에는 보존해 반복 prompt loop를 만들지 않는다. 교체가 필요하면 Docker를 시작하지
+  않는 explicit clear parameter를 사용한다.
+- 이유: 매 run마다 secret을 폐기하던 기존 계약은 장애 재시도마다 사용자 입력을 요구했다. 평문 `.env`
+  또는 process/container 환경변수 재사용은 편하지만 secret 노출면을 넓힌다. CurrentUser DPAPI는 새
+  dependency 없이 Windows 계정 경계에서 재사용성과 at-rest 보호를 함께 제공한다.
+- 근거: `tools/discord_capture_credential.psm1`, `tools/run_discord_voice_corpus_capture.ps1`,
+  `tools/discord_voice_corpus_capture.py`, `tests/tools/test_run_discord_voice_corpus_capture_launcher.py`,
+  `tests/voice/test_discord_voice_corpus_capture.py`, commit `314a358`.
+- 영향: 최초 유효 credential만 한 번 hidden prompt로 저장한다. 같은 Windows 사용자 권한의 악성
+  process는 CurrentUser DPAPI 자체를 호출할 수 있으므로 이 설계의 위협 경계 밖이며, 다른 OS principal,
+  accidental plaintext persistence와 ambiguous failure deletion은 fail-closed한다.
