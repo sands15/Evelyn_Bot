@@ -24,8 +24,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - P0-4는 microphone, speaker, Discord, Minecraft 없이 현행 Qwen3-14B와 old/new STT image를
   분리 비교한다. overlap 2+20, private positive 40/negative 10 batch+stream, cancel/successor,
   cold restart 3회와 exact cleanup이 모두 필요하다.
-- private corpus directory가 현재 absent(`0/50`)다. 합성 자료로 대체하지 않으며 이 gate가
-  닫히기 전에는 STT image를 승격하거나 P0-5 Qwen3.8을 시작하지 않는다.
+- Discord exact-10 첫 capture는 RTP 유입 뒤 WAV `0/10`, 30분 TTL로 종료됐다. 정상 PCM까지
+  폐기하던 timing/admission 계약은 commit `2f802bd`로 수정했고 canonical 검증을 통과했다.
+  live 재검증 전이며 private corpus는 여전히 absent(`0/50`)다.
 
 ## 최근 검증
 
@@ -52,14 +53,20 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   `422.6/2233.2/626.1ms`, min free `10,284MiB`, error 0이었다. 현재 v2 승격 증거는 아니다.
 - Main graph-on/SWA1/ubatch2048와 OmniVoice CUDA 12.9/FlashInfer 0.6.15는 source/live 근거가
   분리돼 있다. speaker/Discord를 포함한 전체 체감 SLO는 아직 완료가 아니다.
+- Discord corpus 회귀 수정은 first-packet age를 품질 판정에서 분리하고 severe transport
+  corruption만 거절한다. focused `79 passed + 5 subtests`, 관련 `1033 passed, 5 skipped +
+  124 subtests`, canonical `4638 passed, 22 skipped + 1433 subtests`가 통과했다. 실패 attempt의
+  exact resource는 제거됐고 Docker는 초기 OFF로 복구됐다.
 - Minecraft 운영 bot은 OFF다. 격리 fresh-world shelter/restart 시나리오는 통과했지만 운영
   Discord/lease와 실제 음성 E2E는 후속 승인 범위다. 상세 상태는 [[CURRENT_STATE]]를 따른다.
 
 ## 다음 행동
 
-1. 실제 private 50-item 입력이 준비되면 positive 40/negative 10 batch+stream, cancel/successor와
-   cold restart 3회를 실행한다.
-2. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
+1. 승인된 Discord channel에서 수정된 exact-10 capture를 한 번 재실행하고 실제 연결, completed
+   PCM 저장 수, severe rejection과 final cleanup을 검증한다.
+2. private 50-item이 완성되면 positive 40/negative 10 batch+stream, cancel/successor와 cold
+   restart 3회를 실행한다.
+3. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
 
 ## 작업 원칙
 
