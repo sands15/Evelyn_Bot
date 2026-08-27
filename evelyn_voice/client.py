@@ -3267,6 +3267,13 @@ class EvelynVoiceClient(discord.VoiceClient):
             segment_first_clean_decode_ms=segment_first_clean_decode_ms,
             segment_decoder_reset_before_first_clean=bool(decoder_stats.get("decoder_reset_before_first_clean")),
         )
+        if (
+            type(utterance_started_at) in {int, float}
+            and bool(np.isfinite(float(utterance_started_at)))
+        ):
+            voice_debug_meta["_utterance_started_at_monotonic"] = float(
+                utterance_started_at
+            )
         voice_debug_meta["_voice_listener_binding"] = self.listener_binding()
         if voice_debug_meta["unstable"]:
             log.warning(

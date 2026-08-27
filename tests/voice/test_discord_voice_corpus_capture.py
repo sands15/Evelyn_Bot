@@ -11,7 +11,7 @@ import wave
 from array import array
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 import numpy as np
@@ -21,18 +21,24 @@ from tools.discord_voice_corpus_capture import (
     DEFAULT_CLIP_COUNT,
     DEFAULT_TTL_SEC,
     DISCORD_TOKEN_ENV,
+    DOMAIN_PHRASES,
     CaptureConfig,
+    CaptureDiscordClient,
     CaptureFailure,
     CaptureResult,
     CorpusCapture,
     VoiceLeaseBinding,
     _run_capture,
     build_parser,
+    guided_prompt_message,
+    guided_retry_message,
+    guided_saved_message,
     main,
     parse_config,
     prepare_private_output_dir,
     read_discord_token,
     shutdown_capture,
+    status_channel_matches_voice_channel,
     wait_for_voice_lease_release_confirmation,
 )
 
@@ -109,7 +115,10 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(saved)
             self.assertTrue(capture.completed)
             self.assertEqual(stdout.getvalue(), "")
-            self.assertEqual([path.name for path in output.iterdir()], ["clip-0001.wav"])
+            self.assertEqual(
+                [path.name for path in output.iterdir()],
+                ["clip-0001.wav"],
+            )
             wav_path = output / "clip-0001.wav"
             with wave.open(str(wav_path), "rb") as wav:
                 self.assertEqual(wav.getnchannels(), 1)
@@ -344,6 +353,335 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(capture.rejected_count, 1)
             self.assertEqual(list(output.iterdir()), [])
+
+
+class GuidedCorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _timed_meta(
+        capture: CorpusCapture,
+        channel: FakeChannel,
+        *,
+        total_ms: float = 0.0,
+    ) -> dict[str, object]:
+        metadata = bind_capture_listener(capture, channel=channel)
+        metadata["timing"] = {"utterance_total_ms": total_ms}
+        return metadata
+
+    @staticmethod
+    def _arm_started_meta(
+        capture: CorpusCapture,
+        metadata: dict[str, object],
+    ) -> dict[str, object]:
+        metadata["_utterance_started_at_monotonic"] = float(
+            capture.armed_at or 0.0
+        ) + 0.001
+        return metadata
+
+    async def test_prompt_shape_retry_and_saved_index_are_serial(self) -> None:
+        messages: list[str] = []
+
+        async def status(message: str) -> None:
+            messages.append(message)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            owner = FakeMember(21)
+            channel = FakeChannel([owner])
+            capture = CorpusCapture(
+                output_dir=output,
+                exact_count=len(DOMAIN_PHRASES),
+                guided=True,
+            )
+            capture.lock_owner(channel, bot_user_id=999)
+            metadata = self._timed_meta(capture, channel)
+            pcm = stereo_pcm(frames=57_600, value=1_200)
+
+            self.assertFalse(
+                await capture.accept_completed_pcm(
+                    channel=channel,
+                    member=owner,
+                    pcm_bytes=pcm,
+                    debug_meta=metadata,
+                )
+            )
+            self.assertEqual(messages, [])
+            await capture.arm_guided(status)
+            self.assertEqual(messages, [guided_prompt_message(0)])
+
+            with patch(
+                "tools.discord_voice_corpus_capture.compute_waveform_activity_stats",
+                return_value={"voiced_ms": 900.0, "longest_voiced_ms": 400.0},
+            ):
+                for invalid_pcm in (
+                    stereo_pcm(frames=24_000, value=1_200),
+                    stereo_pcm(frames=504_000, value=1_200),
+                ):
+                    self.assertFalse(
+                        await capture.accept_completed_pcm(
+                            channel=channel,
+                            member=owner,
+                            pcm_bytes=invalid_pcm,
+                            debug_meta=self._arm_started_meta(capture, metadata),
+                        )
+                    )
+
+            with patch(
+                "tools.discord_voice_corpus_capture.compute_waveform_activity_stats",
+                return_value={"voiced_ms": 40.0, "longest_voiced_ms": 20.0},
+            ):
+                self.assertFalse(
+                    await capture.accept_completed_pcm(
+                        channel=channel,
+                        member=owner,
+                        pcm_bytes=pcm,
+                        debug_meta=self._arm_started_meta(capture, metadata),
+                    )
+                )
+
+            with patch(
+                "tools.discord_voice_corpus_capture.compute_waveform_activity_stats",
+                return_value={"voiced_ms": 900.0, "longest_voiced_ms": 400.0},
+            ):
+                first_start = float(capture.armed_at or 0.0) + 0.001
+                metadata["_utterance_started_at_monotonic"] = first_start
+                results = await asyncio.gather(
+                    capture.accept_completed_pcm(
+                        channel=channel,
+                        member=owner,
+                        pcm_bytes=pcm,
+                        debug_meta=metadata,
+                    ),
+                    capture.accept_completed_pcm(
+                        channel=channel,
+                        member=owner,
+                        pcm_bytes=stereo_pcm(frames=57_600, value=1_300),
+                        debug_meta=metadata,
+                    ),
+                )
+
+            self.assertEqual(results, [True, False])
+            self.assertEqual(capture.saved_count, 1)
+            self.assertEqual([path.name for path in output.iterdir()], ["clip-0001.wav"])
+            self.assertIn(DOMAIN_PHRASES[1], messages[-1])
+            self.assertEqual(capture.rejected_count, 5)
+
+    async def test_missing_guided_start_timing_is_terminal(self) -> None:
+        messages: list[str] = []
+
+        async def status(message: str) -> None:
+            messages.append(message)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            owner = FakeMember(23)
+            channel = FakeChannel([owner])
+            capture = CorpusCapture(
+                output_dir=output,
+                exact_count=len(DOMAIN_PHRASES),
+                guided=True,
+            )
+            capture.lock_owner(channel, bot_user_id=999)
+            metadata = self._timed_meta(capture, channel)
+            await capture.arm_guided(status)
+            self.assertFalse(
+                await capture.accept_completed_pcm(
+                    channel=channel,
+                    member=owner,
+                    pcm_bytes=stereo_pcm(frames=57_600, value=1_200),
+                    debug_meta=metadata,
+                )
+            )
+            self.assertEqual(capture.error_code, "guided_timing_invalid")
+            self.assertTrue(capture.done.is_set())
+            self.assertEqual(list(output.iterdir()), [])
+
+    async def test_terminal_failure_status_follows_inflight_saved_status(self) -> None:
+        messages: list[str] = []
+        saved_status_started = asyncio.Event()
+        release_saved_status = asyncio.Event()
+
+        async def status(message: str) -> None:
+            if message == guided_saved_message(1):
+                saved_status_started.set()
+                await asyncio.wait_for(release_saved_status.wait(), timeout=2.0)
+            messages.append(message)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            owner = FakeMember(24)
+            channel = FakeChannel([owner])
+            capture = CorpusCapture(
+                output_dir=output,
+                exact_count=len(DOMAIN_PHRASES),
+                guided=True,
+            )
+            capture.lock_owner(channel, bot_user_id=999)
+            metadata = self._timed_meta(capture, channel)
+            await capture.arm_guided(status)
+            self._arm_started_meta(capture, metadata)
+            with patch(
+                "tools.discord_voice_corpus_capture.compute_waveform_activity_stats",
+                return_value={"voiced_ms": 900.0, "longest_voiced_ms": 400.0},
+            ):
+                accept_task = asyncio.create_task(
+                    capture.accept_completed_pcm(
+                        channel=channel,
+                        member=owner,
+                        pcm_bytes=stereo_pcm(frames=57_600, value=1_200),
+                        debug_meta=metadata,
+                    )
+                )
+                await asyncio.wait_for(saved_status_started.wait(), timeout=2.0)
+                capture.fail("capture_ttl_expired")
+                failure_task = asyncio.create_task(capture.notify_failure(status))
+                await asyncio.sleep(0)
+                self.assertFalse(failure_task.done())
+                release_saved_status.set()
+                await asyncio.gather(accept_task, failure_task)
+
+            self.assertIn("저장 완료", messages[-2])
+            self.assertIn("실패", messages[-1])
+            self.assertEqual(capture.error_code, "capture_ttl_expired")
+
+    async def test_pre_prompt_utterance_and_status_failure_fail_closed(self) -> None:
+        messages: list[str] = []
+
+        async def status(message: str) -> None:
+            messages.append(message)
+            if len(messages) > 1:
+                raise RuntimeError("fixed test send failure")
+
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            owner = FakeMember(22)
+            channel = FakeChannel([owner])
+            capture = CorpusCapture(
+                output_dir=output,
+                exact_count=len(DOMAIN_PHRASES),
+                guided=True,
+            )
+            capture.lock_owner(channel, bot_user_id=999)
+            metadata = self._timed_meta(capture, channel)
+            await capture.arm_guided(status)
+            pcm = stereo_pcm(frames=57_600, value=1_200)
+
+            metadata["_utterance_started_at_monotonic"] = float(
+                capture.armed_at or 0.0
+            ) - 1.0
+
+            self.assertFalse(
+                await capture.accept_completed_pcm(
+                    channel=channel,
+                    member=owner,
+                    pcm_bytes=pcm,
+                    debug_meta=metadata,
+                )
+            )
+            self.assertTrue(capture.armed)
+            with patch(
+                "tools.discord_voice_corpus_capture.compute_waveform_activity_stats",
+                return_value={"voiced_ms": 900.0, "longest_voiced_ms": 400.0},
+            ):
+                self.assertFalse(
+                    await capture.accept_completed_pcm(
+                        channel=channel,
+                        member=owner,
+                        pcm_bytes=pcm,
+                        debug_meta=self._arm_started_meta(capture, metadata),
+                    )
+                )
+            self.assertEqual(capture.error_code, "status_send_failed")
+            self.assertTrue(capture.done.is_set())
+            self.assertEqual(capture.saved_count, 1)
+
+    def test_fixed_domain_messages_are_bounded_and_content_safe(self) -> None:
+        self.assertEqual(
+            DOMAIN_PHRASES,
+            (
+                "이블린, 다이아몬드 곡괭이를 찾아줘",
+                "이블린, 참나무 원목을 열두 개 모아줘",
+                "이블린, 제작대에서 빵 세 개를 만들어줘",
+                "이블린, 크리퍼와 스켈레톤을 피해줘",
+                "이블린, Control Page 상태를 확인해줘",
+                "이블린, Discord 음성 연결을 다시 확인해줘",
+                "이블린, Main LLM과 Qwen ASR 상태를 알려줘",
+                "이블린, GPU 일 번의 VRAM을 확인해줘",
+                "이블린, 마인크래프트 Voyager 상태만 보여줘",
+                "이블린, 오후 세 시 이십오 분에 열두 개를 세어줘",
+            ),
+        )
+        self.assertEqual(len(set(DOMAIN_PHRASES)), 10)
+        messages = [guided_prompt_message(index) for index in range(10)]
+        messages += [guided_retry_message(index, "transport") for index in range(10)]
+        messages += [guided_saved_message(index) for index in range(1, 11)]
+        rendered = "\n".join(messages)
+        for phrase in DOMAIN_PHRASES:
+            self.assertIn(phrase, rendered)
+        for canary in (
+            "PRIVATE_TRANSCRIPT_SENTINEL",
+            "123456789012345678",
+            "DISCORD_TOKEN_PRIVATE_SENTINEL",
+            "runtime_artifacts/private-capture",
+        ):
+            self.assertNotIn(canary, rendered)
+        self.assertTrue(all(0 < len(message) <= 2_000 for message in messages))
+        self.assertNotIn("성공", guided_saved_message(10))
+
+    def test_status_channel_must_be_messageable_and_in_same_guild(self) -> None:
+        status = Mock(spec=discord.TextChannel)
+        status.guild = SimpleNamespace(id=77)
+        voice = SimpleNamespace(guild=SimpleNamespace(id=77))
+        self.assertTrue(status_channel_matches_voice_channel(status, voice))
+        status.guild = SimpleNamespace(id=78)
+        self.assertFalse(status_channel_matches_voice_channel(status, voice))
+        self.assertFalse(
+            status_channel_matches_voice_channel(SimpleNamespace(), voice)
+        )
+
+    def test_real_guided_shape_boundaries(self) -> None:
+        def sine_pcm(seconds: float) -> bytes:
+            samples = np.arange(int(16_000 * seconds), dtype=np.float32)
+            audio = np.sin((2.0 * np.pi * 220.0 * samples) / 16_000.0) * 0.2
+            return (audio * 32767.0).astype("<i2").tobytes()
+
+        self.assertEqual(CorpusCapture._guided_shape_rejection(sine_pcm(0.99)), "duration")
+        self.assertEqual(CorpusCapture._guided_shape_rejection(sine_pcm(1.0)), "")
+        self.assertEqual(CorpusCapture._guided_shape_rejection(sine_pcm(10.0)), "")
+        self.assertEqual(CorpusCapture._guided_shape_rejection(sine_pcm(10.01)), "duration")
+        silence = np.zeros(32_000, dtype="<i2").tobytes()
+        self.assertEqual(CorpusCapture._guided_shape_rejection(silence), "activity")
+
+    async def test_status_send_disables_mentions(self) -> None:
+        sent: list[tuple[str, object]] = []
+
+        class StatusChannel:
+            async def send(self, message: str, *, allowed_mentions: object) -> None:
+                sent.append((message, allowed_mentions))
+
+        with tempfile.TemporaryDirectory() as root:
+            capture = CorpusCapture(
+                output_dir=Path(root),
+                exact_count=len(DOMAIN_PHRASES),
+                guided=True,
+            )
+            client = CaptureDiscordClient(
+                config=CaptureConfig(
+                    channel_id=1,
+                    output_dir=Path(root),
+                    status_channel_id=2,
+                ),
+                capture=capture,
+                lease_binding=VoiceLeaseBinding(),
+            )
+            client.status_channel = StatusChannel()
+            await client.send_status(guided_prompt_message(0))
+            await client.close()
+
+        self.assertEqual(sent[0][0], guided_prompt_message(0))
+        mentions = sent[0][1]
+        self.assertFalse(mentions.everyone)
+        self.assertFalse(mentions.users)
+        self.assertFalse(mentions.roles)
 
 
 class CaptureAuthenticationTests(unittest.IsolatedAsyncioTestCase):
@@ -594,6 +932,7 @@ class CaptureCliContractTests(unittest.TestCase):
             for option in action.option_strings
         }
         self.assertIn("--token-stdin", option_strings)
+        self.assertIn("--status-channel-id", option_strings)
         self.assertNotIn("--token", option_strings)
         config, token_stdin = parse_config(
             [
@@ -606,9 +945,30 @@ class CaptureCliContractTests(unittest.TestCase):
         self.assertEqual(config.clip_count, DEFAULT_CLIP_COUNT)
         self.assertEqual(config.ttl_sec, DEFAULT_TTL_SEC)
         self.assertFalse(token_stdin)
+        guided, _ = parse_config(
+            [
+                "--channel-id",
+                "12345678901234567",
+                "--status-channel-id",
+                "22345678901234567",
+                "--output-dir",
+                "private-stage",
+            ]
+        )
+        self.assertEqual(guided.status_channel_id, 22345678901234567)
         for argv in (
             ["--channel-id", "1", "--output-dir", "x", "--count", "11"],
             ["--channel-id", "1", "--output-dir", "x", "--ttl-seconds", "1800.1"],
+            [
+                "--channel-id",
+                "1",
+                "--status-channel-id",
+                "2",
+                "--output-dir",
+                "x",
+                "--count",
+                "1",
+            ],
         ):
             with self.assertRaisesRegex(CaptureFailure, "invalid_arguments"):
                 parse_config(argv)

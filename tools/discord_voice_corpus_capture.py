@@ -29,7 +29,10 @@ for import_root in (REPO_ROOT, RUNTIME_ROOT):
 
 import discord  # noqa: E402
 
-from evelyn_core.audio import prepare_stt_audio  # noqa: E402
+from evelyn_core.audio import (  # noqa: E402
+    compute_waveform_activity_stats,
+    prepare_stt_audio,
+)
 from evelyn_core.discord_session_policy import (  # noqa: E402
     is_transport_corrupted_audio_policy,
 )
@@ -54,12 +57,34 @@ MAX_CLIP_COUNT = 10
 DEFAULT_TTL_SEC = 30 * 60
 MAX_TTL_SEC = 30 * 60
 MAX_CLIP_SEC = 30.0
+GUIDED_MIN_CLIP_SEC = 1.0
+GUIDED_MAX_CLIP_SEC = 10.0
+GUIDED_MIN_VOICED_MS = 220.0
+GUIDED_MIN_LONGEST_VOICED_MS = 120.0
 MAX_INPUT_BYTES = int(MAX_CLIP_SEC * INPUT_RATE * INPUT_CHANNELS * SAMPLE_WIDTH)
 MAX_TOKEN_BYTES = 512
 LEASE_RELEASE_TIMEOUT_SEC = 15.0
 LEASE_RELEASE_POLL_SEC = 0.05
 GATEWAY_CLOSE_TIMEOUT_SEC = 10.0
+STATUS_SEND_TIMEOUT_SEC = 10.0
 _CAPTURE_FILE_RE = re.compile(r"(?:clip-\d{4}\.wav|\.clip-\d{4}\.wav\.part)\Z")
+
+DOMAIN_PHRASES = (
+    "이블린, 다이아몬드 곡괭이를 찾아줘",
+    "이블린, 참나무 원목을 열두 개 모아줘",
+    "이블린, 제작대에서 빵 세 개를 만들어줘",
+    "이블린, 크리퍼와 스켈레톤을 피해줘",
+    "이블린, Control Page 상태를 확인해줘",
+    "이블린, Discord 음성 연결을 다시 확인해줘",
+    "이블린, Main LLM과 Qwen ASR 상태를 알려줘",
+    "이블린, GPU 일 번의 VRAM을 확인해줘",
+    "이블린, 마인크래프트 Voyager 상태만 보여줘",
+    "이블린, 오후 세 시 이십오 분에 열두 개를 세어줘",
+)
+_STATUS_PREFIX = "[Evelyn Discord 음성 캡처]"
+_STATUS_FAILURE = (
+    f"{_STATUS_PREFIX} 실패했습니다. 이번 결과는 corpus에 반영하지 않습니다."
+)
 
 
 class CaptureFailure(RuntimeError):
@@ -80,6 +105,7 @@ class CaptureConfig:
     output_dir: Path
     clip_count: int = DEFAULT_CLIP_COUNT
     ttl_sec: float = DEFAULT_TTL_SEC
+    status_channel_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -121,9 +147,10 @@ def _ttl_seconds(value: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = SafeArgumentParser(
-        description="Capture a bounded private Discord voice corpus without inference.",
+        description="Capture a bounded private Discord voice corpus with guided prompts.",
     )
     parser.add_argument("--channel-id", required=True, type=_positive_id)
+    parser.add_argument("--status-channel-id", type=_positive_id)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument(
         "--count",
@@ -145,15 +172,76 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_config(argv: Sequence[str] | None = None) -> tuple[CaptureConfig, bool]:
     args = build_parser().parse_args(argv)
+    status_channel_id = (
+        None if args.status_channel_id is None else int(args.status_channel_id)
+    )
+    if status_channel_id is not None and int(args.count) != len(DOMAIN_PHRASES):
+        raise CaptureFailure("invalid_arguments")
     return (
         CaptureConfig(
             channel_id=int(args.channel_id),
             output_dir=Path(args.output_dir),
             clip_count=int(args.count),
             ttl_sec=float(args.ttl_seconds),
+            status_channel_id=status_channel_id,
         ),
         bool(args.token_stdin),
     )
+
+
+def guided_prompt_message(index: int) -> str:
+    if not 0 <= int(index) < len(DOMAIN_PHRASES):
+        raise CaptureFailure("guided_prompt_invalid")
+    number = int(index) + 1
+    return (
+        f"{_STATUS_PREFIX} {number}/{len(DOMAIN_PHRASES)}\n"
+        "아래 문장을 한 번만 말해 주세요. 저장 완료가 뜬 뒤 다음 문장으로 "
+        f"넘어가세요.\n{DOMAIN_PHRASES[index]}"
+    )
+
+
+def guided_retry_message(index: int, reason: str) -> str:
+    reasons = {
+        "duration": "발화 길이가 범위를 벗어났습니다.",
+        "activity": "충분한 음성이 감지되지 않았습니다.",
+        "transport": "음성 전송이 불완전했습니다.",
+        "duplicate": "직전과 같은 오디오가 감지됐습니다.",
+        "invalid": "오디오 형식을 확인하지 못했습니다.",
+    }
+    if not 0 <= int(index) < len(DOMAIN_PHRASES):
+        raise CaptureFailure("guided_prompt_invalid")
+    if reason not in reasons:
+        reason = "invalid"
+    return (
+        f"{_STATUS_PREFIX} {int(index) + 1}/{len(DOMAIN_PHRASES)} 저장 안 됨: "
+        f"{reasons[reason]}\n같은 문장을 다시 말해 주세요.\n"
+        f"{DOMAIN_PHRASES[index]}"
+    )
+
+
+def guided_saved_message(saved_count: int) -> str:
+    saved = int(saved_count)
+    if not 1 <= saved <= len(DOMAIN_PHRASES):
+        raise CaptureFailure("guided_prompt_invalid")
+    if saved == len(DOMAIN_PHRASES):
+        return (
+            f"{_STATUS_PREFIX} {saved}/{len(DOMAIN_PHRASES)} 수집됨. "
+            "사후 STT 모델 진단과 안전 정리를 진행합니다."
+        )
+    return (
+        f"{_STATUS_PREFIX} {saved}/{len(DOMAIN_PHRASES)} 저장 완료.\n\n"
+        f"{guided_prompt_message(saved)}"
+    )
+
+
+def status_channel_matches_voice_channel(status_channel: Any, voice_channel: Any) -> bool:
+    try:
+        return bool(
+            isinstance(status_channel, discord.abc.Messageable)
+            and int(status_channel.guild.id) == int(voice_channel.guild.id)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def read_discord_token(*, from_stdin: bool, stdin: TextIO) -> str:
@@ -273,11 +361,23 @@ def participant_ids_excluding_self(
 
 
 class CorpusCapture:
-    def __init__(self, *, output_dir: Path, exact_count: int) -> None:
+    def __init__(
+        self,
+        *,
+        output_dir: Path,
+        exact_count: int,
+        guided: bool = False,
+    ) -> None:
         if not 1 <= int(exact_count) <= MAX_CLIP_COUNT:
+            raise CaptureFailure("clip_count_invalid")
+        if guided and int(exact_count) != len(DOMAIN_PHRASES):
             raise CaptureFailure("clip_count_invalid")
         self.output_dir = Path(output_dir)
         self.exact_count = int(exact_count)
+        self.guided = bool(guided)
+        self.armed = not self.guided
+        self.armed_at: float | None = None
+        self.status_callback: Callable[[str], Awaitable[None]] | None = None
         self.owner_id: int | None = None
         self.bot_user_id: int | None = None
         self.listener_binding: tuple[object, int, int] | None = None
@@ -293,10 +393,83 @@ class CorpusCapture:
         return self.saved_count == self.exact_count and not self.error_code
 
     def fail(self, code: str) -> None:
-        if self.completed or self.error_code:
+        if self.done.is_set() or self.error_code:
             return
         self.error_code = code
         self.done.set()
+
+    async def arm_guided(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> None:
+        if not self.guided or self.armed or self.done.is_set():
+            raise CaptureFailure("guided_state_invalid")
+        await status_callback(guided_prompt_message(0))
+        self.status_callback = status_callback
+        self.armed_at = asyncio.get_running_loop().time()
+        self.armed = True
+
+    async def _notify(self, message: str) -> None:
+        callback = self.status_callback
+        if not self.guided or callback is None:
+            raise CaptureFailure("guided_state_invalid")
+        await callback(message)
+
+    async def _notify_and_rearm(self, message: str) -> None:
+        await self._notify(message)
+        self.armed_at = asyncio.get_running_loop().time()
+        self.armed = True
+
+    @staticmethod
+    def _guided_utterance_started_at(
+        debug_meta: Any,
+    ) -> float | None:
+        if not isinstance(debug_meta, Mapping):
+            return None
+        try:
+            utterance_started_at = float(
+                debug_meta.get("_utterance_started_at_monotonic")
+            )
+        except (TypeError, ValueError):
+            return None
+        return utterance_started_at if math.isfinite(utterance_started_at) else None
+
+    async def notify_failure(
+        self,
+        status_callback: Callable[[str], Awaitable[None]],
+    ) -> None:
+        async with self._lock:
+            if not self.guided or not self.error_code:
+                return
+            if self.error_code == "status_send_failed":
+                return
+            with contextlib.suppress(Exception):
+                await status_callback(_STATUS_FAILURE)
+
+    @staticmethod
+    def _guided_shape_rejection(pcm16_mono: bytes) -> str:
+        duration = len(pcm16_mono) / float(OUTPUT_RATE * SAMPLE_WIDTH)
+        if not GUIDED_MIN_CLIP_SEC <= duration <= GUIDED_MAX_CLIP_SEC:
+            return "duration"
+        try:
+            audio = np.frombuffer(pcm16_mono, dtype="<i2").astype(np.float32)
+            audio /= 32768.0
+            activity = compute_waveform_activity_stats(
+                audio,
+                sampling_rate=OUTPUT_RATE,
+            )
+            voiced_ms = float(activity.get("voiced_ms") or 0.0)
+            longest_voiced_ms = float(activity.get("longest_voiced_ms") or 0.0)
+        except Exception:
+            return "invalid"
+        if (
+            not math.isfinite(voiced_ms)
+            or not math.isfinite(longest_voiced_ms)
+            or voiced_ms < GUIDED_MIN_VOICED_MS
+            or longest_voiced_ms < GUIDED_MIN_LONGEST_VOICED_MS
+        ):
+            return "activity"
+        return ""
 
     def lock_owner(self, channel: Any, *, bot_user_id: int) -> None:
         if int(bot_user_id) <= 0:
@@ -394,7 +567,7 @@ class CorpusCapture:
             raise CaptureFailure("clip_write_failed") from exc
         self.hashes.add(digest)
         self.saved_count = index
-        if self.saved_count == self.exact_count:
+        if self.saved_count == self.exact_count and not self.guided:
             self.done.set()
         return True
 
@@ -409,22 +582,78 @@ class CorpusCapture:
         async with self._lock:
             if self.done.is_set():
                 return False
+            if self.guided and not self.armed:
+                self.rejected_count += 1
+                return False
             try:
                 self.assert_owner(channel, member)
                 self.assert_listener_binding(member, debug_meta)
+                if self.guided:
+                    utterance_started_at = self._guided_utterance_started_at(debug_meta)
+                    if utterance_started_at is None or self.armed_at is None:
+                        self.fail("guided_timing_invalid")
+                        return False
+                    if utterance_started_at < self.armed_at:
+                        self.rejected_count += 1
+                        return False
+                if self.guided:
+                    self.armed = False
                 if is_transport_corrupted_audio_policy(dict(debug_meta)):
                     self.rejected_count += 1
+                    if self.guided:
+                        await self._notify_and_rearm(
+                            guided_retry_message(self.saved_count, "transport")
+                        )
                     return False
                 pcm16_mono = pcm48_stereo_to_pcm16_mono(pcm_bytes)
-                return self._store(pcm16_mono)
+                if self.guided:
+                    rejection = self._guided_shape_rejection(pcm16_mono)
+                    if rejection:
+                        self.rejected_count += 1
+                        await self._notify_and_rearm(
+                            guided_retry_message(self.saved_count, rejection)
+                        )
+                        return False
+                    digest = hashlib.sha256(pcm16_mono).hexdigest()
+                    if digest in self.hashes:
+                        self.rejected_count += 1
+                        await self._notify_and_rearm(
+                            guided_retry_message(self.saved_count, "duplicate")
+                        )
+                        return False
+                stored = self._store(pcm16_mono)
+                if not stored:
+                    if self.guided:
+                        await self._notify_and_rearm(
+                            guided_retry_message(self.saved_count, "invalid")
+                        )
+                    return False
+                if self.guided:
+                    message = guided_saved_message(self.saved_count)
+                    if self.saved_count == self.exact_count:
+                        await self._notify(message)
+                        self.done.set()
+                    else:
+                        await self._notify_and_rearm(message)
+                return True
             except CaptureFailure as exc:
                 if exc.code.startswith(("participant_guard", "listener_binding")):
                     self.fail(exc.code)
                     return False
                 if exc.code in {"clip_pcm_invalid", "clip_duration_invalid"}:
                     self.rejected_count += 1
+                    if self.guided:
+                        try:
+                            await self._notify_and_rearm(
+                                guided_retry_message(self.saved_count, "invalid")
+                            )
+                        except Exception:
+                            self.fail("status_send_failed")
                     return False
                 self.fail(exc.code)
+                return False
+            except Exception:
+                self.fail("status_send_failed" if self.guided else "capture_failed")
                 return False
 
 
@@ -601,6 +830,7 @@ class CaptureDiscordClient(discord.Client):
         self.capture = capture
         self.lease_binding = lease_binding
         self.capture_channel: Any | None = None
+        self.status_channel: Any | None = None
         self.capture_voice_client: Any | None = None
         self._setup_started = False
         self._shutdown_started = False
@@ -615,6 +845,12 @@ class CaptureDiscordClient(discord.Client):
             channel = self.get_channel(self.capture_config.channel_id)
             if not isinstance(channel, discord.VoiceChannel):
                 raise CaptureFailure("voice_channel_unavailable")
+            status_channel_id = self.capture_config.status_channel_id
+            if status_channel_id is not None:
+                status_channel = self.get_channel(status_channel_id)
+                if not status_channel_matches_voice_channel(status_channel, channel):
+                    raise CaptureFailure("status_channel_unavailable")
+                self.status_channel = status_channel
             bot_user_id = int(getattr(self.user, "id", 0) or 0)
             if bot_user_id <= 0:
                 raise CaptureFailure("participant_guard_unavailable")
@@ -656,10 +892,35 @@ class CaptureDiscordClient(discord.Client):
                 voice_client,
                 on_completed_pcm,
             )
+            if self.capture.guided:
+                await self.capture.arm_guided(self.send_status)
         except CaptureFailure as exc:
             self.capture.fail(exc.code)
         except Exception:
             self.capture.fail("capture_setup_failed")
+
+    async def send_status(self, message: str) -> None:
+        if (
+            self.status_channel is None
+            or not isinstance(message, str)
+            or not 0 < len(message) <= 2_000
+        ):
+            raise CaptureFailure("status_send_failed")
+        try:
+            await asyncio.wait_for(
+                self.status_channel.send(
+                    message,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ),
+                timeout=STATUS_SEND_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            raise CaptureFailure("status_send_failed") from exc
+
+    async def notify_failure(self) -> None:
+        if self.status_channel is None:
+            return
+        await self.capture.notify_failure(self.send_status)
 
     async def on_voice_state_update(
         self,
@@ -690,6 +951,7 @@ async def _run_capture(config: CaptureConfig, discord_token: str) -> CaptureResu
     capture = CorpusCapture(
         output_dir=config.output_dir,
         exact_count=config.clip_count,
+        guided=config.status_channel_id is not None,
     )
     lease_binding = VoiceLeaseBinding()
     client = CaptureDiscordClient(
@@ -733,6 +995,8 @@ async def _run_capture(config: CaptureConfig, discord_token: str) -> CaptureResu
         capture.fail("capture_failed")
     finally:
         discord_token = ""
+        if config.status_channel_id is not None and not capture.completed:
+            await client.notify_failure()
         try:
             await shutdown_capture(
                 voice_client=client.capture_voice_client,
@@ -792,6 +1056,7 @@ def main(
             output_dir=private_output,
             clip_count=config.clip_count,
             ttl_sec=config.ttl_sec,
+            status_channel_id=config.status_channel_id,
         )
         with open(os.devnull, "w", encoding="utf-8") as discard:
             with contextlib.redirect_stdout(discard), contextlib.redirect_stderr(discard):

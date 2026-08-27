@@ -771,6 +771,10 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             'voice_debug_meta["_voice_listener_binding"] = self.listener_binding()',
             client_source,
         )
+        self.assertIn(
+            'voice_debug_meta["_utterance_started_at_monotonic"] = float(',
+            client_source,
+        )
 
         item = {"idx": 1, "ssrc": 42, "packets": [packet], "queued_at": now}
         created_tasks: list[asyncio.Task] = []

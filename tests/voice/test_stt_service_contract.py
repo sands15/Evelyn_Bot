@@ -23,6 +23,7 @@ MAIN = REPO_ROOT / "main.py"
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
 
 from evelyn_core.stt_client import (  # noqa: E402
+    MAX_STT_RESPONSE_BYTES,
     transcribe_audio16k_via_service,
     transcribe_completed_audio16k_via_service,
 )
@@ -162,7 +163,9 @@ class SttServiceContractTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size: int) -> bytes:
+                if size != MAX_STT_RESPONSE_BYTES + 1:
+                    raise AssertionError("response read was not bounded")
                 return b'{"text":"raw-result"}'
 
         def open_request(req, **_kwargs):
@@ -187,6 +190,32 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertEqual(result["text"], "raw-result")
         self.assertIs(payload["validation_bound"], True)
         self.assertFalse(any("session" in key or "attempt" in key for key in payload))
+
+    def test_stt_client_rejects_oversized_response_with_bounded_read(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size: int) -> bytes:
+                if size != MAX_STT_RESPONSE_BYTES + 1:
+                    raise AssertionError("response read was not bounded")
+                return b"x" * size
+
+        with patch(
+            "evelyn_core.stt_client.request.urlopen",
+            return_value=Response(),
+        ), self.assertRaisesRegex(RuntimeError, "stt_response_too_large"):
+            transcribe_audio16k_via_service(
+                np.zeros(16, dtype=np.float32),
+                service_url="http://stt",
+                timeout_sec=3.0,
+                sampling_rate=16_000,
+                max_new_tokens=12,
+                stage="validation-batch",
+            )
 
     def test_stt_service_redacts_validation_transcript_print(self) -> None:
         source = STT_SERVICE.read_text(encoding="utf-8")

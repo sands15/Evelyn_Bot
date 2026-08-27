@@ -358,7 +358,7 @@ class SttStreamClientTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self):
+            def read(self, _size):
                 return next(responses)
 
         def open_request(req, **_kwargs):

@@ -7,6 +7,10 @@ param(
     [string]$ChannelId,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
+    [ValidatePattern('^[0-9]{17,20}$')]
+    [string]$StatusChannelId,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
     [string]$AttemptId,
 
@@ -916,6 +920,7 @@ function New-CaptureContainer {
         $captureImage,
         'python', '/app/tools/discord_voice_corpus_capture.py',
         '--channel-id', $ChannelId,
+        '--status-channel-id', $StatusChannelId,
         '--output-dir', '/app/runtime_artifacts/private-capture',
         '--count', [string]$clipCount,
         '--ttl-seconds', [string]$CaptureTimeoutSec,
@@ -1662,6 +1667,9 @@ function Get-AllowlistedRunFailureCode {
         'capture_container_secret_contract_invalid',
         'lease_token_generation_failed',
         'bot_api_readiness_timeout',
+        'guided_timing_invalid',
+        'status_channel_unavailable',
+        'status_send_failed',
         'discord_token_invalid',
         'discord_auth_failed',
         'discord_token_cache_unsafe',

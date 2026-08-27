@@ -10,9 +10,14 @@ from urllib import request
 import numpy as np
 
 
+MAX_STT_RESPONSE_BYTES = 1024 * 1024
+
+
 def _json_request(req: request.Request, *, timeout_sec: float) -> dict[str, Any]:
     with request.urlopen(req, timeout=max(1.0, float(timeout_sec))) as resp:
-        raw = resp.read()
+        raw = resp.read(MAX_STT_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_STT_RESPONSE_BYTES:
+        raise RuntimeError("stt_response_too_large")
     return json.loads(raw.decode("utf-8")) if raw else {}
 
 
