@@ -704,7 +704,10 @@ async def _run_capture(config: CaptureConfig, discord_token: str) -> CaptureResu
     async def live() -> None:
         nonlocal discord_token, gateway_task, done_task
         try:
-            await client.login(discord_token)
+            try:
+                await client.login(discord_token)
+            except discord.LoginFailure as exc:
+                raise CaptureFailure("discord_auth_failed") from exc
         finally:
             discord_token = ""
         gateway_task = asyncio.create_task(client.connect(reconnect=False))
@@ -724,6 +727,8 @@ async def _run_capture(config: CaptureConfig, discord_token: str) -> CaptureResu
         await asyncio.wait_for(live(), timeout=config.ttl_sec)
     except TimeoutError:
         capture.fail("capture_ttl_expired")
+    except CaptureFailure as exc:
+        capture.fail(exc.code)
     except Exception:
         capture.fail("capture_failed")
     finally:

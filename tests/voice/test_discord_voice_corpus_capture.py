@@ -11,8 +11,9 @@ import wave
 from array import array
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import discord
 import numpy as np
 
 
@@ -25,6 +26,7 @@ from tools.discord_voice_corpus_capture import (
     CaptureResult,
     CorpusCapture,
     VoiceLeaseBinding,
+    _run_capture,
     build_parser,
     main,
     parse_config,
@@ -342,6 +344,40 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(capture.rejected_count, 1)
             self.assertEqual(list(output.iterdir()), [])
+
+
+class CaptureAuthenticationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_login_rejection_has_exact_failure_code(self) -> None:
+        class RejectingClient:
+            def __init__(self, **_kwargs: object) -> None:
+                self.capture_voice_client = None
+
+            async def login(self, _token: str) -> None:
+                raise discord.LoginFailure("rejected test credential")
+
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            config = CaptureConfig(
+                channel_id=12345678901234567,
+                output_dir=output,
+                clip_count=1,
+                ttl_sec=60,
+            )
+            with (
+                patch(
+                    "tools.discord_voice_corpus_capture.CaptureDiscordClient",
+                    RejectingClient,
+                ),
+                patch(
+                    "tools.discord_voice_corpus_capture.shutdown_capture",
+                    new=AsyncMock(),
+                ),
+            ):
+                result = await _run_capture(config, "dummy-rejected-token")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "discord_auth_failed")
+        self.assertEqual(result.saved_count, 0)
 
 
 class FakeVoiceClient:
@@ -665,6 +701,42 @@ class CaptureCliContractTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertTrue(output.is_dir())
             self.assertEqual(list(output.iterdir()), [])
+
+    def test_auth_rejection_emits_one_exact_public_code(self) -> None:
+        async def rejected_runner(
+            _config: CaptureConfig,
+            _token: str,
+        ) -> CaptureResult:
+            return CaptureResult(
+                ok=False,
+                code="discord_auth_failed",
+                saved_count=0,
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "private"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "--channel-id",
+                        "1",
+                        "--output-dir",
+                        str(output),
+                        "--token-stdin",
+                    ],
+                    stdin=io.StringIO("dummy-rejected-token\n"),
+                    runner=rejected_runner,
+                )
+            self.assertFalse(output.exists())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "capture_failed code=discord_auth_failed\n",
+        )
 
     def test_environment_token_is_fallback_and_removed_from_process_env(self) -> None:
         secret = "DISCORD_ENV_PRIVATE_SENTINEL_123456789"

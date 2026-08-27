@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +14,7 @@ REPO_ROOT = next(
     path for path in Path(__file__).resolve().parents if (path / "main.py").exists()
 )
 LAUNCHER = REPO_ROOT / "tools" / "run_discord_voice_corpus_capture.ps1"
+CREDENTIAL_MODULE = REPO_ROOT / "tools" / "discord_capture_credential.psm1"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 CAPTURE_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.discord-capture"
 CAPTURE_DOCKERIGNORE = REPO_ROOT / "docker" / "Dockerfile.discord-capture.dockerignore"
@@ -19,6 +25,7 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = LAUNCHER.read_text(encoding="utf-8")
+        cls.credential_source = CREDENTIAL_MODULE.read_text(encoding="utf-8")
         cls.dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
         cls.capture_dockerfile = CAPTURE_DOCKERFILE.read_text(encoding="utf-8")
         cls.capture_dockerignore = CAPTURE_DOCKERIGNORE.read_text(encoding="utf-8")
@@ -101,7 +108,7 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("!tools/discord_voice_corpus_capture.py", self.capture_dockerignore)
 
         mandatory_channel = re.compile(
-            r"\[Parameter\(Mandatory = \$true\)\]\s*"
+            r"\[Parameter\(Mandatory = \$true, ParameterSetName = 'Capture'\)\]\s*"
             r"\[ValidatePattern\('\^\[0-9\]\{17,20\}\$'\)\]\s*"
             r"\[string\]\$ChannelId,"
         )
@@ -135,50 +142,50 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
             mutating_lines,
         )
 
-    def test_keeps_bot_token_on_redirected_stdin_and_lease_ephemeral(self) -> None:
+    def test_caches_bot_token_with_dpapi_and_keeps_stdin_handoff(self) -> None:
         source = self.source
+        credential = self.credential_source
 
+        self.assertIn("tools\\discord_capture_credential.psm1", source)
+        self.assertIn("discord-capture-credential-v1", source)
         self.assertIn("Read-Host 'Discord bot token' -AsSecureString", source)
-        token_prompt = source.index("$discordToken = Read-HiddenDiscordToken")
-        docker_start = source.index("$initialDockerRunning = Get-DockerInitialState")
-        first_build = source.index("$botImageId = Build-OwnedImage")
-        bot_ready = source.index("\n    Wait-BotApiReady\n")
-        token_handoff = source.index(
-            "Start-CaptureWithHiddenToken -SecureToken $discordToken"
-        )
-        self.assertLess(docker_start, token_prompt)
-        self.assertLess(first_build, token_prompt)
-        self.assertLess(bot_ready, token_prompt)
-        self.assertLess(first_build, token_handoff)
-        self.assertLess(token_prompt, token_handoff)
-        self.assertIn("[Security.SecureString]$SecureToken", source)
-        self.assertIn(
-            "Start-CaptureWithHiddenToken -SecureToken $discordToken",
-            source,
-        )
-        self.assertGreaterEqual(source.count("$discordToken.Dispose()"), 2)
         self.assertEqual(source.count("Read-Host 'Discord bot token'"), 1)
+        self.assertIn("Get-SavedDiscordToken", source)
+        self.assertIn("Read-EvelynDiscordTokenCache", source)
+        self.assertIn("Write-EvelynDiscordTokenCache", source)
+        self.assertIn("Remove-EvelynDiscordTokenCache", source)
+        self.assertIn("'discord_token_cache_invalid'", source)
+        self.assertIn("'discord_token_cache_unsafe'", source)
+        self.assertIn("[switch]$ClearSavedDiscordToken", source)
+
+        docker_start = source.index("$initialDockerRunning = Get-DockerInitialState")
+        bot_ready = source.index("\n    Wait-BotApiReady\n")
+        token_acquire = source.index(
+            "[byte[]]$discordTokenBytes = Get-SavedDiscordToken",
+            bot_ready,
+        )
+        token_handoff = source.index(
+            "$captureProcess = Start-CaptureWithTokenBytes",
+            token_acquire,
+        )
+        self.assertLess(docker_start, bot_ready)
+        self.assertLess(bot_ready, token_acquire)
+        self.assertLess(token_acquire, token_handoff)
+
+        self.assertIn("[Security.SecureString]$SecureToken", source)
         self.assertIn("$secureToken.MakeReadOnly()", source)
         self.assertIn("[Runtime.InteropServices.Marshal]::Copy(", source)
+        self.assertIn("ZeroFreeBSTR", source)
         self.assertIn("$process.StandardInput.BaseStream", source)
-        self.assertIn("$stdinStream.Write($tokenBytes", source)
+        self.assertIn("$stdinStream.Write($TokenBytes", source)
         self.assertIn("$stdinStream.WriteByte(10)", source)
         self.assertIn("[Array]::Clear($tokenChars", source)
-        self.assertIn("[Array]::Clear($tokenBytes", source)
+        self.assertIn("[Array]::Clear($discordTokenBytes", source)
+        self.assertIn("return ,$tokenBytes", source)
         self.assertIn("$processStarted = $true", source)
         self.assertNotIn("$process.StandardInput.Write($tokenChars", source)
         self.assertNotIn("PtrToStringBSTR", source)
         self.assertNotIn("$plainToken", source)
-        handoff_disposal = re.compile(
-            r"try\s*\{\s*"
-            r"\$captureProcess = Start-CaptureWithHiddenToken "
-            r"-SecureToken \$discordToken\s*"
-            r"\}\s*finally\s*\{\s*"
-            r"\$discordToken\.Dispose\(\)\s*"
-            r"\$discordToken = \$null",
-            re.DOTALL,
-        )
-        self.assertRegex(source, handoff_disposal)
         self.assertIn("[System.Diagnostics.ProcessStartInfo]::new()", source)
         self.assertIn("$startInfo.RedirectStandardInput = $true", source)
         self.assertIn("@('start', '--attach', '--interactive', $captureContainerId)", source)
@@ -186,6 +193,27 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("--token-stdin", source)
         self.assertNotRegex(source, r"'--env',\s*'DISCORD_BOT_TOKEN'")
         self.assertNotIn("DISCORD_BOT_TOKEN=$plainToken", source)
+
+        self.assertIn("ProtectedData]::Protect", credential)
+        self.assertIn("ProtectedData]::Unprotect", credential)
+        self.assertIn("DataProtectionScope]::CurrentUser", credential)
+        self.assertIn("[IO.FileOptions]::WriteThrough", credential)
+        self.assertIn("$stream.Flush($true)", credential)
+        self.assertIn(
+            "[IO.File]::Move($paths.Temporary, $paths.Token, $true)",
+            credential,
+        )
+        self.assertIn("$script:maxCiphertextBytes = 4096", credential)
+        self.assertIn("S-1-5-18", credential)
+        self.assertIn("SetAccessRuleProtection($true, $false)", credential)
+        self.assertNotIn("DISCORD_BOT_TOKEN", credential)
+        self.assertIn("return ,$plaintext", credential)
+        self.assertIn("'discord_auth_failed'", source)
+        self.assertIn(
+            "$removedRejectedToken = Remove-EvelynDiscordTokenCache",
+            source,
+        )
+
         self.assertIn("[byte[]]::new(48)", source)
         self.assertIn("RandomNumberGenerator", source)
         self.assertGreaterEqual(
@@ -193,7 +221,176 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
             2,
         )
         self.assertIn("[Array]::Clear($leaseBytes", source)
-        self.assertIn("ZeroFreeBSTR", source)
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("pwsh"),
+        "Windows PowerShell and CurrentUser DPAPI are required",
+    )
+    def test_dpapi_cache_roundtrip_corruption_and_exact_clear(self) -> None:
+        fake_token = "dummy-not-a-real-discord-token"
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$Module = $env:EVELYN_CREDENTIAL_TEST_MODULE
+$TrustedRoot = $env:EVELYN_CREDENTIAL_TEST_TRUSTED_ROOT
+$CredentialRoot = $env:EVELYN_CREDENTIAL_TEST_STORE
+Import-Module -Name $Module -Force
+$tokenText = [Console]::In.ReadToEnd()
+$tokenBytes = [Text.Encoding]::UTF8.GetBytes($tokenText)
+$readBytes = $null
+$replacementBytes = $null
+try {
+    Write-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot `
+        -TokenBytes $tokenBytes
+    $tokenPath = Join-Path $CredentialRoot 'discord-bot-token.dpapi'
+    $partPath = Join-Path $CredentialRoot '.discord-bot-token.dpapi.part'
+    $ciphertext = [IO.File]::ReadAllBytes($tokenPath)
+    $readBytes = Read-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot
+    $roundTrip = [Linq.Enumerable]::SequenceEqual[byte](
+        $tokenBytes,
+        $readBytes
+    )
+    $ciphertextContainsPlain = (
+        [Text.Encoding]::Latin1.GetString($ciphertext).Contains($tokenText)
+    )
+    $tokenAcl = Get-Acl -LiteralPath $tokenPath
+    $rules = @($tokenAcl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]
+    ))
+    $sentinel = Join-Path $CredentialRoot 'keep-me.txt'
+    [IO.File]::WriteAllText($sentinel, 'sentinel')
+
+    [IO.File]::WriteAllBytes($tokenPath, [byte[]](1, 2, 3))
+    $corruptCode = ''
+    try {
+        $null = Read-EvelynDiscordTokenCache `
+            -TrustedRoot $TrustedRoot `
+            -CredentialRoot $CredentialRoot
+    } catch {
+        $corruptCode = [string]$_.Exception.Message
+    }
+    $corruptRemoved = Remove-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot
+
+    $replacementBytes = [Text.Encoding]::UTF8.GetBytes($tokenText + '-rotated')
+    Write-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot `
+        -TokenBytes $replacementBytes
+    Write-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot `
+        -TokenBytes $tokenBytes
+    $firstClear = Remove-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot
+    $secondClear = Remove-EvelynDiscordTokenCache `
+        -TrustedRoot $TrustedRoot `
+        -CredentialRoot $CredentialRoot
+    $credentialDirectory = [IO.DirectoryInfo]::new($CredentialRoot)
+    $aclSections = (
+        [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group
+    )
+    $unsafeAcl = [IO.FileSystemAclExtensions]::GetAccessControl(
+        $credentialDirectory,
+        $aclSections
+    )
+    $builtinUsers = [Security.Principal.SecurityIdentifier]::new(
+        'S-1-5-32-545'
+    )
+    $unsafeRule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $builtinUsers,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+    $null = $unsafeAcl.AddAccessRule($unsafeRule)
+    [IO.FileSystemAclExtensions]::SetAccessControl(
+        $credentialDirectory,
+        $unsafeAcl
+    )
+    $unsafeCode = ''
+    try {
+        $null = Read-EvelynDiscordTokenCache `
+            -TrustedRoot $TrustedRoot `
+            -CredentialRoot $CredentialRoot
+    } catch {
+        $unsafeCode = [string]$_.Exception.Message
+    }
+
+    [pscustomobject]@{
+        roundTrip = $roundTrip
+        readType = $readBytes.GetType().FullName
+        ciphertextContainsPlain = $ciphertextContainsPlain
+        aclProtected = $tokenAcl.AreAccessRulesProtected
+        aclRuleCount = $rules.Count
+        corruptCode = $corruptCode
+        corruptRemoved = $corruptRemoved
+        firstClear = $firstClear
+        secondClear = $secondClear
+        unsafeCode = $unsafeCode
+        sentinelPreserved = Test-Path -LiteralPath $sentinel
+        tokenAbsent = -not (Test-Path -LiteralPath $tokenPath)
+        partAbsent = -not (Test-Path -LiteralPath $partPath)
+    } | ConvertTo-Json -Compress
+} finally {
+    [Array]::Clear($tokenBytes, 0, $tokenBytes.Length)
+    if ($null -ne $readBytes) {
+        [Array]::Clear($readBytes, 0, $readBytes.Length)
+    }
+    if ($null -ne $replacementBytes) {
+        [Array]::Clear($replacementBytes, 0, $replacementBytes.Length)
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trusted_root = Path(temp_dir) / "trusted"
+            credential_root = trusted_root / "Evelyn" / "credential-v1"
+            trusted_root.mkdir()
+            test_environment = os.environ.copy()
+            test_environment.update(
+                {
+                    "EVELYN_CREDENTIAL_TEST_MODULE": str(CREDENTIAL_MODULE),
+                    "EVELYN_CREDENTIAL_TEST_TRUSTED_ROOT": str(trusted_root),
+                    "EVELYN_CREDENTIAL_TEST_STORE": str(credential_root),
+                }
+            )
+            completed = subprocess.run(
+                [
+                    shutil.which("pwsh") or "pwsh",
+                    "-NoProfile",
+                    "-Command",
+                    script,
+                ],
+                input=fake_token,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=test_environment,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["roundTrip"])
+        self.assertEqual(result["readType"], "System.Byte[]")
+        self.assertFalse(result["ciphertextContainsPlain"])
+        self.assertTrue(result["aclProtected"])
+        self.assertEqual(result["aclRuleCount"], 2)
+        self.assertEqual(result["corruptCode"], "discord_token_cache_invalid")
+        self.assertTrue(result["corruptRemoved"])
+        self.assertTrue(result["firstClear"])
+        self.assertFalse(result["secondClear"])
+        self.assertEqual(result["unsafeCode"], "discord_token_cache_unsafe")
+        self.assertTrue(result["sentinelPreserved"])
+        self.assertTrue(result["tokenAbsent"])
+        self.assertTrue(result["partAbsent"])
 
     def test_bounds_capture_validates_ten_wavs_and_restores_host_state(self) -> None:
         source = self.source

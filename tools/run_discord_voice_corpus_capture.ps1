@@ -1,17 +1,21 @@
 #Requires -Version 7.2
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Capture')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [ValidatePattern('^[0-9]{17,20}$')]
     [string]$ChannelId,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Capture')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
     [string]$AttemptId,
 
+    [Parameter(ParameterSetName = 'Capture')]
     [ValidateRange(60, 1800)]
-    [int]$CaptureTimeoutSec = 1800
+    [int]$CaptureTimeoutSec = 1800,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Clear')]
+    [switch]$ClearSavedDiscordToken
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +36,7 @@ $captureOuterGraceSec = 60
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $captureTool = Join-Path $projectRoot 'tools\discord_voice_corpus_capture.py'
+$credentialModule = Join-Path $projectRoot 'tools\discord_capture_credential.psm1'
 $botDockerfile = Join-Path $projectRoot 'docker\Dockerfile.bot-api'
 $discordDockerfile = Join-Path $projectRoot 'docker\Dockerfile.discord-capture'
 $discordRequirements = Join-Path $projectRoot 'docker\requirements.discord-capture.txt'
@@ -41,6 +46,14 @@ $voiceAsrStagingRoot = Join-Path $validationRoot 'voice_asr_staging'
 $labRoot = Join-Path $voiceAsrStagingRoot 'capture-labs'
 $stagingRoot = Join-Path $voiceAsrStagingRoot 'captures'
 $hostLocalBridgeRoot = Join-Path $runtimeArtifactsRoot 'local_bridge'
+$localAppDataRoot = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)
+$credentialRoot = if ([string]::IsNullOrWhiteSpace($localAppDataRoot)) {
+    ''
+} else {
+    Join-Path $localAppDataRoot 'Evelyn\discord-capture-credential-v1'
+}
 $hostInstanceLockPaths = @(
     (Join-Path $projectRoot '.evelyn_bot.lock'),
     (Join-Path $hostLocalBridgeRoot 'instance.lock')
@@ -56,7 +69,11 @@ $captureImage = "evelyn-capture-lab-discord:$runId"
 $labAttempt = Join-Path $labRoot $runId
 $labRuntime = Join-Path $labAttempt 'runtime_artifacts'
 $captureHostDir = Join-Path $labRuntime 'private-capture'
-$stagingAttempt = Join-Path $stagingRoot $AttemptId
+$stagingAttempt = if ($PSCmdlet.ParameterSetName -ceq 'Capture') {
+    Join-Path $stagingRoot $AttemptId
+} else {
+    ''
+}
 $labMarker = Join-Path $labAttempt $markerName
 
 $dockerCommand = $null
@@ -75,7 +92,7 @@ $networkId = ''
 $botContainerId = ''
 $captureContainerId = ''
 $captureProcess = $null
-$discordToken = $null
+$discordTokenBytes = $null
 $captureMutex = $null
 $captureMutexOwned = $false
 $hostInstanceLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
@@ -86,6 +103,24 @@ $hostSnapshotCaptured = $false
 $ownedDockerResourcesZero = $false
 $hostDockerStateUnchanged = $false
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
+
+function Import-EvelynDiscordCredentialModule {
+    if ([string]::IsNullOrWhiteSpace($localAppDataRoot)) {
+        throw 'local_app_data_missing'
+    }
+    if (-not (Test-Path -LiteralPath $credentialModule -PathType Leaf)) {
+        throw 'required_source_missing'
+    }
+    try {
+        Import-Module `
+            -Name $credentialModule `
+            -Force `
+            -Global `
+            -ErrorAction Stop
+    } catch {
+        throw 'credential_module_import_failed'
+    }
+}
 
 function Invoke-ExternalProcess {
     param(
@@ -946,7 +981,7 @@ function Read-HiddenDiscordToken {
     }
 }
 
-function Start-CaptureWithHiddenToken {
+function Convert-HiddenDiscordTokenToBytes {
     param(
         [Parameter(Mandatory = $true)]
         [Security.SecureString]$SecureToken
@@ -955,9 +990,7 @@ function Start-CaptureWithHiddenToken {
     $tokenChars = $null
     $tokenBytes = $null
     $bstr = [IntPtr]::Zero
-    $process = $null
-    $processStarted = $false
-    $handleReturned = $false
+    $success = $false
     try {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken)
         $tokenChars = [char[]]::new($SecureToken.Length)
@@ -967,17 +1000,76 @@ function Start-CaptureWithHiddenToken {
             0,
             $tokenChars.Length
         )
-        $containsWhitespace = $false
-        foreach ($tokenChar in $tokenChars) {
-            if ([char]::IsWhiteSpace($tokenChar)) {
-                $containsWhitespace = $true
-                break
-            }
-        }
         $tokenBytes = [Text.Encoding]::UTF8.GetBytes($tokenChars)
-        if ($tokenBytes.Length -le 0 -or $tokenBytes.Length -gt 512 -or $containsWhitespace) {
-            throw 'discord_token_invalid'
+        Assert-EvelynDiscordTokenBytes -TokenBytes $tokenBytes
+        $success = $true
+        return ,$tokenBytes
+    } finally {
+        if ($null -ne $tokenChars) {
+            [Array]::Clear($tokenChars, 0, $tokenChars.Length)
         }
+        if (-not $success -and $null -ne $tokenBytes) {
+            [Array]::Clear($tokenBytes, 0, $tokenBytes.Length)
+        }
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+}
+
+function Get-SavedDiscordToken {
+    $secureToken = $null
+    $tokenBytes = $null
+    $success = $false
+    try {
+        try {
+            [byte[]]$tokenBytes = Read-EvelynDiscordTokenCache `
+                -TrustedRoot $localAppDataRoot `
+                -CredentialRoot $credentialRoot
+        } catch {
+            if ([string]$_.Exception.Message -cne 'discord_token_cache_invalid') {
+                throw
+            }
+            $null = Remove-EvelynDiscordTokenCache `
+                -TrustedRoot $localAppDataRoot `
+                -CredentialRoot $credentialRoot
+            $tokenBytes = $null
+        }
+        if ($null -ne $tokenBytes -and $tokenBytes.Length -gt 0) {
+            $success = $true
+            return ,$tokenBytes
+        }
+
+        $secureToken = Read-HiddenDiscordToken
+        [byte[]]$tokenBytes = Convert-HiddenDiscordTokenToBytes `
+            -SecureToken $secureToken
+        Write-EvelynDiscordTokenCache `
+            -TrustedRoot $localAppDataRoot `
+            -CredentialRoot $credentialRoot `
+            -TokenBytes $tokenBytes
+        $success = $true
+        return ,$tokenBytes
+    } finally {
+        if ($null -ne $secureToken) {
+            $secureToken.Dispose()
+        }
+        if (-not $success -and $null -ne $tokenBytes) {
+            [Array]::Clear($tokenBytes, 0, $tokenBytes.Length)
+        }
+    }
+}
+
+function Start-CaptureWithTokenBytes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$TokenBytes
+    )
+
+    $process = $null
+    $processStarted = $false
+    $handleReturned = $false
+    try {
+        Assert-EvelynDiscordTokenBytes -TokenBytes $TokenBytes
 
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $dockerCommand.Source
@@ -1000,7 +1092,7 @@ function Start-CaptureWithHiddenToken {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $stdinStream = $process.StandardInput.BaseStream
-        $stdinStream.Write($tokenBytes, 0, $tokenBytes.Length)
+        $stdinStream.Write($TokenBytes, 0, $TokenBytes.Length)
         $stdinStream.WriteByte(10)
         $stdinStream.Flush()
         $stdinStream.Close()
@@ -1013,15 +1105,6 @@ function Start-CaptureWithHiddenToken {
         $handleReturned = $true
         return $handle
     } finally {
-        if ($null -ne $tokenChars) {
-            [Array]::Clear($tokenChars, 0, $tokenChars.Length)
-        }
-        if ($null -ne $tokenBytes) {
-            [Array]::Clear($tokenBytes, 0, $tokenBytes.Length)
-        }
-        if ($bstr -ne [IntPtr]::Zero) {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
         if (-not $handleReturned -and $null -ne $process) {
             try {
                 if ($processStarted) {
@@ -1067,6 +1150,13 @@ function Wait-CaptureProcess {
         [Text.Encoding]::UTF8.GetByteCount($stderr) -gt 4096
     ) {
         throw 'capture_output_too_large'
+    }
+    if (
+        $process.ExitCode -ne 0 -and
+        [string]::IsNullOrWhiteSpace($stdout) -and
+        $stderr.Trim() -ceq 'capture_failed code=discord_auth_failed'
+    ) {
+        throw 'discord_auth_failed'
     }
     if (
         $process.ExitCode -ne 0 -or
@@ -1540,6 +1630,8 @@ function Get-AllowlistedRunFailureCode {
 
     $allowed = @(
         'required_source_missing',
+        'local_app_data_missing',
+        'credential_module_import_failed',
         'docker_command_missing',
         'git_command_missing',
         'source_tree_not_clean',
@@ -1571,6 +1663,10 @@ function Get-AllowlistedRunFailureCode {
         'lease_token_generation_failed',
         'bot_api_readiness_timeout',
         'discord_token_invalid',
+        'discord_auth_failed',
+        'discord_token_cache_unsafe',
+        'discord_token_cache_invalid',
+        'discord_token_cache_write_failed',
         'capture_process_start_failed',
         'capture_outer_timeout',
         'capture_output_too_large',
@@ -1599,7 +1695,62 @@ function Add-CleanupFailure {
     $cleanupFailures.Add($Code)
 }
 
+if ($PSCmdlet.ParameterSetName -ceq 'Clear') {
+    $clearMutex = $null
+    $clearMutexOwned = $false
+    try {
+        Import-EvelynDiscordCredentialModule
+        $clearMutex = [Threading.Mutex]::new(
+            $false,
+            'Local\EvelynDiscordVoiceCorpusCaptureV1'
+        )
+        try {
+            $clearMutexOwned = $clearMutex.WaitOne(0)
+        } catch [Threading.AbandonedMutexException] {
+            $clearMutexOwned = $true
+        }
+        if (-not $clearMutexOwned) {
+            throw 'capture_owner_busy'
+        }
+        $removed = Remove-EvelynDiscordTokenCache `
+            -TrustedRoot $localAppDataRoot `
+            -CredentialRoot $credentialRoot
+        Write-Host (
+            'saved_discord_token_cleared removed={0}' -f
+            $removed.ToString().ToLowerInvariant()
+        )
+        exit 0
+    } catch {
+        $code = if (
+            [string]$_.Exception.Message -in @(
+                'capture_owner_busy',
+                'required_source_missing',
+                'local_app_data_missing',
+                'credential_module_import_failed',
+                'discord_token_cache_unsafe'
+            )
+        ) {
+            [string]$_.Exception.Message
+        } else {
+            'discord_token_cache_clear_failed'
+        }
+        Write-Error "discord_token_clear_failed code=$code"
+        exit 1
+    } finally {
+        if ($clearMutexOwned) {
+            try {
+                $clearMutex.ReleaseMutex()
+            } catch {
+            }
+        }
+        if ($null -ne $clearMutex) {
+            $clearMutex.Dispose()
+        }
+    }
+}
+
 try {
+    Import-EvelynDiscordCredentialModule
     $dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue
     if ($null -eq $dockerCommand) {
         $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
@@ -1753,12 +1904,13 @@ try {
 
     $null = Invoke-Docker -Arguments @('container', 'start', $botContainerId)
     Wait-BotApiReady
-    $discordToken = Read-HiddenDiscordToken
+    [byte[]]$discordTokenBytes = Get-SavedDiscordToken
     try {
-        $captureProcess = Start-CaptureWithHiddenToken -SecureToken $discordToken
+        $captureProcess = Start-CaptureWithTokenBytes `
+            -TokenBytes $discordTokenBytes
     } finally {
-        $discordToken.Dispose()
-        $discordToken = $null
+        [Array]::Clear($discordTokenBytes, 0, $discordTokenBytes.Length)
+        $discordTokenBytes = $null
     }
     Wait-CaptureProcess -CaptureHandle $captureProcess
     Assert-VoiceLeaseReleased
@@ -1769,13 +1921,29 @@ try {
     $runFailureCode = Get-AllowlistedRunFailureCode -RawCode (
         [string]$_.Exception.Message
     )
-} finally {
-    if ($null -ne $discordToken) {
+    if ($runFailureCode -ceq 'discord_auth_failed') {
         try {
-            $discordToken.Dispose()
-            $discordToken = $null
+            $removedRejectedToken = Remove-EvelynDiscordTokenCache `
+                -TrustedRoot $localAppDataRoot `
+                -CredentialRoot $credentialRoot
+            if (-not $removedRejectedToken) {
+                throw 'discord_rejected_token_cache_missing'
+            }
         } catch {
-            Add-CleanupFailure -Code 'discord_token_dispose_failed'
+            Add-CleanupFailure -Code 'discord_rejected_token_cache_clear_failed'
+        }
+    }
+} finally {
+    if ($null -ne $discordTokenBytes) {
+        try {
+            [Array]::Clear(
+                $discordTokenBytes,
+                0,
+                $discordTokenBytes.Length
+            )
+            $discordTokenBytes = $null
+        } catch {
+            Add-CleanupFailure -Code 'discord_token_zero_failed'
         }
     }
     try {
