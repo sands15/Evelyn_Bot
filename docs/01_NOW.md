@@ -24,9 +24,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - P0-4는 microphone, speaker, Discord, Minecraft 없이 현행 Qwen3-14B와 old/new STT image를
   분리 비교한다. overlap 2+20, private positive 40/negative 10 batch+stream, cancel/successor,
   cold restart 3회와 exact cleanup이 모두 필요하다.
-- Discord exact-10의 정상 PCM 폐기와 반복 token prompt는 commits `2f802bd`, `314a358`로 닫았다.
-  live 재검증은 canonical unique WAV `10/10`, marker/hash 일치와 CurrentUser DPAPI 저장을 통과했다.
-  이는 staging capture이며 고정 private manifest는 아직 absent(`0/50`)라 promotion 근거가 아니다.
+- Discord transport exact-10과 반복 token prompt는 commits `2f802bd`, `314a358`로 닫았지만 staged
+  audio는 one-phrase shape와 revised STT content/order gate가 `exact 0/10`, `order 0/10`, CER `1.4091`로 실패했다.
+  transport 증거만 보존하며 고정 private manifest는 absent(`0/50`), promotion은 계속 차단한다.
 
 ## 최근 검증
 
@@ -53,17 +53,17 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   `422.6/2233.2/626.1ms`, min free `10,284MiB`, error 0이었다. 현재 v2 승격 증거는 아니다.
 - Main graph-on/SWA1/ubatch2048와 OmniVoice CUDA 12.9/FlashInfer 0.6.15는 source/live 근거가
   분리돼 있다. speaker/Discord를 포함한 전체 체감 SLO는 아직 완료가 아니다.
-- Discord live는 CurrentUser DPAPI save/load, gateway/voice UDP와 completed PCM exact-10을 통과했다.
-  10개는 canonical 16kHz mono PCM, unique hash `10/10`이며 staging marker count/hash와 일치했다.
-  credential DACL은 current user/SYSTEM만 허용하고 `.part` residue는 0이었다. launcher/lab은 0/absent,
-  Docker Desktop/WSL은 OFF, GPU1은 `0MiB`, Wallpaper Engine은 기존 실행 상태였다.
+- Discord live transport는 DPAPI, gateway/voice UDP, canonical unique PCM·marker/hash `10/10`을 통과했다.
+  그러나 길이 중앙값 `0.84s`, 두 파일에 전체 길이의 `80.3%`가 몰렸고 revised STT content/order도 실패했다.
+  transcript는 출력·저장하지 않았고 invalid staging은 보존했다. exact-owned lab은 0, credential residue는 0,
+  Docker Desktop/WSL은 OFF, GPU1은 `0MiB×3`, Wallpaper Engine은 기존 실행 상태였다.
 - Minecraft 운영 bot은 OFF다. 격리 fresh-world shelter/restart 시나리오는 통과했지만 운영
   Discord/lease와 실제 음성 E2E는 후속 승인 범위다. 상세 상태는 [[CURRENT_STATE]]를 따른다.
 
 ## 다음 행동
 
-1. staged exact-10의 frozen domain phrase content/order gate를 닫고 남은 positive 30/negative 10을
-   private manifest에 결박한다. 불일치 audio는 corpus로 승격하지 않는다.
+1. phrase별 안내→한 문장 capture→즉시 content/order 판정→실패 clip만 retry하는 exact-10 경로로
+   다시 수집한다. 현재 invalid staging은 corpus로 승격하지 않는다.
 2. private 50-item이 완성되면 positive 40/negative 10 batch+stream, cancel/successor와 cold
    restart 3회를 실행한다.
 3. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
