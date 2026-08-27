@@ -24,9 +24,9 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
 - P0-4는 microphone, speaker, Discord, Minecraft 없이 현행 Qwen3-14B와 old/new STT image를
   분리 비교한다. overlap 2+20, private positive 40/negative 10 batch+stream, cancel/successor,
   cold restart 3회와 exact cleanup이 모두 필요하다.
-- Discord exact-10 첫 capture의 정상 PCM 폐기 결함은 commit `2f802bd`로 수정했다. 반복 token
-  prompt는 commit `314a358`의 CurrentUser DPAPI cache와 exact auth-rejection invalidation으로 닫았다.
-  live 재검증과 최초 1회 저장은 대기 중이며 private corpus는 여전히 absent(`0/50`)다.
+- Discord exact-10의 정상 PCM 폐기와 반복 token prompt는 commits `2f802bd`, `314a358`로 닫았다.
+  live 재검증은 canonical unique WAV `10/10`, marker/hash 일치와 CurrentUser DPAPI 저장을 통과했다.
+  이는 staging capture이며 고정 private manifest는 아직 absent(`0/50`)라 promotion 근거가 아니다.
 
 ## 최근 검증
 
@@ -53,17 +53,17 @@ Codex가 작업 시작 시 읽는 작은 작업 문맥이다. 상세 사실은 �
   `422.6/2233.2/626.1ms`, min free `10,284MiB`, error 0이었다. 현재 v2 승격 증거는 아니다.
 - Main graph-on/SWA1/ubatch2048와 OmniVoice CUDA 12.9/FlashInfer 0.6.15는 source/live 근거가
   분리돼 있다. speaker/Discord를 포함한 전체 체감 SLO는 아직 완료가 아니다.
-- Discord corpus는 first-packet age를 품질에서 분리하고 severe transport corruption만 거절한다.
-  credential은 repo/env/argv/container/log에 두지 않고 protected host cache→stdin으로만 전달한다.
-  관련 `1036 passed, 5 skipped + 124 subtests`, canonical `4641 passed, 22 skipped + 1433 subtests`가
-  통과했다. 미접속 follow-up의 exact resource도 제거됐고 Docker는 초기 OFF로 복구됐다.
+- Discord live는 CurrentUser DPAPI save/load, gateway/voice UDP와 completed PCM exact-10을 통과했다.
+  10개는 canonical 16kHz mono PCM, unique hash `10/10`이며 staging marker count/hash와 일치했다.
+  credential DACL은 current user/SYSTEM만 허용하고 `.part` residue는 0이었다. launcher/lab은 0/absent,
+  Docker Desktop/WSL은 OFF, GPU1은 `0MiB`, Wallpaper Engine은 기존 실행 상태였다.
 - Minecraft 운영 bot은 OFF다. 격리 fresh-world shelter/restart 시나리오는 통과했지만 운영
   Discord/lease와 실제 음성 E2E는 후속 승인 범위다. 상세 상태는 [[CURRENT_STATE]]를 따른다.
 
 ## 다음 행동
 
-1. 승인된 Discord channel에서 최초 1회 hidden credential을 저장하고 exact-10 capture의 실제 연결,
-   completed PCM 저장 수, severe rejection과 final cleanup을 검증한다.
+1. staged exact-10의 frozen domain phrase content/order gate를 닫고 남은 positive 30/negative 10을
+   private manifest에 결박한다. 불일치 audio는 corpus로 승격하지 않는다.
 2. private 50-item이 완성되면 positive 40/negative 10 batch+stream, cancel/successor와 cold
    restart 3회를 실행한다.
 3. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
