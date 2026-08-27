@@ -39,6 +39,14 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("--pull=false", source)
         self.assertIn("capture-tool-sha256", source)
         self.assertIn("--read-only", source)
+        self.assertIn(
+            "$null -ne $container.HostConfig.DeviceRequests -and",
+            source,
+        )
+        self.assertIn(
+            "$null -ne $container.HostConfig.Devices -and",
+            source,
+        )
         self.assertIn("/app/tools/discord_voice_corpus_capture.py", source)
         self.assertIn("!tools/discord_voice_corpus_capture.py", self.dockerignore)
         self.assertNotIn("source=$captureTool", source)

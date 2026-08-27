@@ -594,8 +594,14 @@ function Assert-OwnedContainer {
     }
     if (-not $CleanupIdentity -and (
         @($container.HostConfig.PortBindings.PSObject.Properties).Count -ne 0 -or
-        @($container.HostConfig.DeviceRequests).Count -ne 0 -or
-        @($container.HostConfig.Devices).Count -ne 0 -or
+        (
+            $null -ne $container.HostConfig.DeviceRequests -and
+            @($container.HostConfig.DeviceRequests).Count -ne 0
+        ) -or
+        (
+            $null -ne $container.HostConfig.Devices -and
+            @($container.HostConfig.Devices).Count -ne 0
+        ) -or
         [string]$container.HostConfig.RestartPolicy.Name -cne 'no'
     )) {
         throw 'owned_container_contract_invalid'
