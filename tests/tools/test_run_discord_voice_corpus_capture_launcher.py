@@ -132,6 +132,8 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("Move-Item -LiteralPath $capturePath -Destination $stagingAttempt", source)
         self.assertIn("Remove-Item -LiteralPath $resolved -Recurse -Force", source)
         self.assertIn("Get-DockerInitialState", source)
+        self.assertIn("Get-Process -Name 'Docker Desktop'", source)
+        self.assertIn("if ($desktopProcesses.Count -eq 0)", source)
         self.assertIn("Start-DockerDesktop", source)
         self.assertIn("Stop-DockerDesktop", source)
         self.assertIn("Get-ContainerSnapshot", source)

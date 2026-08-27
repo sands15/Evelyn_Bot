@@ -243,6 +243,12 @@ function Get-DockerInitialState {
     ) {
         return $false
     }
+    $desktopProcesses = @(
+        Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue
+    )
+    if ($desktopProcesses.Count -eq 0) {
+        return $false
+    }
     throw 'docker_initial_state_unknown'
 }
 
