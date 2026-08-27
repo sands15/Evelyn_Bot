@@ -255,6 +255,8 @@ services:
       LOCAL_TTS_OUTPUT_ENABLED: "false"
       VOICE_INPUT_MODE: "discord"
       VOICE_CONSOLE_ONLY_STT_AND_REPLY: "false"
+      VOICE_DEBUG_SAVE_AUDIO: "${VOICE_DEBUG_SAVE_AUDIO:-false}"
+      VOICE_DEBUG_AUDIO_DIR: "/run/evelyn-private/voice-debug"
       OPUS_ERROR_TO_SILENCE: "false"
       STT_USE_RAW_48K: "false"
       PYTHONUNBUFFERED: "1"
@@ -275,6 +277,8 @@ services:
         condition: service_healthy
       stt:
         condition: service_healthy
+    tmpfs:
+      - /run/evelyn-private/voice-debug:rw,nosuid,nodev,noexec,size=512m,mode=0700
     volumes:
       - ./bot_memory:/app/bot_memory
       - ./bot_profiles:/app/bot_profiles

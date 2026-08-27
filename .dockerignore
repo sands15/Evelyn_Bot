@@ -29,6 +29,7 @@ evelyn_core/evelin/
 
 !tools/
 !tools/provision_falcon_ocr_snapshot.py
+!tools/discord_voice_corpus_capture.py
 
 !external/
 !external/mindcraft/

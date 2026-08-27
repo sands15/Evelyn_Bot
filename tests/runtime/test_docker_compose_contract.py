@@ -414,6 +414,33 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("stop_grace_period: 30s", discord_bot)
         self.assertIn('TTS_WARMUP_GENERATE_ENABLED: "true"', discord_bot)
 
+    def test_discord_voice_debug_audio_is_opt_in_private_bounded_tmpfs(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        discord_bot = source.split("  discord_bot:\n", 1)[1].split(
+            "\n  main_llm:",
+            1,
+        )[0]
+        volumes = discord_bot.split("\n    volumes:\n", 1)[1].split(
+            "\n    networks:",
+            1,
+        )[0]
+
+        self.assertIn(
+            'VOICE_DEBUG_SAVE_AUDIO: "${VOICE_DEBUG_SAVE_AUDIO:-false}"',
+            discord_bot,
+        )
+        self.assertIn(
+            'VOICE_DEBUG_AUDIO_DIR: "/run/evelyn-private/voice-debug"',
+            discord_bot,
+        )
+        self.assertIn(
+            "/run/evelyn-private/voice-debug:rw,nosuid,nodev,noexec,"
+            "size=512m,mode=0700",
+            discord_bot,
+        )
+        self.assertNotIn("voice-debug", volumes)
+        self.assertNotIn("debug_audio", volumes)
+
     def test_app_images_are_built_and_started_with_one_source_revision(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 
