@@ -742,6 +742,282 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         allow_capture_cleanup.set()
         await asyncio.wait_for(lease_released.wait(), timeout=1.0)
 
+    def test_discord_rtp_padding_is_stripped_after_outer_decrypt(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = Mock()
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.runtime = SimpleNamespace(
+            voice_mode="aead_xchacha20_poly1305_rtpsize",
+            voice_secret_key=b"k" * 32,
+            dave_protocol_version=1,
+            bind_dave_ssrc=Mock(),
+        )
+        voice_client.dave = SimpleNamespace(protocol_version=1)
+        voice_client._connection = SimpleNamespace(
+            dave_protocol_version=0,
+            dave_session=None,
+        )
+        voice_client._sync_dave_from_base()
+        self.assertEqual(voice_client.runtime.dave_protocol_version, 0)
+        self.assertEqual(voice_client.dave.protocol_version, 0)
+        packet = (
+            bytes.fromhex("b07800010000000100000001bede0001")
+            + b"ciphertext"
+            + b"nonce"
+        )
+
+        decrypt = Mock(return_value=b"ext!opus\x00\x00\x03")
+        with patch.object(
+            client_module,
+            "crypto_aead_xchacha20poly1305_ietf_decrypt",
+            decrypt,
+        ):
+            decrypted = voice_client._decrypt_standard_voice_packet(packet)
+
+        self.assertIsNotNone(decrypted)
+        payload, info = decrypted
+        self.assertTrue(info["padding"])
+        self.assertEqual(payload, b"opus")
+        self.assertEqual(decrypt.call_args.args[1], packet[:16])
+        self.assertIsNone(client_module._parse_rtp_header(b"\x70" + packet[1:]))
+
+        for invalid_plaintext in (b"ext!opus\x00", b"ext!\x01", b"ext!\x09"):
+            with (
+                self.subTest(plaintext=invalid_plaintext),
+                patch.object(
+                    client_module,
+                    "crypto_aead_xchacha20poly1305_ietf_decrypt",
+                    return_value=invalid_plaintext,
+                ),
+            ):
+                self.assertIsNone(
+                    voice_client._decrypt_standard_voice_packet(packet)
+                )
+
+        voice_client._try_dave_inner_decrypt = Mock(
+            return_value=(None, 9, "cryptor_pending")
+        )
+        voice_client._queue_pending_inner_packet = Mock()
+        with patch.object(
+            client_module,
+            "parse_dave_payload",
+            return_value=SimpleNamespace(ranges_count=0),
+        ):
+            pending = voice_client._resolve_dave_audio_payload(
+                user_id=9,
+                ssrc=7,
+                outer_plain=b"dave-ciphertext",
+                packet_meta={"sequence": 1},
+                dave_required=True,
+            )
+
+        self.assertEqual(pending, (None, 9, "deferred_cryptor_pending"))
+        voice_client._queue_pending_inner_packet.assert_called_once()
+
+        voice_client._try_dave_inner_decrypt = Mock(
+            return_value=(b"opus", 9, "ok")
+        )
+        with patch.object(
+            client_module,
+            "parse_dave_payload",
+            return_value=SimpleNamespace(ranges_count=0),
+        ):
+            transitioned = voice_client._resolve_dave_audio_payload(
+                user_id=9,
+                ssrc=7,
+                outer_plain=b"prior-epoch-dave-frame",
+                packet_meta={"sequence": 2},
+                dave_required=False,
+            )
+
+        self.assertEqual(transitioned, (b"opus", 9, "inner_ok"))
+        voice_client._try_dave_inner_decrypt.assert_called_once()
+
+    async def test_receive_uses_unpadded_outer_payload_for_endpointing(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = Mock()
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        raw_packet = bytes.fromhex("a07800010000000100000001") + (b"x" * 80)
+        info = client_module._parse_rtp_header(raw_packet)
+        self.assertIsNotNone(info)
+
+        class OnePacketTransport:
+            def __init__(self) -> None:
+                self.sent = False
+
+            async def recv_packet(self) -> bytes:
+                if not self.sent:
+                    self.sent = True
+                    return raw_packet
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.runtime = SimpleNamespace(receive_ready=asyncio.Event())
+        voice_client.udp_transport = OnePacketTransport()
+        voice_client.media_queue = asyncio.Queue(maxsize=4)
+        voice_client.pending_ssrc_packets = {}
+        voice_client.media_packet_count = 0
+        voice_client._prune_pending_ssrc_packets = Mock()
+        voice_client._decrypt_standard_voice_packet = Mock(
+            return_value=(b"\xf8\xff\xfe", info)
+        )
+
+        receive_task = asyncio.create_task(voice_client._receive_loop())
+        queued = await asyncio.wait_for(voice_client.media_queue.get(), timeout=1.0)
+        receive_task.cancel()
+        await receive_task
+
+        self.assertEqual(queued["payload"], b"\xf8\xff\xfe")
+        self.assertEqual(queued["outer_plain"], b"\xf8\xff\xfe")
+        self.assertGreater(len(queued["raw_packet"]), 60)
+        voice_client._decrypt_standard_voice_packet.assert_called_once_with(raw_packet)
+
+        voice_client.utterance_states = {}
+        voice_client.preroll_packet_limit = 5
+        voice_client.decrypt_packet_count = 0
+        speech = {**queued, "payload": b"s", "sequence": 1}
+        silence = {**queued, "sequence": 2}
+        voice_client._route_packet_to_utterance_state(speech, now=1.0)
+        voice_client._route_packet_to_utterance_state(silence, now=1.1)
+
+        state = voice_client.utterance_states[queued["ssrc"]]
+        self.assertTrue(state["in_utterance"])
+        self.assertEqual(state["last_voice_like_at"], 1.0)
+
+        voice_client.end_silence_sec = 0.01
+        voice_client.utterance_count = 0
+        voice_client.utterance_queue = asyncio.Queue(maxsize=1)
+        voice_client._flush_ready_reordered_packets = Mock()
+        decrypt_task = asyncio.create_task(voice_client._decrypt_loop())
+        ended = await asyncio.wait_for(
+            voice_client.utterance_queue.get(),
+            timeout=1.0,
+        )
+        decrypt_task.cancel()
+        await decrypt_task
+
+        self.assertEqual(
+            [packet["sequence"] for packet in ended["packets"]],
+            [1, 2],
+        )
+
+        now = asyncio.get_running_loop().time()
+        voice_client.pending_inner_packets = {
+            7: [
+                {
+                    "packet": {"sequence": 3},
+                    "payload": b"still-encrypted",
+                    "user_id": 9,
+                    "queued_at": now,
+                    "attempts": 0,
+                    "ranges_count": 0,
+                }
+            ]
+        }
+        voice_client._try_dave_inner_decrypt = Mock(
+            return_value=(b"still-encrypted", 9, "passthrough_not_ready")
+        )
+        voice_client._log_pending_inner_event = Mock()
+
+        recovered = voice_client._drain_pending_inner_packets(ssrc=7, user_id=9)
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(len(voice_client.pending_inner_packets[7]), 1)
+
+        voice_client.runtime = SimpleNamespace(
+            get_preferred_user_id=lambda _ssrc: 9,
+            current_speaking_user_id=9,
+            pending_user_ids=[],
+            dave_ssrc_to_user_id={},
+            voice_secret_key=b"k" * 32,
+            voice_mode="aead_xchacha20_poly1305_rtpsize",
+            dave_protocol_version=1,
+            bind_dave_ssrc=Mock(),
+        )
+        voice_client.dave = SimpleNamespace(ready=True)
+        voice_client._sync_dave_from_base = Mock()
+        voice_client._ordered_unique_packets = Mock(
+            side_effect=lambda packets: list(packets)
+        )
+        voice_client.opus_decoder_stats = {}
+        voice_client.pending_inner_packets = {}
+        voice_client.utterance_queue = asyncio.Queue(maxsize=1)
+        voice_client._utterance_processing_tasks = set()
+        outer_info = {"header_len": 12, "unencrypted_header_len": 12}
+        speech_packet = {
+            "raw_packet": b"raw-speech",
+            "outer_plain": b"dave-speech",
+            "outer_info": outer_info,
+            "ssrc": 7,
+            "sequence": 1,
+            "timestamp": 960,
+            "payload": b"dave-speech",
+        }
+        silence_packet = {
+            **speech_packet,
+            "raw_packet": b"raw-silence",
+            "outer_plain": b"\xf8\xff\xfe",
+            "sequence": 2,
+            "timestamp": 1920,
+            "payload": b"\xf8\xff\xfe",
+        }
+
+        def resolve_pending_speech(**kwargs):
+            if kwargs["outer_plain"] != b"\xf8\xff\xfe":
+                voice_client.pending_inner_packets[7] = [{"pending": True}]
+                return None, 9, "deferred_cryptor_pending"
+            return b"\xf8\xff\xfe", 9, "inner_silence"
+
+        voice_client._resolve_dave_audio_payload = Mock(
+            side_effect=resolve_pending_speech
+        )
+        voice_client._drain_pending_inner_packets = Mock(return_value=[])
+        await voice_client._process_utterance_packets(
+            {
+                "idx": 1,
+                "ssrc": 7,
+                "packets": [speech_packet, silence_packet],
+                "body_packets": [speech_packet, silence_packet],
+                "queued_at": now,
+            }
+        )
+        retry_item = await asyncio.wait_for(
+            voice_client.utterance_queue.get(),
+            timeout=1.0,
+        )
+
+        self.assertEqual(retry_item["dave_retry"], 1)
+        self.assertEqual(
+            [packet["opus_packet"] for packet in retry_item["normalized_packets"]],
+            [b"\xf8\xff\xfe"],
+        )
+
     async def test_cancelled_release_drain_waits_for_capture_stop_and_release(self) -> None:
         davey = ModuleType("davey")
         davey.DAVE_PROTOCOL_VERSION = 1
@@ -1012,7 +1288,6 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         voice_client._sync_dave_from_base = Mock()
-        voice_client._enable_dave_passthrough = Mock()
         voice_client._set_internal_voice_reconnect_active = (
             reconnect_flags.append
         )

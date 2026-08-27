@@ -81,6 +81,7 @@ VOICE_UNKNOWN_SSRC_RETRY_MS = max(80.0, float(os.getenv("VOICE_UNKNOWN_SSRC_RETR
 VOICE_UNKNOWN_SSRC_LOG_INTERVAL_SEC = max(0.5, float(os.getenv("VOICE_UNKNOWN_SSRC_LOG_INTERVAL_SEC", "8.0")))
 
 _DAVE_MARKER = b"\xfa\xfa"
+_OPUS_SILENCE = b"\xf8\xff\xfe"
 
 
 @dataclass(slots=True)
@@ -636,6 +637,9 @@ def _parse_rtp_header(packet: bytes):
 
     b0, b1 = packet[0], packet[1]
     version = (b0 >> 6) & 0b11
+    if version != 2:
+        return None
+    padding = bool(b0 & 0x20)
     cc = b0 & 0x0F
     x = (b0 >> 4) & 0x01
     marker = (b1 >> 7) & 0x01
@@ -661,6 +665,7 @@ def _parse_rtp_header(packet: bytes):
 
     return {
         "version": version,
+        "padding": padding,
         "payload_type": payload_type,
         "marker": marker,
         "sequence": sequence,
@@ -757,6 +762,10 @@ class EvelynVoiceClient(discord.VoiceClient):
 
     def _sync_dave_from_base(self) -> None:
         base_conn = getattr(self, "_connection", None)
+        negotiated_version = getattr(base_conn, "dave_protocol_version", None)
+        if type(negotiated_version) is int and negotiated_version >= 0:
+            self.runtime.dave_protocol_version = negotiated_version
+            self.dave.protocol_version = negotiated_version
         base_dave = getattr(base_conn, "dave_session", None)
 
         if base_dave is None:
@@ -775,7 +784,11 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.runtime.dave_ready = self.dave.ready
         self.runtime.dave_status = str(self.dave.status)
         self.runtime.dave_epoch = self.dave.epoch
-        self.runtime.dave_protocol_version = self.dave.protocol_version
+        self.runtime.dave_protocol_version = (
+            negotiated_version
+            if type(negotiated_version) is int and negotiated_version >= 0
+            else self.dave.protocol_version
+        )
 
         log.info(
             "DAVE BASE SYNC | ready=%s status=%r epoch=%r proto=%r",
@@ -820,7 +833,6 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.decrypt_packet_count = 0
 
         self.end_silence_sec = float(os.getenv("VOICE_END_SILENCE_SEC", "0.82"))
-        self.voice_payload_threshold = 60
         self.preroll_packet_limit = max(0, int(round(float(os.getenv("VOICE_PREROLL_MS", "520")) / 20.0)))
 
         self.utterance_states: dict[int, dict] = {}
@@ -1014,7 +1026,6 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.runtime.voice_secret_key = secret_key
         self.connected_at = asyncio.get_running_loop().time()
         self._sync_dave_from_base()
-        self._enable_dave_passthrough()
         self.gateway.try_apply_pending_dave()
 
     def rearm_listener_after_base_udp_change(
@@ -1288,37 +1299,39 @@ class EvelynVoiceClient(discord.VoiceClient):
         nonce[:4] = nonce_suffix
         nonce = bytes(nonce)
 
-        aad_candidates = [packet_bytes[:12]]
-
         unenc_header_len = info["unencrypted_header_len"]
-        if unenc_header_len > 12:
-            aad_candidates.append(packet_bytes[:unenc_header_len])
-
         decrypted_extension_len = max(0, info["header_len"] - info["unencrypted_header_len"])
 
-        for aad in aad_candidates:
-            try:
-                plaintext = crypto_aead_xchacha20poly1305_ietf_decrypt(
-                    ciphertext,
-                    aad,
-                    nonce,
-                    key,
-                )
-                if decrypted_extension_len:
-                    if len(plaintext) < decrypted_extension_len:
-                        log.warning(
-                            "STD DECRYPT ext underflow | ssrc=%s seq=%s ts=%s plain_len=%d ext_len=%d",
-                            info["ssrc"],
-                            info["sequence"],
-                            info["timestamp"],
-                            len(plaintext),
-                            decrypted_extension_len,
-                        )
-                        return None
-                    plaintext = plaintext[decrypted_extension_len:]
-                return plaintext, info
-            except Exception:
-                pass
+        try:
+            plaintext = crypto_aead_xchacha20poly1305_ietf_decrypt(
+                ciphertext,
+                packet_bytes[:unenc_header_len],
+                nonce,
+                key,
+            )
+            if decrypted_extension_len:
+                if len(plaintext) < decrypted_extension_len:
+                    log.warning(
+                        "STD DECRYPT ext underflow | ssrc=%s seq=%s ts=%s plain_len=%d ext_len=%d",
+                        info["ssrc"],
+                        info["sequence"],
+                        info["timestamp"],
+                        len(plaintext),
+                        decrypted_extension_len,
+                    )
+                    return None
+                plaintext = plaintext[decrypted_extension_len:]
+            if info["padding"]:
+                if (
+                    not plaintext
+                    or plaintext[-1] == 0
+                    or plaintext[-1] >= len(plaintext)
+                ):
+                    return None
+                plaintext = plaintext[:-plaintext[-1]]
+            return plaintext, info
+        except Exception:
+            pass
 
         log.warning(
             "STD DECRYPT failed | ssrc=%s seq=%s ts=%s mode=%s header_len=%s unenc_header_len=%s enc_len=%s",
@@ -1433,7 +1446,6 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         # TEMP: custom gateway apply 대신 base discord dave_session 기준으로 동기화
         self._sync_dave_from_base()
-        self._enable_dave_passthrough()
 
         self.gateway.try_apply_pending_dave()
 
@@ -1566,17 +1578,6 @@ class EvelynVoiceClient(discord.VoiceClient):
     def _get_base_dave_session(self):
         base_conn = getattr(self, "_connection", None)
         return getattr(base_conn, "dave_session", None)
-
-    def _enable_dave_passthrough(self) -> None:
-        base_dave = self._get_base_dave_session()
-        if base_dave is None:
-            return
-
-        try:
-            base_dave.set_passthrough_mode(True, 10)
-            log.info("DAVE passthrough enabled")
-        except Exception as e:
-            log.warning("DAVE passthrough enable failed | err=%r", e)
 
     def _dave_can_passthrough(self, user_id: int | None) -> bool:
         if user_id is None:
@@ -1722,11 +1723,11 @@ class EvelynVoiceClient(discord.VoiceClient):
 
     @staticmethod
     def _is_retryable_inner_reason(reason: str | None) -> bool:
-        return reason in {"not_ready", "no_session", "no_valid_cryptor", "retry_candidate_failed", "cryptor_pending"}
+        return reason in {"not_ready", "no_session", "no_valid_cryptor", "retry_candidate_failed", "cryptor_pending", "passthrough_not_ready"}
 
     @staticmethod
     def _is_terminal_inner_reason(reason: str | None) -> bool:
-        return reason in {"empty", "silence", "passthrough", "passthrough_disabled", "error", "plain", "strip_only"}
+        return reason in {"empty", "silence", "passthrough", "passthrough_disabled", "error", "plain"}
 
     @staticmethod
     def _normalize_inner_error_reason(err_text: str, *, current_successes: int = 0) -> str:
@@ -1750,7 +1751,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         if not outer_plain:
             return None, None, "empty"
 
-        if outer_plain == b"\xF8\xFF\xFE":
+        if outer_plain == _OPUS_SILENCE:
             return outer_plain, user_id, "silence"
 
         base_dave = self._get_base_dave_session()
@@ -1777,10 +1778,6 @@ class EvelynVoiceClient(discord.VoiceClient):
             normalized_reason = self._normalize_inner_error_reason(err_text, current_successes=current_successes)
 
             if normalized_reason == "passthrough_disabled":
-                try:
-                    self._enable_dave_passthrough()
-                except Exception:
-                    pass
                 if log_allowed and allow_passthrough:
                     log.info(
                         "DAVE INNER passthrough | user_id=%s in_len=%d prefix=%s",
@@ -1934,7 +1931,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                 ssrc=int(ssrc),
                 outer_plain=item["payload"],
             )
-            if plain is not None:
+            if plain is not None and reason in {
+                "ok",
+                "remap",
+                "silence",
+                "passthrough",
+            }:
                 packet = dict(item["packet"])
                 packet["opus_packet"] = plain
                 packet["used_dave_inner"] = True
@@ -1975,9 +1977,17 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         return recovered
 
-    def _resolve_dave_audio_payload(self, *, user_id: int, ssrc: int, outer_plain: bytes, packet_meta: dict) -> tuple[bytes | None, int | None, str]:
+    def _resolve_dave_audio_payload(
+        self,
+        *,
+        user_id: int,
+        ssrc: int,
+        outer_plain: bytes,
+        packet_meta: dict,
+        dave_required: bool,
+    ) -> tuple[bytes | None, int | None, str]:
         parsed = parse_dave_payload(outer_plain)
-        if parsed is None:
+        if parsed is None and not dave_required:
             return outer_plain, user_id, "plain"
 
         plain, resolved_user_id, reason = self._try_dave_inner_decrypt(
@@ -1990,24 +2000,13 @@ class EvelynVoiceClient(discord.VoiceClient):
                 self.runtime.bind_dave_ssrc(int(resolved_user_id), int(ssrc))
             return plain, resolved_user_id, f"inner_{reason}"
 
-        if parsed.ranges_count == 0 and 0 < parsed.ciphertext_len <= len(outer_plain):
-            stripped = outer_plain[:parsed.ciphertext_len]
-            log.info(
-                "DAVE SUPPLEMENTAL STRIP | ssrc=%s seq=%s nonce=%s cipher_len=%s",
-                ssrc,
-                packet_meta.get("sequence"),
-                parsed.nonce,
-                parsed.ciphertext_len,
-            )
-            return stripped, user_id, "strip_only"
-
         if self._is_retryable_inner_reason(reason):
             self._queue_pending_inner_packet(
                 ssrc=int(ssrc),
                 packet=packet_meta,
                 payload=outer_plain,
                 user_id=int(resolved_user_id or user_id),
-                ranges_count=parsed.ranges_count,
+                ranges_count=parsed.ranges_count if parsed is not None else 0,
                 reason=reason,
             )
             return None, resolved_user_id or user_id, f"deferred_{reason}"
@@ -2016,7 +2015,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             self._log_pending_inner_event(
                 ssrc=int(ssrc),
                 reason=reason,
-                message=f"terminal seq={packet_meta.get('sequence')} ranges={parsed.ranges_count}",
+                message=f"terminal seq={packet_meta.get('sequence')} ranges={parsed.ranges_count if parsed is not None else 0}",
                 level=logging.WARNING,
             )
         return None, resolved_user_id or user_id, f"unhandled_{reason}"
@@ -2268,6 +2267,8 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         current_packet = {
             "raw_packet": packet_info.get("raw_packet"),
+            "outer_plain": packet_info.get("outer_plain"),
+            "outer_info": packet_info.get("outer_info"),
             "ssrc": ssrc,
             "sequence": sequence,
             "timestamp": timestamp,
@@ -2289,7 +2290,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             },
         )
 
-        if payload_len >= self.voice_payload_threshold:
+        if payload and payload != _OPUS_SILENCE:
             state["last_voice_like_at"] = now
             if not state["in_utterance"]:
                 state["in_utterance"] = True
@@ -2402,10 +2403,15 @@ class EvelynVoiceClient(discord.VoiceClient):
                 if info["payload_type"] != 120:
                     continue
 
-                payload = packet[info["header_len"]:]
+                outer_result = self._decrypt_standard_voice_packet(packet)
+                if outer_result is None:
+                    continue
+                payload, outer_info = outer_result
 
                 packet_info = {
                     "raw_packet": packet,
+                    "outer_plain": payload,
+                    "outer_info": outer_info,
                     "ssrc": info["ssrc"],
                     "sequence": info["sequence"],
                     "timestamp": info["timestamp"],
@@ -2586,6 +2592,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         processing_started_at = asyncio.get_running_loop().time()
         dave_success = 0
         map_retry = int(item.get("map_retry", 0))
+        dave_retry = int(item.get("dave_retry", 0))
 
         if not packets:
             return
@@ -2680,13 +2687,15 @@ class EvelynVoiceClient(discord.VoiceClient):
         )
         self._sync_dave_from_base()
 
-        use_dave = bool(self.dave.ready)
+        dave_required = bool(
+            (self.runtime.dave_protocol_version or 0) > 0
+        )
         use_std = bool(
             self.runtime.voice_secret_key
             and self.runtime.voice_mode == "aead_xchacha20_poly1305_rtpsize"
         )
 
-        if not use_dave and not use_std:
+        if not dave_required and not use_std:
             log.warning(
                 "No decrypt path yet; skipping idx=%d | dave_ready=%s mode=%r key=%s",
                 idx,
@@ -2730,8 +2739,17 @@ class EvelynVoiceClient(discord.VoiceClient):
         )
         decoder_stats["decoder_reset_before_first_clean"] = False
 
-        normalized_packets: list[dict] = []
-        for packet_index, p in enumerate(packets, start=1):
+        normalized_packets: list[dict] = list(
+            item.get("normalized_packets") or ()
+        )
+        dave_success += sum(
+            bool(packet.get("used_dave_inner"))
+            for packet in normalized_packets
+        )
+        for packet_index, p in enumerate(
+            packets if dave_retry == 0 else (),
+            start=1,
+        ):
             raw_packet = p.get("raw_packet")
             if raw_packet is None:
                 failed += 1
@@ -2746,74 +2764,99 @@ class EvelynVoiceClient(discord.VoiceClient):
                     )
                 continue
 
-            outer_result = self._decrypt_standard_voice_packet(raw_packet)
-            if not outer_result:
+            outer_plain = p.get("outer_plain")
+            outer_info = p.get("outer_info")
+            if outer_plain is None or outer_info is None:
+                outer_result = self._decrypt_standard_voice_packet(raw_packet)
+                if not outer_result:
+                    failed += 1
+                    outer_fail += 1
+                    if packet_index <= 5:
+                        log.warning(
+                            "OUTER DECRYPT failed | idx=%d pkt=%d seq=%d ts=%d payload=%d",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                            p["timestamp"],
+                            len(p["payload"]),
+                        )
+                    continue
+                outer_plain, outer_info = outer_result
+            used_dave_inner = False
+            opus_packet, resolved_user_id, dave_reason = self._resolve_dave_audio_payload(
+                user_id=int(user_id),
+                ssrc=int(ssrc),
+                outer_plain=outer_plain,
+                packet_meta=p,
+                dave_required=dave_required,
+            )
+            if resolved_user_id is not None and int(resolved_user_id) != int(user_id):
+                user_id = int(resolved_user_id)
+                self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
+                log.info("VOICE MAP DAVE REMAP | idx=%d ssrc=%d user_id=%s", idx, ssrc, user_id)
+
+            if opus_packet is None:
                 failed += 1
-                outer_fail += 1
-                if packet_index <= 5:
-                    log.warning(
-                        "OUTER DECRYPT failed | idx=%d pkt=%d seq=%d ts=%d payload=%d",
-                        idx,
-                        packet_index,
-                        p["sequence"],
-                        p["timestamp"],
-                        len(p["payload"]),
-                    )
+                dave_fail += 1
+                if dave_reason.startswith("deferred_") or (dave_success == 0 and dave_fail <= VOICE_DAVE_WARMUP_GRACE_PACKETS):
+                    dave_warmup_skips += 1
+                    if packet_index <= 5:
+                        log.info(
+                            "PACKET DAVE defer/skip | idx=%d pkt=%d seq=%d ts=%d reason=%s grace=%d/%d",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                            p["timestamp"],
+                            dave_reason,
+                            dave_fail,
+                            VOICE_DAVE_WARMUP_GRACE_PACKETS,
+                        )
+                else:
+                    if packet_index <= 3:
+                        log.warning(
+                            "PACKET DAVE failed | idx=%d pkt=%d seq=%d ts=%d outer_len=%d ext_len=%d reason=%s",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                            p["timestamp"],
+                            len(outer_plain),
+                            max(0, outer_info["header_len"] - outer_info["unencrypted_header_len"]),
+                            dave_reason,
+                        )
                 continue
 
-            outer_plain, outer_info = outer_result
-            used_dave_inner = False
-            if use_dave:
-                opus_packet, resolved_user_id, dave_reason = self._resolve_dave_audio_payload(
-                    user_id=int(user_id),
-                    ssrc=int(ssrc),
-                    outer_plain=outer_plain,
-                    packet_meta=p,
-                )
-                if resolved_user_id is not None and int(resolved_user_id) != int(user_id):
-                    user_id = int(resolved_user_id)
-                    self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
-                    log.info("VOICE MAP DAVE REMAP | idx=%d ssrc=%d user_id=%s", idx, ssrc, user_id)
-
-                if opus_packet is None:
-                    failed += 1
-                    dave_fail += 1
-                    if dave_reason.startswith("deferred_") or (dave_success == 0 and dave_fail <= VOICE_DAVE_WARMUP_GRACE_PACKETS):
-                        dave_warmup_skips += 1
-                        if packet_index <= 5:
-                            log.info(
-                                "PACKET DAVE defer/skip | idx=%d pkt=%d seq=%d ts=%d reason=%s grace=%d/%d",
-                                idx,
-                                packet_index,
-                                p["sequence"],
-                                p["timestamp"],
-                                dave_reason,
-                                dave_fail,
-                                VOICE_DAVE_WARMUP_GRACE_PACKETS,
-                            )
-                    else:
-                        if packet_index <= 3:
-                            log.warning(
-                                "PACKET DAVE failed | idx=%d pkt=%d seq=%d ts=%d outer_len=%d ext_len=%d reason=%s",
-                                idx,
-                                packet_index,
-                                p["sequence"],
-                                p["timestamp"],
-                                len(outer_plain),
-                                max(0, outer_info["header_len"] - outer_info["unencrypted_header_len"]),
-                                dave_reason,
-                            )
-                    continue
-
-                used_dave_inner = dave_reason.startswith("inner_")
-                if used_dave_inner:
-                    dave_success += 1
-            else:
-                opus_packet = outer_plain
+            used_dave_inner = dave_reason.startswith("inner_")
+            if used_dave_inner:
+                dave_success += 1
 
             normalized_packets.append({**p, "opus_packet": opus_packet, "used_dave_inner": used_dave_inner})
 
-        normalized_packets.extend(self._drain_pending_inner_packets(ssrc=int(ssrc), user_id=int(user_id)))
+        recovered_pending = self._drain_pending_inner_packets(
+            ssrc=int(ssrc),
+            user_id=int(user_id),
+        )
+        normalized_packets.extend(recovered_pending)
+        dave_success += sum(
+            bool(packet.get("used_dave_inner"))
+            for packet in recovered_pending
+        )
+        if self.pending_inner_packets.get(int(ssrc)):
+            retry_item = deepcopy(item)
+            retry_item["dave_retry"] = dave_retry + 1
+            retry_item["normalized_packets"] = normalized_packets
+
+            async def _requeue_dave_retry() -> None:
+                retry_delay_sec = VOICE_PENDING_INNER_MAX_AGE_SEC / max(
+                    1,
+                    VOICE_PENDING_INNER_MAX_ATTEMPTS - 1,
+                )
+                await asyncio.sleep(retry_delay_sec)
+                await self.utterance_queue.put(retry_item)
+
+            retry_task = asyncio.create_task(_requeue_dave_retry())
+            self._utterance_processing_tasks.add(retry_task)
+            retry_task.add_done_callback(self._utterance_processing_tasks.discard)
+            return
         normalized_packets = self._ordered_unique_packets(normalized_packets)
         expanded_packets = self._expand_packets_with_fakes(normalized_packets)
 
