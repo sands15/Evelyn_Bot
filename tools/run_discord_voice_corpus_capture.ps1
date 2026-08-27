@@ -65,6 +65,7 @@ $gitCommand = $null
 $sourceRevision = ''
 $captureToolSha256 = ''
 $initialDockerRunning = $null
+$dockerStartAttemptedByLauncher = $false
 $dockerStartedByLauncher = $false
 $baselineContainers = ''
 $protectedImageSnapshot = ''
@@ -226,33 +227,45 @@ function Get-DockerInitialState {
     if (Test-DockerReady) {
         return $true
     }
-    $status = Invoke-Docker `
-        -Arguments @('desktop', 'status') `
-        -TimeoutSec 30 `
-        -AllowFailure
+    $status = $null
+    try {
+        $status = Invoke-Docker `
+            -Arguments @('desktop', 'status') `
+            -TimeoutSec 10 `
+            -AllowFailure
+    } catch {
+        if ([string]$_.Exception.Message -cne 'process_timeout') {
+            throw
+        }
+    }
     if (
+        $null -ne $status -and
         $status.ExitCode -eq 0 -and
         $status.Stdout.Trim().ToLowerInvariant() -match 'stopped|not running'
     ) {
         return $false
     }
-    $desktopProcesses = @(
-        Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue
-    )
+    $desktopProcesses = @(Get-DockerDesktopOwnerProcesses)
     if ($desktopProcesses.Count -eq 0) {
-        return $false
+        if (Test-DockerDesktopWslStopped) {
+            return $false
+        }
     }
     throw 'docker_initial_state_unknown'
 }
 
 function Start-DockerDesktop {
-    $null = Invoke-Docker -Arguments @('desktop', 'start') -TimeoutSec 180
+    $null = Invoke-Docker `
+        -Arguments @('desktop', 'start', '--detach', '--timeout', '30') `
+        -TimeoutSec 45
     Wait-DockerState -Running $true
 }
 
 function Stop-DockerDesktop {
-    $null = Invoke-Docker -Arguments @('desktop', 'stop') -TimeoutSec 180
-    Wait-DockerState -Running $false
+    $null = Invoke-Docker `
+        -Arguments @('desktop', 'stop', '--detach', '--timeout', '30') `
+        -TimeoutSec 45
+    Wait-DockerDesktopFullyStopped
 }
 
 function Assert-FixedDescendant {
@@ -274,6 +287,199 @@ function Assert-FixedDescendant {
         throw 'owned_path_outside_fixed_root'
     }
     return $resolvedPath
+}
+
+function Get-DockerDesktopOwnerProcesses {
+    return @(
+        Get-Process -Name @(
+            'Docker Desktop',
+            'com.docker.backend',
+            'com.docker.build',
+            'docker-sandboxd',
+            'vpnkit'
+        ) -ErrorAction SilentlyContinue
+    )
+}
+
+function Test-DockerDesktopWslStopped {
+    $wslCommand = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if ($null -eq $wslCommand) {
+        throw 'docker_wsl_state_unknown'
+    }
+    $result = Invoke-ExternalProcess `
+        -FilePath $wslCommand.Source `
+        -ArgumentList @('--list', '--running', '--quiet') `
+        -TimeoutSec 15 `
+        -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        throw 'docker_wsl_state_unknown'
+    }
+    $runningDistributions = @(
+        (($result.Stdout -replace "`0", '') -split "`r?`n") |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $runningDockerDistributions = @(
+        $runningDistributions | Where-Object {
+            $_ -in @('docker-desktop', 'docker-desktop-data')
+        }
+    )
+    return $runningDockerDistributions.Count -eq 0
+}
+
+function Test-DockerDesktopFullyStopped {
+    if (Test-DockerReady) {
+        return $false
+    }
+    if (@(Get-DockerDesktopOwnerProcesses).Count -ne 0) {
+        return $false
+    }
+    return Test-DockerDesktopWslStopped
+}
+
+function Wait-DockerDesktopFullyStopped {
+    $deadline = [DateTime]::UtcNow.AddSeconds($dockerWaitSec)
+    $stableChecks = 0
+    do {
+        if (Test-DockerDesktopFullyStopped) {
+            $stableChecks += 1
+            if ($stableChecks -ge 2) {
+                return
+            }
+        } else {
+            $stableChecks = 0
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'docker_state_timeout'
+}
+
+function Assert-StaleDockerSocketDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$AllowedNames
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    $directory = Get-Item -Force -LiteralPath $Path
+    if (
+        -not $directory.PSIsContainer -or
+        ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+    ) {
+        throw 'docker_runtime_socket_directory_unsafe'
+    }
+    $entries = @(Get-ChildItem -Force -LiteralPath $Path)
+    if ($entries.Count -eq 0) {
+        return $false
+    }
+    foreach ($entry in $entries) {
+        if (
+            $AllowedNames -cnotcontains $entry.Name -or
+            $entry.PSIsContainer -or
+            [int64]$entry.Length -ne 0 -or
+            -not (
+                $entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint
+            ) -or
+            $null -ne $entry.LinkType -or
+            $null -ne $entry.Target
+        ) {
+            throw 'docker_runtime_socket_entry_unsafe'
+        }
+    }
+    return $true
+}
+
+function Quarantine-StaleDockerRuntimeSockets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('prestart', 'poststop', 'failed-start')]
+        [string]$Phase
+    )
+
+    if (-not (Test-DockerDesktopFullyStopped)) {
+        throw 'docker_runtime_not_fully_stopped'
+    }
+    Start-Sleep -Milliseconds 500
+    if (-not (Test-DockerDesktopFullyStopped)) {
+        throw 'docker_runtime_not_fully_stopped'
+    }
+
+    $localAppDataRoot = [System.IO.Path]::GetFullPath(
+        [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::LocalApplicationData
+        )
+    )
+    $dockerLocalRoot = Join-Path $localAppDataRoot 'Docker'
+    foreach ($fixedRoot in @($localAppDataRoot, $dockerLocalRoot)) {
+        $rootItem = Get-Item -Force -LiteralPath $fixedRoot
+        if (
+            -not $rootItem.PSIsContainer -or
+            ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        ) {
+            throw 'docker_runtime_socket_directory_unsafe'
+        }
+    }
+    $specifications = @(
+        [pscustomobject]@{
+            Source = Join-Path $localAppDataRoot 'Docker\run'
+            DestinationName = 'run'
+            AllowedNames = @(
+                'dockerEthernetVfkit',
+                'dockerInference',
+                'userAnalyticsOtlpHttp.sock'
+            )
+        },
+        [pscustomobject]@{
+            Source = Join-Path $localAppDataRoot 'docker-secrets-engine'
+            DestinationName = 'docker-secrets-engine'
+            AllowedNames = @('engine.sock')
+        }
+    )
+    $directoriesToMove = [System.Collections.Generic.List[object]]::new()
+    foreach ($specification in $specifications) {
+        $source = Assert-FixedDescendant `
+            -Path $specification.Source `
+            -Root $localAppDataRoot
+        if (
+            Assert-StaleDockerSocketDirectory `
+                -Path $source `
+                -AllowedNames $specification.AllowedNames
+        ) {
+            $directoriesToMove.Add($specification)
+        }
+    }
+    if ($directoriesToMove.Count -eq 0) {
+        return
+    }
+
+    $quarantineRoot = Assert-FixedDescendant `
+        -Path (Join-Path $dockerLocalRoot (
+            "evelyn-stale-runtime\$runId-$Phase"
+        )) `
+        -Root $localAppDataRoot
+    if (Test-Path -LiteralPath $quarantineRoot) {
+        throw 'docker_runtime_quarantine_exists'
+    }
+    $null = New-Item -ItemType Directory -Path $quarantineRoot
+    foreach ($specification in $directoriesToMove) {
+        $destination = Join-Path `
+            $quarantineRoot `
+            $specification.DestinationName
+        $null = Assert-FixedDescendant `
+            -Path $destination `
+            -Root $quarantineRoot
+        Move-Item `
+            -LiteralPath $specification.Source `
+            -Destination $destination
+        $null = New-Item -ItemType Directory -Path $specification.Source
+    }
+    Write-Output (
+        'docker_runtime_sockets_quarantined phase={0} directories={1}' -f
+        $Phase,
+        $directoriesToMove.Count
+    )
 }
 
 function Assert-CaptureRootsSafe {
@@ -1344,6 +1550,11 @@ function Get-AllowlistedRunFailureCode {
         'capture_root_unsafe',
         'docker_initial_state_unknown',
         'docker_state_timeout',
+        'docker_wsl_state_unknown',
+        'docker_runtime_not_fully_stopped',
+        'docker_runtime_socket_directory_unsafe',
+        'docker_runtime_socket_entry_unsafe',
+        'docker_runtime_quarantine_exists',
         'capture_owner_busy',
         'host_voice_owner_active',
         'production_container_running',
@@ -1469,10 +1680,10 @@ try {
     }
     Write-LabMarker
 
-    $discordToken = Read-HiddenDiscordToken
-
     $initialDockerRunning = Get-DockerInitialState
     if (-not $initialDockerRunning) {
+        $null = Quarantine-StaleDockerRuntimeSockets -Phase 'prestart'
+        $dockerStartAttemptedByLauncher = $true
         Start-DockerDesktop
         $dockerStartedByLauncher = $true
     }
@@ -1542,6 +1753,7 @@ try {
 
     $null = Invoke-Docker -Arguments @('container', 'start', $botContainerId)
     Wait-BotApiReady
+    $discordToken = Read-HiddenDiscordToken
     try {
         $captureProcess = Start-CaptureWithHiddenToken -SecureToken $discordToken
     } finally {
@@ -1581,7 +1793,11 @@ try {
         Add-CleanupFailure -Code 'process_environment_clear_failed'
     }
 
-    if ($null -ne $initialDockerRunning -and -not (Test-DockerReady)) {
+    if (
+        $null -ne $initialDockerRunning -and
+        $initialDockerRunning -and
+        -not (Test-DockerReady)
+    ) {
         try {
             Start-DockerDesktop
         } catch {
@@ -1703,14 +1919,23 @@ try {
                 if (-not (Test-DockerReady)) {
                     Start-DockerDesktop
                 }
-            } elseif (
-                $dockerStartedByLauncher -and
-                $ownedDockerResourcesZero -and
-                $hostDockerStateUnchanged
-            ) {
-                Stop-DockerDesktop
+            } elseif ($dockerStartAttemptedByLauncher) {
+                if (-not (Test-DockerDesktopFullyStopped)) {
+                    Stop-DockerDesktop
+                }
+                $quarantinePhase = if ($dockerStartedByLauncher) {
+                    'poststop'
+                } else {
+                    'failed-start'
+                }
+                $null = Quarantine-StaleDockerRuntimeSockets `
+                    -Phase $quarantinePhase
             }
-            if ((Test-DockerReady) -ne [bool]$initialDockerRunning) {
+            if ($initialDockerRunning) {
+                if (-not (Test-DockerReady)) {
+                    throw 'docker_restore_failed'
+                }
+            } elseif (-not (Test-DockerDesktopFullyStopped)) {
                 throw 'docker_restore_failed'
             }
         } catch {

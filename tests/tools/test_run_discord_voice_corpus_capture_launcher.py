@@ -142,12 +142,15 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         token_prompt = source.index("$discordToken = Read-HiddenDiscordToken")
         docker_start = source.index("$initialDockerRunning = Get-DockerInitialState")
         first_build = source.index("$botImageId = Build-OwnedImage")
+        bot_ready = source.index("\n    Wait-BotApiReady\n")
         token_handoff = source.index(
             "Start-CaptureWithHiddenToken -SecureToken $discordToken"
         )
-        self.assertLess(token_prompt, docker_start)
-        self.assertLess(token_prompt, first_build)
+        self.assertLess(docker_start, token_prompt)
+        self.assertLess(first_build, token_prompt)
+        self.assertLess(bot_ready, token_prompt)
         self.assertLess(first_build, token_handoff)
+        self.assertLess(token_prompt, token_handoff)
         self.assertIn("[Security.SecureString]$SecureToken", source)
         self.assertIn(
             "Start-CaptureWithHiddenToken -SecureToken $discordToken",
@@ -209,7 +212,24 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("Move-Item -LiteralPath $capturePath -Destination $stagingAttempt", source)
         self.assertIn("Remove-Item -LiteralPath $resolved -Recurse -Force", source)
         self.assertIn("Get-DockerInitialState", source)
-        self.assertIn("Get-Process -Name 'Docker Desktop'", source)
+        self.assertIn("Get-DockerDesktopOwnerProcesses", source)
+        self.assertIn("Test-DockerDesktopWslStopped", source)
+        self.assertIn("'docker-desktop-data'", source)
+        self.assertIn("Test-DockerDesktopFullyStopped", source)
+        self.assertIn("Quarantine-StaleDockerRuntimeSockets", source)
+        self.assertIn("'dockerEthernetVfkit'", source)
+        self.assertIn("'dockerInference'", source)
+        self.assertIn("'userAnalyticsOtlpHttp.sock'", source)
+        self.assertIn("'engine.sock'", source)
+        self.assertIn("[int64]$entry.Length -ne 0", source)
+        self.assertIn("$null -ne $entry.LinkType", source)
+        self.assertIn("$null -ne $entry.Target", source)
+        self.assertIn("Move-Item `\n            -LiteralPath $specification.Source", source)
+        self.assertIn("'desktop', 'start', '--detach', '--timeout', '30'", source)
+        self.assertIn("'desktop', 'stop', '--detach', '--timeout', '30'", source)
+        self.assertIn("$dockerStartAttemptedByLauncher = $true", source)
+        self.assertNotIn("'--force'", source)
+        self.assertNotIn("factory reset", source.lower())
         self.assertIn("if ($desktopProcesses.Count -eq 0)", source)
         self.assertIn("Start-DockerDesktop", source)
         self.assertIn("Stop-DockerDesktop", source)
@@ -221,6 +241,27 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("$hostDockerStateUnchanged", source)
         self.assertNotIn("$previousDiscordToken", source)
         self.assertNotIn("$previousLeaseToken", source)
+
+        restore_start = source.index(
+            "} elseif ($dockerStartAttemptedByLauncher) {"
+        )
+        stop_guard = source.index(
+            "if (-not (Test-DockerDesktopFullyStopped))",
+            restore_start,
+        )
+        stop_call = source.index("Stop-DockerDesktop", stop_guard)
+        quarantine_call = source.index(
+            "Quarantine-StaleDockerRuntimeSockets",
+            stop_call,
+        )
+        off_proof = source.index(
+            "} elseif (-not (Test-DockerDesktopFullyStopped))",
+            quarantine_call,
+        )
+        self.assertLess(restore_start, stop_guard)
+        self.assertLess(stop_guard, stop_call)
+        self.assertLess(stop_call, quarantine_call)
+        self.assertLess(quarantine_call, off_proof)
 
         wait_index = source.index("Wait-CaptureProcess -CaptureHandle $captureProcess")
         lease_index = source.index("Assert-VoiceLeaseReleased", wait_index)

@@ -1018,6 +1018,100 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [b"\xf8\xff\xfe"],
         )
 
+    async def test_pending_dave_speech_precedes_carried_silence_without_gap(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = (
+            lambda *_args, **_kwargs: b""
+        )
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        voice_client = object.__new__(client_module.EvelynVoiceClient)
+        voice_client.runtime = SimpleNamespace(
+            get_preferred_user_id=lambda _ssrc: 9,
+            current_speaking_user_id=9,
+            pending_user_ids=[],
+            dave_ssrc_to_user_id={},
+            voice_secret_key=b"k" * 32,
+            voice_mode="aead_xchacha20_poly1305_rtpsize",
+            dave_protocol_version=1,
+            bind_dave_ssrc=Mock(),
+        )
+        voice_client.dave = SimpleNamespace(ready=True)
+        voice_client._sync_dave_from_base = Mock()
+        voice_client.opus_decoder_stats = {}
+        voice_client.pending_inner_log_times = {}
+        voice_client._log_pending_inner_event = Mock()
+
+        now = asyncio.get_running_loop().time()
+        speech_packet = {
+            "raw_packet": b"raw-speech",
+            "ssrc": 7,
+            "sequence": 1,
+            "timestamp": 960,
+            "payload": b"dave-speech",
+        }
+        silence_packet = {
+            "raw_packet": b"raw-silence",
+            "ssrc": 7,
+            "sequence": 2,
+            "timestamp": 1920,
+            "payload": b"\xf8\xff\xfe",
+            "opus_packet": b"\xf8\xff\xfe",
+            "used_dave_inner": True,
+        }
+        voice_client.pending_inner_packets = {
+            7: [
+                {
+                    "packet": speech_packet,
+                    "payload": b"dave-speech",
+                    "user_id": 9,
+                    "queued_at": now,
+                    "attempts": 0,
+                    "ranges_count": 0,
+                    "sequence": 1,
+                }
+            ]
+        }
+        voice_client._try_dave_inner_decrypt = Mock(
+            return_value=(b"opus-speech", 9, "ok")
+        )
+
+        expanded_packets = []
+        expand_packets = client_module.EvelynVoiceClient._expand_packets_with_fakes
+
+        def capture_expanded_packets(packets):
+            expanded_packets.extend(expand_packets(voice_client, packets))
+            return []
+
+        voice_client._expand_packets_with_fakes = capture_expanded_packets
+        await voice_client._process_utterance_packets(
+            {
+                "idx": 1,
+                "ssrc": 7,
+                "packets": [speech_packet, silence_packet],
+                "body_packets": [speech_packet, silence_packet],
+                "normalized_packets": [silence_packet],
+                "dave_retry": 1,
+            }
+        )
+
+        self.assertEqual(
+            [packet["sequence"] for packet in expanded_packets],
+            [1, 2],
+        )
+        self.assertFalse(any(packet["fake_packet"] for packet in expanded_packets))
+
     async def test_cancelled_release_drain_waits_for_capture_stop_and_release(self) -> None:
         davey = ModuleType("davey")
         davey.DAVE_PROTOCOL_VERSION = 1

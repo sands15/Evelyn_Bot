@@ -1080,11 +1080,19 @@ class EvelynVoiceClient(discord.VoiceClient):
         return max(0, ((int(current_seq) - int(previous_seq) - 1) & 0xFFFF))
 
     @staticmethod
-    def _ordered_unique_packets(packets: list[dict]) -> list[dict]:
+    def _ordered_unique_packets(
+        packets: list[dict],
+        *,
+        anchor_sequence: int | None = None,
+    ) -> list[dict]:
         if len(packets) <= 1:
             return packets
 
-        anchor = int(packets[0].get("sequence", 0))
+        anchor = int(
+            packets[0].get("sequence", 0)
+            if anchor_sequence is None
+            else anchor_sequence
+        )
         ordered: dict[int, dict] = {}
         for packet in packets:
             seq = int(packet.get("sequence", 0))
@@ -2857,7 +2865,10 @@ class EvelynVoiceClient(discord.VoiceClient):
             self._utterance_processing_tasks.add(retry_task)
             retry_task.add_done_callback(self._utterance_processing_tasks.discard)
             return
-        normalized_packets = self._ordered_unique_packets(normalized_packets)
+        normalized_packets = self._ordered_unique_packets(
+            normalized_packets,
+            anchor_sequence=first_seq,
+        )
         expanded_packets = self._expand_packets_with_fakes(normalized_packets)
 
         body_seq_keys = {
