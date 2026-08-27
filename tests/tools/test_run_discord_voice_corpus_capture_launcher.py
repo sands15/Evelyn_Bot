@@ -21,6 +21,7 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
     def test_uses_clean_head_and_isolated_exact_owned_resources(self) -> None:
         source = self.source
 
+        self.assertTrue(source.startswith("#Requires -Version 7.2\n"))
         self.assertIn("'status', '--porcelain', '--untracked-files=all', '--', '.'", source)
         self.assertIn("'rev-parse', 'HEAD'", source)
         self.assertIn("source_tree_not_clean", source)
