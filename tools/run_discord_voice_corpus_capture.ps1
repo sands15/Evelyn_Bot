@@ -33,7 +33,8 @@ $captureOuterGraceSec = 60
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $captureTool = Join-Path $projectRoot 'tools\discord_voice_corpus_capture.py'
 $botDockerfile = Join-Path $projectRoot 'docker\Dockerfile.bot-api'
-$discordDockerfile = Join-Path $projectRoot 'docker\Dockerfile.discord-bot'
+$discordDockerfile = Join-Path $projectRoot 'docker\Dockerfile.discord-capture'
+$discordRequirements = Join-Path $projectRoot 'docker\requirements.discord-capture.txt'
 $runtimeArtifactsRoot = Join-Path $projectRoot 'runtime_artifacts'
 $validationRoot = Join-Path $runtimeArtifactsRoot 'validation'
 $voiceAsrStagingRoot = Join-Path $validationRoot 'voice_asr_staging'
@@ -61,15 +62,6 @@ $labMarker = Join-Path $labAttempt $markerName
 $dockerCommand = $null
 $gitCommand = $null
 
-$previousDiscordToken = [Environment]::GetEnvironmentVariable(
-    'DISCORD_BOT_TOKEN',
-    [EnvironmentVariableTarget]::Process
-)
-$previousLeaseToken = [Environment]::GetEnvironmentVariable(
-    'EVELYN_VOICE_INPUT_LEASE_TOKEN',
-    [EnvironmentVariableTarget]::Process
-)
-
 $sourceRevision = ''
 $captureToolSha256 = ''
 $initialDockerRunning = $null
@@ -82,6 +74,7 @@ $networkId = ''
 $botContainerId = ''
 $captureContainerId = ''
 $captureProcess = $null
+$discordToken = $null
 $captureMutex = $null
 $captureMutexOwned = $false
 $hostInstanceLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
@@ -724,19 +717,59 @@ function Wait-BotApiReady {
     throw 'bot_api_readiness_timeout'
 }
 
-function Start-CaptureWithHiddenToken {
+function Read-HiddenDiscordToken {
     $secureToken = $null
-    $plainToken = ''
-    $bstr = [IntPtr]::Zero
+    $tokenValid = $false
     try {
         $secureToken = Read-Host 'Discord bot token' -AsSecureString
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
-        $plainToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         if (
-            [string]::IsNullOrWhiteSpace($plainToken) -or
-            [Text.Encoding]::UTF8.GetByteCount($plainToken) -gt 512 -or
-            $plainToken -match '\s'
+            $null -eq $secureToken -or
+            $secureToken.Length -le 0 -or
+            $secureToken.Length -gt 512
         ) {
+            throw 'discord_token_invalid'
+        }
+
+        $secureToken.MakeReadOnly()
+        $tokenValid = $true
+        return $secureToken
+    } finally {
+        if (-not $tokenValid -and $null -ne $secureToken) {
+            $secureToken.Dispose()
+        }
+    }
+}
+
+function Start-CaptureWithHiddenToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Security.SecureString]$SecureToken
+    )
+
+    $tokenChars = $null
+    $tokenBytes = $null
+    $bstr = [IntPtr]::Zero
+    $process = $null
+    $processStarted = $false
+    $handleReturned = $false
+    try {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken)
+        $tokenChars = [char[]]::new($SecureToken.Length)
+        [Runtime.InteropServices.Marshal]::Copy(
+            $bstr,
+            $tokenChars,
+            0,
+            $tokenChars.Length
+        )
+        $containsWhitespace = $false
+        foreach ($tokenChar in $tokenChars) {
+            if ([char]::IsWhiteSpace($tokenChar)) {
+                $containsWhitespace = $true
+                break
+            }
+        }
+        $tokenBytes = [Text.Encoding]::UTF8.GetBytes($tokenChars)
+        if ($tokenBytes.Length -le 0 -or $tokenBytes.Length -gt 512 -or $containsWhitespace) {
             throw 'discord_token_invalid'
         }
 
@@ -755,28 +788,55 @@ function Start-CaptureWithHiddenToken {
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         if (-not $process.Start()) {
-            $process.Dispose()
             throw 'capture_process_start_failed'
         }
+        $processStarted = $true
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.StandardInput.WriteLine($plainToken)
-        $process.StandardInput.Flush()
-        $process.StandardInput.Close()
-        $plainToken = ''
+        $stdinStream = $process.StandardInput.BaseStream
+        $stdinStream.Write($tokenBytes, 0, $tokenBytes.Length)
+        $stdinStream.WriteByte(10)
+        $stdinStream.Flush()
+        $stdinStream.Close()
 
-        return [pscustomobject]@{
+        $handle = [pscustomobject]@{
             Process = $process
             StdoutTask = $stdoutTask
             StderrTask = $stderrTask
         }
+        $handleReturned = $true
+        return $handle
     } finally {
-        $plainToken = ''
+        if ($null -ne $tokenChars) {
+            [Array]::Clear($tokenChars, 0, $tokenChars.Length)
+        }
+        if ($null -ne $tokenBytes) {
+            [Array]::Clear($tokenBytes, 0, $tokenBytes.Length)
+        }
         if ($bstr -ne [IntPtr]::Zero) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         }
-        if ($null -ne $secureToken) {
-            $secureToken.Dispose()
+        if (-not $handleReturned -and $null -ne $process) {
+            try {
+                if ($processStarted) {
+                    try {
+                        $process.StandardInput.BaseStream.Close()
+                    } catch {
+                    }
+                    if (-not $process.HasExited) {
+                        try {
+                            $process.Kill($true)
+                        } catch {
+                            $process.Kill()
+                        }
+                        $process.WaitForExit()
+                    }
+                }
+            } catch {
+                Add-CleanupFailure -Code 'capture_client_cleanup_failed'
+            } finally {
+                $process.Dispose()
+            }
         }
     }
 }
@@ -1353,7 +1413,12 @@ try {
         $null,
         [EnvironmentVariableTarget]::Process
     )
-    foreach ($requiredPath in @($captureTool, $botDockerfile, $discordDockerfile)) {
+    foreach ($requiredPath in @(
+        $captureTool,
+        $botDockerfile,
+        $discordDockerfile,
+        $discordRequirements
+    )) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw 'required_source_missing'
         }
@@ -1403,6 +1468,8 @@ try {
         $null = New-Item -ItemType Directory -Path $stagingRoot -Force
     }
     Write-LabMarker
+
+    $discordToken = Read-HiddenDiscordToken
 
     $initialDockerRunning = Get-DockerInitialState
     if (-not $initialDockerRunning) {
@@ -1475,7 +1542,12 @@ try {
 
     $null = Invoke-Docker -Arguments @('container', 'start', $botContainerId)
     Wait-BotApiReady
-    $captureProcess = Start-CaptureWithHiddenToken
+    try {
+        $captureProcess = Start-CaptureWithHiddenToken -SecureToken $discordToken
+    } finally {
+        $discordToken.Dispose()
+        $discordToken = $null
+    }
     Wait-CaptureProcess -CaptureHandle $captureProcess
     Assert-VoiceLeaseReleased
     Publish-ValidatedCapture
@@ -1486,6 +1558,14 @@ try {
         [string]$_.Exception.Message
     )
 } finally {
+    if ($null -ne $discordToken) {
+        try {
+            $discordToken.Dispose()
+            $discordToken = $null
+        } catch {
+            Add-CleanupFailure -Code 'discord_token_dispose_failed'
+        }
+    }
     try {
         [Environment]::SetEnvironmentVariable(
             'DISCORD_BOT_TOKEN',
@@ -1638,20 +1718,6 @@ try {
         }
     }
 
-    try {
-        [Environment]::SetEnvironmentVariable(
-            'DISCORD_BOT_TOKEN',
-            $previousDiscordToken,
-            [EnvironmentVariableTarget]::Process
-        )
-        [Environment]::SetEnvironmentVariable(
-            'EVELYN_VOICE_INPUT_LEASE_TOKEN',
-            $previousLeaseToken,
-            [EnvironmentVariableTarget]::Process
-        )
-    } catch {
-        Add-CleanupFailure -Code 'process_environment_restore_failed'
-    }
     try {
         Release-HostVoiceExclusion
     } catch {

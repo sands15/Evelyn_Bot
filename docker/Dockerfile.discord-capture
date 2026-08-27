@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/evelyn_core/runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libopus0 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/requirements.discord-capture.txt /app/docker/requirements.discord-capture.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check \
+    -r /app/docker/requirements.discord-capture.txt
+
+COPY main.py /app/main.py
+COPY evelyn_core/runtime /app/evelyn_core/runtime
+COPY evelyn_voice /app/evelyn_voice
+COPY tools/discord_voice_corpus_capture.py /app/tools/discord_voice_corpus_capture.py
+
+ARG EVELYN_SOURCE_REVISION=unversioned
+
+ENV EVELYN_CORE_RUNTIME=/app/evelyn_core/runtime
+ENV EVELYN_CORE_ROOT=/app/evelyn_core
+ENV EVELYN_PROJECT_ROOT=/app
+ENV EVELYN_RUNTIME_ROLE=discord_capture
+ENV EVELYN_IMAGE_SOURCE_REVISION=${EVELYN_SOURCE_REVISION}
+
+CMD ["python", "/app/tools/discord_voice_corpus_capture.py"]

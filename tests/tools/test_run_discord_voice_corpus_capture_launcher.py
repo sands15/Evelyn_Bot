@@ -10,6 +10,9 @@ REPO_ROOT = next(
 )
 LAUNCHER = REPO_ROOT / "tools" / "run_discord_voice_corpus_capture.ps1"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+CAPTURE_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.discord-capture"
+CAPTURE_DOCKERIGNORE = REPO_ROOT / "docker" / "Dockerfile.discord-capture.dockerignore"
+CAPTURE_REQUIREMENTS = REPO_ROOT / "docker" / "requirements.discord-capture.txt"
 
 
 class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
@@ -17,6 +20,9 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = LAUNCHER.read_text(encoding="utf-8")
         cls.dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
+        cls.capture_dockerfile = CAPTURE_DOCKERFILE.read_text(encoding="utf-8")
+        cls.capture_dockerignore = CAPTURE_DOCKERIGNORE.read_text(encoding="utf-8")
+        cls.capture_requirements = CAPTURE_REQUIREMENTS.read_text(encoding="utf-8")
 
     def test_uses_clean_head_and_isolated_exact_owned_resources(self) -> None:
         source = self.source
@@ -35,7 +41,8 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("Assert-NoExistingCaptureOwner", source)
         self.assertIn("Recover-OwnedResourceIds", source)
         self.assertIn("docker\\Dockerfile.bot-api", source)
-        self.assertIn("docker\\Dockerfile.discord-bot", source)
+        self.assertIn("docker\\Dockerfile.discord-capture", source)
+        self.assertNotIn("docker\\Dockerfile.discord-bot", source)
         self.assertIn("--pull=false", source)
         self.assertIn("capture-tool-sha256", source)
         self.assertIn("--read-only", source)
@@ -66,6 +73,32 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertNotIn("--publish", source)
         self.assertNotIn("--device", source)
         self.assertNotIn("/dev/snd", source)
+
+        capture_requirements = self.capture_requirements.lower()
+        for forbidden_dependency in (
+            "torch",
+            "silero",
+            "sounddevice",
+            "pillow",
+            "psutil",
+            "requests",
+        ):
+            self.assertNotIn(forbidden_dependency, capture_requirements)
+        for required_dependency in ("aiohttp", "discord.py", "numpy", "pynacl", "davey"):
+            self.assertIn(required_dependency, capture_requirements)
+
+        capture_dockerfile = self.capture_dockerfile
+        self.assertIn("apt-get install -y --no-install-recommends libopus0", capture_dockerfile)
+        self.assertNotIn("COPY .", capture_dockerfile)
+        self.assertNotIn("ffmpeg", capture_dockerfile)
+        self.assertNotIn("libportaudio", capture_dockerfile)
+        self.assertNotIn("libsndfile", capture_dockerfile)
+        dependency_install = capture_dockerfile.index("python -m pip install")
+        source_revision_arg = capture_dockerfile.index("ARG EVELYN_SOURCE_REVISION")
+        self.assertLess(dependency_install, source_revision_arg)
+        self.assertIn("!evelyn_core/runtime/**", self.capture_dockerignore)
+        self.assertIn("!evelyn_voice/**", self.capture_dockerignore)
+        self.assertIn("!tools/discord_voice_corpus_capture.py", self.capture_dockerignore)
 
         mandatory_channel = re.compile(
             r"\[Parameter\(Mandatory = \$true\)\]\s*"
@@ -106,11 +139,47 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         source = self.source
 
         self.assertIn("Read-Host 'Discord bot token' -AsSecureString", source)
+        token_prompt = source.index("$discordToken = Read-HiddenDiscordToken")
+        docker_start = source.index("$initialDockerRunning = Get-DockerInitialState")
+        first_build = source.index("$botImageId = Build-OwnedImage")
+        token_handoff = source.index(
+            "Start-CaptureWithHiddenToken -SecureToken $discordToken"
+        )
+        self.assertLess(token_prompt, docker_start)
+        self.assertLess(token_prompt, first_build)
+        self.assertLess(first_build, token_handoff)
+        self.assertIn("[Security.SecureString]$SecureToken", source)
+        self.assertIn(
+            "Start-CaptureWithHiddenToken -SecureToken $discordToken",
+            source,
+        )
+        self.assertGreaterEqual(source.count("$discordToken.Dispose()"), 2)
+        self.assertEqual(source.count("Read-Host 'Discord bot token'"), 1)
+        self.assertIn("$secureToken.MakeReadOnly()", source)
+        self.assertIn("[Runtime.InteropServices.Marshal]::Copy(", source)
+        self.assertIn("$process.StandardInput.BaseStream", source)
+        self.assertIn("$stdinStream.Write($tokenBytes", source)
+        self.assertIn("$stdinStream.WriteByte(10)", source)
+        self.assertIn("[Array]::Clear($tokenChars", source)
+        self.assertIn("[Array]::Clear($tokenBytes", source)
+        self.assertIn("$processStarted = $true", source)
+        self.assertNotIn("$process.StandardInput.Write($tokenChars", source)
+        self.assertNotIn("PtrToStringBSTR", source)
+        self.assertNotIn("$plainToken", source)
+        handoff_disposal = re.compile(
+            r"try\s*\{\s*"
+            r"\$captureProcess = Start-CaptureWithHiddenToken "
+            r"-SecureToken \$discordToken\s*"
+            r"\}\s*finally\s*\{\s*"
+            r"\$discordToken\.Dispose\(\)\s*"
+            r"\$discordToken = \$null",
+            re.DOTALL,
+        )
+        self.assertRegex(source, handoff_disposal)
         self.assertIn("[System.Diagnostics.ProcessStartInfo]::new()", source)
         self.assertIn("$startInfo.RedirectStandardInput = $true", source)
         self.assertIn("@('start', '--attach', '--interactive', $captureContainerId)", source)
-        self.assertIn("$process.StandardInput.WriteLine($plainToken)", source)
-        self.assertIn("$process.StandardInput.Close()", source)
+        self.assertIn("$stdinStream.Close()", source)
         self.assertIn("--token-stdin", source)
         self.assertNotRegex(source, r"'--env',\s*'DISCORD_BOT_TOKEN'")
         self.assertNotIn("DISCORD_BOT_TOKEN=$plainToken", source)
@@ -150,8 +219,8 @@ class DiscordVoiceCorpusCaptureLauncherContractTests(unittest.TestCase):
         self.assertIn("$hostSnapshotCaptured", source)
         self.assertIn("$ownedDockerResourcesZero", source)
         self.assertIn("$hostDockerStateUnchanged", source)
-        self.assertIn("$previousDiscordToken", source)
-        self.assertIn("$previousLeaseToken", source)
+        self.assertNotIn("$previousDiscordToken", source)
+        self.assertNotIn("$previousLeaseToken", source)
 
         wait_index = source.index("Wait-CaptureProcess -CaptureHandle $captureProcess")
         lease_index = source.index("Assert-VoiceLeaseReleased", wait_index)
