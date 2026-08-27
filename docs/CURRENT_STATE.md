@@ -3567,3 +3567,9 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
   actual engine은 max model length `8192`, GPU memory utilization `0.35`, max sequence `1`, audio per
   prompt `1`이고 입력 상한은 `30초`였다. mismatch는 startup을 fail-close한다. headless GPU1 2+20은
   검증했지만 private corpus, Discord gateway와 마이크는 시작하거나 검증하지 않았다.
+- 2026-08-28 Discord corpus 도구는 텍스트 phrase별 prompt 이후 시작한 한 발화만
+  shape/activity/duplicate gate로 저장하고, exact 10개 뒤 pinned STT에서 각 WAV를 한 번만 진단한다.
+  평가 STT는 admission·자동 retry·삭제·승격에 관여하지 않으며 최종 상태 알림은 cleanup 뒤 text-only다.
+  승인된 guided live capture는 canonical `10/10`과 정상 길이 분포를 통과했지만 aggregate-only 모델 진단은
+  similarity `8/10`, order `9/10`, normalized/entity-action exact `0/10`으로 실패했다. 이는 transport
+  live 근거이지 private corpus나 revised STT promotion 근거가 아니다. [[worklog/2026-08-28]]

@@ -974,3 +974,21 @@ type: decision-log
 - 영향: 최초 유효 credential만 한 번 hidden prompt로 저장한다. 같은 Windows 사용자 권한의 악성
   process는 CurrentUser DPAPI 자체를 호출할 수 있으므로 이 설계의 위협 경계 밖이며, 다른 OS principal,
   accidental plaintext persistence와 ambiguous failure deletion은 fail-closed한다.
+
+## 2026-08-28 — Discord corpus capture admission과 모델 진단을 분리
+
+- 상태: source 구현·guided live capture 완료, 첫 사후 모델 진단 FAIL
+- 결정: Discord corpus는 고정 phrase를 텍스트로 하나씩 안내하고 prompt 이후 시작한 한 발화만
+  transport/shape/activity/duplicate gate로 저장한다. 평가 대상 STT의 결과는 capture admission, clip 선별,
+  자동 retry나 삭제에 사용하지 않는다.
+- 결정: exact 10개가 수집된 뒤 pinned loopback STT에서 각 WAV를 정확히 한 번만 판독한다. pre/post health,
+  nonempty, similarity, same-index unique-best, normalized whole-utterance exact와 critical entity/action exact를
+  aggregate-only로 판정한다. cleanup과 호스트 복구 뒤에만 봇이 고정 성공/실패 텍스트를 한 번 전송하며
+  PASS여도 corpus를 자동 승격하지 않는다.
+- 이유: 평가할 모델로 잘 인식된 clip만 admission하면 corpus가 편향되고 실제 실패를 숨긴다. capture 중
+  음성 안내는 수집 오디오를 오염시킬 수 있으며, fuzzy similarity만으로는 숫자·entity·반대 동작과 trailing
+  contradiction을 놓칠 수 있다.
+- 근거: `tools/discord_voice_corpus_capture.py`, `tools/discord_corpus_model_diagnostic.py`,
+  `tools/discord_capture_status_notify.py`, 관련 tests, [[worklog/2026-08-28]].
+- 영향: 실패 staging은 자동 삭제·재녹음·승격하지 않는다. 사람이 읽기 어려운 phrase는 별도 frozen set
+  변경으로 해결하고, 같은 attempt의 판정 기준이나 transcript를 보고 사후 조정하지 않는다.

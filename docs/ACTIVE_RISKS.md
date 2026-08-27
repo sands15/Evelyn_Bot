@@ -1880,11 +1880,14 @@ Discord `on_ready`의 저장 음성 채널 복원은 fixed `voice_rearm_failed`�
 실패는 한 번으로 끝난다. 이미 존재하는 connected-client 분기의 재무장은 여전히 단발이며,
 실제 stale/transitional Local Bridge heartbeat와 Discord gateway가 겹친 startup은 live 미검증이다.
 
-STT source는 Qwen vLLM session backend와 PyTorch/Torchaudio 2.9.1+cu128 조합으로 바뀌었지만 새
-image를 build/load하지 않았다. 따라서 GPU0의 Main/TTS 동시 사용, 0.35 memory budget, 30초 누적
-재처리의 p95와 OOM 여부, 한국어 CER/entity exact는 미검증이다. `vllm==0.14.0`은 Qwen 0.0.6의
-공식 호환 pin을 따른다. standalone vLLM HTTP/media-fetch surface는 노출하지 않지만, 지원되는
-후속 Qwen/vLLM 조합이 나오면 보안 수정 버전으로 다시 평가해야 한다.
+Revised STT image는 pinned source와 GPU1 headless 2+20에서 load/health/latency/error/cleanup을 통과했다.
+2026-08-28 guided Discord capture도 transport·shape `10/10`을 통과했지만 exact-once 모델 진단은
+similarity `8/10`, order `9/10`, normalized/entity-action exact `0/10`으로 실패했다. 따라서 private
+positive corpus, 한국어 domain entity/action accuracy와 promotion은 계속 미검증이다. 다음 capture는
+사람이 읽기 쉬운 짧은 frozen phrase set을 먼저 승인해야 하며, 평가 STT 결과로 clip을 선별하거나 실패
+clip만 자동 재수집해 corpus를 편향시키지 않는다. `vllm==0.14.0`은 Qwen 0.0.6의 공식 호환 pin을
+따르고 standalone vLLM HTTP/media-fetch surface는 노출하지 않지만, 지원되는 후속 조합이 나오면
+보안 수정 버전으로 다시 평가해야 한다.
 
 Discord는 아직 packet-time Opus decode가 아니라 기존 0.82초 endpoint 뒤 완성 PCM을 resident
 모델의 offline/batch endpoint로 정확히 한 번 보낸다. 정상 final은 wake와 본문 STT가 재사용하고
