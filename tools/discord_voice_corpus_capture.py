@@ -30,6 +30,9 @@ for import_root in (REPO_ROOT, RUNTIME_ROOT):
 import discord  # noqa: E402
 
 from evelyn_core.audio import prepare_stt_audio  # noqa: E402
+from evelyn_core.discord_session_policy import (  # noqa: E402
+    is_transport_corrupted_audio_policy,
+)
 from evelyn_core.paths import get_runtime_artifacts_root  # noqa: E402
 from evelyn_core.voice_ingress_runtime import (  # noqa: E402
     voice_listener_binding_is_current,
@@ -409,7 +412,7 @@ class CorpusCapture:
             try:
                 self.assert_owner(channel, member)
                 self.assert_listener_binding(member, debug_meta)
-                if bool(debug_meta.get("unstable")):
+                if is_transport_corrupted_audio_policy(dict(debug_meta)):
                     self.rejected_count += 1
                     return False
                 pcm16_mono = pcm48_stereo_to_pcm16_mono(pcm_bytes)

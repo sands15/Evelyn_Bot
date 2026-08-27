@@ -172,6 +172,89 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return VoiceSupportCompositionDeps(**values)
 
+    def test_completed_utterance_age_is_not_receiver_instability(self) -> None:
+        davey = ModuleType("davey")
+        davey.DAVE_PROTOCOL_VERSION = 1
+        davey.DaveSession = object
+        davey.MediaType = SimpleNamespace(audio="audio")
+        nacl = ModuleType("nacl")
+        bindings = ModuleType("nacl.bindings")
+        bindings.crypto_aead_xchacha20poly1305_ietf_decrypt = Mock()
+        nacl.bindings = bindings
+
+        with patch.dict(
+            sys.modules,
+            {"davey": davey, "nacl": nacl, "nacl.bindings": bindings},
+        ):
+            client_module = importlib.import_module("evelyn_voice.client")
+
+        clean = {
+            "idx": 1,
+            "ssrc": 7,
+            "packet_count": 100,
+            "expanded_count": 100,
+            "success": 100,
+            "failed": 0,
+            "started_output": True,
+            "dave_success": 100,
+            "dave_warmup_skips": 0,
+            "outer_fail": 0,
+            "dave_fail": 0,
+            "opus_fail": 0,
+            "opus_silence_fill": 0,
+            "real_silence": 0,
+            "plc_packets": 0,
+            "fec_packets": 0,
+            "trim_ms": 0.0,
+            "trim_meta": {"body_rms": 0.03},
+            "first_packet_age_ms": 2_820.0,
+            "queue_wait_ms": 5.0,
+            "decrypt_ms": 2.0,
+            "utterance_total_ms": 2_822.0,
+            "pcm_bytes_len": 384_000,
+            "onset_buffer_ms": 200.0,
+            "onset_reorder_wait_ms": 120.0,
+            "onset_good_packets_before_decode": 10,
+            "onset_plc_count": 0,
+            "onset_fec_count": 0,
+            "onset_opus_fail_count": 0,
+            "onset_trim_ms": None,
+            "onset_packet_ok": True,
+            "onset_failed_ratio": 0.0,
+            "onset_clean_run_packets": 10,
+            "onset_robotic": False,
+            "onset_artifact_score": 0.0,
+            "onset_vad_prob": 0.8,
+            "onset_rms": 0.03,
+            "onset_dropped": False,
+            "segment_started_with_concealment": False,
+            "segment_first_clean_decode_ms": 0.0,
+            "segment_decoder_reset_before_first_clean": False,
+        }
+
+        meta = client_module._build_voice_receive_debug_meta(**clean)
+        self.assertFalse(meta["unstable"])
+        self.assertEqual(meta["timing"]["first_packet_age_ms"], 2_820.0)
+
+        delayed = client_module._build_voice_receive_debug_meta(
+            **{**clean, "queue_wait_ms": 300.0}
+        )
+        self.assertFalse(delayed["unstable"])
+        self.assertEqual(delayed["timing"]["queue_wait_ms"], 300.0)
+
+        trim_ms, trim_meta = client_module._adjust_trim_for_unstable_onset(
+            trim_ms=200.0,
+            trim_meta={},
+            packet_count=100,
+            failed=0,
+            opus_fail=0,
+            plc_packets=0,
+            fec_packets=0,
+            pcm_bytes_len=384_000,
+        )
+        self.assertEqual(trim_ms, 200.0)
+        self.assertFalse(trim_meta["unstable_onset"])
+
     async def test_tts_warmup_sets_started_before_runtime_call(self) -> None:
         events: list[object] = []
         deps = self.build_deps(set_tts_warmup_started=lambda value: events.append(("started", value)))

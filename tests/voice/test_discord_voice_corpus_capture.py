@@ -276,7 +276,7 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(capture.error_code, "listener_binding_stale")
 
-    async def test_unstable_clip_is_rejected_and_stt_audio_path_is_reused(self) -> None:
+    async def test_diagnostic_instability_does_not_override_completed_pcm_contract(self) -> None:
         owner = FakeMember(8)
         bot = FakeMember(9, bot=True)
         pcm = stereo_pcm(frames=4_800, value=700)
@@ -289,16 +289,7 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
 
             unstable_meta = dict(debug_meta)
             unstable_meta["unstable"] = True
-            self.assertFalse(
-                await capture.accept_completed_pcm(
-                    channel=channel,
-                    member=owner,
-                    pcm_bytes=pcm,
-                    debug_meta=unstable_meta,
-                )
-            )
-            self.assertEqual(capture.rejected_count, 1)
-            self.assertEqual(list(output.iterdir()), [])
+            unstable_meta["reasons"] = ["dave_warmup_skips=1"]
 
             canonical = np.linspace(-0.5, 0.5, 1_600, dtype=np.float32)
             with patch(
@@ -310,12 +301,47 @@ class CorpusCaptureTests(unittest.IsolatedAsyncioTestCase):
                         channel=channel,
                         member=owner,
                         pcm_bytes=pcm,
-                        debug_meta=debug_meta,
+                        debug_meta=unstable_meta,
                     )
                 )
             prepare.assert_called_once_with(pcm)
+            self.assertEqual(capture.rejected_count, 0)
             with wave.open(str(output / "clip-0001.wav"), "rb") as wav:
                 self.assertEqual(wav.readframes(1_600), (canonical * 32767.0).astype("<i2").tobytes())
+
+    async def test_explicit_transport_corruption_is_rejected(self) -> None:
+        owner = FakeMember(10)
+        bot = FakeMember(11, bot=True)
+        with tempfile.TemporaryDirectory() as root:
+            output = prepare_private_output_dir(Path(root) / "capture")
+            channel = FakeChannel([owner, bot])
+            capture = CorpusCapture(output_dir=output, exact_count=1)
+            capture.lock_owner(channel, bot_user_id=bot.id)
+            debug_meta = bind_capture_listener(capture, channel=channel)
+            debug_meta.update(
+                {
+                    "unstable": True,
+                    "reasons": [
+                        "opus_fail=4",
+                        "plc=2",
+                        "fec=2",
+                        "front_burst_detected",
+                        "heavy_trim_ms=220",
+                        "burst_trim_ms=140",
+                    ],
+                }
+            )
+
+            self.assertFalse(
+                await capture.accept_completed_pcm(
+                    channel=channel,
+                    member=owner,
+                    pcm_bytes=stereo_pcm(frames=4_800, value=700),
+                    debug_meta=debug_meta,
+                )
+            )
+            self.assertEqual(capture.rejected_count, 1)
+            self.assertEqual(list(output.iterdir()), [])
 
 
 class FakeVoiceClient:

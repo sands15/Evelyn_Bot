@@ -71,7 +71,6 @@ VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS"
 VOICE_DYNAMIC_TRIM_MAX_MS = max(VOICE_DYNAMIC_TRIM_MIN_MS, float(os.getenv("VOICE_DYNAMIC_TRIM_MAX_MS", "480")))
 VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSECUTIVE", "4")))
 VOICE_UNSTABLE_TRIM_CAP_MS = max(0.0, float(os.getenv("VOICE_UNSTABLE_TRIM_CAP_MS", "80")))
-VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS = max(250.0, float(os.getenv("VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS", "1500")))
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 VOICE_PENDING_INNER_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_PENDING_INNER_MAX_ATTEMPTS", "8")))
 VOICE_PENDING_INNER_MAX_AGE_SEC = max(0.2, float(os.getenv("VOICE_PENDING_INNER_MAX_AGE_SEC", "1.8")))
@@ -372,7 +371,6 @@ def _adjust_trim_for_unstable_onset(
     opus_fail: int,
     plc_packets: int,
     fec_packets: int,
-    first_packet_wait_ms: float | None,
     pcm_bytes_len: int,
 ) -> tuple[float, dict]:
     short_clip = (pcm_bytes_len / float(max(1, VOICE_PCM_BYTES_PER_MS) * 1000)) < 1.0
@@ -385,9 +383,6 @@ def _adjust_trim_for_unstable_onset(
         unstable_reasons.append(f"fec={fec_packets}")
     if failed >= max(5 if short_clip else 3, int(round(packet_count * (0.22 if short_clip else 0.18)))):
         unstable_reasons.append(f"high_failed_ratio={failed}/{packet_count}")
-    if first_packet_wait_ms is not None and first_packet_wait_ms >= VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS:
-        unstable_reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
-
     adjusted_meta = dict(trim_meta)
     adjusted_meta["unstable_onset"] = bool(unstable_reasons)
     adjusted_meta["unstable_reasons"] = unstable_reasons
@@ -420,7 +415,7 @@ def _build_voice_receive_debug_meta(
     fec_packets: int,
     trim_ms: float,
     trim_meta: dict,
-    first_packet_wait_ms: float | None,
+    first_packet_age_ms: float | None,
     queue_wait_ms: float | None,
     decrypt_ms: float | None,
     utterance_total_ms: float | None,
@@ -505,9 +500,6 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"onset_fec={onset_fec_count}")
     if onset_trim_cap_ms is not None:
         reasons.append(f"onset_trim_cap_ms={int(round(float(onset_trim_cap_ms)))}")
-    if first_packet_wait_ms is not None and first_packet_wait_ms >= 250.0:
-        reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
-
     return {
         "unstable": bool(reasons),
         "reasons": reasons,
@@ -546,7 +538,7 @@ def _build_voice_receive_debug_meta(
             "onset_trim_cap_ms": _round_metric(onset_trim_cap_ms, 1),
         },
         "timing": {
-            "first_packet_wait_ms": _round_metric(first_packet_wait_ms, 1),
+            "first_packet_age_ms": _round_metric(first_packet_age_ms, 1),
             "queue_wait_ms": _round_metric(queue_wait_ms, 1),
             "decrypt_ms": _round_metric(decrypt_ms, 1),
             "utterance_total_ms": _round_metric(utterance_total_ms, 1),
@@ -2598,6 +2590,12 @@ class EvelynVoiceClient(discord.VoiceClient):
         utterance_started_at = item.get("utterance_started_at")
         queued_at = item.get("queued_at")
         processing_started_at = asyncio.get_running_loop().time()
+        queue_wait_ms = None
+        if queued_at is not None:
+            queue_wait_ms = max(
+                0.0,
+                (processing_started_at - float(queued_at)) * 1000.0,
+            )
         dave_success = 0
         map_retry = int(item.get("map_retry", 0))
         dave_retry = int(item.get("dave_retry", 0))
@@ -2966,12 +2964,11 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         decrypt_ms = (asyncio.get_running_loop().time() - processing_started_at) * 1000.0
         utterance_total_ms = self._latency_ms(utterance_started_at)
-        queue_wait_ms = self._latency_ms(queued_at)
-        first_packet_wait_ms = None
+        first_packet_age_ms = None
         if body_packets:
             first_received_at = body_packets[0].get("received_at")
             if first_received_at is not None:
-                first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
+                first_packet_age_ms = (processing_started_at - float(first_received_at)) * 1000.0
 
         onset_conceal_total = onset_opus_fail_count + onset_plc_count + onset_fec_count
         onset_failed_ratio = (float(onset_failed_packets) / float(onset_packet_count)) if onset_packet_count > 0 else 1.0
@@ -2985,7 +2982,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             strict=onset_strict,
         )
         onset_drop_threshold = max(3, int((min(len(expanded_packets), onset_window_packets) * VOICE_ONSET_DROP_CONCEAL_RATIO) + 0.999))
-        stale_onset = first_packet_wait_ms is not None and first_packet_wait_ms >= VOICE_ONSET_STALE_WAIT_MS
+        stale_onset = queue_wait_ms is not None and queue_wait_ms >= VOICE_ONSET_STALE_WAIT_MS
         first_clean_window_ok = (
             onset_clean_run_max >= VOICE_ONSET_FIRST_CLEAN_WINDOW_PACKETS
             and segment_first_clean_decode_ms is not None
@@ -3036,9 +3033,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                     state["preroll"].clear()
                 onset_pending_pcm.clear()
 
-        if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms) or dave_warmup_skips > 0 or plc_packets > 0 or fec_packets > 0:
+        if self._should_log_timing(first_packet_age_ms, queue_wait_ms, decrypt_ms, utterance_total_ms) or dave_warmup_skips > 0 or plc_packets > 0 or fec_packets > 0:
             log.info(
-                "DECRYPT SUMMARY | idx=%d packets=%d expanded=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d dave_warmup_skips=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d plc=%d fec=%d started_output=%s first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
+                "DECRYPT SUMMARY | idx=%d packets=%d expanded=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d dave_warmup_skips=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d plc=%d fec=%d started_output=%s first_packet_age_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
                 idx,
                 len(packets),
                 len(expanded_packets),
@@ -3055,7 +3052,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 plc_packets,
                 fec_packets,
                 started_output,
-                f"{first_packet_wait_ms:.0f}" if first_packet_wait_ms is not None else "?",
+                f"{first_packet_age_ms:.0f}" if first_packet_age_ms is not None else "?",
                 f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
                 decrypt_ms,
                 f"{utterance_total_ms:.0f}" if utterance_total_ms is not None else "?",
@@ -3102,7 +3099,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             clean_run_packets=onset_clean_run_max,
             strict=onset_strict,
         )
-        stale_onset = first_packet_wait_ms is not None and first_packet_wait_ms >= VOICE_ONSET_STALE_WAIT_MS
+        stale_onset = queue_wait_ms is not None and queue_wait_ms >= VOICE_ONSET_STALE_WAIT_MS
         first_clean_window_ok = (
             onset_clean_run_max >= VOICE_ONSET_FIRST_CLEAN_WINDOW_PACKETS
             and segment_first_clean_decode_ms is not None
@@ -3181,7 +3178,6 @@ class EvelynVoiceClient(discord.VoiceClient):
             opus_fail=opus_fail,
             plc_packets=plc_packets,
             fec_packets=fec_packets,
-            first_packet_wait_ms=first_packet_wait_ms,
             pcm_bytes_len=len(pcm_bytes),
         )
         trim_meta["onset_buffer_ms"] = float(onset_buffer_ms)
@@ -3247,7 +3243,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             fec_packets=fec_packets,
             trim_ms=trim_ms,
             trim_meta=trim_meta,
-            first_packet_wait_ms=first_packet_wait_ms,
+            first_packet_age_ms=first_packet_age_ms,
             queue_wait_ms=queue_wait_ms,
             decrypt_ms=decrypt_ms,
             utterance_total_ms=utterance_total_ms,
