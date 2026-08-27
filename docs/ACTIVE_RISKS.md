@@ -1883,8 +1883,10 @@ Discord `on_ready`의 저장 음성 채널 복원은 fixed `voice_rearm_failed`�
 Revised STT image는 pinned source와 GPU1 headless 2+20에서 load/health/latency/error/cleanup을 통과했다.
 2026-08-28 guided Discord capture도 transport·shape `10/10`을 통과했지만 exact-once 모델 진단은
 similarity `8/10`, order `9/10`, normalized/entity-action exact `0/10`으로 실패했다. 따라서 private
-positive corpus, 한국어 domain entity/action accuracy와 promotion은 계속 미검증이다. 다음 capture는
-사람이 읽기 쉬운 짧은 frozen phrase set을 먼저 승인해야 하며, 평가 STT 결과로 clip을 선별하거나 실패
+positive corpus, 한국어 domain entity/action accuracy와 promotion은 계속 미검증이다. 사용자의 수동 승인은
+원본 FAIL과 marker hash를 함께 기록해 이 10개만 `domain-discord-pcm` 후보로 선택했지만, legacy v1 둘의
+same-run 암호 결박은 없고 production promotion을 허용하지 않는다. 후속 v2 report는 marker SHA를 직접
+포함한다. 나머지 40개를 실제 수집해야 하고, 평가 STT 결과로 clip을 선별하거나 실패
 clip만 자동 재수집해 corpus를 편향시키지 않는다. `vllm==0.14.0`은 Qwen 0.0.6의 공식 호환 pin을
 따르고 standalone vLLM HTTP/media-fetch surface는 노출하지 않지만, 지원되는 후속 조합이 나오면
 보안 수정 버전으로 다시 평가해야 한다.

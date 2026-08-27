@@ -3275,8 +3275,14 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
   package-set `c7518d52...e519`를 결박한 report SHA-256 `cb72eb22...14b1`의 같은 p95는
   `158.2/24.9/2030.3ms`, min free는 `6,144MiB`였다. 독립 비교와 pre/post 환경 안정성이 통과했다.
 - exact cleanup 뒤 owned container/network/volume은 `0/0/0`, GPU1은 `0MiB` 연속 3회, production은
-  OFF였다. private corpus는 absent(`0/50`)이므로 corpus, cancel/successor, cold restart, promotion과
-  P0-5는 차단돼 있다. 이 2+20은 full P0-4 promotion 증거가 아니다.
+  OFF였다. assembled private corpus는 absent(`0/50`)이고 accepted staging candidate는 후술하는
+  `10/50`뿐이므로 corpus, cancel/successor, cold restart, promotion과 P0-5는 차단돼 있다. 이 2+20은
+  full P0-4 promotion 증거가 아니다.
+- 2026-08-28 guided Discord capture는 transport/shape `10/10` 뒤 자동 model diagnostic에서 FAIL했다.
+  사용자의 명시적 선택은 원본 FAIL report hash와 exact capture marker hash를 함께 기록한 별도 receipt로
+  이 10개만 미래 `domain-discord-pcm` 후보로 accepted했다. legacy diagnostic v1은 marker digest가 없어
+  same-run 암호 결박이 false이고, pairing authority는 사용자 지시다. 후속 diagnostic v2는 marker SHA를
+  직접 포함한다. receipt는 production promotion false이며 나머지 40개와 이후 자동 gate를 대체하지 않는다.
 - benchmark report는 production admission, Windows launcher, Discord와 Local Voice가 읽지 않는다.
   historical v1 결과는 revised image A/B·corpus·restart 증거로 재사용하지 않는다. 실행 계약은
   [[GPU1_CONCURRENCY_BENCHMARK]]가 소유한다.

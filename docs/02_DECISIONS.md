@@ -992,3 +992,21 @@ type: decision-log
   `tools/discord_capture_status_notify.py`, 관련 tests, [[worklog/2026-08-28]].
 - 영향: 실패 staging은 자동 삭제·재녹음·승격하지 않는다. 사람이 읽기 어려운 phrase는 별도 frozen set
   변경으로 해결하고, 같은 attempt의 판정 기준이나 transcript를 보고 사후 조정하지 않는다.
+
+## 2026-08-28 — Discord 자동 진단과 사용자 corpus 선택 승인을 별도 evidence로 유지
+
+- 상태: 구현·명시적 사용자 승인·live 후속 알림 검증 완료
+- 결정: 사용자는 operational gate가 정상인 exact guided 10개를 자동 model diagnostic FAIL 상태에서도
+  `domain-discord-pcm` 후보로 수동 선택할 수 있다. 이때 자동 report를 수정하지 않고 report SHA와 exact
+  capture marker SHA를 함께 기록한 `evelyn.discord-corpus-user-acceptance.v2` sidecar를 원자적으로 만든다.
+- 결정: legacy diagnostic v1은 marker digest가 없으므로 receipt에 `explicit_user_pairing`과
+  `sameRunCryptographicBinding=false`를 고정한다. content digest는 서명이 아니다. 후속 diagnostic v2는
+  같은 canonical corpus read에서 marker SHA를 report에 넣고 verifier가 exact match를 요구한다.
+- 결정: receipt scope는 `domain-discord-pcm-10-only`, production promotion은 false다. 원본이 바뀌면
+  verifier가 stale로 거부하고, Discord에는 기존 PASS가 아닌 이 한계를 포함한 고정 `accepted` 메시지를 보낸다.
+- 이유: 사용자 선택권을 반영하면서 자동 관측 실패를 성공으로 위조하거나 50-item benchmark·restart·cleanup
+  gate까지 암묵적으로 면제하지 않기 위해서다.
+- 근거: `tools/discord_corpus_user_acceptance.py`, `tools/discord_capture_status_notify.py`, 관련 tests,
+  [[worklog/2026-08-28]].
+- 영향: accepted guided 10개는 미래 explicit 50-row selection에 넣을 수 있다. 나머지 40개가 없으므로
+  assembly, P0-4 promotion과 P0-5는 계속 차단된다.

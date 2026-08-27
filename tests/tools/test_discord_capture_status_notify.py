@@ -23,7 +23,7 @@ class DiscordCaptureStatusNotifyTests(unittest.TestCase):
             for action in parser._actions
             for option in action.option_strings
         }
-        self.assertEqual(set(RESULT_MESSAGES), {"pass", "fail"})
+        self.assertEqual(set(RESULT_MESSAGES), {"pass", "fail", "accepted"})
         self.assertIn("--token-stdin", options)
         self.assertNotIn("--token", options)
         with self.assertRaisesRegex(NotificationFailure, "invalid_arguments"):
@@ -76,6 +76,10 @@ class DiscordCaptureStatusNotifyTests(unittest.TestCase):
             "transcript",
         ):
             self.assertNotIn(forbidden, rendered)
+        self.assertIn("수동 승인 성공", RESULT_MESSAGES["accepted"])
+        self.assertIn("diagnostic FAIL", RESULT_MESSAGES["accepted"])
+        self.assertIn("same-run 암호 결박이 없으며", RESULT_MESSAGES["accepted"])
+        self.assertIn("승격은 아직 하지 않았습니다", RESULT_MESSAGES["accepted"])
 
     def test_missing_or_oversized_token_has_one_fixed_error(self) -> None:
         for token in ("", "x" * 514):

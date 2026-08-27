@@ -24,6 +24,12 @@ RESULT_MESSAGES = {
         "[Evelyn Discord 음성 검증] 실패: 이번 결과는 corpus에 승격하지 "
         "않았습니다. 세부 원인은 현재 Codex 작업에서 확인해 주세요."
     ),
+    "accepted": (
+        "[Evelyn Discord 음성 검증] 수동 승인 성공: guided capture 10/10을 "
+        "domain-discord-pcm 후보로 수락했습니다. 자동 STT model diagnostic "
+        "FAIL 기록은 보존합니다. 현재 v1 진단에는 capture와의 same-run 암호 "
+        "결박이 없으며 전체 corpus/production 승격은 아직 하지 않았습니다."
+    ),
 }
 
 

@@ -33,7 +33,8 @@ from evelyn_core.stt_client import transcribe_audio16k_via_service  # noqa: E402
 from evelyn_core.voice_validation import transcript_match  # noqa: E402
 
 
-REPORT_SCHEMA = "evelyn.discord-corpus-model-diagnostic.v1"
+LEGACY_REPORT_SCHEMA = "evelyn.discord-corpus-model-diagnostic.v1"
+REPORT_SCHEMA = "evelyn.discord-corpus-model-diagnostic.v2"
 STT_MODEL = "Qwen/Qwen3-ASR-1.7B"
 STT_BACKEND = "vllm"
 STT_ENGINE = {
@@ -100,6 +101,7 @@ def _empty_report() -> dict[str, Any]:
         "schema": REPORT_SCHEMA,
         "status": "fail",
         "failureCode": None,
+        "captureMarkerSha256": None,
         "counts": {
             "expectedWavCount": len(DOMAIN_PHRASES),
             "validWavCount": 0,
@@ -252,7 +254,9 @@ def _marker_matches(marker: Any, audio_sha256: Sequence[str]) -> bool:
     )
 
 
-def load_canonical_corpus(corpus_dir: Path) -> tuple[np.ndarray, ...]:
+def load_canonical_corpus_bound(
+    corpus_dir: Path,
+) -> tuple[tuple[np.ndarray, ...], str]:
     root = Path(corpus_dir)
     try:
         metadata = root.lstat()
@@ -269,22 +273,29 @@ def load_canonical_corpus(corpus_dir: Path) -> tuple[np.ndarray, ...]:
         by_name = {entry.name: entry for entry in entries}
         loaded = tuple(_read_canonical_wav(by_name[name]) for name in expected_names)
         try:
-            marker = json.loads(
-                _read_stable_regular(
-                    by_name[STAGING_MARKER_NAME],
-                    max_bytes=MAX_MARKER_BYTES,
-                ).decode("utf-8")
+            marker_raw = _read_stable_regular(
+                by_name[STAGING_MARKER_NAME],
+                max_bytes=MAX_MARKER_BYTES,
             )
+            marker = json.loads(marker_raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise DiagnosticFailure("corpus_invalid") from exc
         if not _marker_matches(marker, tuple(digest for _audio, digest in loaded)):
             raise DiagnosticFailure("corpus_invalid")
         marker = None
-        return tuple(audio for audio, _digest in loaded)
+        return (
+            tuple(audio for audio, _digest in loaded),
+            hashlib.sha256(marker_raw).hexdigest(),
+        )
     except DiagnosticFailure:
         raise
     except OSError as exc:
         raise DiagnosticFailure("corpus_invalid") from exc
+
+
+def load_canonical_corpus(corpus_dir: Path) -> tuple[np.ndarray, ...]:
+    audio_items, _marker_sha256 = load_canonical_corpus_bound(corpus_dir)
+    return audio_items
 
 
 def _health_exact(payload: Any) -> bool:
@@ -388,9 +399,10 @@ def run_diagnostic(
     health_client = health or fetch_health
     batch_client = batch or transcribe_audio16k_via_service
     try:
-        audio_items = load_canonical_corpus(corpus_dir)
+        audio_items, marker_sha256 = load_canonical_corpus_bound(corpus_dir)
     except DiagnosticFailure:
         return _finish_report(report, "corpus_invalid")
+    report["captureMarkerSha256"] = marker_sha256
     report["counts"]["validWavCount"] = len(audio_items)
 
     try:

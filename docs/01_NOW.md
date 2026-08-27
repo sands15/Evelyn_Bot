@@ -23,9 +23,9 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 - P0-4는 microphone, speaker, Discord, Minecraft 없이 현행 Qwen3-14B와 old/new STT image를
   분리 비교한다. overlap 2+20, private positive 40/negative 10 batch+stream, cancel/successor,
   cold restart 3회와 exact cleanup이 모두 필요하다.
-- Discord guided capture와 DPAPI 재사용은 source·live `10/10`으로 검증했다. 새 staging은 길이
-  `1.10~3.36초`, 중앙값 `2.79초`로 shape/분리가 정상이나 revised STT 사후 진단은 similarity `8/10`,
-  order `9/10`, normalized/entity-action exact `0/10`으로 FAIL했다. promotion은 계속 차단한다.
+- Discord guided capture/DPAPI 재사용은 `10/10`이고 길이 `1.10~3.36초`, 중앙값 `2.79초`였다.
+  revised STT는 similarity/order `8/10·9/10`, normalized/entity-action exact `0/10`으로 FAIL했다.
+  exact 10개만 수동 승인했으며 legacy v1 same-run 결박은 없고 pairing authority는 사용자 지시다.
 
 ## 최근 검증
 
@@ -56,18 +56,18 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
   사후 exact-once STT는 nonempty `10/10`, error `0`이지만 content/order gate가 실패했다. transcript는
   출력·저장하지 않았고 staging은 자동 retry/delete/promotion 없이 보존했다. Docker AI inference socket
   재발 원인을 비활성화한 뒤 exact-owned lab 0, Docker/WSL·production OFF, GPU1 `0MiB×3`, Wallpaper 유지와
-  cleanup 후 고정 Discord 실패 알림을 확인했다. [[worklog/2026-08-28]]
+  cleanup을 확인했다. user-acceptance receipt는 두 원본 hash/fresh verifier를 통과하며 same-run binding과
+  production promotion은 false다. 후속 diagnostic v2는 marker SHA를 포함하고 Discord accepted 알림도
+  전송했다. [[worklog/2026-08-28]]
 - Minecraft 운영 bot은 OFF다. 격리 fresh-world shelter/restart 시나리오는 통과했지만 운영
   Discord/lease와 실제 음성 E2E는 후속 승인 범위다. 상세 상태는 [[CURRENT_STATE]]를 따른다.
 
 ## 다음 행동
 
-1. domain entity/action coverage를 유지하면서 사람이 읽기 쉬운 짧은 frozen phrase set을 승인·교체한다.
-2. 새 guided attempt도 capture admission과 exact-once 사후 진단을 분리하며 model 결과로 clip을 선별하거나
-   자동 retry하지 않는다. 현재 FAIL staging은 corpus로 승격하지 않는다.
-3. private 50-item이 완성되면 positive 40/negative 10 batch+stream, cancel/successor와 cold
-   restart 3회를 실행한다.
-4. 위 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
+1. `suite-clean` 10, `suite-far-field` 10, `domain-clean` 10과 negative 10을 실제 수집한다.
+2. private 50-item을 explicit selection/assembly한 뒤 batch+stream, cancel/successor와 cold restart 3회를
+   실행한다. accepted Discord 10개를 다른 class로 복제하지 않는다.
+3. 위 자동 gate가 전부 통과한 뒤에만 revised STT image를 승격하고 P0-5 Qwen3.8을 시작한다.
 
 ## 작업 원칙
 

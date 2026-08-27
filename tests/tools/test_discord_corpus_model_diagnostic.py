@@ -114,7 +114,14 @@ class DiscordCorpusModelDiagnosticTests(unittest.TestCase):
             )
 
             self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["schema"], diagnostic.REPORT_SCHEMA)
             self.assertIsNone(report["failureCode"])
+            self.assertEqual(
+                report["captureMarkerSha256"],
+                hashlib.sha256(
+                    (corpus / diagnostic.STAGING_MARKER_NAME).read_bytes()
+                ).hexdigest(),
+            )
             self.assertEqual(report["counts"]["validWavCount"], 10)
             self.assertEqual(report["counts"]["batchAttemptCount"], 10)
             self.assertEqual(report["counts"]["responseCount"], 10)
