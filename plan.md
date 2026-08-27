@@ -1,6 +1,6 @@
 # Evelyn 실행 계획
 
-마지막 검토: 2026-08-26 KST
+마지막 검토: 2026-08-28 KST
 
 ## 이 파일의 역할
 
@@ -929,23 +929,180 @@ Discord 연결과 실제 장치 청취는 별도 구현/live 승인 전 시작�
 완료 조건: 성공·실패·취소·재시작이 동일 lease/actionRun 증거로 닫히고, cleanup 후
 Minecraft/Voyager 운영 bot이 의도한 OFF 상태다.
 
-### P1-3. `/작업` 기능을 실제 지식 작업에 쓸 수 있게 만들기
+### P1-3. 검증 가능한 지식 작업의 실행·평가 기반
 
-- [ ] `review|summarize|explain|compare`가 raw receipt만으로 성공을 주장하지 않도록
-  유지하면서, goal-bound source evidence만 인용하는 최소 semantic evaluator를 설계한다.
-- [ ] 명시적 링크 요청에는 allowlisted URL을 결과에 표시할 수 있는 정책을 추가한다.
-- [ ] 10KiB를 넘는 파일 수요가 실제로 확인될 때만 별도 bounded large-read grant를
-  추가한다. 기본 step budget을 무작정 늘리지 않는다.
-- [ ] behavioral mutation은 독립 Host evaluator가 생기기 전까지
-  `semanticVerified:false`와 자동 재시도 금지를 유지한다.
+상태: **[R] 설계 동결·승인 대기**. P0-4/P0-5와 P1-1/P1-2의 선행 순서를
+우회하지 않는다. 구현은 아래 `P1-3A → P1-3B`를 각각 별도 ID로 승인받아 한 단계씩
+수행한다. 이 항목은 영상의 selective context, eval, inspectable custom-agent contract를
+최소 범위로 옮긴다. principal·삭제 계보·durable promotion이 필요한 feedback/self-healing은
+P1-4 뒤의 P1-5가 별도로 소유한다. 영상 근거는
+[feedback router/fixer 06:53](https://youtu.be/3flfON7F8hU?t=413),
+[사람 수정 기반 self-healing 08:23](https://youtu.be/3flfON7F8hU?t=503),
+[context와 row별 eval 13:00](https://youtu.be/3flfON7F8hU?t=780),
+[trigger·instructions·context와 draft-only 외부 작업 17:32](https://youtu.be/3flfON7F8hU?t=1052),
+[run history·review·rollback·version 23:00](https://youtu.be/3flfON7F8hU?t=1380)이다.
 
-완료 조건: 읽기/비교/요약의 결과가 exact source evidence와 연결되고, 모델 문장만으로
-완료가 승격되지 않으며, 대표 Control Page와 Voice E2E가 통과한다.
+#### 문제·검증된 root cause·영향
+
+- `context_pipeline.py`의 `ContextPolicy`/`ContextPacket`은 selective context를,
+  `task_loop_runtime.py`의 `TaskGrant`/`TaskStepReceipt`/`TaskLoopResult`는 bounded 실행과
+  typed evidence를 이미 제공한다. `task_approval_runtime.py`도 exact workspace mutation만
+  사람 승인에 결박한다. 새 범용 agent framework가 필요한 상태가 아니다.
+- 다만 현재 `skills/task_loop/__init__.py`는 route의 messages/ContextPacket을 소비하지 않고
+  user goal, source, `TurnScope`만 `run_default_task_loop`에 넘긴다. worker가 실제로 보는 context는
+  `_worker_state`의 goal·tool guidance·최근 typed observations뿐이다. 따라서 일반 route/memory
+  context를 consumed context로 기록하거나 새로 주입하지 않는다.
+- 그러나 현재 실행 계약에는 실제 trigger/skill origin, instruction version, context selection
+  manifest, grant/tool 집합, output schema, eval suite version을 한 run identity로 묶은 기록이 없다.
+  같은 결과가 어느 instruction/context/evaluator 조합에서 나왔는지 비교할 수 없다.
+- `FastActionCoordinator`의 task/event history는 process memory이고,
+  `FastActionRecoveryJournal`은 raw prompt/reply를 저장하지 않는 interrupted-work 안전 표식이다.
+  후자는 재시작 중 중복 실행을 막지만 terminal step, context 구성, eval, review와 version 전이를
+  inspect/replay하는 activity ledger가 아니다.
+- `self_model.py`는 tone/identity feedback을 `review_candidate`로 기록하고
+  `identity_review.py`는 TSV/Markdown export를 만들지만, accept/reject를 active profile에
+  적용하는 authoritative promotion 경로는 없다. 일반 task routing/context/answer correction도
+  candidate→eval→approval→promotion→rollback 흐름이 없다.
+- `review|summarize|explain|compare`는 raw receipt만으로 semantic completion을 주장하지 않게
+  막혀 있다. 이 안전 fence는 맞지만, source-grounded draft와 고정 eval이 없어서 실제 지식 작업에
+  쓸 수 있는 다음 상태로 진행하지 못한다.
+
+#### 목표·포함 범위·명시적 비범위
+
+- 목표는 기존 `/작업` 경로를 `trigger → exact task contract → 실제 worker context → typed tool
+  receipt → grounded draft → review/eval`로 관측 가능하게 만드는 것이다.
+- 포함: 모든 text/voice/Control Page `task_executor` terminal의 content-free 계약 projection,
+  source-grounded review/summarize/explain/compare draft와 fixed synthetic eval이다. text/voice는 현재
+  turn envelope에만 record를 반환하고, 최근 history panel은 기존 FastAction owner가 있는 Fast Control에만
+  제공한다. cross-surface store나 durable run history를 뜻하지 않는다.
+- 비범위: 새 daemon·범용 agent framework·자유형 shell·임의 MCP 연결, long-context 전체 dump,
+  production source code 자동 수정, active tool allowlist/permission/approval/evaluator 변경,
+  자동 external send/deploy/delete, manager·사용자 음성/문체 복제나 impersonation이다.
+- Voice는 동일 `task_executor` contract를 호출하는 ingress일 뿐 별도 권한이 아니다. 이메일·Discord
+  전송 같은 외부 효과는 계속 draft-only이고 기존 explicit delivery authorization 없이는 실행하지 않는다.
+- independent하지 않은 단계는 병렬화하지 않는다. production Qwen broker는 capacity-one을 유지하고,
+  eval의 모델 row도 직렬 실행한다. 병렬화는 content-free deterministic validator 최대 4개에만 허용한다.
+- 10KiB 초과 파일은 실제 수요가 확인될 때만 별도 bounded large-read grant로 재설계한다.
+  이 계획은 기본 6-step 권한이나 context budget을 넓히지 않는다.
+
+#### 선택한 해법과 버린 대안
+
+- 선택: 실행 권위는 기존 `TurnScope` currentness, coarse `TaskGrant`, signed Host HMAC/boot/TTL/
+  one-shot, sandbox·mutation authority, exact approval와 receipt verifier의 합성이다. 새 task contract는
+  이 권위들의 content-free 관측 projection일 뿐 어느 단계도 승인하거나 확장하지 않는다.
+- 선택: 기존 task ID와 `TaskLoopResult`/FastAction projection을 재사용한다. 새 AgentRun ID, observer
+  callback, append-only journal, external anchor와 별도 UI framework는 만들지 않는다.
+- 선택: semantic 결과는 `completed`를 흉내 내지 않고 `grounded_draft_ready`로 표시한다.
+  exact evidence reference와 deterministic structural validation은 출처 연결을 증명하지만 자연어
+  claim의 절대적 진실을 증명하지 않으므로 `semanticVerified:false`를 유지한다.
+- 버림: process-local task history를 먼저 durable GitHub형 ledger로 일반화하면 principal·삭제 lineage·
+  single-writer/CAS/anchor를 해결하기 전에 사용자 가치가 없는 기반부터 커진다. recovery journal도
+  interrupted-work 안전 책임을 유지하며 activity log로 확장하지 않는다.
+
+#### P1-3A — exact TaskWorkContract와 process-local inspection
+
+1. `task_loop_runtime.py`에 별도 run ID 없이 기존 `task_id`에 결박되는
+   `evelyn.task-work-contract.v1` frozen dataclass를 추가한다. 내부 계약은 route/source enum,
+   allowlisted `skillOriginClass(internal|bundled|external)`만 사용하고 module/file origin 원문은
+   버린다. current principal equality token과 `grantId`는 `repr=False` internal owner binding이며
+   public projection이나 artifact에 내보내지 않는다.
+2. instruction identity는 `build_task_worker_payload`의 source-owned system instruction version/digest와
+   실제 `_worker_state`에 들어간 tool-guidance name 집합으로 고정한다. consumed context manifest는
+   `goalPresent:true`, step 번호, observation count와 tool/code만 기록한다. route messages,
+   `ContextPacket`, memory, file/web body는 worker가 소비하지 않으므로 기록·주입하지 않는다.
+3. authority projection은 `TurnScope` currentness, `TaskGrant` tool/budget, Host receipt의
+   attempted/executed/observed/verified/outcome/code, approval state를 관측한다. HMAC, boot secret,
+   raw receipt/evidence/args는 복제하지 않으며 이 projection은 authorize/complete 권한이 없다.
+4. `TaskLoopResult`에 contract와 exact `public_task_record()`를 붙인다. public status allowlist는
+   현행 `completed|failed|blocked|uncertain|awaiting_approval|budget_exhausted|cancelled`와 P1-3B의
+   `grounded_draft_ready`뿐이다. record는 status/code, step/model count와 step별 tool/flag/outcome/code,
+   contract/eval version, `processLocal:true`, `durable:false`만 가진다.
+5. `skills/task_loop/__init__.py`, `voice_route_execution.py`와
+   `voice_execution_dependency_composition.py`는 현재 `SkillContext`의 principal owner를 내부 계약에
+   전달하고 terminal public record를 `SkillResult.metadata["taskRecord"]`로 반환한다. Main/Voice turn
+   envelope는 현재 turn의 이 content-free side channel만 전달하고 보관하거나 TTS로 읽지 않는다.
+   Fast Control direct task는
+   authenticated local principal을 사용한다. 다른 principal의 task/feedback/promotion에 이 token을
+   재사용하는 기능은 P1-3에 없다.
+6. `fast_action_runtime.py`와 `fast_control_api.py`는 terminal `TaskLoopResult`의 public record만 기존
+   FastAction task에 붙인다. text/voice record를 이 coordinator로 복제하지 않는다. `docs/index.html`과
+   기존 `evelyn-task-approval.js/.css`는 Fast Control 최신 4건의
+   process-local record만 렌더링하고 module path, principal, goal/context/evidence, reply를 읽지 않는다.
+   full diff는 기존 transient approval preview에만 남는다.
+7. process restart 뒤 terminal history를 복원하거나 private task를 replay하지 않는다. 기존
+   `FastActionRecoveryJournal`만 interrupted work를 outcome-unverified로 닫고 자동 재실행을 막는다.
+   durable history가 실제 promotion 요구로 확인되기 전에는 journal/anchor/single-writer를 추가하지 않는다.
+
+P1-3A 먼저 실패할 회귀는 raw summary/evidence/principal/module path가 public record로 나오는 경우,
+route-level ContextPacket을 consumed로 표시하는 경우, 외부 caller가 반환 record를 바꿔 내부 task state를
+변조하는 경우, 새 status가 기존 allowlist 검사를 우회하는 경우다. focused는 task contract/result,
+task skill/route composition, FastAction integration, recovery 비회귀와 UI parse/privacy tests다.
+broad는 canonical `python -m pytest -q` 기능 실패 0개다. 승인된 representative surface에서
+Control Page/text 각 read-only task 3건의 schema·step code·raw leakage 0을 확인한다. Voice live는
+P1-1에서 surface가 이미 승인된 경우에만 같은 3건을 추가한다.
+
+#### P1-3B — source-grounded 지식 draft와 fixed eval
+
+1. `task_loop_runtime.py`에 내부 `grounded_draft` terminal transition을 추가한다. candidate output은
+   `evelyn.task-grounded-draft.v1` exact schema로 `kind(review|summarize|explain|compare)`, bounded
+   section/claim, 각 claim의 `stepId/evidenceRef`만 가진다. evidenceRef는 현재 run의 verified read/diff/
+   search receipt가 실제로 소유한 fragment에만 결박하며 fabricated/cross-run/stale reference는 거부한다.
+2. `main_llm_runtime.py`의 registered-route status/terminal finalizer와 Fast Control/Voice의 기존
+   task outcome adapter는 `grounded_draft_ready`를 success가 아닌 reviewable terminal로 동일하게
+   처리한다. structural validation을 통과한 draft만 source label과 함께 표시한다. 명시적 링크
+   요청일 때만 verified web receipt의 allowlisted `https` URL을 표시하고 redirect/credential/local/
+   private URL은 제거한다. TTS에는 source body/URL을 읽지 않고 content-free 안내만 보낸다.
+3. 모델 자유문이 claim truth나 실행 완료 권한이 되지 않는다. 모든 evidenceRef가 exact여도 결과는
+   `grounded_draft_ready`, `semanticVerified:false`, `humanReviewRequired:true`다. behavioral mutation은
+   독립 Host evaluator가 생기기 전까지 기존 `semanticVerified:false`와 자동 재시도 금지를 유지한다.
+4. 새 `tools/task_agent_eval.py`와 `tests/tools/test_task_agent_eval.py`는 private data 없는 fixed 24-row
+   corpus를 쓴다: grounded review/summarize/explain/compare 12, permission·prompt-injection·private
+   leakage 8, timeout/cancel/restart/approval 4다. baseline/candidate는 source/model/evaluator/corpus,
+   tool grant와 input case가 같고 비교 대상 instruction/guidance version·digest만 달라야 한다.
+   temperature 0과 현행 timeout으로 한 row씩 격리 실행한다.
+5. report에는 case opaque ID, binding, status/code, evidence coverage, unauthorized-effect/privacy flag,
+   latency/context byte count와 aggregate만 atomic JSON으로 쓴다. prompt/output/source content는
+   Git/docs/report에 넣지 않는다. 모델 row는 Qwen broker에서 직렬, deterministic validation만 최대 4개다.
+6. gate는 schema parse 24/24, grounded 12건 evidence coverage 100%, fabricated/cross-run ref 0,
+   unauthorized tool/mutation/send 0, private/raw leakage 0, timeout/error 0이다. candidate는 safety row
+   전건 통과, expected predicate가 baseline 이상, latency/context p95가 baseline보다 10% 넘게 악화되지
+   않아야 한다. 하나라도 실패하면 candidate를 promotion 입력으로 쓰지 않는다.
+
+eval owner는 exact `evalRunId`, baseline/candidate contract digest와 suite version이다. row별 현행
+6-step/120초 task deadline을 유지하고 전체 24-row run은 60분에서 중단한다. 취소·timeout은 현재
+row와 admission을 회수하고 `incomplete` aggregate만 atomic 보존하며, successor row나 promotion을
+자동 시작하지 않는다.
+
+P1-3B focused는 task loop/main finalizer/url policy/eval tool tests와 기존 task completion false-green
+회귀다. broad는 canonical suite 기능 실패 0개다. 대표 Control Page와 Voice에서 각 네 kind 1건씩
+exact evidence 연결, 잘못된 ref 거부, 링크 opt-in, TTS raw body 비노출을 확인한다.
+
+#### 전체 rollback·완료 조건·예상 diff
+
+- P1-3A rollback은 contract/public record/panel wiring을 disable하고 기존 task loop/FastAction/recovery
+  동작으로 돌아간다. P1-3B rollback은 grounded kind admission을 닫아 기존 fixed noncompleted outcome을
+  유지한다. 저장 schema migration이나 durable artifact cleanup은 없다.
+- 예상 diff는 `task_loop_runtime.py`, `skills/task_loop/__init__.py`, `voice_route_execution.py`,
+  `voice_execution_dependency_composition.py`, `fast_action_runtime.py`, `fast_control_api.py`,
+  `main_llm_runtime.py`, `voice_orchestration.py`, 기존 task-approval UI 3개, 새 eval tool/test 2개,
+  `tests/core/test_task_loop_runtime.py`, `tests/core/test_task_route_orchestration.py`,
+  `tests/core/test_ask_llm_once_runtime.py`, `tests/voice/test_voice_turn_orchestrator.py`,
+  `tests/runtime/test_fast_action_runtime.py`, `tests/runtime/test_fast_task_loop_integration.py`,
+  `tests/runtime/test_task_approval_ui_contract.py`, current-state/risk/decision/NOW/worklog/plan 문서다.
+  새 runtime framework,
+  dependency, DB migration, external anchor/MCP, model/timeout/default step budget diff는 0이다.
+- 완료는 process-local contract projection과 24-row eval/grounded draft가 통과하고 대표 승인 surface에서
+  raw leakage·unauthorized effect·false semantic completion이 0일 때만 선언한다. durable feedback/
+  promotion/rollback은 P1-3 완료로 주장하지 않는다.
+- trigger, 실제 consumed context, authority projection, output schema, eval corpus/gate, timeout·취소,
+  live 비범위와 단계별 파일 범위를 위에서 고정했다. **미해결 설계 질문은 0개다.**
 
 ### P1-4. 운영 보안·내구성 마감
 
 - [ ] continuity와 memory deletion의 HMAC key/external anchor를 repository 밖에 배치하고
   Windows DACL/owner 및 Docker read-only mount를 실제로 검증한다.
+- [ ] P1-5 전역 guidance 승격용 privileged local Control Page principal/issuer proof와 private
+  feedback correction·deletion-current cascade를 기존 continuity/memory authority에 결박한다.
 - [ ] Codex action route는 tool registry와 secret-canary 비노출이 실제 image에서
   증명되기 전까지 비활성으로 유지한다.
 - [ ] Qwen-ASR/Transformers와 Mineflayer 계열 보안 릴리스를 추적하되, 호환 smoke 없이
@@ -954,7 +1111,80 @@ Minecraft/Voyager 운영 bot이 의도한 OFF 상태다.
   노출하지 않고 정확한 desired/off/degraded 상태를 보이는지 확인한다.
 
 완료 조건: restart/rollback 공격과 권한 경계의 live 증거가 남고, 미검증 action route는
-계속 fail-closed하며, public health privacy 검사가 통과한다.
+계속 fail-closed하며, privileged principal과 deletion-current가 forged/stale feedback을 거부하고,
+public health privacy 검사가 통과한다.
+
+### P1-5. 사람 교정 기반 feedback candidate와 안전한 version promotion
+
+상태: **[D] 설계 중·구현 미승인**. P1-3의 fixed eval/TaskWorkContract와 P1-4의
+principal/key/external-anchor/deletion-current 경계가 먼저 완료돼야 한다. 아래 불변 경계는
+고정했지만 durable owner 세부가 P1-4에서 확정되지 않았으므로 `[R]`로 올리지 않는다.
+
+#### 적용할 개념과 고정 경계
+
+- 영상의 router/fixer와 self-healing은 `사람의 exact correction → scoped guidance candidate →
+  fixed eval → exact approval → isolated canary → active version`으로만 해석한다. production source,
+  tool grant, approval policy, evaluator와 safety/system instruction은 candidate 대상이 아니다.
+- feedback은 exact task ID만으로 받지 않는다. authenticated `issuerPrincipalRef`, task owner principal,
+  surface/session currentness와 feedback nonce를 함께 결박한다. 다른 Discord 사용자·room·session의
+  task에 feedback을 달 수 없다. 첫 버전에서 actionable `correct` candidate 생성과 global
+  `task_executor` guidance의 승인·활성화는 authenticated privileged local Control Page operator만
+  할 수 있다. Discord/voice feedback은 same-principal 확인 뒤 review-only scoped signal로만 남기며
+  runtime guidance candidate를 만들거나 승인·활성화하지 못한다.
+- category는 `answer_quality|context_selection|task_routing|tone_identity|tool_failure|
+  permission_safety` allowlist다. `tone_identity`는 기존 identity review queue로만 보내고,
+  `permission_safety`와 evaluator/tool/approval/source 변경 요구는 `human_engineering_required`로
+  끝낸다. agent가 category나 owner를 승격하지 못한다.
+- `correct`는 사람이 직접 쓴 bounded correction을 candidate guidance로 사용하며 Evelyn/Qwen이
+  재작성하거나 source patch를 만들지 않는다. guidance는
+  `build_task_worker_payload`의 safety/system·TaskGrant·tool/approval/output verifier 뒤에 놓이는
+  비권위 planner input이다.
+- baseline/candidate eval은 source/model/evaluator/corpus/tool grant/input case가 같고 guidance
+  version/digest만 달라야 한다. P1-3의 24-row gate를 전부 통과하지 못하면 approval preview를
+  만들지 않는다.
+
+#### 예정 상태·privacy·canary·rollback
+
+- 예정 상태는 `captured → owner_verified → routed → candidate_ready → eval_passed →
+  awaiting_approval → approval_granted → canary_running → canary_passed → active`다. active parent는
+  canary 동안 그대로 유지하고, exact local-operator read-only/grounded task 10건만 candidate pointer로
+  실행한다. 그래서 canary 실패는 active rollback이 아니라 candidate 폐기이며 자동 retry하지 않는다.
+- activation은 candidate/eval/owner/parent generation에 묶인 one-use approval 뒤 canary 10/10,
+  unauthorized effect/privacy/structural failure 0, ledger integrity current일 때만 atomic CAS로 수행한다.
+  immutable base version과 이전 두 verified active version, 각 version의 transitive feedback dependency를
+  보존한다. activation 뒤 새 고정 실패는 `activeVersionId`, guidance digest, task ID, contract/evaluator
+  version, fixed failure code, current principal과 ledger integrity에 결박된 exact failure receipt가 있을
+  때만 rollback을 한 번 허용한다. generic tool/network failure는 rollback 근거가 아니다.
+- rollback target은 exact parent로 고정하지 않는다. transitive feedback dependency가 모두
+  deletion-current이고 evaluator/authority contract도 current인 generation 중 가장 최신 verified
+  version을 atomic CAS로 고른다. 그런 version이 없으면 immutable base로 돌아가며, base도 current
+  contract를 만족하지 못하면 candidate admission과 promoted guidance 적용을 모두 fail-closed한다.
+  rollback 뒤 자동 재승격·재시도는 없다.
+- durable store는 P1-4에서 정한 repository 밖 key와 domain-separated external anchor를 사용한다.
+  single writer, OS lock, boot generation, monotonic event sequence, CAS head, prune checkpoint와 late
+  callback fence를 모두 요구한다. `atomic_json_write`만으로 concurrent append 성공을 주장하지 않는다.
+- private feedback에는 raw original task/reply/transcript를 복제하지 않는다. `feedbackId`, opaque
+  principal, source task ID, correction revision, candidate lineage와 deletion-current generation만 가진다.
+  correction/삭제가 current가 아니면 eval·approval·canary를 거부한다. feedback 삭제·정정은 파생
+  candidate를 revoke하고, 이미 active라면 위 dependency-current 규칙으로 newest unaffected generation을
+  선택하는 rollback과 public content-free receipt를 요구한다.
+- public UI는 principal, correction/guidance 원문, path/origin, context byte count를 노출하지 않는다.
+  full candidate guidance는 authenticated local approval preview에서만 transient하게 보여 준다.
+
+#### `[R]` 전환 전 남은 설계 질문
+
+1. P1-4가 확정할 privileged local operator의 durable identity와 issuer proof를 어느 existing
+   Control Page session contract에서 발급할지.
+2. feedback correction/delete가 memory deletion-current와 같은 principal lineage로 전파되는 exact
+   API·journal owner와 retention/explicit-delete 계약.
+3. candidate/profile journal의 domain, external anchor slot, DACL/mount와 restart reconciliation을
+   어느 process가 single-writer로 소유할지.
+
+이 세 항목을 code path·schema·tests까지 고정하기 전에는 feedback 원문 저장, candidate 생성,
+canary 또는 active pointer 변경을 구현·실행하지 않는다. 완료 조건은 P1-3 eval 전건, same-principal/
+local-operator authority, deletion cascade, canary 10/10, forged/stale/replay 거부, version-bound failure
+receipt와 newest-unaffected rollback 선택이 source/offline 및 별도 승인된 read-only live session에서 모두
+통과하는 것이다.
 
 ## P2 — P0/P1 이후에만 수행
 
