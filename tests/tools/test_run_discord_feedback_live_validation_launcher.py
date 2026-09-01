@@ -175,6 +175,15 @@ class DiscordFeedbackLiveValidationLauncherTests(unittest.TestCase):
         self.assertGreaterEqual(
             source.count("target=/run/evelyn-command-guard"), 2
         )
+        clear_run_artifacts = source[
+            source.index("function Clear-OwnedRunArtifacts") : source.index(
+                "if (-not $RunLive)"
+            )
+        ]
+        self.assertLess(
+            clear_run_artifacts.index("if ($cleanupFailures.Count -ne 0) { return }"),
+            clear_run_artifacts.index("Get-ChildItem"),
+        )
 
     def test_validation_admin_identity_is_stdin_only_and_sessionless(self) -> None:
         source = self.source

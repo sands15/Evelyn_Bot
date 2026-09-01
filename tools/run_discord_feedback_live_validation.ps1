@@ -1475,6 +1475,7 @@ function Remove-OwnedDockerResources {
 }
 
 function Clear-OwnedRunArtifacts {
+    if ($cleanupFailures.Count -ne 0) { return }
     if (-not (Test-Path -LiteralPath $runRoot -PathType Container)) { return }
     $normalizedRoot = [IO.Path]::GetFullPath($runRoot).TrimEnd(
         [IO.Path]::DirectorySeparatorChar,
