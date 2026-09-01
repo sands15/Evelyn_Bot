@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import sys
+import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -23,6 +26,9 @@ from evelyn_core.discord_app_composition_runtime import (  # noqa: E402
     DiscordCommandCompositionDeps,
     DiscordEventCompositionDeps,
     build_discord_intents,
+)
+from evelyn_core.discord_conversation_archive_runtime import (  # noqa: E402
+    DiscordSharedSessionRegistry,
 )
 from evelyn_core.autonomy import AutonomyEngine  # noqa: E402
 from evelyn_core.discord_runtime_status import DiscordRuntimeStatus  # noqa: E402
@@ -49,6 +55,16 @@ def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
         is_control_command_authorized=lambda _ctx: True,
         guild_is_open=lambda _guild_id: True,
         guild_epoch=lambda _guild_id: 0,
+        conversation_archive_enabled=False,
+        conversation_archive_read_self=None,
+        conversation_archive_preview_delete=None,
+        conversation_archive_apply_delete=None,
+        conversation_archive_set_consent=None,
+        conversation_archive_capture_feedback=None,
+        conversation_archive_archive_autonomy_grant=None,
+        conversation_archive_archive_minecraft_command=None,
+        conversation_archive_sleep=None,
+        conversation_archive_operator_authorized=lambda _ctx: True,
     )
     values.update(overrides)
     return DiscordCommandCompositionDeps(**values)
@@ -81,6 +97,17 @@ def make_event_deps(**overrides) -> DiscordEventCompositionDeps:
         text_message_handler=lambda: object(),
         log=Mock(),
         recover_search_followups=None,
+        conversation_archive_enabled=False,
+        conversation_participation_tracker=None,
+        conversation_participation_observer=None,
+        conversation_consent_current=None,
+        conversation_archive_ready=AsyncMock(return_value="boot-1"),
+        conversation_archive_otp_delivery_worker=None,
+        conversation_shared_session_registry=None,
+        conversation_shared_session_open=AsyncMock(),
+        conversation_shared_session_close=AsyncMock(),
+        conversation_archive_command_guild_id=0,
+        conversation_archive_command_ownership=("", ""),
     )
     values.update(overrides)
     return DiscordEventCompositionDeps(**values)
@@ -95,7 +122,232 @@ def make_composition(*, events=None, commands_deps=None) -> DiscordAppCompositio
     )
 
 
+def active_shared_sessions(
+    *,
+    guild_id: int = 7,
+    text_channel_id: int = 8,
+    voice_channel_id: int = 9,
+    operator_user_id: int = 5,
+) -> DiscordSharedSessionRegistry:
+    sessions = DiscordSharedSessionRegistry(ttl_seconds=3600.0)
+    sessions.begin_generation("boot-1")
+    sessions.open(
+        operator_user_id=operator_user_id,
+        guild_id=guild_id,
+        text_channel_id=text_channel_id,
+        voice_channel_id=voice_channel_id,
+    )
+    return sessions
+
+
+class FakeRemoteApplicationCommand:
+    def __init__(self, command_id: int, payload: dict) -> None:
+        self.id = int(command_id)
+        self._payload = dict(payload)
+        self.name = str(payload.get("name") or "")
+        self.default_member_permissions = payload.get("default_member_permissions")
+        self.dm_permission = payload.get("dm_permission", True)
+        self.nsfw = payload.get("nsfw", False)
+
+    def to_dict(self) -> dict:
+        return dict(self._payload)
+
+
+class FakeDiscordApplicationCommandRegistry:
+    def __init__(
+        self,
+        *,
+        guild_payloads=(),
+        global_payloads=(),
+        fail_upsert_at: int | None = None,
+        ambiguous_upsert_failure: bool = False,
+        invalid_upsert_shape_at: int | None = None,
+        fail_edit_at: int | None = None,
+        ambiguous_edit_failure: bool = False,
+        drift_second_global_fetch: bool = False,
+        concurrent_on_upsert_failure: dict | None = None,
+    ) -> None:
+        self.guild = [
+            FakeRemoteApplicationCommand(1000 + index, payload)
+            for index, payload in enumerate(guild_payloads)
+        ]
+        self.globals = [
+            FakeRemoteApplicationCommand(2000 + index, payload)
+            for index, payload in enumerate(global_payloads)
+        ]
+        self.fail_upsert_at = fail_upsert_at
+        self.ambiguous_upsert_failure = ambiguous_upsert_failure
+        self.invalid_upsert_shape_at = invalid_upsert_shape_at
+        self.fail_edit_at = fail_edit_at
+        self.ambiguous_edit_failure = ambiguous_edit_failure
+        self.drift_second_global_fetch = drift_second_global_fetch
+        self.concurrent_on_upsert_failure = concurrent_on_upsert_failure
+        self.upsert_count = 0
+        self.edit_count = 0
+        self.global_fetch_count = 0
+        self.next_id = 3000
+
+    async def get_guild(self, _application_id, _guild_id):
+        result = []
+        for command in self.guild:
+            payload = {**command.to_dict(), "id": str(command.id)}
+            payload.pop("contexts", None)
+            payload.pop("integration_types", None)
+            result.append(payload)
+        return result
+
+    async def get_global(self, _application_id):
+        self.global_fetch_count += 1
+        result = [
+            {**command.to_dict(), "id": str(command.id)} for command in self.globals
+        ]
+        if self.drift_second_global_fetch and self.global_fetch_count == 2:
+            result.append(
+                {
+                    "id": "9999",
+                    "type": 1,
+                    "name": "concurrent-global",
+                    "description": "changed outside the publisher",
+                    "options": [],
+                }
+            )
+        return result
+
+    async def upsert(self, _application_id, _guild_id, payload):
+        self.upsert_count += 1
+        existing = next(
+            (command for command in self.guild if command.name == payload["name"]),
+            None,
+        )
+        command_id = existing.id if existing is not None else self.next_id
+        if existing is None:
+            self.next_id += 1
+        response_payload = dict(payload)
+        if self.invalid_upsert_shape_at == self.upsert_count:
+            response_payload["name"] = "unexpected-temp-name"
+        replacement = FakeRemoteApplicationCommand(command_id, response_payload)
+        if existing is not None:
+            self.guild.remove(existing)
+        self.guild.append(replacement)
+        if self.fail_upsert_at == self.upsert_count:
+            if self.concurrent_on_upsert_failure is not None:
+                self.guild.append(
+                    FakeRemoteApplicationCommand(
+                        self.next_id,
+                        self.concurrent_on_upsert_failure,
+                    )
+                )
+                self.next_id += 1
+            if not self.ambiguous_upsert_failure:
+                self.guild.remove(replacement)
+                if existing is not None:
+                    self.guild.append(existing)
+            raise RuntimeError("simulated_upsert_failure")
+        return {**replacement.to_dict(), "id": str(command_id)}
+
+    async def post(self, _route, **kwargs):
+        payload = kwargs["json"]
+        existing = next(
+            (command for command in self.guild if command.name == payload["name"]),
+            None,
+        )
+        await kwargs["raise_for_status"](
+            SimpleNamespace(status=200 if existing is not None else 201)
+        )
+        return await self.upsert(None, None, payload)
+
+    async def edit(self, _application_id, _guild_id, command_id, payload):
+        self.edit_count += 1
+        command = next(
+            (command for command in self.guild if command.id == command_id),
+            None,
+        )
+        if command is None or any(
+            other.id != command_id and other.name == payload["name"]
+            for other in self.guild
+        ):
+            raise RuntimeError("simulated_edit_collision")
+        replacement = FakeRemoteApplicationCommand(command_id, payload)
+        if self.fail_edit_at != self.edit_count or self.ambiguous_edit_failure:
+            self.guild.remove(command)
+            self.guild.append(replacement)
+        if self.fail_edit_at == self.edit_count:
+            raise RuntimeError("simulated_edit_failure")
+        return {**replacement.to_dict(), "id": str(command_id)}
+
+    async def delete(self, _application_id, _guild_id, command_id):
+        command = next(
+            (command for command in self.guild if command.id == command_id),
+            None,
+        )
+        if command is None:
+            raise RuntimeError("simulated_delete_missing")
+        self.guild.remove(command)
+
+
 class DiscordAppCompositionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._archive_command_temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._archive_command_temporary.cleanup)
+        self._archive_command_fixture_index = 0
+
+    def _archive_command_fixture(self):
+        self._archive_command_fixture_index += 1
+        guild_id = 123456789012345678
+        ownership_path = Path(self._archive_command_temporary.name) / (
+            f"ownership-{self._archive_command_fixture_index}.json"
+        )
+        composition = make_composition(
+            events=make_event_deps(
+                conversation_archive_enabled=True,
+                conversation_archive_command_guild_id=guild_id,
+                conversation_archive_command_ownership=(
+                    str(ownership_path),
+                    "a" * 32,
+                ),
+            ),
+            commands_deps=make_command_deps(conversation_archive_enabled=True),
+        )
+        bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=987654321098765432,
+        )
+        composition.register(bot)
+        desired = {
+            command.name: command.to_dict(bot.tree)
+            for command in composition._conversation_archive_application_commands
+        }
+        globals_payload = [
+            {
+                "type": 1,
+                "name": f"global-{index}",
+                "description": f"existing global command {index}",
+                "options": [],
+            }
+            for index in range(51)
+        ]
+        return composition, bot, guild_id, desired, globals_payload
+
+    @staticmethod
+    def _wire_archive_command_registry(bot, registry) -> None:
+        bot.http.get_guild_commands = AsyncMock(side_effect=registry.get_guild)
+        bot.http.get_global_commands = AsyncMock(side_effect=registry.get_global)
+        bot.tree.sync = AsyncMock()
+        bot.http.request = AsyncMock(side_effect=registry.post)
+        bot.http.edit_guild_command = AsyncMock(side_effect=registry.edit)
+        bot.http.delete_guild_command = AsyncMock(side_effect=registry.delete)
+        bot.http.upsert_global_command = AsyncMock()
+        bot.http.bulk_upsert_global_commands = AsyncMock()
+        bot.http.bulk_upsert_guild_commands = AsyncMock()
+
+    def _assert_no_bulk_or_global_command_mutation(self, bot) -> None:
+        bot.tree.sync.assert_not_awaited()
+        bot.http.upsert_global_command.assert_not_awaited()
+        bot.http.bulk_upsert_global_commands.assert_not_awaited()
+        bot.http.bulk_upsert_guild_commands.assert_not_awaited()
+
     def test_autonomy_start_same_guild_reset_during_route_fences_stale_start(
         self,
     ) -> None:
@@ -518,6 +770,1237 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertIs(bot.on_ready.__self__, composition)
         self.assertIs(bot.on_message.__self__, composition)
         self.assertIs(bot.on_command_error.__self__, composition)
+
+    def test_archive_application_commands_register_only_for_literal_true_and_are_guild_only(self) -> None:
+        for enabled, expected in ((Mock(name="truthy"), False), (True, True)):
+            with self.subTest(enabled=enabled):
+                composition = make_composition(
+                    commands_deps=make_command_deps(
+                        conversation_archive_enabled=enabled,
+                    )
+                )
+                bot = commands.Bot(
+                    command_prefix="!",
+                    intents=discord.Intents.none(),
+                    help_command=None,
+                )
+
+                bindings = composition.register(bot)
+                registered = {
+                    name: bot.tree.get_command(name)
+                    for name in (
+                        "기록열람",
+                        "기록삭제",
+                        "기록동의",
+                        "기록철회",
+                        "피드백제출",
+                    )
+                }
+
+                if not expected:
+                    self.assertTrue(all(command is None for command in registered.values()))
+                    self.assertIsNone(bindings.record_view_application_command)
+                    self.assertIsNone(bindings.feedback_application_command)
+                    continue
+                self.assertTrue(all(command is not None for command in registered.values()))
+                self.assertIs(
+                    bindings.record_view_application_command,
+                    registered["기록열람"],
+                )
+                for command in registered.values():
+                    self.assertTrue(command.allowed_contexts.guild)
+                    self.assertFalse(command.allowed_contexts.dm_channel)
+                    self.assertFalse(command.allowed_contexts.private_channel)
+                    self.assertTrue(command.allowed_installs.guild)
+                    self.assertFalse(command.allowed_installs.user)
+                self.assertEqual(
+                    {parameter.name for parameter in registered["기록삭제"].parameters},
+                    {"시작", "끝"},
+                )
+                self.assertEqual(
+                    {
+                        parameter.name
+                        for parameter in registered["피드백제출"].parameters
+                    },
+                    {"출처", "분류", "교정", "변경범위"},
+                )
+                self.assertNotIn("sync(", inspect.getsource(composition.register))
+
+    def test_archive_command_publish_preserves_foreign_and_global_commands(self) -> None:
+        composition, bot, guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        foreign = {
+            "type": 1,
+            "name": "기존서버명령",
+            "description": "must remain unchanged",
+            "options": [],
+        }
+        registry = FakeDiscordApplicationCommandRegistry(
+            guild_payloads=[foreign],
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+
+        self.assertEqual(bot.http.request.await_count, 5)
+        self.assertEqual(bot.http.edit_guild_command.await_count, 5)
+        self.assertTrue(
+            all(
+                call.args[0].method == "POST"
+                and str(guild_id) in call.args[0].url
+                and callable(call.kwargs.get("raise_for_status"))
+                for call in bot.http.request.await_args_list
+            )
+        )
+        temporary_names = {
+            call.kwargs["json"]["name"] for call in bot.http.request.await_args_list
+        }
+        self.assertTrue(temporary_names.isdisjoint(desired))
+        self.assertTrue(all(len(name) == 32 for name in temporary_names))
+        self.assertEqual(
+            [command.to_dict() for command in registry.guild if command.name == foreign["name"]],
+            [foreign],
+        )
+        self.assertEqual(len(registry.globals), 51)
+        self.assertEqual(
+            {command.name for command in registry.guild if command.name in desired},
+            set(desired),
+        )
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_post_200_never_claims_or_deletes_concurrent_temp(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        original_post = registry.post
+        injected = False
+
+        async def inject_same_temporary_name(route, **kwargs):
+            nonlocal injected
+            if not injected:
+                injected = True
+                registry.guild.append(
+                    FakeRemoteApplicationCommand(8123, kwargs["json"])
+                )
+            return await original_post(route, **kwargs)
+
+        bot.http.request.side_effect = inject_same_temporary_name
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_rollback_failed",
+        ):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        bot.http.delete_guild_command.assert_not_awaited()
+        self.assertEqual([command.id for command in registry.guild], [8123])
+        self.assertFalse(composition._conversation_archive_owned_commands)
+        self.assertTrue(
+            composition._conversation_archive_command_recovery_required
+        )
+
+    def test_archive_command_patch_collision_deletes_only_owned_temp(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        original_edit = registry.edit
+        concurrent_id = 8456
+        injected = False
+
+        async def inject_target_before_patch(application_id, guild_id, command_id, payload):
+            nonlocal injected
+            if not injected:
+                injected = True
+                registry.guild.append(
+                    FakeRemoteApplicationCommand(concurrent_id, payload)
+                )
+            return await original_edit(application_id, guild_id, command_id, payload)
+
+        bot.http.edit_guild_command.side_effect = inject_target_before_patch
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_rollback_failed",
+        ):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertEqual(bot.http.delete_guild_command.await_count, 1)
+        self.assertEqual([command.id for command in registry.guild], [concurrent_id])
+        self.assertIn(registry.guild[0].name, desired)
+
+    def test_overlapping_archive_publish_is_serialized_exactly_once(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        original_post = registry.post
+
+        async def block_first(route, **kwargs):
+            if not first_started.is_set():
+                first_started.set()
+                await release_first.wait()
+            return await original_post(route, **kwargs)
+
+        bot.http.request.side_effect = block_first
+
+        async def scenario() -> None:
+            first = asyncio.create_task(
+                composition._publish_conversation_archive_application_commands()
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            second = asyncio.create_task(
+                composition._publish_conversation_archive_application_commands()
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(second.done())
+            release_first.set()
+            await asyncio.gather(first, second)
+
+        asyncio.run(scenario())
+
+        self.assertEqual(bot.http.request.await_count, 5)
+        self.assertEqual(bot.http.edit_guild_command.await_count, 5)
+        self.assertEqual(
+            {command.name for command in registry.guild},
+            set(desired),
+        )
+        bot.http.delete_guild_command.assert_not_awaited()
+
+    def test_archive_command_publish_collision_is_no_write(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        collision = dict(desired["기록열람"])
+        collision["description"] = "foreign command with a reserved name"
+        registry = FakeDiscordApplicationCommandRegistry(
+            guild_payloads=[collision],
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        with self.assertRaisesRegex(RuntimeError, "archive_command_publish_collision"):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        bot.http.request.assert_not_awaited()
+        bot.http.delete_guild_command.assert_not_awaited()
+        self.assertEqual(registry.guild[0].to_dict(), collision)
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_publish_exact_shape_is_idempotent_when_guild_get_omits_global_only_fields(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            guild_payloads=list(desired.values()),
+            global_payloads=globals_payload,
+        )
+        raw_guild = asyncio.run(registry.get_guild(bot.application_id, _guild_id))
+        self.assertTrue(
+            all(
+                "contexts" not in command and "integration_types" not in command
+                for command in raw_guild
+            )
+        )
+        self.assertTrue(
+            all(
+                payload["contexts"] == [0]
+                and payload["integration_types"] == [0]
+                for payload in desired.values()
+            )
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+
+        bot.http.request.assert_not_awaited()
+        bot.http.delete_guild_command.assert_not_awaited()
+        self.assertEqual(bot.http.get_guild_commands.await_count, 2)
+        self.assertEqual(bot.http.get_global_commands.await_count, 2)
+        self.assertTrue(composition._conversation_archive_commands_published)
+        asyncio.run(composition._clear_conversation_archive_application_commands())
+        bot.http.delete_guild_command.assert_not_awaited()
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_invalid_returned_shape_rolls_back_only_returned_id(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+            invalid_upsert_shape_at=1,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        with self.assertRaisesRegex(RuntimeError, "archive_command_publish_failed"):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertEqual(bot.http.request.await_count, 1)
+        self.assertEqual(bot.http.delete_guild_command.await_count, 1)
+        self.assertFalse(registry.guild)
+        self.assertFalse(composition._conversation_archive_owned_commands)
+        self.assertFalse(
+            {command.name for command in registry.guild}.intersection(desired)
+        )
+
+    def test_archive_command_patch_response_loss_rolls_back_final_owned_id(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+            fail_edit_at=1,
+            ambiguous_edit_failure=True,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        with self.assertRaisesRegex(RuntimeError, "archive_command_publish_failed"):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertFalse(registry.guild)
+        self.assertFalse(composition._conversation_archive_owned_commands)
+        self.assertEqual(bot.http.delete_guild_command.await_count, 1)
+
+    def test_archive_command_201_invalid_body_requeries_temp_before_rollback(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        original_post = registry.post
+
+        async def invalid_body_after_201(route, **kwargs):
+            result = await original_post(route, **kwargs)
+            return {**result, "id": "invalid"}
+
+        bot.http.request.side_effect = invalid_body_after_201
+
+        with self.assertRaisesRegex(RuntimeError, "archive_command_publish_failed"):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertFalse(registry.guild)
+        self.assertFalse(composition._conversation_archive_owned_commands)
+        self.assertEqual(bot.http.delete_guild_command.await_count, 1)
+
+    def test_archive_command_clear_delete_response_loss_converges(self) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        first = True
+
+        async def ambiguous_delete(application_id, guild_id, command_id):
+            nonlocal first
+            await registry.delete(application_id, guild_id, command_id)
+            if first:
+                first = False
+                raise RuntimeError("response lost after applied delete")
+
+        bot.http.delete_guild_command.side_effect = ambiguous_delete
+        asyncio.run(composition._clear_conversation_archive_application_commands())
+
+        self.assertFalse(registry.guild)
+        self.assertFalse(composition._conversation_archive_owned_commands)
+
+    def test_archive_command_clear_success_without_delete_keeps_ownership_and_fails(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        owned_ids = set(composition._conversation_archive_owned_commands)
+        bot.http.delete_guild_command.side_effect = None
+        bot.http.delete_guild_command.return_value = None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_clear_verification_failed",
+        ):
+            asyncio.run(composition._clear_conversation_archive_application_commands())
+
+        self.assertEqual(set(composition._conversation_archive_owned_commands), owned_ids)
+        self.assertEqual({command.id for command in registry.guild}, owned_ids)
+
+    def test_archive_command_ownership_ledger_is_atomic_and_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ownership.json"
+            run_id = "a" * 32
+            composition, bot, _guild_id, _desired, globals_payload = (
+                self._archive_command_fixture()
+            )
+            composition.deps = DiscordAppCompositionDeps(
+                events=replace(
+                    composition.deps.events,
+                    conversation_archive_command_ownership=(str(path), run_id),
+                ),
+                commands=composition.deps.commands,
+            )
+            registry = FakeDiscordApplicationCommandRegistry(
+                global_payloads=globals_payload,
+            )
+            self._wire_archive_command_registry(bot, registry)
+
+            asyncio.run(composition._publish_conversation_archive_application_commands())
+            published = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                published["schema"],
+                "evelyn.discord-command-ownership.v2",
+            )
+            self.assertEqual(published["runId"], run_id)
+            self.assertEqual(
+                {entry["id"] for entry in published["commands"]},
+                {str(command.id) for command in registry.guild},
+            )
+            self.assertTrue(
+                all(
+                    set(entry) == {"id", "shapes"}
+                    and len(entry["shapes"]) == 1
+                    for entry in published["commands"]
+                )
+            )
+            self.assertFalse(list(path.parent.glob(".*.tmp")))
+
+            asyncio.run(composition._clear_conversation_archive_application_commands())
+            cleared = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(cleared["commands"], [])
+
+    def test_archive_command_restart_adopts_exact_v2_ledger_without_post(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        owned_ids = set(composition._conversation_archive_owned_commands)
+
+        restarted = DiscordAppComposition(composition.deps)
+        restarted_bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=bot.application_id,
+        )
+        restarted.register(restarted_bot)
+        self._wire_archive_command_registry(restarted_bot, registry)
+
+        asyncio.run(
+            restarted._publish_conversation_archive_application_commands()
+        )
+
+        restarted_bot.http.request.assert_not_awaited()
+        restarted_bot.http.edit_guild_command.assert_not_awaited()
+        self.assertEqual(
+            set(restarted._conversation_archive_owned_commands),
+            owned_ids,
+        )
+        self.assertEqual({command.name for command in registry.guild}, set(desired))
+
+    def test_archive_command_partial_restart_is_recovery_only_no_republish(self) -> None:
+        composition, bot, _guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        ownership_path = Path(
+            composition.deps.events.conversation_archive_command_ownership[0]
+        )
+        ledger = json.loads(ownership_path.read_text(encoding="utf-8"))
+        ledger["commands"] = ledger["commands"][:1]
+        ownership_path.write_text(json.dumps(ledger), encoding="utf-8")
+        registry.guild = registry.guild[:1]
+
+        restarted = DiscordAppComposition(composition.deps)
+        restarted_bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=bot.application_id,
+        )
+        restarted.register(restarted_bot)
+        self._wire_archive_command_registry(restarted_bot, registry)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_restart_incomplete",
+        ):
+            asyncio.run(
+                restarted._publish_conversation_archive_application_commands()
+            )
+
+        restarted_bot.http.request.assert_not_awaited()
+        restarted_bot.http.edit_guild_command.assert_not_awaited()
+        restarted_bot.http.delete_guild_command.assert_not_awaited()
+        self.assertTrue(
+            restarted._conversation_archive_command_recovery_required
+        )
+        self.assertEqual(len(restarted._conversation_archive_owned_commands), 1)
+
+    def test_archive_command_recovery_adopts_one_exact_run_temporary_shape(self) -> None:
+        composition, bot, guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        composition._persist_conversation_archive_command_ownership(bot, guild_id)
+        _bot, _guild_id, payloads, desired_shapes = (
+            composition._conversation_archive_command_context()
+        )
+        run_id = composition.deps.events.conversation_archive_command_ownership[1]
+        temporary_payload, _temporary_shape = next(
+            iter(
+                composition._temporary_conversation_archive_command_payloads(
+                    payloads,
+                    desired_shapes,
+                    run_id,
+                ).values()
+            )
+        )
+        temporary_id = 81234567890123456
+        registry.guild.append(
+            FakeRemoteApplicationCommand(temporary_id, temporary_payload)
+        )
+
+        restarted = DiscordAppComposition(composition.deps)
+        restarted_bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=bot.application_id,
+        )
+        restarted.register(restarted_bot)
+        self._wire_archive_command_registry(restarted_bot, registry)
+        _bot, _guild_id, _payloads, restarted_shapes = (
+            restarted._conversation_archive_command_context()
+        )
+        restarted._load_conversation_archive_command_ownership(
+            restarted_bot,
+            guild_id,
+            list(registry.guild),
+            restarted_shapes,
+            adopt_stale_temporary=True,
+        )
+
+        self.assertEqual(set(restarted._conversation_archive_owned_commands), {temporary_id})
+        self.assertTrue(restarted._conversation_archive_command_recovery_required)
+        asyncio.run(restarted._clear_conversation_archive_application_commands())
+        self.assertEqual(registry.guild, [])
+        restarted_bot.http.request.assert_not_awaited()
+        restarted_bot.http.edit_guild_command.assert_not_awaited()
+        restarted_bot.http.delete_guild_command.assert_awaited_once()
+        ledger = json.loads(
+            Path(
+                restarted.deps.events.conversation_archive_command_ownership[0]
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(ledger["commands"], [])
+
+    def test_archive_command_recovery_never_adopts_ambiguous_run_temporary_shape(self) -> None:
+        composition, bot, guild_id, _desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        composition._persist_conversation_archive_command_ownership(bot, guild_id)
+        _bot, _guild_id, payloads, desired_shapes = (
+            composition._conversation_archive_command_context()
+        )
+        run_id = composition.deps.events.conversation_archive_command_ownership[1]
+        temporary_payload, _temporary_shape = next(
+            iter(
+                composition._temporary_conversation_archive_command_payloads(
+                    payloads,
+                    desired_shapes,
+                    run_id,
+                ).values()
+            )
+        )
+        registry.guild.extend(
+            [
+                FakeRemoteApplicationCommand(81234567890123456, temporary_payload),
+                FakeRemoteApplicationCommand(81234567890123457, temporary_payload),
+            ]
+        )
+        restarted = DiscordAppComposition(composition.deps)
+        restarted_bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=bot.application_id,
+        )
+        restarted.register(restarted_bot)
+        self._wire_archive_command_registry(restarted_bot, registry)
+        _bot, _guild_id, _payloads, restarted_shapes = (
+            restarted._conversation_archive_command_context()
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_ownership_stale_ambiguous",
+        ):
+            restarted._load_conversation_archive_command_ownership(
+                restarted_bot,
+                guild_id,
+                list(registry.guild),
+                restarted_shapes,
+                adopt_stale_temporary=True,
+            )
+
+        restarted_bot.http.delete_guild_command.assert_not_awaited()
+        self.assertFalse(restarted._conversation_archive_owned_commands)
+
+    def test_archive_command_ledger_write_failure_cleans_known_returned_id(self) -> None:
+        for failure in (OSError("ledger unavailable"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                composition, bot, _guild_id, _desired, globals_payload = (
+                    self._archive_command_fixture()
+                )
+                registry = FakeDiscordApplicationCommandRegistry(
+                    global_payloads=globals_payload,
+                )
+                self._wire_archive_command_registry(bot, registry)
+                calls = 0
+
+                def flaky_writer(*_args, **_kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise failure
+
+                expected = type(failure) if isinstance(failure, BaseException) else RuntimeError
+                with patch(
+                    "evelyn_core.discord_app_composition_runtime.write_command_ownership_ledger",
+                    side_effect=flaky_writer,
+                ):
+                    if isinstance(failure, KeyboardInterrupt):
+                        with self.assertRaises(expected):
+                            asyncio.run(
+                                composition._publish_conversation_archive_application_commands()
+                            )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "archive_command_publish_failed"):
+                            asyncio.run(
+                                composition._publish_conversation_archive_application_commands()
+                            )
+
+                self.assertEqual(bot.http.request.await_count, 1)
+                self.assertEqual(bot.http.delete_guild_command.await_count, 1)
+                self.assertFalse(registry.guild)
+                self.assertFalse(composition._conversation_archive_owned_commands)
+
+    def test_archive_command_publish_ambiguous_partial_failure_rolls_back_new_names(
+        self,
+    ) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        foreign = {
+            "type": 1,
+            "name": "기존서버명령",
+            "description": "must remain unchanged",
+            "options": [],
+        }
+        concurrent_name = list(desired)[2]
+        registry = FakeDiscordApplicationCommandRegistry(
+            guild_payloads=[foreign],
+            global_payloads=globals_payload,
+            fail_upsert_at=2,
+            ambiguous_upsert_failure=True,
+            concurrent_on_upsert_failure=desired[concurrent_name],
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_rollback_failed",
+        ):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertEqual(bot.http.request.await_count, 2)
+        self.assertEqual(bot.http.delete_guild_command.await_count, 2)
+        self.assertEqual(
+            [command.to_dict() for command in registry.guild],
+            [foreign, desired[concurrent_name]],
+        )
+        self.assertEqual(
+            {command.name for command in registry.guild}.intersection(desired),
+            {concurrent_name},
+        )
+        self.assertTrue(composition._conversation_archive_command_recovery_required)
+        self.assertFalse(composition._conversation_archive_owned_commands)
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_selective_clear_preserves_foreign_and_globals(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        foreign = {
+            "type": 1,
+            "name": "기존서버명령",
+            "description": "must remain unchanged",
+            "options": [],
+        }
+        registry = FakeDiscordApplicationCommandRegistry(
+            guild_payloads=[foreign],
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        asyncio.run(composition._clear_conversation_archive_application_commands())
+
+        self.assertEqual(bot.http.delete_guild_command.await_count, 5)
+        self.assertEqual(bot.http.request.await_count, 5)
+        self.assertEqual(
+            [command.to_dict() for command in registry.guild],
+            [foreign],
+        )
+        self.assertEqual(len(registry.globals), 51)
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_selective_clear_drift_is_no_delete(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        payloads = list(desired.values())
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+        )
+        self._wire_archive_command_registry(bot, registry)
+        asyncio.run(composition._publish_conversation_archive_application_commands())
+        registry.guild[0]._payload["description"] = "drifted managed command"
+
+        with self.assertRaisesRegex(RuntimeError, "archive_command_clear_drift"):
+            asyncio.run(
+                composition._clear_conversation_archive_application_commands()
+            )
+
+        bot.http.delete_guild_command.assert_not_awaited()
+        self.assertEqual(bot.http.request.await_count, 5)
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_publish_global_snapshot_drift_rolls_back(self) -> None:
+        composition, bot, _guild_id, desired, globals_payload = (
+            self._archive_command_fixture()
+        )
+        registry = FakeDiscordApplicationCommandRegistry(
+            global_payloads=globals_payload,
+            drift_second_global_fetch=True,
+        )
+        self._wire_archive_command_registry(bot, registry)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_verification_failed",
+        ):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+
+        self.assertEqual(bot.http.request.await_count, 5)
+        self.assertEqual(bot.http.delete_guild_command.await_count, 5)
+        self.assertFalse(
+            {command.name for command in registry.guild}.intersection(desired)
+        )
+        self.assertEqual(len(registry.globals), 51)
+        self._assert_no_bulk_or_global_command_mutation(bot)
+
+    def test_archive_command_publish_fails_closed_without_exact_guild(self) -> None:
+        composition = make_composition(
+            events=make_event_deps(conversation_archive_enabled=True),
+            commands_deps=make_command_deps(conversation_archive_enabled=True),
+        )
+        bot = commands.Bot(
+            command_prefix="!",
+            intents=discord.Intents.none(),
+            help_command=None,
+            application_id=987654321098765432,
+        )
+        composition.register(bot)
+        bot.http.request = AsyncMock(return_value={})
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_command_publish_configuration_invalid",
+        ):
+            asyncio.run(
+                composition._publish_conversation_archive_application_commands()
+            )
+        bot.http.request.assert_not_awaited()
+
+    def test_human_voice_state_reaches_archive_before_bot_only_return(self) -> None:
+        observer = AsyncMock()
+        consent = Mock(return_value=True)
+        ensure = AsyncMock()
+        guild = SimpleNamespace(id=7, voice_client=None)
+        member = SimpleNamespace(id=3, guild=guild, bot=False)
+        events = make_event_deps(
+            conversation_archive_enabled=True,
+            conversation_participation_observer=observer,
+            conversation_consent_current=consent,
+            conversation_shared_session_registry=active_shared_sessions(),
+            ensure_listening_voice_client=ensure,
+        )
+        state = SimpleNamespace(
+            channel=SimpleNamespace(id=9),
+            self_mute=False,
+            mute=False,
+            suppress=False,
+            self_deaf=False,
+            deaf=False,
+        )
+
+        composition = make_composition(events=events)
+
+        async def scenario() -> None:
+            await composition.on_voice_state_update(
+                member,
+                SimpleNamespace(channel=None),
+                state,
+            )
+            await composition.on_voice_state_update(
+                member,
+                state,
+                SimpleNamespace(**{**state.__dict__, "self_mute": True}),
+            )
+
+        asyncio.run(scenario())
+
+        self.assertEqual(observer.await_count, 2)
+        update = observer.await_args_list[0].args[0]
+        self.assertEqual((update.guild_id, update.user_id), (7, 3))
+        self.assertTrue(update.snapshot.eligible)
+        self.assertEqual({row.kind.value for row in update.opened}, {"presence", "eligible"})
+        muted_update = observer.await_args_list[1].args[0]
+        self.assertFalse(muted_update.snapshot.eligible)
+        self.assertEqual([row.kind.value for row in muted_update.closed], ["eligible"])
+        self.assertEqual(consent.call_count, 2)
+        ensure.assert_not_awaited()
+
+    def test_mock_archive_flag_does_not_track_human_voice_state(self) -> None:
+        observer = AsyncMock()
+        events = make_event_deps(
+            conversation_archive_enabled=Mock(name="truthy_archive_flag"),
+            conversation_participation_observer=observer,
+        )
+        member = SimpleNamespace(
+            id=3,
+            guild=SimpleNamespace(id=7, voice_client=None),
+            bot=False,
+        )
+
+        asyncio.run(
+            make_composition(events=events).on_voice_state_update(
+                member,
+                SimpleNamespace(channel=None),
+                SimpleNamespace(channel=SimpleNamespace(id=9)),
+            )
+        )
+
+        observer.assert_not_awaited()
+
+    def test_archive_voice_clock_is_clamped_when_wall_clock_moves_back(self) -> None:
+        observer = AsyncMock()
+        guild = SimpleNamespace(id=7, voice_client=None)
+        member = SimpleNamespace(id=3, guild=guild, bot=False)
+        joined = SimpleNamespace(
+            channel=SimpleNamespace(id=9),
+            self_mute=False,
+            mute=False,
+            suppress=False,
+            self_deaf=False,
+            deaf=False,
+        )
+        muted = SimpleNamespace(**{**joined.__dict__, "self_mute": True})
+        composition = make_composition(
+            events=make_event_deps(
+                conversation_archive_enabled=True,
+                conversation_participation_observer=observer,
+                conversation_consent_current=lambda **_kwargs: True,
+                conversation_shared_session_registry=active_shared_sessions(),
+            )
+        )
+
+        async def scenario() -> None:
+            await composition.on_voice_state_update(
+                member,
+                SimpleNamespace(channel=None),
+                joined,
+            )
+            await composition.on_voice_state_update(member, joined, muted)
+
+        with patch(
+            "evelyn_core.discord_app_composition_runtime.time.time",
+            side_effect=[100.0, 99.0],
+        ):
+            asyncio.run(scenario())
+
+        self.assertEqual(observer.await_count, 2)
+        self.assertEqual(
+            [item.args[0].observed_at for item in observer.await_args_list],
+            [100.0, 100.0],
+        )
+
+    def test_ready_and_disconnect_do_not_restore_a_stale_shared_session(self) -> None:
+        observer = AsyncMock()
+        guild = SimpleNamespace(
+            id=7,
+            voice_client=None,
+            voice_channels=[],
+            stage_channels=[],
+        )
+        voice_state = SimpleNamespace(
+            channel=SimpleNamespace(id=9),
+            self_mute=False,
+            mute=False,
+            suppress=False,
+            self_deaf=False,
+            deaf=False,
+        )
+        member = SimpleNamespace(
+            id=3,
+            guild=guild,
+            bot=False,
+            voice=voice_state,
+        )
+        guild.voice_channels = [SimpleNamespace(id=9, members=[member])]
+        events = make_event_deps(
+            bot_guilds=lambda: [guild],
+            voice_client_type=SimpleNamespace,
+            conversation_archive_enabled=True,
+            conversation_participation_observer=observer,
+            conversation_consent_current=lambda **_kwargs: True,
+            conversation_shared_session_registry=active_shared_sessions(),
+        )
+        composition = make_composition(events=events)
+        # Command registration/publishing is outside this direct on_ready lifecycle test.
+        composition._conversation_archive_commands_published = True
+
+        async def scenario() -> None:
+            await composition.on_ready()
+            await composition.on_disconnect()
+
+        asyncio.run(scenario())
+
+        observer.assert_not_awaited()
+        self.assertIsNone(
+            events.conversation_shared_session_registry.peek(guild_id=7)
+        )
+
+    def test_ready_does_not_rebuild_suppressed_stage_member_without_fresh_join(self) -> None:
+        observer = AsyncMock()
+        guild = SimpleNamespace(
+            id=7,
+            voice_client=None,
+            voice_channels=[],
+            stage_channels=[],
+        )
+        voice_state = SimpleNamespace(
+            channel=SimpleNamespace(id=11),
+            self_mute=False,
+            mute=False,
+            suppress=True,
+            self_deaf=False,
+            deaf=False,
+        )
+        member = SimpleNamespace(id=3, guild=guild, bot=False, voice=voice_state)
+        guild.stage_channels = [SimpleNamespace(id=11, members=[member])]
+        composition = make_composition(
+            events=make_event_deps(
+                bot_guilds=lambda: [guild],
+                voice_client_type=SimpleNamespace,
+                conversation_archive_enabled=True,
+                conversation_participation_observer=observer,
+                conversation_consent_current=lambda **_kwargs: True,
+                conversation_shared_session_registry=active_shared_sessions(
+                    voice_channel_id=11
+                ),
+            )
+        )
+        # Command registration/publishing is outside this direct on_ready lifecycle test.
+        composition._conversation_archive_commands_published = True
+
+        asyncio.run(composition.on_ready())
+
+        observer.assert_not_awaited()
+
+    def test_authorized_join_and_rejoin_open_only_after_complete_korean_notice(self) -> None:
+        class VoiceClient:
+            def __init__(self, channel) -> None:
+                self.channel = channel
+
+            @staticmethod
+            def stop_listening() -> None:
+                return None
+
+            async def disconnect(self, **_kwargs) -> None:
+                return None
+
+        async def scenario():
+            sessions = DiscordSharedSessionRegistry(ttl_seconds=3600.0)
+            sessions.begin_generation("boot-1")
+            guild = SimpleNamespace(id=7, voice_client=None)
+            voice_channel = SimpleNamespace(id=9, name="Voice", members=[])
+
+            async def ensure(_guild, channel):
+                client = VoiceClient(channel)
+                guild.voice_client = client
+                return client
+
+            ensure_voice = AsyncMock(side_effect=ensure)
+            open_lease = AsyncMock()
+            close_lease = AsyncMock()
+            ctx = SimpleNamespace(
+                guild=guild,
+                channel=SimpleNamespace(id=8),
+                author=SimpleNamespace(
+                    id=5,
+                    voice=SimpleNamespace(channel=voice_channel),
+                ),
+                send=AsyncMock(),
+            )
+            composition = make_composition(
+                events=make_event_deps(
+                    conversation_archive_enabled=True,
+                    conversation_shared_session_registry=sessions,
+                    conversation_participation_observer=AsyncMock(),
+                    conversation_shared_session_open=open_lease,
+                    conversation_shared_session_close=close_lease,
+                ),
+                commands_deps=make_command_deps(
+                    conversation_archive_enabled=True,
+                    conversation_archive_operator_authorized=lambda value: (
+                        value.author.id == 5
+                    ),
+                    ensure_listening_voice_client=ensure_voice,
+                ),
+            )
+
+            await composition.join_voice(ctx)
+            first = sessions.current(
+                guild_id=7,
+                generation="boot-1",
+                operator_user_id=5,
+                text_channel_id=8,
+                voice_channel_id=9,
+            )
+            await composition.rejoin_voice(ctx)
+            current = sessions.current(
+                guild_id=7,
+                generation="boot-1",
+                operator_user_id=5,
+                text_channel_id=8,
+                voice_channel_id=9,
+            )
+            return ctx, ensure_voice, open_lease, close_lease, first, current
+
+        (
+            ctx,
+            ensure_voice,
+            open_lease,
+            close_lease,
+            first,
+            current,
+        ) = asyncio.run(scenario())
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(current)
+        self.assertEqual(ensure_voice.await_count, 2)
+        self.assertEqual(open_lease.await_count, 2)
+        close_lease.assert_awaited_once_with(first)
+        self.assertIs(open_lease.await_args_list[0].args[0], first)
+        self.assertIs(open_lease.await_args_list[1].args[0], current)
+        sent = [str(item.args[0]) for item in ctx.send.await_args_list]
+        notices = [text for text in sent if "기록·전사 중" in text]
+        self.assertEqual(len(notices), 2)
+        for notice in notices:
+            for required in (
+                "확정 음성 전사(final STT)",
+                "Minecraft",
+                "30일",
+                "원본 음성(raw audio)은 저장하지 않아",
+                "/기록열람",
+                "/기록삭제",
+                "/기록동의",
+                "/기록철회",
+            ):
+                self.assertIn(required, notice)
+
+    def test_unauthorized_join_cannot_open_or_close_an_existing_session(self) -> None:
+        sessions = active_shared_sessions()
+        existing = sessions.peek(guild_id=7)
+        ensure_voice = AsyncMock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7, voice_client=None),
+            channel=SimpleNamespace(id=8),
+            author=SimpleNamespace(
+                id=6,
+                voice=SimpleNamespace(
+                    channel=SimpleNamespace(id=9, name="Voice")
+                ),
+            ),
+            send=AsyncMock(),
+        )
+        composition = make_composition(
+            events=make_event_deps(
+                conversation_archive_enabled=True,
+                conversation_shared_session_registry=sessions,
+            ),
+            commands_deps=make_command_deps(
+                conversation_archive_enabled=True,
+                conversation_archive_operator_authorized=lambda _ctx: False,
+                ensure_listening_voice_client=ensure_voice,
+            ),
+        )
+
+        asyncio.run(composition.join_voice(ctx))
+
+        ensure_voice.assert_not_awaited()
+        self.assertEqual(sessions.peek(guild_id=7), existing)
+        self.assertNotIn(
+            "기록·전사 중",
+            " ".join(str(item.args[0]) for item in ctx.send.await_args_list),
+        )
+
+    def test_notice_failure_closes_previous_session_and_never_opens_successor(self) -> None:
+        sessions = active_shared_sessions()
+        voice_channel = SimpleNamespace(id=9, name="Voice", members=[])
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7, voice_client=None),
+            channel=SimpleNamespace(id=8),
+            author=SimpleNamespace(
+                id=5,
+                voice=SimpleNamespace(channel=voice_channel),
+            ),
+            send=AsyncMock(side_effect=[OSError("send failed"), None]),
+        )
+        composition = make_composition(
+            events=make_event_deps(
+                conversation_archive_enabled=True,
+                conversation_shared_session_registry=sessions,
+                conversation_participation_observer=AsyncMock(),
+            ),
+            commands_deps=make_command_deps(
+                conversation_archive_enabled=True,
+                conversation_archive_operator_authorized=lambda _ctx: True,
+                ensure_listening_voice_client=AsyncMock(return_value=object()),
+            ),
+        )
+
+        asyncio.run(composition.join_voice(ctx))
+
+        self.assertIsNone(sessions.peek(guild_id=7))
+
+    def test_shared_session_ttl_and_explicit_leave_close_voice_admission(self) -> None:
+        async def scenario():
+            sessions = DiscordSharedSessionRegistry(ttl_seconds=0.02)
+            sessions.begin_generation("boot-1")
+            voice_channel = SimpleNamespace(id=9, name="Voice", members=[])
+
+            class VoiceClient:
+                channel = voice_channel
+
+                @staticmethod
+                def stop_listening() -> None:
+                    return None
+
+                async def disconnect(self, **_kwargs) -> None:
+                    return None
+
+            client = VoiceClient()
+            guild = SimpleNamespace(id=7, voice_client=client)
+            ctx = SimpleNamespace(
+                guild=guild,
+                channel=SimpleNamespace(id=8),
+                author=SimpleNamespace(
+                    id=5,
+                    voice=SimpleNamespace(channel=voice_channel),
+                ),
+                send=AsyncMock(),
+            )
+            composition = make_composition(
+                events=make_event_deps(
+                    conversation_archive_enabled=True,
+                    conversation_shared_session_registry=sessions,
+                    conversation_participation_observer=AsyncMock(),
+                ),
+                commands_deps=make_command_deps(
+                    conversation_archive_enabled=True,
+                    conversation_archive_operator_authorized=lambda _ctx: True,
+                    ensure_listening_voice_client=AsyncMock(return_value=client),
+                    mark_voice_manual_disconnect=Mock(),
+                ),
+            )
+            await composition.join_voice(ctx)
+            self.assertIsNotNone(sessions.current(guild_id=7))
+            await asyncio.sleep(0.06)
+            expired = sessions.peek(guild_id=7)
+            await composition.join_voice(ctx)
+            self.assertIsNotNone(sessions.current(guild_id=7))
+            await composition.leave_voice(ctx)
+            return sessions, expired
+
+        sessions, expired = asyncio.run(scenario())
+
+        self.assertIsNone(expired)
+        self.assertIsNone(sessions.peek(guild_id=7))
 
     def test_command_replies_use_one_post_delivery_continuity_owner(
         self,
@@ -1384,6 +2867,29 @@ class DiscordAppCompositionTests(unittest.TestCase):
             "discord_app_composition.admit_search_followup_ingress()",
             main_source,
         )
+        self.assertIn(
+            "ttl_seconds=CONVERSATION_ARCHIVE_SHARED_SESSION_TTL_SEC",
+            main_source,
+        )
+        for callback in (
+            "archive_user_text",
+            "archive_final_transcript",
+            "archive_assistant_text",
+            "confirm_assistant_delivery",
+            "open_shared_session_lease",
+            "close_shared_session_lease",
+            "archive_autonomy_grant",
+            "archive_minecraft_command",
+            "authorize_voice_capture",
+            "observe_participation",
+            "consent_current",
+            "set_consent",
+            "capture_feedback",
+            "purge_feedback_targets",
+            "begin_generation",
+        ):
+            self.assertIn(f"conversation_archive_gate.{callback}", main_source)
+        self.assertIn("in ALLOWED_RESTART_USER_IDS", main_source)
         self.assertNotIn("@bot.event", main_source)
         self.assertNotIn("@bot.command", main_source)
         self.assertNotIn("globals()", runtime_source)

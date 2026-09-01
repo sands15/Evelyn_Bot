@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -182,6 +182,22 @@ def _safe_identifier(value: Any, *, limit: int = 96) -> str:
     return text[:limit]
 
 
+def _parent_record_ids(value: Any) -> tuple[str, ...]:
+    if value in (None, (), []):
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) != 1:
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    parent = str(value[0] or "").strip()
+    if (
+        not parent
+        or not parent[0].isalnum()
+        or not parent[0].isascii()
+        or _safe_identifier(parent, limit=64) != parent
+    ):
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    return (parent,)
+
+
 def _safe_guild_id(value: Any) -> int | None:
     try:
         guild_id = int(value)
@@ -230,15 +246,19 @@ class MinecraftWorldLease:
     expires_at: float
     issued_monotonic: float
     expires_monotonic: float
+    parent_record_ids: tuple[str, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "leaseId": self.lease_id,
             "guildId": self.guild_id,
             "source": self.source,
             "issuedAt": self.issued_at,
             "expiresAt": self.expires_at,
         }
+        if self.parent_record_ids:
+            payload["parentRecordIds"] = list(self.parent_record_ids)
+        return payload
 
 
 class MinecraftWorldLeaseOwner:
@@ -258,7 +278,7 @@ class MinecraftWorldLeaseOwner:
             Awaitable[dict[str, Any]],
         ],
         enable_mode: Callable[..., Awaitable[dict[str, Any]]],
-        disable_mode: Callable[[int], Awaitable[dict[str, Any]]],
+        disable_mode: Callable[..., Awaitable[dict[str, Any]]],
         set_goal: Callable[..., Awaitable[dict[str, Any]]],
         dispatch_action: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         get_action_status: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
@@ -458,6 +478,11 @@ class MinecraftWorldLeaseOwner:
                 lease.expires_at
                 if lease is not None
                 else None
+            ),
+            "parentRecordIds": (
+                list(lease.parent_record_ids)
+                if lease is not None
+                else []
             ),
             "reasonCode": (
                 safe_reason
@@ -1169,6 +1194,7 @@ class MinecraftWorldLeaseOwner:
         issuer_ref: str,
         source: str,
         ttl_sec: float | None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> MinecraftWorldLease:
         boundary_error = self._boundary_error_code()
         if boundary_error:
@@ -1178,6 +1204,9 @@ class MinecraftWorldLeaseOwner:
         resolved_guild_id = _safe_guild_id(guild_id)
         resolved_issuer = _safe_identifier(issuer_ref)
         resolved_source = _safe_identifier(source)
+        resolved_parent_record_ids = _parent_record_ids(
+            parent_record_ids
+        )
         if resolved_guild_id is None:
             raise RuntimeError("minecraft_world_guild_invalid")
         if not resolved_issuer:
@@ -1204,6 +1233,7 @@ class MinecraftWorldLeaseOwner:
             expires_at=issued_at + effective_ttl,
             issued_monotonic=issued_monotonic,
             expires_monotonic=issued_monotonic + effective_ttl,
+            parent_record_ids=resolved_parent_record_ids,
         )
         previous = self._lease
         if previous is not None:
@@ -1287,6 +1317,7 @@ class MinecraftWorldLeaseOwner:
         reason: str,
         force: bool = False,
         lease: MinecraftWorldLease | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> bool:
         self._prune_stop_attempts()
         if not force and len(self._stop_attempts) >= STOP_RETRY_LIMIT:
@@ -1328,7 +1359,13 @@ class MinecraftWorldLeaseOwner:
             self._mark_audit_unavailable()
         self._write_status()
         try:
-            stopped = await self.disable_mode(guild_id)
+            disable_kwargs = {}
+            if parent_record_ids:
+                disable_kwargs["parent_record_ids"] = parent_record_ids
+            stopped = await self.disable_mode(
+                guild_id,
+                **disable_kwargs,
+            )
         except Exception:
             stopped = {}
         verified = bool(
@@ -1403,6 +1440,7 @@ class MinecraftWorldLeaseOwner:
         reason: str,
         force: bool = True,
         lease: MinecraftWorldLease | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> bool:
         stop_task = asyncio.create_task(
             self._stop_runtime(
@@ -1410,6 +1448,7 @@ class MinecraftWorldLeaseOwner:
                 reason=reason,
                 force=force,
                 lease=lease,
+                parent_record_ids=parent_record_ids,
             )
         )
         cancellation_requested = False
@@ -1643,6 +1682,7 @@ class MinecraftWorldLeaseOwner:
         source: str,
         goal: str | None = None,
         ttl_sec: float | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
@@ -1707,6 +1747,7 @@ class MinecraftWorldLeaseOwner:
                     issuer_ref=issuer_ref,
                     source=source,
                     ttl_sec=ttl_sec,
+                    parent_record_ids=parent_record_ids,
                 )
             except RuntimeError as exc:
                 if str(exc) in {
@@ -1927,6 +1968,7 @@ class MinecraftWorldLeaseOwner:
         guild_id: int,
         *,
         expected_lease_id: str | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
@@ -1950,6 +1992,9 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_lease_owner_mismatch"
                 )
+            resolved_parent_record_ids = _parent_record_ids(
+                parent_record_ids
+            )
             action_cancel_failed = False
             for record in tuple(self._inflight_actions.values()):
                 request = record.get("request") or {}
@@ -1967,6 +2012,7 @@ class MinecraftWorldLeaseOwner:
                 reason="explicit_disconnect",
                 force=True,
                 lease=lease,
+                parent_record_ids=resolved_parent_record_ids,
             )
             boundary_error = self._boundary_error_code()
             if not stopped:
@@ -1995,6 +2041,7 @@ class MinecraftWorldLeaseOwner:
         goal: str,
         *,
         expected_lease_id: str | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
@@ -2012,6 +2059,9 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_authorization_required"
                 )
+            resolved_parent_record_ids = _parent_record_ids(
+                parent_record_ids
+            )
             if self._inflight_actions:
                 raise RuntimeError("minecraft_world_action_busy")
             boundary_error = self._boundary_error_code()
@@ -2031,6 +2081,20 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_authorization_required"
                 )
+            if resolved_parent_record_ids:
+                lease = replace(
+                    lease,
+                    parent_record_ids=resolved_parent_record_ids,
+                )
+                self._lease = lease
+                if not self._write_status():
+                    await self._shielded_stop_runtime(
+                        guild_id=guild_id,
+                        reason="status_write_failed",
+                        force=True,
+                        lease=lease,
+                    )
+                    raise RuntimeError(self._boundary_error_code())
             requested_goal = str(goal or "").strip()
             if not self._append_required_event(
                 "goal_attempted",

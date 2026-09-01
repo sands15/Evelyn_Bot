@@ -131,9 +131,14 @@ class FakeProjector:
     def __init__(self) -> None:
         self.bindings: list[dict] = []
         self.candidates: list[dict] = []
+        self.archive_contexts: list[dict] = []
         self.disarms: list[str] = []
         self.verified = True
         self.guard_error = ""
+        self.archive_allowed = True
+
+    def archive_ready(self) -> bool:
+        return self.archive_allowed
 
     def status(self) -> dict:
         return {
@@ -146,8 +151,18 @@ class FakeProjector:
         self.bindings.append(dict(binding))
         return {"accepted": True, "code": "armed"}
 
-    def observe(self, candidate: dict) -> dict:
+    def observe(
+        self,
+        candidate: dict,
+        *,
+        archive_context: dict | None = None,
+    ) -> dict:
         self.candidates.append(dict(candidate))
+        if archive_context is not None:
+            self.archive_contexts.append(dict(archive_context))
+            self.candidates[-1]["archiveGuildId"] = archive_context[
+                "guildId"
+            ]
         return {
             "verified": self.verified,
             "code": "effect_verified" if self.verified else "candidate_rejected",
@@ -257,6 +272,7 @@ class MindcraftActionGatewayTests(unittest.TestCase):
             request,
             action_lock=action_lock,
             preflight_status=ready_status(),
+            archive_parent_record_ids=("minecraft-command-1",),
         )
 
         self.assertEqual(
@@ -296,8 +312,42 @@ class MindcraftActionGatewayTests(unittest.TestCase):
             completed,
         )
         self.assertFalse(action_lock.acquired)
+        self.assertEqual(
+            self.projector.archive_contexts[0]["parentRecordIds"],
+            ["minecraft-command-1"],
+        )
         self.assertEqual(self.runtime.stop_count, 1)
         self.assertFalse(self.runtime.alive)
+
+    def test_archive_fault_blocks_dispatch_before_action_record(self) -> None:
+        self.projector.archive_allowed = False
+        request = bound_request()
+        action_lock = self.lock()
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "minecraft_action_gateway_unavailable",
+            ):
+                self.gateway.dispatch(
+                    request,
+                    action_lock=action_lock,
+                    preflight_status=ready_status(),
+                )
+            self.assertEqual(self.projector.bindings, [])
+            payload = json.loads(
+                self.action_status_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["records"], [])
+        finally:
+            action_lock.release()
+
+    def test_archive_readiness_exception_is_fail_closed(self) -> None:
+        with patch.object(
+            self.projector,
+            "archive_ready",
+            side_effect=RuntimeError("private backend detail"),
+        ):
+            self.assertFalse(self.gateway.available())
 
     def test_terminal_action_can_restart_with_fresh_binding_only(self) -> None:
         first = bound_request()

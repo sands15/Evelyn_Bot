@@ -79,6 +79,12 @@ class RuntimeProcessCompositionDeps:
     control_page_local_url: Callable[[], str]
     wait_forever: Callable[[], Awaitable[Any]]
     log: Callable[..., Any]
+    begin_conversation_archive_generation: Callable[
+        [], Awaitable[str]
+    ] | None = None
+    run_conversation_archive_purge_worker: Callable[
+        [], Awaitable[None]
+    ] | None = None
     terminal_exit_deadline_sec: float = (
         DEFAULT_TERMINAL_EXIT_DEADLINE_SEC
     )
@@ -562,6 +568,8 @@ class RuntimeLifecycleComposition:
 
     async def run_local_only_mode(self) -> None:
         deps = self.deps.process
+        archive_purge_task: asyncio.Task[Any] | None = None
+        startup_initialized = False
         deps.log("[LOCAL MODE] starting without Discord gateway")
         deps.mark_startup_component("discord_gateway", "done", "disabled by DISCORD_ENABLED=false")
         try:
@@ -578,13 +586,59 @@ class RuntimeLifecycleComposition:
             raise RuntimeError("Control Page start failed") from None
         try:
             await self.ensure_startup_components_ready()
-            await deps.ensure_local_mic_service_started()
-            deps.ensure_vision_watch_started()
+            startup_initialized = True
         except Exception as exc:
             deps.log(f"[STARTUP] local_init_fail err={exc!r}")
+        begin_archive = deps.begin_conversation_archive_generation
+        run_purge = deps.run_conversation_archive_purge_worker
         try:
-            await deps.ensure_control_page_background_tasks_started()
+            if (begin_archive is None) != (run_purge is None):
+                raise RuntimeError
+            if begin_archive is not None and run_purge is not None:
+                generation = await begin_archive()
+                if not isinstance(generation, str) or not generation:
+                    raise RuntimeError
+                archive_purge_task = asyncio.create_task(run_purge())
+                await asyncio.sleep(0)
+                if archive_purge_task.done():
+                    await asyncio.gather(
+                        archive_purge_task,
+                        return_exceptions=True,
+                    )
+                    raise RuntimeError
+        except asyncio.CancelledError:
+            if archive_purge_task is not None:
+                archive_purge_task.cancel()
+                await asyncio.gather(
+                    archive_purge_task,
+                    return_exceptions=True,
+                )
+            raise
         except Exception as exc:
-            deps.log(f"[CONTROL PAGE] bg_tasks_fail err={exc!r}")
-        deps.log(f"[LOCAL MODE] ready url={deps.control_page_local_url()}")
-        await deps.wait_forever()
+            deps.log(
+                "[STARTUP] conversation_archive_fail "
+                f"errorType={type(exc).__name__}"
+            )
+            raise RuntimeError(
+                "conversation_archive_startup_failed"
+            ) from None
+        try:
+            if startup_initialized:
+                try:
+                    await deps.ensure_local_mic_service_started()
+                    deps.ensure_vision_watch_started()
+                except Exception as exc:
+                    deps.log(f"[STARTUP] local_init_fail err={exc!r}")
+            try:
+                await deps.ensure_control_page_background_tasks_started()
+            except Exception as exc:
+                deps.log(f"[CONTROL PAGE] bg_tasks_fail err={exc!r}")
+            deps.log(f"[LOCAL MODE] ready url={deps.control_page_local_url()}")
+            await deps.wait_forever()
+        finally:
+            if archive_purge_task is not None:
+                archive_purge_task.cancel()
+                await asyncio.gather(
+                    archive_purge_task,
+                    return_exceptions=True,
+                )

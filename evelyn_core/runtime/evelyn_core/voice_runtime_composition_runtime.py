@@ -128,6 +128,7 @@ class LocalMicCompositionDeps:
     waveform_filter_enabled: bool
     time: Callable[[], float]
     log: Callable[..., Any]
+    conversation_archive_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -472,6 +473,7 @@ class VoiceRuntimeComposition:
             local_only_mode=deps.local_only_mode,
             local_control_voice_member=self.local_control_voice_member,
             process_member_audio=deps.process_member_audio(),
+            conversation_archive_enabled=deps.conversation_archive_enabled,
             log=deps.log,
             time=deps.time,
         )
@@ -517,6 +519,7 @@ class VoiceRuntimeComposition:
             vad_filter_enabled=deps.vad_filter_enabled,
             env_noise_filter_enabled=deps.env_noise_filter_enabled,
             waveform_filter_enabled=deps.waveform_filter_enabled,
+            conversation_archive_enabled=deps.conversation_archive_enabled,
             log=deps.log,
         )
 

@@ -3,11 +3,52 @@
 
   const mount = document.getElementById("taskApprovalMount");
   const statePill = document.getElementById("taskApprovalStatePill");
-  if (!mount || !statePill) return;
+  const taskRecordMount = document.getElementById("taskRecordMount");
+  if (!mount || !statePill || !taskRecordMount) return;
 
   const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
   const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+  const BASE_GUIDANCE_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
+  const CODE_PATTERN = /^[a-z][a-z0-9_]{0,95}$/;
+  const TASK_RECORD_STATUSES = new Set([
+    "completed",
+    "failed",
+    "blocked",
+    "uncertain",
+    "awaiting_approval",
+    "budget_exhausted",
+    "cancelled",
+    "grounded_draft_ready",
+  ]);
+  const TASK_STEP_OUTCOMES = new Set(["success", "failed", "uncertain"]);
+  const TASK_RECORD_FIELDS = new Set([
+    "schema",
+    "taskId",
+    "status",
+    "code",
+    "stepCount",
+    "modelCallCount",
+    "steps",
+    "contractVersion",
+    "evalVersion",
+    "guidanceVersion",
+    "guidanceDigest",
+    "guidanceMode",
+    "canaryRunId",
+    "processLocal",
+    "durable",
+  ]);
+  const TASK_STEP_FIELDS = new Set([
+    "step",
+    "tool",
+    "attempted",
+    "executed",
+    "observed",
+    "verified",
+    "outcome",
+    "code",
+  ]);
   const APPROVAL_PATHS = new Set([
     "/api/control-page/task-approval/preview",
     "/api/control-page/task-approval/apply",
@@ -33,6 +74,109 @@
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  function hasExactKeys(value, allowed) {
+    const keys = value && typeof value === "object" ? Object.keys(value) : [];
+    return keys.length === allowed.size && keys.every((key) => allowed.has(key));
+  }
+
+  function validTaskStep(value) {
+    if (!hasExactKeys(value, TASK_STEP_FIELDS)) return null;
+    const step = Number(value.step);
+    const tool = String(value.tool || "");
+    const outcome = String(value.outcome || "");
+    const code = String(value.code || "");
+    if (!Number.isInteger(step) || step < 0 || step > 10) return null;
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(tool)) return null;
+    if (!TASK_STEP_OUTCOMES.has(outcome)) return null;
+    if (!CODE_PATTERN.test(code)) return null;
+    for (const flag of ["attempted", "executed", "observed", "verified"]) {
+      if (typeof value[flag] !== "boolean") return null;
+    }
+    return {
+      step,
+      tool,
+      attempted: value.attempted,
+      executed: value.executed,
+      observed: value.observed,
+      verified: value.verified,
+      outcome,
+      code,
+    };
+  }
+
+  function validTaskRecord(value) {
+    if (!hasExactKeys(value, TASK_RECORD_FIELDS)) return null;
+    const taskId = String(value.taskId || "");
+    const status = String(value.status || "");
+    const code = String(value.code || "");
+    const stepCount = Number(value.stepCount);
+    const modelCallCount = Number(value.modelCallCount);
+    if (value.schema !== "evelyn.task-public-record.v1") return null;
+    if (!ID_PATTERN.test(taskId) || !TASK_RECORD_STATUSES.has(status)) return null;
+    if (!CODE_PATTERN.test(code)) return null;
+    if (!Number.isInteger(stepCount) || stepCount < 0 || stepCount > 10) return null;
+    if (!Number.isInteger(modelCallCount) || modelCallCount < 0 || modelCallCount > 10) return null;
+    if (!Array.isArray(value.steps) || value.steps.length > 20) return null;
+    if (value.contractVersion !== "evelyn.task-work-contract.v1") return null;
+    if (value.evalVersion !== "evelyn.task-agent-eval-suite.v1") return null;
+    const guidanceVersion = String(value.guidanceVersion || "");
+    const guidanceDigest = String(value.guidanceDigest || "");
+    const guidanceMode = String(value.guidanceMode || "");
+    const canaryRunId = value.canaryRunId;
+    if (!ID_PATTERN.test(guidanceVersion) || !SHA256_PATTERN.test(guidanceDigest)) return null;
+    if ((guidanceVersion === "base") !== (guidanceDigest === BASE_GUIDANCE_DIGEST)) return null;
+    if (guidanceMode !== "active" && guidanceMode !== "canary") return null;
+    if (guidanceMode === "active" && canaryRunId !== null) return null;
+    if (guidanceMode === "canary" && !ID_PATTERN.test(String(canaryRunId || ""))) return null;
+    if (value.processLocal !== true || value.durable !== false) return null;
+    const steps = value.steps.map(validTaskStep);
+    if (steps.some((step) => step === null)) return null;
+    return {
+      taskId, status, code, stepCount, modelCallCount, steps,
+      guidanceVersion, guidanceDigest, guidanceMode, canaryRunId
+    };
+  }
+
+  function renderTaskRecords(tasks) {
+    const records = (Array.isArray(tasks) ? tasks : [])
+      .map((task) => validTaskRecord(task && task.taskRecord))
+      .filter(Boolean)
+      .slice(-4)
+      .reverse();
+    if (!records.length) {
+      taskRecordMount.replaceChildren(
+        element("span", "task-approval-meta", "종료된 작업 기록이 없습니다.")
+      );
+      return;
+    }
+    taskRecordMount.replaceChildren(...records.map((record) => {
+      const card = element("article", "task-record-card");
+      const head = element("div", "task-approval-preview-head");
+      head.append(
+        element("strong", "", record.taskId),
+        element("span", "task-approval-pill", record.status)
+      );
+      const details = element("dl", "task-approval-binding");
+      addBinding(details, "결과 코드", record.code);
+      addBinding(details, "단계 / 모델 호출", `${record.stepCount} / ${record.modelCallCount}`);
+      addBinding(details, "규칙", `${record.guidanceMode} · ${record.guidanceVersion}`);
+      addBinding(details, "저장", "process-local · non-durable");
+      card.append(head, details);
+      if (record.steps.length) {
+        const list = element("ol", "task-record-steps");
+        for (const step of record.steps) {
+          list.append(element(
+            "li",
+            "",
+            `${step.step}. ${step.tool} · ${step.outcome} · ${step.code} · A${Number(step.attempted)} E${Number(step.executed)} O${Number(step.observed)} V${Number(step.verified)}`
+          ));
+        }
+        card.append(list);
+      }
+      return card;
+    }));
   }
 
   function setState(value) {
@@ -554,5 +698,9 @@
   window.addEventListener("evelyn:task-approval-state", function (event) {
     receivePublicState(event.detail && event.detail.approval);
   });
+  window.addEventListener("evelyn:task-record-state", function (event) {
+    renderTaskRecords(event.detail && event.detail.tasks);
+  });
   receivePublicState(window.EvelynTaskApprovalPublicState || null);
+  renderTaskRecords(window.EvelynTaskRecordPublicState || []);
 })();

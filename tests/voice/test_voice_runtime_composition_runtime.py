@@ -259,6 +259,34 @@ class VoiceRuntimeCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pcm_bytes, b"pcm")
         self.assertTrue(routed_meta["routed_local_control"])
 
+    async def test_archive_mode_blocks_main_local_mic_before_capture_and_dispatch(self) -> None:
+        process_member_audio = AsyncMock()
+        service_factory = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            composition = make_composition(
+                Path(temp_dir),
+                local_mic=make_local_mic_deps(
+                    conversation_archive_enabled=True,
+                    local_only_mode=True,
+                    process_member_audio=lambda: process_member_audio,
+                    service_factory=service_factory,
+                ),
+            )
+
+            await composition.ensure_local_mic_service_started()
+            await composition.handle_local_mic_segment(
+                b"private-pcm",
+                {"duration_sec": 0.4},
+            )
+
+        service_factory.assert_not_called()
+        process_member_audio.assert_not_awaited()
+        self.assertFalse(composition.local_mic_runtime_state["capture_ready"])
+        self.assertEqual(
+            composition.local_mic_runtime_state["last_error"],
+            "conversation_archive_local_owner_unverified",
+        )
+
     async def test_local_mic_stop_clears_owned_service_and_capture_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             composition = make_composition(Path(temp_dir))
@@ -290,6 +318,10 @@ class VoiceRuntimeCompositionTests(unittest.IsolatedAsyncioTestCase):
             main_source.index("voice_support_composition = VoiceSupportComposition("),
         )
         self.assertNotIn("globals()", runtime_source)
+        self.assertIn(
+            "conversation_archive_enabled=CONVERSATION_ARCHIVE_ENABLED",
+            main_source,
+        )
 
 
 if __name__ == "__main__":

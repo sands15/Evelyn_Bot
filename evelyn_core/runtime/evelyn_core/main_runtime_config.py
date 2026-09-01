@@ -14,7 +14,67 @@ VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY",
 VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "true"
 VOICE_TRACE_ALL_EVENTS = os.getenv("VOICE_TRACE_ALL_EVENTS", "true").lower() == "true"
 TURN_TRACE_LOG_DIR = Path(os.getenv("TURN_TRACE_LOG_DIR", str(PROJECT_ROOT / "logs" / "turn_trace")))
-VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "false").lower() == "true"
+CONVERSATION_ARCHIVE_ENABLED = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_ENABLED",
+    "false",
+).lower() in {"1", "true", "yes", "on"}
+CONVERSATION_ARCHIVE_BOT_API_URL = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_BOT_API_URL",
+    "http://127.0.0.1:8798",
+).rstrip("/")
+CONVERSATION_ARCHIVE_INGEST_KEY_FILE = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE",
+    "",
+).strip()
+CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE",
+    "",
+).strip()
+_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID_RAW = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID",
+    "",
+).strip()
+if (
+    _CONVERSATION_ARCHIVE_COMMAND_GUILD_ID_RAW
+    and (
+        not _CONVERSATION_ARCHIVE_COMMAND_GUILD_ID_RAW.isdecimal()
+        or not 17 <= len(_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID_RAW) <= 20
+    )
+):
+    raise RuntimeError("conversation_archive_command_guild_id_invalid")
+CONVERSATION_ARCHIVE_COMMAND_GUILD_ID = int(
+    _CONVERSATION_ARCHIVE_COMMAND_GUILD_ID_RAW or "0"
+)
+ARCHIVE_COMMAND_OWNERSHIP_FILE = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_COMMAND_OWNERSHIP_LEDGER", ""
+).strip()
+ARCHIVE_COMMAND_RUN_ID = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_COMMAND_RUN_ID", ""
+).strip()
+if bool(ARCHIVE_COMMAND_OWNERSHIP_FILE) != bool(ARCHIVE_COMMAND_RUN_ID) or (
+    ARCHIVE_COMMAND_OWNERSHIP_FILE
+    and (
+        not (
+            Path(ARCHIVE_COMMAND_OWNERSHIP_FILE).is_absolute()
+            or ARCHIVE_COMMAND_OWNERSHIP_FILE.startswith("/")
+        )
+        or len(ARCHIVE_COMMAND_RUN_ID) != 32
+        or any(value not in "0123456789abcdef" for value in ARCHIVE_COMMAND_RUN_ID)
+    )
+):
+    raise RuntimeError("conversation_archive_command_ownership_invalid")
+CONVERSATION_ARCHIVE_SHARED_SESSION_TTL_SEC = max(
+    60,
+    int(os.getenv("EVELYN_CONVERSATION_ARCHIVE_SHARED_SESSION_TTL_SEC", "14400")),
+)
+CONVERSATION_ARCHIVE_EPHEMERAL_DELETE_SEC = 180
+VOICE_DEBUG_SAVE_AUDIO_REQUESTED = (
+    os.getenv("VOICE_DEBUG_SAVE_AUDIO", "false").lower() == "true"
+)
+# A private archive must never coexist with recoverable raw debug audio.
+VOICE_DEBUG_SAVE_AUDIO = bool(
+    VOICE_DEBUG_SAVE_AUDIO_REQUESTED and not CONVERSATION_ARCHIVE_ENABLED
+)
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
 VOICE_DEBUG_MAX_AGE_DAYS = float(os.getenv("VOICE_DEBUG_MAX_AGE_DAYS", "7"))
@@ -33,7 +93,15 @@ STT_FULL_RESCORING_TIMEOUT_SEC = float(os.getenv("STT_FULL_RESCORING_TIMEOUT_SEC
 STT_FULL_RESCORING_MIN_AUDIO_SEC = float(os.getenv("STT_FULL_RESCORING_MIN_AUDIO_SEC", "2.0"))
 STT_FULL_RESCORING_MIN_TEXT_LEN = int(os.getenv("STT_FULL_RESCORING_MIN_TEXT_LEN", "8"))
 STT_COOLDOWN_AFTER_TIMEOUT_SEC = float(os.getenv("STT_COOLDOWN_AFTER_TIMEOUT_SEC", "6.0"))
-VOICE_REJOIN_ON_READY = os.getenv("VOICE_REJOIN_ON_READY", "true").lower() in {"1", "true", "yes", "on"}
+VOICE_REJOIN_ON_READY_REQUESTED = os.getenv(
+    "VOICE_REJOIN_ON_READY",
+    "true",
+).lower() in {"1", "true", "yes", "on"}
+# An archive-enabled shared session is bound to a fresh, explicit join and is
+# intentionally not resurrected after a gateway/process restart.
+VOICE_REJOIN_ON_READY = bool(
+    VOICE_REJOIN_ON_READY_REQUESTED and not CONVERSATION_ARCHIVE_ENABLED
+)
 VOICE_LAST_CHANNEL_STATE_FILE = os.getenv("VOICE_LAST_CHANNEL_STATE_FILE", str(RUNTIME_ARTIFACTS_ROOT / "state" / "voice_last_channel.json"))
 VOICE_LIVE_RECENT_SEC = float(os.getenv("VOICE_LIVE_RECENT_SEC", "90.0"))
 TTS_FIRST_CHUNK_MIN_CHARS = int(os.getenv("TTS_FIRST_CHUNK_MIN_CHARS", "14"))

@@ -791,6 +791,70 @@ class MindcraftLlmBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(max_active, 1)
 
     async def test_qwen_queue_wait_does_not_spend_inference_timeout(self) -> None:
+        class Clock:
+            now = 0.0
+
+            def time(self) -> float:
+                return self.now
+
+        class Transport:
+            def is_closing(self) -> bool:
+                return False
+
+        class Request:
+            transport = Transport()
+
+        loop = asyncio.get_running_loop()
+        invocation = broker._QwenInvocation(
+            admitted=loop.create_future(),
+            result=loop.create_future(),
+            delivery_done=loop.create_future(),
+            finalized=loop.create_future(),
+        )
+        clock = Clock()
+        inference_waiting = asyncio.Event()
+        real_wait = asyncio.wait
+
+        async def observed_wait(futures, **kwargs):
+            if set(futures) == {invocation.result}:
+                inference_waiting.set()
+            return await real_wait(futures, **kwargs)
+
+        waiter = None
+        try:
+            with (
+                patch.object(
+                    broker.asyncio,
+                    "get_running_loop",
+                    return_value=clock,
+                ),
+                patch.object(broker.asyncio, "wait", observed_wait),
+            ):
+                waiter = asyncio.create_task(
+                    broker._wait_for_qwen_result(
+                        Request(),  # type: ignore[arg-type]
+                        invocation,
+                        inference_timeout_sec=0.01,
+                    )
+                )
+                await asyncio.sleep(0)
+                clock.now = 10.0
+                invocation.admitted.set_result(clock.now)
+                await asyncio.wait_for(inference_waiting.wait(), timeout=1)
+                self.assertFalse(waiter.done())
+                clock.now += 0.05
+                invocation.result.set_result("second")
+                self.assertEqual(
+                    await asyncio.wait_for(waiter, timeout=1),
+                    "second",
+                )
+        finally:
+            if waiter is not None and not waiter.done():
+                waiter.cancel()
+                with suppress(asyncio.CancelledError):
+                    await waiter
+
+    async def test_qwen_queued_request_completes_over_aiohttp(self) -> None:
         first_entered = asyncio.Event()
         release_first = asyncio.Event()
         order: list[str] = []
@@ -815,7 +879,7 @@ class MindcraftLlmBrokerTests(unittest.IsolatedAsyncioTestCase):
                 "MINDCRAFT_LOCAL_LLM_URL",
                 str(upstream_server.make_url("/local")),
             ),
-            patch.object(broker, "MINDCRAFT_TASK_TIMEOUT_SEC", 0.01),
+            patch.object(broker, "MINDCRAFT_TASK_TIMEOUT_SEC", 1.0),
             patch.object(broker, "MINDCRAFT_LLM_DISCONNECT_POLL_SEC", 0.005),
         ):
             client, token = await self.start_broker()

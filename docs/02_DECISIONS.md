@@ -1010,3 +1010,102 @@ type: decision-log
   [[worklog/2026-08-28]].
 - 영향: accepted guided 10개는 미래 explicit 50-row selection에 넣을 수 있다. 나머지 40개가 없으므로
   assembly, P0-4 promotion과 P0-5는 계속 차단된다.
+
+## 2026-08-28 — 프로젝트 지식과 개인 개발 기록의 소유권 분리
+
+- 상태: 승인·로컬 적용 완료
+- 결정: `docs/`는 Evelyn의 프로젝트 지식과 검증 근거의 원본으로 유지한다. 프로젝트를 넘어 이어지는
+  개인 성과·재사용 가능한 배움·개인 작업 방식 결정은 저장소 밖의 별도 로컬 Developer Vault가 소유한다.
+- 결정: 개인 Vault는 프로젝트 상세를 복사하지 않고 원본 문서 링크만 남긴다. Evelyn runtime memory와
+  private transcript·audio·log·runtime artifact는 어느 개발 문서 Vault에도 기록하지 않는다.
+- 이유: 코드·테스트와 함께 버전 관리해야 하는 프로젝트 사실과, 프로젝트가 끝난 뒤에도 이어져야 하는
+  개인 개발 이력의 수명과 독자가 다르기 때문이다. 소유권을 나누면 중복과 상태 불일치를 피할 수 있다.
+- 근거: 사용자 승인, [[00_EVELYN_HOME]], 루트 `AGENTS.md`, 전역 Codex 작업 지침.
+- 영향: Evelyn 작업 문서는 기존 working-memory loop를 유지한다. 의미 있는 개인 개발 결과가 있을 때만
+  별도 Vault에 짧은 요약과 프로젝트 원본 링크를 남기며, 새 내용이 없으면 기록하지 않는다.
+
+## 2026-08-28 — private archive는 단독 writer와 전 sink 증명 전 완료 금지를 사용
+
+- 상태: P1-4 source/offline 핵심 경계 구현, live 검증 대기
+- 결정: private archive 파일은 `bot_api`만 변경한다. C:의 SQLite 원본, D:의 검증 replica, DB 밖 anchor와
+  OS writer lease를 사용하고 Discord·Control Page·Minecraft는 목적 제한 서명 API로만 접근한다. 기능은
+  기본 OFF이며 별도 운영 승인 전 기존 surface를 자동 전환하지 않는다.
+- 결정: 일반 Discord 사용자는 guild slash command의 invoker-only ephemeral 화면에서 자기 text/final STT와
+  직접 연결된 답변·task·Minecraft 결과만 본다. 전체 열람은 UAC로 고정한 Windows 신원, 등록 Discord DM
+  OTP, loopback HTTPS를 모두 통과한 짧은 local admin session에만 준다. 두 capability와 token domain은
+  결합하지 않는다.
+- 결정: Discord mode는 로컬 마이크를 입력·참여·완료 조건에서 제외하고 실행 중 캡처도 정지한다. 화자는
+  gateway의 exact SSRC→Discord user ID mapping으로 확정하고 현재 `display_name`은 표시·기록용 이름 snapshot으로만
+  쓴다. mapping이 없으면 STT 전에 보류 후 폐기하며 lone-member/current-speaker 추정은 하지 않는다.
+- 결정: 사용자 삭제와 30일 retention은 기준 DB와 D: replica를 함께 redaction하지만, `완전 정화` 표시는
+  17개 필수 sink가 동일 deletion generation에 대해 실제 제거와 fresh negative recall을 모두 증명한 뒤에만
+  허용한다. owner, lineage 또는 late-writer currentness가 없거나 후보가 손상되면 추측하지 않고
+  `manual_review/local_cleanup_pending`으로 남긴다. 사용자가 지정한 법적·운영상 최소 event는 이름과 실제
+  UTC 발생시각뿐이며 admin-only table에 자동 투영한다. 이것도 원래 발생시각+30일에 primary compaction과
+  D: 검증 복제로 제거하고, 이미 만료된 직접/retention 삭제에서는 다시 만들지 않는다. 특정 법률을 새로
+  주장하는 근거가 아니며 삭제 사유는 별도의 content-free tombstone으로만 표현한다.
+- 결정: process owner는 삭제 work를 받는 즉시 exact lineage를 freeze하고 성공 뒤에는 release하지 않고 해당
+  process 수명 동안 retire한다. 원격 owner receipt는 동일 request/generation/scope에 결박하며 전부 확인되기
+  전 memory bundle writer fence와 `local_cleanup_pending`을 풀지 않는다. 시작 복원과 poll은 bounded keyset
+  cursor를 사용하되 1,000개 뒤 요청도 순환 도달하게 한다.
+- 이유: 단순 DB 행 삭제나 백업 복사는 메모리·cache·음성 임시물·세계 효과 계보의 재등장을 막지 못하며,
+  같은 계정의 Discord OTP가 일반 사용자 열람권을 관리자 권한으로 바꾸는 근거도 아니다. 가용성보다
+  개인정보 삭제의 거짓 성공 방지를 우선한다.
+- 근거: `plan.md` P1-4, `evelyn_core/runtime/evelyn_core/conversation_archive.py`,
+  `conversation_archive_purge.py`, `conversation_archive_memory_purge.py`,
+  `discord_conversation_archive_runtime.py`, `fast_control_api.py`, 관련 source/offline tests,
+  [[worklog/2026-08-28]].
+- 영향: 17개 필수 sink owner route와 production process/memory/cognitive writer fence는 연결됐다. lineage가
+  불완전하거나 attribution 없는 legacy/global cache와 등록되지 않은 사본은 계속 manual로 남긴다.
+  local-private microphone은 archive ON에서 닫힌 상태지만 Discord mode의 완료 조건이 아니다. 이를 별도로
+  열 필요가 생길 때만 owner-proof 정책을 결정한다. P1-5는 아래 별도 결정의 권한·승격 경계를 따른다.
+
+## 2026-08-28 — 지식 작업은 내용 없는 실행 계약과 source-grounded draft로 검증
+
+- 상태: 승인·source/offline 구현·전체 회귀 검증 완료, live Qwen 평가 대기
+- 결정: 기존 task loop를 유지하고 새 agent framework나 daemon을 만들지 않는다. 각 실행은 principal token,
+  skill origin, instruction/context manifest, tool·approval 권한, output schema, evaluator와 선택적 guidance
+  version/digest를 `TaskWorkContract` 하나에 결박한다. Control Page에는 원문·goal·principal·evidence·reply가
+  없는 process-local terminal `taskRecord` 최신 4건만 보인다.
+- 결정: `review|summarize|explain|compare`는 허용된 source와 exact evidence reference로 만든 구조화
+  `grounded_draft_ready`까지만 자동 완료로 인정한다. 이는 의미 정확성의 최종 주장과 외부 effect 권한이
+  아니다. 고정 24-row 평가는 baseline/candidate를 같은 source·evaluator·tool grant와 실제 입력 digest에
+  결박하고, 기존 Qwen broker의 capacity-one `task` admission에서 48회 직렬 실행한다. 취소·120초 row
+  deadline은 현재 HTTP invocation을 취소해 끝까지 수거하고 successor를 시작하지 않은 채 content-free
+  `incomplete` report를 원자 저장한다.
+- 이유: 기존 bounded task loop, broker와 typed evidence가 이미 실행 안전 경계를 제공한다. 실행 계약과
+  source-owned 평가만 더하면 결과의 출처·권한·평가 조합을 검토할 수 있고, 새 범용 agent 계층의 중복
+  상태와 cancellation owner를 만들 필요가 없다.
+- 근거: `../evelyn_core/runtime/evelyn_core/task_loop_runtime.py`,
+  `../evelyn_core/runtime/evelyn_core/task_grounded_draft_runtime.py`,
+  `../tools/task_agent_eval.py`, 관련 core/runtime/voice/tools tests, `../plan.md` P1-3,
+  [[worklog/2026-08-28]].
+- 영향: guidance는 system instruction·TaskGrant·approval·verifier보다 낮은 advisory 입력이다. 실제 Qwen
+  24-row와 라이브 surface는 별도 승인 전 실행하지 않으며 source/offline 통과를 production 품질 증거로
+  해석하지 않는다.
+
+## 2026-08-28 — feedback 개선은 archive sole writer와 사람 소유 승격만 사용
+
+- 상태: 승인·source/offline 구현·전체 회귀 검증 완료, Discord/카나리 live 대기
+- 결정: 피드백 원문·교정과 `source_bound_candidate`는 P1-4 기준 DB·replica·삭제 계보가 소유한다. local
+  operator가 private 사실·식별자·인용·원문/hash/embedding을 넣지 않았다고 직접 검토하고 일반 규칙을
+  다시 작성한 `independent guidance`만 source-free 파생 버전이 된다. 원본 피드백 삭제는 source-bound
+  사본과 무결성 계보를 삭제 상태로 만들지만 이미 독립화·승인된 active 버전은 자동 취소하지 않는다.
+- 결정: `bot_api`만 correction, version, evaluation, approval, canary, activation, failure, rollback,
+  revocation record와 active pointer를 쓴다. fixed eval 전건, action·version·archive generation에 결박된
+  새 local-admin OTP, 서버가 수집한 exact 10개 grounded read-only receipt, generation CAS를 차례로
+  통과해야 활성화한다. current contract/evaluator에 결박된 고정 실패만 rollback을 열고 revoke는 fresh OTP로
+  대상과 descendants를 폐기한다. 재시작·source 삭제·집계 예외의 running canary는 raw durable receipt에서
+  보수적으로 실패 종료하며 active pointer는 바꾸지 않는다.
+- 결정: Discord `/피드백제출`은 현재 shared session에서 같은 Discord user ID가 실제 전달 완료된 자기 최신
+  답변에만 review-only 피드백을 붙인다. text send 성공 또는 voice playback 완료 전 답변, stale session,
+  다른 guild/channel/user는 거부하며 Discord에는 generalize/eval/approve/activate API를 제공하지 않는다.
+- 이유: 자동 self-healing이 사람의 교정을 새 권한·tool·전역 사실로 승격하거나, 삭제된 source가 다시
+  파생 버전에 스며드는 일을 막으면서도 사용자가 요구한 독립 개선 버전의 연속성은 유지해야 한다.
+- 근거: `../evelyn_core/runtime/evelyn_core/feedback_improvement.py`,
+  `../evelyn_core/runtime/evelyn_core/conversation_archive.py`,
+  `../evelyn_core/runtime/evelyn_core/discord_conversation_archive_runtime.py`,
+  `../evelyn_core/runtime/evelyn_core/fast_control_api.py`, 관련 archive/Discord/UI tests,
+  `../plan.md` P1-5, [[worklog/2026-08-28]].
+- 영향: source/offline 전체 회귀는 통과했지만 실제 Discord 전달 경쟁, local admin OTP, real-Qwen eval,
+  10건 canary와 production pointer 전환은 live 증거가 아니다. archive 기본 OFF도 유지한다.

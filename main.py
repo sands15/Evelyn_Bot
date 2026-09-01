@@ -15,7 +15,7 @@ import wave
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVELYN_CORE_RUNTIME = PROJECT_ROOT / "evelyn_core" / "runtime"
 os.environ.setdefault("EVELYN_PROJECT_ROOT", str(PROJECT_ROOT))
@@ -78,7 +78,9 @@ from evelyn_core.cognitive_followup_policy import should_force_search_followup_f
 from evelyn_core.llm_cognitive_dependency_composition import LlmCognitiveDependencyComposition, LlmCognitiveDependencyCompositionDeps
 from evelyn_core.cognitive_refresh_composition import CognitiveRefreshComposition, CognitiveRefreshCompositionDeps
 from evelyn_core.self_model import (
-    mark_self_state_assistant_output, record_self_identity_turn, render_self_judgment_context, render_self_state_context, update_self_state_for_turn,)
+    mark_self_state_assistant_output, record_self_identity_turn, render_self_judgment_context, render_self_state_context,
+    reset_persona_state_for_deletion, update_self_state_for_turn,)
+from evelyn_core.identity_review import IDENTITY_REVIEW_EXPORT_DIR, cleanup_identity_review_artifacts
 from evelyn_core.vision_watch import (
     capture_vision_watch_frame, read_vision_watch_state, render_vision_watch_context, update_vision_watch_analysis, vision_watch_scene_is_unreliable,)
 from evelyn_core.vision_quality import build_vision_quality
@@ -170,6 +172,8 @@ from evelyn_core.discord_commands import (
 )
 from evelyn_core.discord_command_handlers import make_control_command_authorized_checker
 from evelyn_core.discord_app_dependency_composition import DiscordAppDependencyComposition, DiscordAppDependencyCompositionDeps
+from evelyn_core.discord_conversation_archive_composition import DiscordConversationArchiveComposition, active_task_planner_guidance_from_composition
+from evelyn_core.conversation_archive_process_composition import ConversationArchiveProcessComposition, ConversationArchiveProcessCompositionDeps
 from evelyn_core.discord_ingress import build_voice_ingress_context, resolve_text_thread_id, normalize_voice_debug_meta, voice_ingress_source
 from evelyn_core.session_key_runtime import (
     make_person_memory_key, make_room_memory_key, make_session_memory_key, make_text_reply_slot_key, make_text_session_key, make_voice_room_session_key,
@@ -247,6 +251,7 @@ from evelyn_core.tts_playback import (
     TtsStreamingPlaybackRequest, TtsPlaybackTracker, add_omnivoice_stream_contract, clear_tts_playback_tracking, configure_tts_playback_logging,
     get_tracked_tts_playback, is_tracked_tts_playback_active, prefetch_tts_sources, resolve_cached_tts_audio_path, split_tts_sentences,
     tracked_tts_playback_count, tracked_tts_playback_guild_ids,
+    cleanup_tts_playback_targets,
 )
 from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload, write_turn_trace_event
 from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry, TurnState
@@ -268,7 +273,7 @@ from evelyn_core.voice_execution_dependency_composition import VoiceExecutionDep
 from evelyn_core.voice_response_dependency_composition import VoiceResponseDependencyComposition, VoiceResponseDependencyCompositionDeps
 from evelyn_core.voice_turn_dependency_composition import VoiceTurnDependencyComposition, VoiceTurnDependencyCompositionDeps
 from evelyn_core.voice_ingress_dependency_composition import VoiceIngressDependencyComposition, VoiceIngressDependencyCompositionDeps
-from evelyn_core.voice_ingress_runtime import current_voice_ingress_epoch, voice_ingress_epoch_is_current
+from evelyn_core.voice_ingress_runtime import cleanup_voice_ingress_targets_from_runtime, current_voice_ingress_epoch, voice_ingress_epoch_is_current
 from evelyn_core.voice_transcription_dependency_composition import VoiceTranscriptionDependencyComposition, VoiceTranscriptionDependencyCompositionDeps
 from evelyn_core.voice_pipeline import (
     DeliveryPlan, RouteDecision, TranscriptResult, VoiceSegment, build_answer_payload, build_answer_payload_from_text, build_delivery_plan,
@@ -308,12 +313,31 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
         / "status.json"
     ),
     system_prompt=SYSTEM_PROMPT, artifact_process=shared_durable_artifact_process(), authenticity=load_continuity_authenticity(
-        protected_root=PROJECT_ROOT, additional_protected_roots=(RUNTIME_ARTIFACTS_ROOT,)), log=print,
+        protected_root=PROJECT_ROOT, additional_protected_roots=(RUNTIME_ARTIFACTS_ROOT,)),
+    writer_fence_current=lambda session_key, current_turn_id: (
+        conversation_archive_process.target_is_current(
+            guild_id=0,
+            turn_id=current_turn_id,
+            session_key=session_key,
+        )
+    ),
+    log=print,
 )
-search_followup_recovery = SearchFollowupRecoveryJournal(path=RUNTIME_ARTIFACTS_ROOT / "search_followup_recovery" / "active.json", enabled=DISCORD_ENABLED)
+search_followup_recovery = SearchFollowupRecoveryJournal(
+    path=RUNTIME_ARTIFACTS_ROOT / "search_followup_recovery" / "active.json",
+    enabled=DISCORD_ENABLED,
+    mutation_target_is_current=lambda **target: (
+        conversation_archive_process.search_followup_target_is_current(**target)
+    ),
+)
 conversation_ingress_composition = build_main_conversation_ingress_composition(
     RUNTIME_ARTIFACTS_ROOT, DISCORD_ENABLED, session_continuity_checkpoint,
-    ACTIVE_CONVERSATION_TEXT_SEC, ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, print, search_followup_recovery.reset_guild,)
+    ACTIVE_CONVERSATION_TEXT_SEC, ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+    print, search_followup_recovery.reset_guild,
+    mutation_target_is_current=lambda **target: (
+        conversation_archive_process.ingress_target_is_current(**target)
+    ),
+)
 guild_is_open = conversation_ingress_composition.guild_is_open; guild_epoch = conversation_ingress_composition.guild_epoch
 autonomy_authorization_manager = AutonomyAuthorizationManager(
     status_path=(
@@ -342,7 +366,6 @@ instance_lock_manager = InstanceLockManager(
 release_instance_lock = instance_lock_manager.release
 acquire_instance_lock = instance_lock_manager.acquire
 atexit.register(release_instance_lock)
-
 bot = commands.Bot(
     command_prefix=lambda _bot, message: commands.when_mentioned_or(
         resolve_command_prefix_from_runtime(
@@ -352,15 +375,22 @@ bot = commands.Bot(
     )(_bot, message),
     intents=intents, help_command=None,
 )
-
 SYSTEM_PROMPT = build_evelyn_system_prompt(omnivoice_tag_guidance=OMNIVOICE_TAG_GUIDANCE)
 session_locks: dict[str, asyncio.Lock] = {}
 reply_slot_locks: dict[str, asyncio.Lock] = {}; reply_slot_admission_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 tts_playback_tracker = TtsPlaybackTracker()
-tts_playback_manager = TtsPlaybackManager(tts_playback_tracker)
+tts_playback_manager = TtsPlaybackManager(
+    tts_playback_tracker,
+    target_is_current=lambda target: conversation_archive_process.tts_target_is_current(
+        target
+    ),
+)
 local_tts_playback_manager = LocalTtsPlaybackManager(
     enabled=LOCAL_TTS_OUTPUT_ENABLED, device=LOCAL_TTS_OUTPUT_DEVICE,
+    target_is_current=lambda target: conversation_archive_process.tts_target_is_current(
+        target
+    ),
     log=print,
 )
 speaker_verifier = SpeakerVerifier(
@@ -417,6 +447,9 @@ control_page_runtime_services_refresh_task_state = RuntimeValue[asyncio.Task | N
 control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
 session_speculative_policies: dict[str, dict[str, Any]] = {}
+conversation_archive_process = ConversationArchiveProcessComposition(enabled=CONVERSATION_ARCHIVE_ENABLED)
+conversation_archive_process_tasks = conversation_archive_process.process_tasks
+voice_ingress_process_tasks = conversation_archive_process.voice_ingress_process_tasks
 room_turn_scopes: dict[str, "TurnScope"] = {}
 turn_scope_registry = TurnScopeRegistry(room_turn_scopes=room_turn_scopes)
 turn_stage_metrics: dict[str, dict[str, float]] = {}
@@ -435,7 +468,6 @@ question_policy_state = QuestionPolicyState(
     min_turn_gap=QUESTION_MIN_TURN_GAP, min_seconds_gap=QUESTION_MIN_SECONDS_GAP,
     max_per_10_turns=QUESTION_MAX_PER_10_TURNS, disable_after_frustration_sec=QUESTION_DISABLE_AFTER_FRUSTRATION_SEC,
 )
-
 conversation_policy_dependency_composition = ConversationPolicyDependencyComposition(
     ConversationPolicyDependencyCompositionDeps(
         normalize_question_policy_mapping_payload=normalize_question_policy_mapping_payload,
@@ -479,23 +511,11 @@ conversation_policy_dependency_composition = ConversationPolicyDependencyComposi
         model_output_stop_tokens=MAIN_LLM_STOP_TOKENS, sanitize_model_output_cleanup=cleanup_assistant_display_artifacts,
     )
 )
-
-build_question_policy_runtime_deps = (
-    conversation_policy_dependency_composition.build_question_policy_runtime_deps
-)
-build_question_policy_state_runtime_deps = (
-    conversation_policy_dependency_composition.build_question_policy_state_runtime_deps
-)
-build_session_turn_runtime_deps = (
-    conversation_policy_dependency_composition.build_session_turn_runtime_deps
-)
-build_discord_session_policy_runtime_deps = (
-    conversation_policy_dependency_composition.build_discord_session_policy_runtime_deps
-)
-build_response_output_policy_runtime_deps = (
-    conversation_policy_dependency_composition.build_response_output_policy_runtime_deps
-)
-
+build_question_policy_runtime_deps = conversation_policy_dependency_composition.build_question_policy_runtime_deps
+build_question_policy_state_runtime_deps = conversation_policy_dependency_composition.build_question_policy_state_runtime_deps
+build_session_turn_runtime_deps = conversation_policy_dependency_composition.build_session_turn_runtime_deps
+build_discord_session_policy_runtime_deps = conversation_policy_dependency_composition.build_discord_session_policy_runtime_deps
+build_response_output_policy_runtime_deps = conversation_policy_dependency_composition.build_response_output_policy_runtime_deps
 autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
@@ -504,6 +524,7 @@ search_followup_queued_counter = RuntimeCounter()
 inflight_llm_requests_counter = RuntimeCounter()
 VOICE_BARGE_IN_CONTINUITY_TARGET = 5
 recent_skill_dispatches: dict[str, float] = {}
+recent_skill_dispatch_targets: dict[str, dict[str, Any]] = {}
 SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
 SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
 SKILL_DISPATCH_CACHE_MAX = 1024
@@ -574,17 +595,13 @@ create_turn_scoped_task = conversation_observability_composition.create_turn_sco
 clear_room_turn_scope = conversation_observability_composition.clear_room_turn_scope
 record_turn_stage = conversation_observability_composition.record_turn_stage
 record_model_call_metric = conversation_observability_composition.record_model_call_metric
-replay_model_call_metrics_from_turn_trace = (
-    conversation_observability_composition.replay_model_call_metrics_from_turn_trace
-)
+replay_model_call_metrics_from_turn_trace = conversation_observability_composition.replay_model_call_metrics_from_turn_trace
 ensure_model_call_metrics_replayed = conversation_observability_composition.ensure_model_call_metrics_replayed
 record_turn_path_summary = conversation_observability_composition.record_turn_path_summary
 summarize_turn_path_metrics = conversation_observability_composition.summarize_turn_path_metrics
 summarize_model_call_metrics = conversation_observability_composition.summarize_model_call_metrics
 normalize_question_policy_mapping = conversation_observability_composition.normalize_question_policy_mapping
-extract_question_policy_from_route_meta = (
-    conversation_observability_composition.extract_question_policy_from_route_meta
-)
+extract_question_policy_from_route_meta = conversation_observability_composition.extract_question_policy_from_route_meta
 user_wants_direct_answer = conversation_observability_composition.user_wants_direct_answer
 user_frustration_with_questions = conversation_observability_composition.user_frustration_with_questions
 is_continuable_technical_topic = conversation_observability_composition.is_continuable_technical_topic
@@ -592,13 +609,9 @@ question_cooldown_hit = conversation_observability_composition.question_cooldown
 apply_fast_path_question_policy = conversation_observability_composition.apply_fast_path_question_policy
 record_question_trace = conversation_observability_composition.record_question_trace
 summarize_question_metrics = conversation_observability_composition.summarize_question_metrics
-proactive_question_scope_candidates = (
-    conversation_observability_composition.proactive_question_scope_candidates
-)
+proactive_question_scope_candidates = conversation_observability_composition.proactive_question_scope_candidates
 record_session_question_asked = conversation_observability_composition.record_session_question_asked
-resolve_pending_proactive_question_for_turn = (
-    conversation_observability_composition.resolve_pending_proactive_question_for_turn
-)
+resolve_pending_proactive_question_for_turn = conversation_observability_composition.resolve_pending_proactive_question_for_turn
 select_and_mark_proactive_question = (
     conversation_observability_composition.select_and_mark_proactive_question
 )
@@ -723,6 +736,10 @@ voice_turn_dependency_composition = VoiceTurnDependencyComposition(
         schedule_voice_utterance_item=lambda *args, **kwargs: _schedule_voice_utterance_item(*args, **kwargs),
         monotonic=time.monotonic, log=print,
         admit_search_followup_recovery=(lambda: discord_app_composition.admit_search_followup_ingress()) if DISCORD_ENABLED else None,
+        voice_ingress_process_tasks=voice_ingress_process_tasks,
+        voice_ingress_target_is_current=(
+            conversation_archive_process.voice_target_is_current
+        ),
     )
 )
 build_voice_barge_in_continuity_runtime_deps = (
@@ -842,9 +859,9 @@ llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
         ),
         build_cognitive_fallback_state=build_cognitive_fallback_state, finalize_cognitive_state=finalize_cognitive_state,
         log=print,
+        archive_target_is_current=conversation_archive_process.target_is_current,
     )
 )
-
 build_cognitive_followup_runtime_deps = (
     llm_cognitive_dependency_composition.build_cognitive_followup_runtime_deps
 )
@@ -929,12 +946,10 @@ vision_watch_composition = VisionWatchComposition(
         log=print,
     )
 )
-
 run_vision_watch_once = vision_watch_composition.run_vision_watch_once
 vision_watch_loop = vision_watch_composition.vision_watch_loop
 ensure_vision_watch_started = vision_watch_composition.ensure_vision_watch_started
 stop_vision_watch_task = vision_watch_composition.stop_vision_watch_task
-
 llm_context_assembly_composition = LlmContextAssemblyComposition(
     LlmContextAssemblyCompositionDeps(
         compute_runtime_mode=compute_runtime_mode, apply_runtime_mode=apply_runtime_mode,
@@ -964,9 +979,7 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         continuity_authenticity=session_continuity_checkpoint.authenticity, log=print,
     )
 )
-
 build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime_deps
-
 cognitive_refresh_composition = CognitiveRefreshComposition(
     CognitiveRefreshCompositionDeps(
         state=build_cognitive_state_runtime_deps, background_tasks=background_cognitive_tasks,
@@ -974,20 +987,19 @@ cognitive_refresh_composition = CognitiveRefreshComposition(
         current_turn_id=current_turn_id, monotonic=time.monotonic,
         current_task=asyncio.current_task, log_turn_event=log_turn_event,
         log=print,
+        archive_target_is_current=conversation_archive_process.target_is_current,
+        archive_task_targets=conversation_archive_process_tasks,
     )
 )
-
 update_cognitive_state = cognitive_refresh_composition.update_cognitive_state
 refresh_cognitive_state_in_background = (
     cognitive_refresh_composition.refresh_cognitive_state_in_background
 )
 schedule_cognitive_refresh = cognitive_refresh_composition.schedule_cognitive_refresh
-
 redact_vision_text_for_memory = partial(
     redact_vision_text_for_memory_payload,
     vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
 )
-
 search_memory_dependency_composition = SearchMemoryDependencyComposition(
     SearchMemoryDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1034,6 +1046,8 @@ search_memory_dependency_composition = SearchMemoryDependencyComposition(
         commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
         search_followup_recovery=search_followup_recovery, continuity_status=session_continuity_checkpoint.status,
         guild_is_open=guild_is_open,
+        archive_target_is_current=conversation_archive_process.target_is_current,
+        archive_task_targets=conversation_archive_process_tasks,
     )
 )
 build_memory_update_runtime_deps = (
@@ -1045,7 +1059,6 @@ build_search_answer_runtime_deps = (
 build_search_followup_runtime_deps = (
     search_memory_dependency_composition.build_search_followup_runtime_deps
 )
-
 memory_maintenance_composition = MemoryMaintenanceComposition(
     MemoryMaintenanceCompositionDeps(
         memory_update=build_memory_update_runtime_deps, memory_locks=memory_locks,
@@ -1062,15 +1075,12 @@ memory_maintenance_composition = MemoryMaintenanceComposition(
         log=print,
     )
 )
-
 update_long_term_memory = memory_maintenance_composition.update_long_term_memory
 schedule_memory_vault_maintenance = (
     memory_maintenance_composition.schedule_memory_vault_maintenance
 )
 schedule_memory_update = memory_maintenance_composition.schedule_memory_update
-
 record_search_followup_queued = search_followup_queued_counter.increment
-
 runtime_lifecycle_composition = RuntimeLifecycleComposition(
     RuntimeLifecycleCompositionDeps(
         startup=RuntimeStartupCompositionDeps(
@@ -1125,12 +1135,17 @@ runtime_lifecycle_composition = RuntimeLifecycleComposition(
             ensure_control_page_background_tasks_started=(
                 lambda: ensure_control_page_background_tasks_started()
             ),
+            begin_conversation_archive_generation=(
+                lambda: conversation_archive_gate.begin_generation()
+            ) if CONVERSATION_ARCHIVE_ENABLED else None,
+            run_conversation_archive_purge_worker=(
+                lambda: conversation_archive.run_purge_owner_loop()
+            ) if CONVERSATION_ARCHIVE_ENABLED else None,
             control_page_local_url=lambda: control_page_local_url(), wait_forever=lambda: asyncio.Event().wait(),
             log=print,
         ),
     )
 )
-
 startup_components_ready = runtime_lifecycle_composition.startup_components_ready
 set_tts_presence = runtime_lifecycle_composition.set_tts_presence
 build_opus_startup_runtime_deps = runtime_lifecycle_composition.build_opus_startup_runtime_deps
@@ -1145,7 +1160,6 @@ schedule_evelyn_stack_shutdown = runtime_lifecycle_composition.schedule_evelyn_s
 schedule_evelyn_local_shutdown = runtime_lifecycle_composition.schedule_evelyn_local_shutdown
 shutdown_bot_process = runtime_lifecycle_composition.shutdown_bot_process
 run_local_only_mode = runtime_lifecycle_composition.run_local_only_mode
-
 evelyn_page_url_runtime_deps = build_evelyn_page_url_runtime_deps(
     project_root=PROJECT_ROOT, configured_page_url=EVELYN_PAGE_URL,
     run_git_config=subprocess.run,
@@ -1154,7 +1168,6 @@ resolve_evelyn_page_url = partial(
     resolve_evelyn_page_url_from_runtime,
     deps=evelyn_page_url_runtime_deps,
 )
-
 voice_runtime_composition = VoiceRuntimeComposition(
     VoiceRuntimeCompositionDeps(
         pipeline=VoicePipelineCompositionDeps(
@@ -1196,10 +1209,10 @@ voice_runtime_composition = VoiceRuntimeComposition(
             queue_max=LOCAL_MIC_QUEUE_MAX, vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
             env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED, waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
             time=time.time, log=print,
+            conversation_archive_enabled=CONVERSATION_ARCHIVE_ENABLED,
         ),
     )
 )
-
 voice_pipeline_counters = voice_runtime_composition.voice_pipeline_counters
 voice_pipeline_state = voice_runtime_composition.voice_pipeline_state
 local_mic_runtime_state = voice_runtime_composition.local_mic_runtime_state
@@ -1238,9 +1251,7 @@ build_local_mic_segment_runtime_deps = voice_runtime_composition.build_local_mic
 handle_local_mic_segment = voice_runtime_composition.handle_local_mic_segment
 build_local_mic_service_runtime_deps = voice_runtime_composition.build_local_mic_service_runtime_deps
 ensure_local_mic_service_started = voice_runtime_composition.ensure_local_mic_service_started
-
 atexit.register(stop_local_mic_service)
-
 voice_audio_support_dependency_composition = VoiceAudioSupportDependencyComposition(
     VoiceAudioSupportDependencyCompositionDeps(
         get_http_session=get_http_session, client_timeout_factory=aiohttp.ClientTimeout,
@@ -1266,7 +1277,6 @@ voice_audio_support_dependency_composition = VoiceAudioSupportDependencyComposit
         log=print,
     )
 )
-
 build_tts_warmup_runtime_deps = (
     voice_audio_support_dependency_composition.build_tts_warmup_runtime_deps
 )
@@ -1279,7 +1289,6 @@ build_omnivoice_request_runtime_deps = (
 build_omnivoice_source_runtime_deps = (
     voice_audio_support_dependency_composition.build_omnivoice_source_runtime_deps
 )
-
 # =========================================================
 # STT
 # =========================================================
@@ -1308,7 +1317,6 @@ voice_input_support_dependency_composition = VoiceInputSupportDependencyComposit
         sleep=asyncio.sleep, log=print,
     )
 )
-
 _build_stt_text_runtime_deps = (
     voice_input_support_dependency_composition.build_stt_text_runtime_deps
 )
@@ -1318,7 +1326,6 @@ build_stt_transcription_runtime_deps = (
 build_discord_voice_connection_runtime_deps = (
     voice_input_support_dependency_composition.build_discord_voice_connection_runtime_deps
 )
-
 voice_support_composition = VoiceSupportComposition(
     VoiceSupportCompositionDeps(
         continuity=lambda: build_voice_barge_in_continuity_runtime_deps(), stt_warmup=lambda: build_stt_warmup_runtime_deps(),
@@ -1340,7 +1347,6 @@ voice_support_composition = VoiceSupportComposition(
         get_guild=bot.get_guild, voice_channel_type=discord.VoiceChannel, now=time.time, log=print,
     )
 )
-
 _parse_barge_in_reason_label = voice_support_composition.parse_barge_in_reason_label
 _format_voice_barge_in_continuity_summary = voice_support_composition.format_voice_barge_in_continuity_summary
 _format_voice_barge_in_continuity_detail_lines = voice_support_composition.format_voice_barge_in_continuity_detail_lines
@@ -1368,7 +1374,6 @@ connect_evelyn_voice_client = voice_support_composition.connect_evelyn_voice_cli
 ensure_listening_voice_client = voice_support_composition.ensure_listening_voice_client
 ensure_voice_client = voice_support_composition.ensure_voice_client
 restore_last_voice_channel = voice_support_composition.restore_last_voice_channel
-
 voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
     VoiceTtsControlDependencyCompositionDeps(
         tts_playback_manager=tts_playback_manager, local_tts_playback_manager=local_tts_playback_manager,
@@ -1397,7 +1402,6 @@ voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
         tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC, voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
     )
 )
-
 build_tts_interrupt_runtime_deps = (
     voice_tts_control_dependency_composition.build_tts_interrupt_runtime_deps
 )
@@ -1407,7 +1411,6 @@ build_cached_tts_runtime_deps = (
 build_voice_tts_interrupt_gate_deps = (
     voice_tts_control_dependency_composition.build_voice_tts_interrupt_gate_deps
 )
-
 discord_tts_dependency_composition = DiscordTtsDependencyComposition(
     DiscordTtsDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1427,14 +1430,12 @@ discord_tts_dependency_composition = DiscordTtsDependencyComposition(
         log=print,
     )
 )
-
 build_discord_tts_single_runtime_deps = (
     discord_tts_dependency_composition.build_discord_tts_single_runtime_deps
 )
 build_discord_tts_stream_runtime_deps = (
     discord_tts_dependency_composition.build_discord_tts_stream_runtime_deps
 )
-
 local_tts_dependency_composition = LocalTtsDependencyComposition(
     LocalTtsDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1452,14 +1453,12 @@ local_tts_dependency_composition = LocalTtsDependencyComposition(
         prefetch_tts_sources=prefetch_tts_sources, cleanup_prepared_tts_item=cleanup_prepared_tts_item,
     )
 )
-
 build_local_tts_single_runtime_deps = (
     local_tts_dependency_composition.build_local_tts_single_runtime_deps
 )
 build_local_tts_stream_runtime_deps = (
     local_tts_dependency_composition.build_local_tts_stream_runtime_deps
 )
-
 delivery_entry_composition = DeliveryEntryComposition(
     LocalDeliveryEntryDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1487,14 +1486,12 @@ delivery_entry_composition = DeliveryEntryComposition(
         log=print,
     ),
 )
-
 _mark_local_tts_first_playback = delivery_entry_composition.mark_local_tts_first_playback
 start_streaming_local_voice_delivery = (
     delivery_entry_composition.start_streaming_local_voice_delivery
 )
 schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts
 start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voice_delivery
-
 # =========================================================
 # LLM
 # =========================================================
@@ -1542,7 +1539,6 @@ voice_response_dependency_composition = VoiceResponseDependencyComposition(
         log=print,
     )
 )
-
 build_voice_response_runtime_deps = (
     voice_response_dependency_composition.build_voice_response_runtime_deps
 )
@@ -1555,15 +1551,12 @@ build_ask_llm_once_runtime_deps = (
 build_voice_stream_chunk_deps = (
     voice_response_dependency_composition.build_voice_stream_chunk_deps
 )
-
 DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_executor", "routing", "delivery"}
 DISABLED_MAIN_APP_SKILL_ROUTES = {"minecraft"}
-
 build_route_executor_runtime_deps = partial(
     ResolveRouteExecutorRuntimeDeps,
     get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id), create_autonomy_engine=get_or_create_autonomy_engine,
 )
-
 get_minecraft_client = LazyResourceProvider(
     MinecraftAutonomyClient,
     MinecraftAutonomyClient,
@@ -1572,7 +1565,6 @@ get_routed_autonomy_executor = partial(
     get_routed_autonomy_executor_from_runtime,
     autonomy_engines=autonomy_engines, executor_type=RoutedAutonomyExecutor,
 )
-
 build_minecraft_live_observation_runtime_deps = partial(
     MinecraftLiveObservationRuntimeDeps,
     get_minecraft_client=get_minecraft_client, merge_voyager_status_into_state=merge_voyager_status_into_state,
@@ -1580,13 +1572,11 @@ build_minecraft_live_observation_runtime_deps = partial(
     now=time.time, stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
     expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
 )
-
 minecraft_live_observation_runtime_deps = build_minecraft_live_observation_runtime_deps()
 observe_live_minecraft_state = partial(
     observe_live_minecraft_state_from_runtime,
     deps=minecraft_live_observation_runtime_deps,
 )
-
 minecraft_mode_composition = MinecraftModeComposition(
     MinecraftModeCompositionDeps(
         get_client=get_minecraft_client, merge_status=merge_voyager_status_into_state,
@@ -1650,7 +1640,6 @@ control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
         monotonic=time.monotonic, log=print,
     )
 )
-
 build_control_page_ui_runtime_deps = (
     control_page_ui_dependency_composition.build_control_page_ui_runtime_deps
 )
@@ -1660,7 +1649,6 @@ build_control_page_guild_selection_runtime_deps = (
 build_control_page_welcome_runtime_deps = (
     control_page_ui_dependency_composition.build_control_page_welcome_runtime_deps
 )
-
 control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComposition(
     ControlPageSnapshotDependencyCompositionDeps(
         control_page=lambda: control_page_composition, get_minecraft_client=lambda: get_minecraft_client(),
@@ -1686,7 +1674,6 @@ control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComp
         sleep=asyncio.sleep, log=print,
     )
 )
-
 build_control_page_minecraft_live_snapshot_runtime_deps = (
     control_page_snapshot_dependency_composition.build_control_page_minecraft_live_snapshot_runtime_deps
 )
@@ -1696,7 +1683,6 @@ build_control_page_minecraft_snapshot_runtime_deps = (
 build_control_page_background_tasks_runtime_deps = (
     control_page_snapshot_dependency_composition.build_control_page_background_tasks_runtime_deps
 )
-
 control_page_runtime_services_dependency_composition = (
     ControlPageRuntimeServicesDependencyComposition(
         ControlPageRuntimeServicesDependencyCompositionDeps(
@@ -1720,14 +1706,12 @@ control_page_runtime_services_dependency_composition = (
         )
     )
 )
-
 build_control_page_runtime_services_runtime_deps = (
     control_page_runtime_services_dependency_composition.build_control_page_runtime_services_runtime_deps
 )
 build_control_page_runtime_services_probe_runtime_deps = (
     control_page_runtime_services_dependency_composition.build_control_page_runtime_services_probe_runtime_deps
 )
-
 control_page_status_tool_composition = ControlPageStatusToolComposition(
     ControlPageStatusToolCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1775,7 +1759,6 @@ control_page_status_tool_composition = ControlPageStatusToolComposition(
         format_position=format_position_short, log=print,
     )
 )
-
 build_control_page_status_runtime_deps = (
     control_page_status_tool_composition.build_control_page_status_runtime_deps
 )
@@ -1836,7 +1819,6 @@ control_page_search_text_dependency_composition = ControlPageSearchTextDependenc
         log=print,
     )
 )
-
 build_control_page_search_runtime_deps = (
     control_page_search_text_dependency_composition.build_control_page_search_runtime_deps
 )
@@ -1854,7 +1836,6 @@ control_page_input_dependency_composition = ControlPageInputDependencyCompositio
         ),
     )
 )
-
 build_control_page_input_runtime_deps = (
     control_page_input_dependency_composition.build_control_page_input_runtime_deps
 )
@@ -1882,12 +1863,9 @@ control_page_state_composition = ControlPageStateComposition(
         local_mic_discord_user_ids=LOCAL_MIC_DISCORD_USER_IDS, voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
     )
 )
-
 build_control_page_state = control_page_state_composition.build_control_page_state
-
 open_control_page_path_with_system = open_path_with_system
 open_control_page_url_with_system = open_url_with_system
-
 control_page_composition = ControlPageComposition(
     ControlPageCompositionDeps(
         ui=lambda: build_control_page_ui_runtime_deps(), guild_selection=lambda: build_control_page_guild_selection_runtime_deps(),
@@ -1929,7 +1907,6 @@ control_page_http_composition = ControlPageHttpComposition(
         local_url=control_page_composition.local_url, log=print,
     )
 )
-
 control_page_local_url = control_page_composition.local_url
 control_page_session_key = control_page_composition.session_key
 control_page_effective_guild_id = control_page_composition.effective_guild_id
@@ -1943,10 +1920,8 @@ mark_startup_component = control_page_composition.mark_startup_component
 startup_component_done = control_page_composition.startup_component_done
 build_control_page_boot_progress = control_page_composition.build_boot_progress
 start_control_page_server = control_page_composition.start_server
-
 increment_inflight_llm_requests = inflight_llm_requests_counter.increment
 decrement_inflight_llm_requests = inflight_llm_requests_counter.decrement
-
 voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
     VoiceExecutionDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -1962,7 +1937,11 @@ voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
                 get_http_session=get_http_session, broker_token_file=MINDCRAFT_LLM_BROKER_TOKEN_FILE, timeout_sec=SPECIALIST_LLM_TIMEOUT_SEC,
             )),
         observe_live_minecraft_state=observe_live_minecraft_state, skill_registry=skill_registry,
-        recent_skill_dispatches=recent_skill_dispatches, build_main_response_guidance=build_main_response_guidance,
+        recent_skill_dispatches=recent_skill_dispatches,
+        recent_skill_dispatch_targets=recent_skill_dispatch_targets,
+        archive_target_is_current=conversation_archive_process.target_is_current,
+        task_guidance_provider=partial(active_task_planner_guidance_from_composition, lambda: globals().get("conversation_archive")),
+        build_main_response_guidance=build_main_response_guidance,
         execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
         resolve_route_executor=lambda *args, **kwargs: resolve_route_executor(*args, **kwargs), model_name=MODEL_NAME,
         llm_server_url=LLM_SERVER_URL, main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
@@ -1985,14 +1964,12 @@ voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
         log=print,
     )
 )
-
 build_voice_route_execution_deps = (
     voice_execution_dependency_composition.build_voice_route_execution_deps
 )
 build_voice_main_llm_streaming_deps = (
     voice_execution_dependency_composition.build_voice_main_llm_streaming_deps
 )
-
 voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
     VoiceDeliveryDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -2048,7 +2025,6 @@ voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
         send_discord_text=lambda *args, **kwargs: send_discord_text(*args, **kwargs),
     )
 )
-
 build_voice_turn_entry_runtime_deps = (
     voice_delivery_dependency_composition.build_voice_turn_entry_runtime_deps
 )
@@ -2058,7 +2034,6 @@ build_voice_delivery_runtime_deps = (
 build_discord_text_reply_runtime_deps = (
     voice_delivery_dependency_composition.build_discord_text_reply_runtime_deps
 )
-
 llm_route_composition = LlmRouteComposition(
     LlmRouteCompositionDeps(
         fast_path=lambda: build_fast_path_policy_runtime_deps(), llm_context=lambda: build_llm_context_assembly_deps(),
@@ -2071,7 +2046,6 @@ llm_route_composition = LlmRouteComposition(
         voice_turn_entry=lambda: build_voice_turn_entry_runtime_deps(), search_payload=search_duckduckgo_payload,
     )
 )
-
 is_control_page_source = llm_route_composition.is_control_page_source
 deep_route_marker_count = llm_route_composition.deep_route_marker_count
 has_negated_search_marker = llm_route_composition.has_negated_search_marker
@@ -2113,7 +2087,6 @@ maybe_handle_short_circuit_route = llm_route_composition.maybe_handle_short_circ
 maybe_execute_registered_route = llm_route_composition.maybe_execute_registered_route
 execute_main_llm_streaming_turn = llm_route_composition.execute_main_llm_streaming_turn
 ask_llm_streaming = llm_route_composition.ask_llm_streaming
-
 # =========================================================
 # 음성 입력 처리
 # =========================================================
@@ -2168,14 +2141,12 @@ voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
         log=print,
     )
 )
-
 build_voice_audio_ingress_runtime_deps = (
     voice_ingress_dependency_composition.build_voice_audio_ingress_runtime_deps
 )
 build_voice_wake_probe_runtime_deps = (
     voice_ingress_dependency_composition.build_voice_wake_probe_runtime_deps
 )
-
 voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposition(
     VoiceTranscriptionDependencyCompositionDeps(
         build_partial_stt_window=lambda *args, **kwargs: build_partial_stt_window(*args, **kwargs),
@@ -2212,7 +2183,6 @@ voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposi
         log=print,
     )
 )
-
 build_voice_stt_execution_deps = (
     voice_transcription_dependency_composition.build_voice_stt_execution_deps
 )
@@ -2223,20 +2193,37 @@ discord_runtime_status = DiscordRuntimeStatus(
     gateway_ready=lambda: discord_gateway_connected(bot), bot_guilds=lambda: list(bot.guilds),
     voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
     conversation_ingress_recovery_status=conversation_ingress_composition.public_status)
+conversation_archive = DiscordConversationArchiveComposition.build(
+    enabled=CONVERSATION_ARCHIVE_ENABLED, base_url=CONVERSATION_ARCHIVE_BOT_API_URL, ingest_key_file=CONVERSATION_ARCHIVE_INGEST_KEY_FILE,
+    user_view_key_file=CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE, shared_session_ttl_seconds=CONVERSATION_ARCHIVE_SHARED_SESSION_TTL_SEC,
+    get_http_session=get_http_session, bot=bot, record_error=discord_runtime_status.record_error,
+    purge_owner_callback=conversation_archive_process.purge, purge_owner_completed=conversation_archive_process.complete,
+)
+conversation_archive_gate = conversation_archive.gate
+conversation_archive_process.configure(lineage_handle=conversation_archive.client.purge_lineage_handle if conversation_archive.client is not None else None,
+    deps=ConversationArchiveProcessCompositionDeps(
+        room_turn_scopes=room_turn_scopes, background_memory_vault_tasks=background_memory_vault_tasks,
+        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks, session_continuity_checkpoint=session_continuity_checkpoint,
+        conversation_ingress_composition=conversation_ingress_composition, search_followup_recovery=search_followup_recovery,
+        reset_persona_state_for_deletion=reset_persona_state_for_deletion, autonomy_authorization_manager=autonomy_authorization_manager,
+        autonomy_engines=autonomy_engines, cleanup_identity_review_artifacts=cleanup_identity_review_artifacts,
+        purge_feedback_targets=(conversation_archive_gate.purge_feedback_targets if conversation_archive_gate is not None else lambda _m: (0, 0, 0)),
+        identity_review_export_dir=IDENTITY_REVIEW_EXPORT_DIR, runtime_artifacts_root=RUNTIME_ARTIFACTS_ROOT,
+        session_speculative_policies=session_speculative_policies, session_question_state=session_question_state,
+        recent_skill_dispatches=recent_skill_dispatches, recent_skill_dispatch_targets=recent_skill_dispatch_targets,
+        build_voice_ingress_runtime_deps=build_voice_ingress_runtime_deps, partial_stt_cache=partial_stt_cache,
+        cleanup_voice_ingress_targets=cleanup_voice_ingress_targets_from_runtime, room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
+        cleanup_tts_playback_targets=cleanup_tts_playback_targets, tts_playback_tracker=tts_playback_tracker,
+        local_tts_playback_manager=local_tts_playback_manager,
+    ))
 voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition(
     VoiceMemberPipelineDependencyCompositionDeps(
-        is_short_followup_candidate=lambda *args, **kwargs: is_short_followup_candidate(
-            *args, **kwargs
-        ),
-        should_ignore_short_transcription=lambda *args, **kwargs: should_ignore_short_transcription(
-            *args, **kwargs
-        ),
+        is_short_followup_candidate=lambda *args, **kwargs: is_short_followup_candidate(*args, **kwargs),
+        should_ignore_short_transcription=lambda *args, **kwargs: should_ignore_short_transcription(*args, **kwargs),
         register_drop_reason=lambda *args, **kwargs: register_drop_reason(*args, **kwargs),
         save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
         log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
-        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
-            *args, **kwargs
-        ),
+        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(*args, **kwargs),
         room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs), session_topic_ids=session_state_store.topic_ids,
         monotonic=time.monotonic, active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC, canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
@@ -2282,10 +2269,13 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         ) if STT_STREAMING_ENABLED else None,
         reserve_main_foreground=partial(try_reserve_voice_main_foreground, get_http_session=get_http_session),
         cancel_main_foreground=partial(cancel_voice_main_foreground, get_http_session=get_http_session),
+        authorize_archive_capture=conversation_archive_gate.authorize_voice_capture if conversation_archive_gate is not None else None,
+        archive_final_transcript=conversation_archive_gate.archive_final_transcript if conversation_archive_gate is not None else None,
+        archive_assistant_text=conversation_archive_gate.archive_assistant_text if conversation_archive_gate is not None else None,
+        confirm_archive_assistant_delivery=conversation_archive_gate.confirm_assistant_delivery if conversation_archive_gate is not None else None,
         log=print,
     )
 )
-
 build_voice_session_gate_deps = (
     voice_member_pipeline_dependency_composition.build_voice_session_gate_deps
 )
@@ -2298,7 +2288,6 @@ build_voice_transcript_reply_deps = (
 build_voice_member_audio_pipeline_deps = (
     voice_member_pipeline_dependency_composition.build_voice_member_audio_pipeline_deps
 )
-
 voice_io_composition = VoiceIoComposition(
     VoiceIoCompositionDeps(
         reply_side_effects=lambda: build_voice_reply_side_effect_deps(), reply_gate=lambda: build_voice_reply_gate_runtime_deps(),
@@ -2344,7 +2333,6 @@ ask_llm_and_speak_streaming = voice_io_composition.ask_llm_and_speak_streaming
 stream_text_reply = voice_io_composition.stream_text_reply
 process_member_audio = voice_io_composition.process_member_audio
 _process_member_audio_impl = voice_io_composition.process_member_audio_impl
-
 discord_app_dependency_composition = DiscordAppDependencyComposition(
     DiscordAppDependencyCompositionDeps(
         process_commands=bot.process_commands, bot_user=lambda: bot.user,
@@ -2372,18 +2360,16 @@ discord_app_dependency_composition = DiscordAppDependencyComposition(
         start_new_turn=start_new_turn,
         record_command_assistant_turn=session_state_store.record_command_assistant_turn, system_prompt=SYSTEM_PROMPT,
         max_history_items=MAX_HISTORY_ITEMS, normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC, question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        archive_user_text=conversation_archive_gate.archive_user_text if conversation_archive_gate is not None else None,
+        archive_assistant_text=conversation_archive_gate.archive_assistant_text if conversation_archive_gate is not None else None,
+        confirm_archive_assistant_delivery=conversation_archive_gate.confirm_assistant_delivery if conversation_archive_gate is not None else None,
     )
 )
-
-build_discord_text_message_handler_deps = (
-    discord_app_dependency_composition.build_discord_text_message_handler_deps
-)
+build_discord_text_message_handler_deps = discord_app_dependency_composition.build_discord_text_message_handler_deps
 build_discord_command_session_runtime_deps = (
     discord_app_dependency_composition.build_discord_command_session_runtime_deps
 )
-
 is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
-
 discord_app_composition = DiscordAppComposition(
     DiscordAppCompositionDeps(
         events=DiscordEventCompositionDeps(
@@ -2398,6 +2384,16 @@ discord_app_composition = DiscordAppComposition(
             text_message_handler=build_discord_text_message_handler_deps,
             log=print, recover_search_followups=partial(recover_search_followups_from_runtime, deps=build_search_followup_runtime_deps()),
             runtime_status=discord_runtime_status,
+            conversation_archive_enabled=CONVERSATION_ARCHIVE_ENABLED,
+            conversation_archive_command_guild_id=CONVERSATION_ARCHIVE_COMMAND_GUILD_ID,
+            conversation_archive_command_ownership=(ARCHIVE_COMMAND_OWNERSHIP_FILE, ARCHIVE_COMMAND_RUN_ID),
+            conversation_participation_observer=conversation_archive_gate.observe_participation if conversation_archive_gate is not None else None,
+            conversation_consent_current=conversation_archive_gate.consent_current if conversation_archive_gate is not None else None,
+            conversation_archive_ready=conversation_archive_gate.begin_generation if conversation_archive_gate is not None else None,
+            conversation_archive_otp_delivery_worker=conversation_archive.deliver_admin_otps if conversation_archive.client is not None else None,
+            conversation_shared_session_registry=conversation_archive.shared_sessions,
+            conversation_shared_session_open=conversation_archive_gate.open_shared_session_lease if conversation_archive_gate is not None else None,
+            conversation_shared_session_close=conversation_archive_gate.close_shared_session_lease if conversation_archive_gate is not None else None,
         ),
         commands=DiscordCommandCompositionDeps(
             ensure_listening_voice_client=ensure_listening_voice_client, mark_voice_manual_disconnect=mark_voice_manual_disconnect,
@@ -2439,38 +2435,42 @@ discord_app_composition = DiscordAppComposition(
             guild_is_open=guild_is_open, guild_epoch=guild_epoch,
             reset_guild_runtime_state=reset_guild_runtime_state,
             build_reset_guild_memory_reply=build_reset_guild_memory_reply, log=print,
+            conversation_archive_enabled=CONVERSATION_ARCHIVE_ENABLED,
+            conversation_archive_read_self=conversation_archive.client.read_self if conversation_archive.client is not None else None,
+            conversation_archive_preview_delete=conversation_archive.client.preview_user_deletion if conversation_archive.client is not None else None,
+            conversation_archive_apply_delete=conversation_archive.client.apply_user_deletion if conversation_archive.client is not None else None,
+            conversation_archive_set_consent=conversation_archive_gate.set_consent if conversation_archive_gate is not None else None,
+            conversation_archive_capture_feedback=(
+                conversation_archive_gate.capture_feedback
+                if conversation_archive_gate is not None
+                else None
+            ),
+            conversation_archive_archive_autonomy_grant=conversation_archive_gate.archive_autonomy_grant if conversation_archive_gate is not None else None,
+            conversation_archive_archive_minecraft_command=(
+                conversation_archive_gate.archive_minecraft_command if conversation_archive_gate is not None else None
+            ),
+            conversation_archive_sleep=asyncio.sleep,
+            conversation_archive_operator_authorized=(
+                lambda ctx: getattr(getattr(ctx, "author", None), "id", None)
+                in ALLOWED_RESTART_USER_IDS
+            ),
         ),
     )
 )
 discord_app_bindings = discord_app_composition.register(bot)
-on_ready = discord_app_bindings.on_ready
-on_voice_state_update = discord_app_bindings.on_voice_state_update
-on_message = discord_app_bindings.on_message
-join_voice = discord_app_bindings.join_voice
-rejoin_voice = discord_app_bindings.rejoin_voice
-leave_voice = discord_app_bindings.leave_voice
-restart_bot_command = discord_app_bindings.restart_bot_command
-shutdown_bot_command = discord_app_bindings.shutdown_bot_command
-status_command = discord_app_bindings.status_command
-evelyn_page_command = discord_app_bindings.evelyn_page_command
-set_guild_prefix = discord_app_bindings.set_guild_prefix
-autonomy_start_command = discord_app_bindings.autonomy_start_command
-autonomy_stop_command = discord_app_bindings.autonomy_stop_command
-autonomy_status_command = discord_app_bindings.autonomy_status_command
-minecraft_connect_command = discord_app_bindings.minecraft_connect_command
-minecraft_disconnect_command = discord_app_bindings.minecraft_disconnect_command
-minecraft_status_command = discord_app_bindings.minecraft_status_command
-minecraft_goal_command = discord_app_bindings.minecraft_goal_command
-observe_channel_command = discord_app_bindings.observe_channel_command
-command_channel_command = discord_app_bindings.command_channel_command
-help_command = discord_app_bindings.help_command
-reset_guild_memory = discord_app_bindings.reset_guild_memory
-restart_bot_command_error = discord_app_composition.control_command_error
-shutdown_bot_command_error = discord_app_composition.control_command_error
-set_guild_prefix_error = discord_app_composition.control_command_error
-observe_channel_command_error = discord_app_composition.control_command_error
-command_channel_command_error = discord_app_composition.control_command_error
-reset_guild_memory_error = discord_app_composition.control_command_error
+on_ready = discord_app_bindings.on_ready; on_voice_state_update = discord_app_bindings.on_voice_state_update; on_message = discord_app_bindings.on_message
+join_voice = discord_app_bindings.join_voice; rejoin_voice = discord_app_bindings.rejoin_voice; leave_voice = discord_app_bindings.leave_voice
+restart_bot_command = discord_app_bindings.restart_bot_command; shutdown_bot_command = discord_app_bindings.shutdown_bot_command
+status_command = discord_app_bindings.status_command; evelyn_page_command = discord_app_bindings.evelyn_page_command
+set_guild_prefix = discord_app_bindings.set_guild_prefix; autonomy_start_command = discord_app_bindings.autonomy_start_command
+autonomy_stop_command = discord_app_bindings.autonomy_stop_command; autonomy_status_command = discord_app_bindings.autonomy_status_command
+minecraft_connect_command = discord_app_bindings.minecraft_connect_command; minecraft_disconnect_command = discord_app_bindings.minecraft_disconnect_command
+minecraft_status_command = discord_app_bindings.minecraft_status_command; minecraft_goal_command = discord_app_bindings.minecraft_goal_command
+observe_channel_command = discord_app_bindings.observe_channel_command; command_channel_command = discord_app_bindings.command_channel_command
+help_command = discord_app_bindings.help_command; reset_guild_memory = discord_app_bindings.reset_guild_memory
+restart_bot_command_error = shutdown_bot_command_error = discord_app_composition.control_command_error
+set_guild_prefix_error = observe_channel_command_error = discord_app_composition.control_command_error
+command_channel_command_error = reset_guild_memory_error = discord_app_composition.control_command_error
 _mark_text_session_from_command = discord_app_composition.mark_text_session_from_command
 # =========================================================
 # 실행

@@ -383,6 +383,8 @@ class MainLlmAdmissionGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_upstream_header_timeout_releases_lane_with_receipt(self) -> None:
         release = asyncio.Event()
+        following_entered = asyncio.Event()
+        following_task: asyncio.Task[aiohttp.ClientResponse] | None = None
 
         async def health(_request: web.Request) -> web.Response:
             return web.json_response({"status": "ok"})
@@ -394,6 +396,8 @@ class MainLlmAdmissionGatewayTests(unittest.IsolatedAsyncioTestCase):
             payload = await request.json()
             if payload.get("label") == "hung-before-headers":
                 await release.wait()
+            elif payload.get("label") == "after-timeout":
+                following_entered.set()
             return web.json_response({"ok": True})
 
         upstream_app = web.Application()
@@ -429,17 +433,31 @@ class MainLlmAdmissionGatewayTests(unittest.IsolatedAsyncioTestCase):
             )
             await timed_out.read()
 
-            following = await asyncio.wait_for(
+            following_task = asyncio.create_task(
                 client.post(
                     "/v1/chat/completions",
                     json={"label": "after-timeout"},
                     headers=_headers(MainRequestKind.REALTIME),
-                ),
-                timeout=1,
+                )
             )
-            self.assertEqual(following.status, 200)
-            await following.read()
+            await asyncio.wait_for(following_entered.wait(), timeout=2)
+            following = await asyncio.wait_for(following_task, timeout=2)
+            self.assertEqual(
+                following.headers[MAIN_ADMISSION_RECEIPT_HEADER],
+                MAIN_ADMISSION_RECEIPT_VALUE,
+            )
+            following.close()
         finally:
+            if following_task is not None:
+                if not following_task.done():
+                    following_task.cancel()
+                results = await asyncio.gather(
+                    following_task,
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, aiohttp.ClientResponse):
+                        result.close()
             release.set()
             await client.close()
             await upstream.close()

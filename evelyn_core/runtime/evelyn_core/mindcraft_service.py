@@ -46,9 +46,14 @@ from .minecraft_action_contract import (
     validate_minecraft_action_request,
 )
 from .mindcraft_world_effect import (
+    ArchiveReadiness,
+    ArchiveSink,
     MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA,
     MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA,
     MindcraftWorldEffectProjector,
+)
+from .mindcraft_conversation_archive_runtime import (
+    MindcraftConversationArchiveClient,
 )
 from .runtime_config_schema import (
     MINDCRAFT_SERVICE_SETTINGS,
@@ -1918,6 +1923,30 @@ def _safe_action_code(value: Any, fallback: str) -> str:
     return text
 
 
+def _archive_parent_record_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > 64
+        or not text[0].isalnum()
+        or not text[0].isascii()
+        or _safe_action_code(text, "") != text
+    ):
+        return ""
+    return text
+
+
+def _archive_parent_record_ids(value: Any) -> tuple[str, ...]:
+    if value in (None, (), []):
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) != 1:
+        raise ValueError("minecraft_archive_lineage_invalid")
+    parent = _archive_parent_record_id(value[0])
+    if not parent:
+        raise ValueError("minecraft_archive_lineage_invalid")
+    return (parent,)
+
+
 def _request_from_action_projection(value: dict[str, Any]) -> dict[str, Any]:
     return validate_minecraft_action_request(
         {
@@ -2015,6 +2044,7 @@ class MindcraftActionGateway:
         self._available = True
         self._last_error_code = ""
         self._active_request: dict[str, Any] | None = None
+        self._active_archive_parent_record_ids: tuple[str, ...] = ()
         self._active_binding: dict[str, Any] | None = None
         self._active_deadline = 0.0
         self._active_readiness_observed = False
@@ -2033,10 +2063,20 @@ class MindcraftActionGateway:
                 return False
             try:
                 observer = self.projector.status()
+                archive_ready = getattr(
+                    self.projector,
+                    "archive_ready",
+                    None,
+                )
+                archive_operational = bool(
+                    not callable(archive_ready)
+                    or archive_ready() is True
+                )
             except Exception:
                 return False
             return bool(
-                observer.get("auditReady") is True
+                archive_operational
+                and observer.get("auditReady") is True
                 and observer.get("statusReady") is True
                 and observer.get("state")
                 in {"idle", "armed", "verified", "rejected"}
@@ -2338,6 +2378,7 @@ class MindcraftActionGateway:
 
     def _clear_active(self) -> None:
         self._active_request = None
+        self._active_archive_parent_record_ids = ()
         self._active_binding = None
         self._active_deadline = 0.0
         self._active_readiness_observed = False
@@ -2463,12 +2504,18 @@ class MindcraftActionGateway:
         *,
         action_lock: MinecraftOwnerLock,
         preflight_status: dict[str, Any],
+        archive_parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         with self._lock:
             normalized = validate_minecraft_action_request(
                 request,
                 bound=True,
             )
+            if len(archive_parent_record_ids) > 1 or any(
+                not _archive_parent_record_id(parent)
+                for parent in archive_parent_record_ids
+            ):
+                raise RuntimeError("minecraft_archive_lineage_invalid")
             if not self.available():
                 raise RuntimeError(
                     self._last_error_code
@@ -2516,6 +2563,9 @@ class MindcraftActionGateway:
                 "contentFree": True,
             }
             self._active_request = normalized
+            self._active_archive_parent_record_ids = tuple(
+                archive_parent_record_ids
+            )
             self._active_binding = binding
             self._active_deadline = time.monotonic() + self.timeout_sec
             self._active_readiness_observed = False
@@ -2576,7 +2626,21 @@ class MindcraftActionGateway:
             if isinstance(goal_manager, dict):
                 candidate = goal_manager.get("postcondition_candidate")
             if candidate is not None:
-                observed = self.projector.observe(candidate)
+                observed = self.projector.observe(
+                    candidate,
+                    archive_context={
+                        **request,
+                        **(
+                            {
+                                "parentRecordIds": list(
+                                    self._active_archive_parent_record_ids
+                                )
+                            }
+                            if self._active_archive_parent_record_ids
+                            else {}
+                        ),
+                    },
+                )
                 if isinstance(observed, dict) and observed.get("verified") is True:
                     return self._terminal_verified()
                 return self._terminal_failure(
@@ -2921,6 +2985,55 @@ async def set_goal(request: web.Request) -> web.Response:
         action_lock.release()
 
 
+async def archive_lifecycle_result(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeError, ValueError):
+        raise _http_json_error(
+            web.HTTPBadRequest,
+            "minecraft_archive_result_payload_invalid",
+        ) from None
+    if not isinstance(payload, dict) or set(payload) != {
+        "guildId",
+        "parentRecordIds",
+        "operation",
+        "outcomeCode",
+    }:
+        raise _http_json_error(
+            web.HTTPBadRequest,
+            "minecraft_archive_result_payload_invalid",
+        )
+    guild_id = payload.get("guildId")
+    if isinstance(guild_id, bool) or not isinstance(guild_id, int) or guild_id <= 0:
+        raise _http_json_error(
+            web.HTTPBadRequest,
+            "minecraft_archive_result_payload_invalid",
+        )
+    try:
+        parent_record_ids = _archive_parent_record_ids(
+            payload.get("parentRecordIds")
+        )
+    except ValueError:
+        raise _http_json_error(
+            web.HTTPBadRequest,
+            "minecraft_archive_lineage_invalid",
+        ) from None
+    archived, error = WORLD_EFFECT_PROJECTOR.archive_verified_lifecycle(
+        guild_id=guild_id,
+        parent_record_ids=parent_record_ids,
+        operation=str(payload.get("operation") or ""),
+        outcome_code=str(payload.get("outcomeCode") or ""),
+    )
+    if not archived:
+        raise _http_json_error(
+            web.HTTPServiceUnavailable,
+            error or "mindcraft_world_effect_archive_unavailable",
+        )
+    return web.json_response(
+        {"archived": True, "contentFree": True}
+    )
+
+
 def _http_json_error(
     status_type: type[web.HTTPException],
     code: str,
@@ -2974,12 +3087,16 @@ async def dispatch_action(request: web.Request) -> web.Response:
     action_lock = _acquire_world_action_lock()
     try:
         action_request = _validate_action_payload(payload)
+        archive_parent_record_ids = _archive_parent_record_ids(
+            (payload.get("worldLease") or {}).get("parentRecordIds")
+        )
         preflight = STATE.build_status(world_action_lock=action_lock)
         try:
             result = ACTION_GATEWAY.dispatch(
                 action_request,
                 action_lock=action_lock,
                 preflight_status=preflight,
+                archive_parent_record_ids=archive_parent_record_ids,
             )
         except MinecraftActionContractError as exc:
             raise _http_json_error(web.HTTPBadRequest, exc.code) from None
@@ -3109,7 +3226,27 @@ async def _action_guard_context(_: web.Application):
         ACTION_GATEWAY.shutdown()
 
 
-def build_app() -> web.Application:
+def build_app(
+    *,
+    conversation_archive_enabled: bool = False,
+    archive_verified_world_effect: ArchiveSink | None = None,
+    validate_conversation_archive_ready: ArchiveReadiness | None = None,
+) -> web.Application:
+    if type(conversation_archive_enabled) is not bool:
+        raise TypeError("conversation_archive_enabled must be bool")
+    WORLD_EFFECT_PROJECTOR.configure_archive(
+        (
+            archive_verified_world_effect
+            if conversation_archive_enabled
+            else None
+        ),
+        validate_ready=(
+            validate_conversation_archive_ready
+            if conversation_archive_enabled
+            else None
+        ),
+        required=conversation_archive_enabled,
+    )
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
@@ -3117,6 +3254,7 @@ def build_app() -> web.Application:
     app.router.add_post("/start", start)
     app.router.add_post("/stop", stop)
     app.router.add_post("/goal", set_goal)
+    app.router.add_post("/archive-result", archive_lifecycle_result)
     app.router.add_post("/action", dispatch_action)
     app.router.add_post("/action/cancel", cancel_action)
     app.router.add_get("/action/{goal_run_id}", action_status)
@@ -3126,12 +3264,50 @@ def build_app() -> web.Application:
     return app
 
 
+def _conversation_archive_callbacks_from_environment(
+) -> tuple[bool, ArchiveSink | None, ArchiveReadiness | None]:
+    enabled = (
+        os.getenv("EVELYN_CONVERSATION_ARCHIVE_ENABLED", "false").strip()
+        == "true"
+    )
+    if not enabled:
+        return False, None, None
+    base_url = os.getenv(
+        "EVELYN_CONVERSATION_ARCHIVE_BOT_API_URL", ""
+    ).strip()
+    key_file = os.getenv(
+        "EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE", ""
+    ).strip()
+    if not base_url:
+        raise RuntimeError("conversation_archive_bot_api_url_required")
+    if not key_file:
+        raise RuntimeError("conversation_archive_minecraft_key_path_required")
+    client = MindcraftConversationArchiveClient.from_key_file(
+        base_url=base_url,
+        key_file=key_file,
+    )
+    return True, client.archive_verified_effect, client.validate_ready
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    web.run_app(build_app(), host=args.host, port=args.port, handle_signals=True, print=None)
+    archive_enabled, archive_sink, archive_readiness = (
+        _conversation_archive_callbacks_from_environment()
+    )
+    web.run_app(
+        build_app(
+            conversation_archive_enabled=archive_enabled,
+            archive_verified_world_effect=archive_sink,
+            validate_conversation_archive_ready=archive_readiness,
+        ),
+        host=args.host,
+        port=args.port,
+        handle_signals=True,
+        print=None,
+    )
 
 
 if __name__ == "__main__":

@@ -1982,6 +1982,43 @@ class VoiceCaptureWatchdogTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge.mic_enabled)
         self.assertEqual(bridge.mic_control_state, "failed")
 
+    async def test_archive_mode_rejects_local_mic_before_lease_or_capture(self):
+        bridge = LocalIoBridge()
+        bridge._inspect_voice_capture_host_lease = Mock()  # type: ignore[method-assign]
+        bridge._start_mic = AsyncMock()  # type: ignore[method-assign]
+
+        with patch.object(local_io_bridge, "CONVERSATION_ARCHIVE_ENABLED", True):
+            await bridge._apply_mic_control_request(
+                revision=44,
+                enabled=True,
+                action_id=f"{44:032x}",
+            )
+
+        bridge._inspect_voice_capture_host_lease.assert_not_called()  # type: ignore[union-attr]
+        bridge._start_mic.assert_not_awaited()  # type: ignore[union-attr]
+        self.assertFalse(bridge.mic_enabled)
+        self.assertTrue(bridge.mic_capture_stopped)
+        self.assertEqual(
+            bridge.mic_control_error,
+            "conversation_archive_local_owner_unverified",
+        )
+
+    async def test_archive_mode_late_segment_never_reaches_stt(self):
+        bridge = LocalIoBridge()
+        bridge._transcribe_stream_or_batch = AsyncMock(  # type: ignore[method-assign]
+            return_value="private transcript"
+        )
+
+        with patch.object(local_io_bridge, "CONVERSATION_ARCHIVE_ENABLED", True):
+            await bridge._handle_segment(b"private-pcm", {})
+
+        bridge._transcribe_stream_or_batch.assert_not_awaited()  # type: ignore[union-attr]
+        self.assertEqual(bridge.discarded_pending_mic_segment_count, 1)
+        self.assertEqual(
+            bridge.last_error,
+            "conversation_archive_local_owner_unverified",
+        )
+
     async def test_heartbeat_expiring_during_start_is_stopped_before_success(self):
         bridge = LocalIoBridge()
         service = SimpleNamespace(capture_ready=True, capture_stopped=False)

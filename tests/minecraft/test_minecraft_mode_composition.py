@@ -101,6 +101,7 @@ class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
                 else {"running": False, "connected": False}
             )
         )
+        client.archive_lifecycle_result = AsyncMock()
         clock = FakeClock()
         deps = MinecraftModeCompositionDeps(
             get_client=lambda: client,
@@ -180,6 +181,45 @@ class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
             MINECRAFT_CONNECTED_OUTCOME,
         )
         client.start.assert_awaited_once_with(goal="goal")
+
+    async def test_verified_connect_and_disconnect_archive_exact_command_root(
+        self,
+    ) -> None:
+        composition, client, _ = self.build(
+            [{"connected": True}],
+            stop_status={"running": False, "connected": False},
+        )
+        proof = {
+            "guildId": 7,
+            "parentRecordIds": ["minecraft-command-1"],
+        }
+
+        await composition.enable_minecraft_mode(
+            7,
+            world_lease=proof,
+        )
+        await composition.disable_minecraft_mode(
+            7,
+            parent_record_ids=("minecraft-command-2",),
+        )
+
+        self.assertEqual(
+            client.archive_lifecycle_result.await_args_list,
+            [
+                unittest.mock.call(
+                    guild_id=7,
+                    parent_record_ids=("minecraft-command-1",),
+                    operation="connect",
+                    outcome_code=MINECRAFT_CONNECTED_OUTCOME,
+                ),
+                unittest.mock.call(
+                    guild_id=7,
+                    parent_record_ids=("minecraft-command-2",),
+                    operation="disconnect",
+                    outcome_code=MINECRAFT_STOPPED_OUTCOME,
+                ),
+            ],
+        )
 
     async def test_enable_rejects_unverified_start(self) -> None:
         composition, _, _ = self.build(

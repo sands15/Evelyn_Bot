@@ -716,7 +716,7 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deps.stop_active_tts_playback.await_count, 2)
         self.assertEqual(deps.save_last_voice_channel_state.call_count, 2)
 
-    async def test_stop_listening_cancels_delayed_map_retry(self) -> None:
+    async def test_unknown_ssrc_is_not_inferred_from_lone_member_and_retry_is_cancelled(self) -> None:
         davey = ModuleType("davey")
         davey.DAVE_PROTOCOL_VERSION = 1
         davey.DaveSession = object
@@ -740,7 +740,15 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             voice_client.listen()
         voice_client.runtime = state_module.VoiceRuntimeState()
-        voice_client.channel = SimpleNamespace(members=[])
+        voice_client.channel = SimpleNamespace(
+            members=[
+                SimpleNamespace(
+                    id=42,
+                    bot=False,
+                    voice=SimpleNamespace(deaf=False, self_deaf=False),
+                )
+            ]
+        )
         voice_client.connected_at = None
         voice_client.dave_inner_fail_log_count = 0
 
@@ -791,6 +799,7 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(client_module.asyncio, "create_task", capture_task),
         ):
             await voice_client._process_utterance_packets(item)
+            self.assertIsNone(voice_client.runtime.get_preferred_user_id(42))
             retry_task = created_tasks[-1]
             voice_client.media_queue.put_nowait({"generation": "old"})
             voice_client.utterance_queue.put_nowait({"generation": "old"})

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import secrets
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -136,6 +137,45 @@ def _safe_scopes(scopes: Iterable[Any]) -> tuple[str, ...]:
         if str(scope).strip() in SUPPORTED_AUTONOMY_ACTIONS
     }
     return tuple(sorted(selected))
+
+
+def _path_is_local_regular(path: Path, *, directory: bool = False) -> bool:
+    for candidate in (path, *path.parents):
+        try:
+            junction = getattr(candidate, "is_junction", None)
+            if candidate.exists() and (
+                candidate.is_symlink()
+                or bool(callable(junction) and junction())
+            ):
+                return False
+        except OSError:
+            return False
+    try:
+        return not path.exists() or (path.is_dir() if directory else path.is_file())
+    except OSError:
+        return False
+
+
+def _atomic_jsonl_write(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not _path_is_local_regular(path):
+        raise OSError("autonomy_authorization_path_unsafe")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -725,6 +765,119 @@ class AutonomyAuthorizationManager:
         with self._lock:
             self._prune_expired()
             return self._status_payload()
+
+    def cleanup_exact_targets(
+        self,
+        target_predicate: Callable[[dict[str, Any]], bool | None],
+    ) -> tuple[int, int, int]:
+        """Remove exact private issuer/event matches; ``None`` means manual."""
+
+        if not callable(target_predicate):
+            return (0, 1, 1)
+        with self._lock:
+            if not _path_is_local_regular(self.status_path) or not _path_is_local_regular(
+                self.events_dir, directory=True
+            ):
+                return (0, 1, 1)
+            try:
+                event_paths = tuple(sorted(self.events_dir.glob("*.jsonl")))
+                parsed: dict[Path, list[dict[str, Any]]] = {}
+                for path in event_paths:
+                    if not _path_is_local_regular(path):
+                        raise OSError("autonomy_authorization_path_unsafe")
+                    rows: list[dict[str, Any]] = []
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            raise ValueError("autonomy_authorization_event_invalid")
+                        rows.append(row)
+                    parsed[path] = rows
+
+                grant_decisions: dict[int, bool | None] = {}
+                for guild_id, grant in self._grants.items():
+                    grant_decisions[guild_id] = target_predicate(
+                        {
+                            "kind": "grant",
+                            "guildId": grant.guild_id,
+                            "grantId": grant.grant_id,
+                            "issuerRef": grant.issuer_ref,
+                            "source": grant.source,
+                            "issuedAt": grant.issued_at,
+                            "expiresAt": grant.expires_at,
+                        }
+                    )
+                event_decisions: dict[Path, list[bool | None]] = {
+                    path: [target_predicate({"kind": "event", **row}) for row in rows]
+                    for path, rows in parsed.items()
+                }
+                if any(
+                    decision is not True and decision is not False and decision is not None
+                    for decision in (
+                        *grant_decisions.values(),
+                        *(item for values in event_decisions.values() for item in values),
+                    )
+                ):
+                    raise ValueError("autonomy_authorization_predicate_invalid")
+            except Exception:
+                return (0, 1, 1)
+
+            removed = 0
+            manual = sum(
+                decision is None
+                for decision in (
+                    *grant_decisions.values(),
+                    *(item for values in event_decisions.values() for item in values),
+                )
+            )
+            for guild_id, decision in grant_decisions.items():
+                if decision is True:
+                    self._grants.pop(guild_id, None)
+                    removed += 1
+            try:
+                for path, rows in parsed.items():
+                    decisions = event_decisions[path]
+                    survivors = [
+                        row for row, decision in zip(rows, decisions) if decision is not True
+                    ]
+                    if len(survivors) != len(rows):
+                        _atomic_jsonl_write(path, survivors)
+                        removed += len(rows) - len(survivors)
+                self._state = "ready" if self._grants else "authorization_required"
+                atomic_json_write(self.status_path, self._status_payload(), durable=True)
+
+                remaining = 0
+                for grant in self._grants.values():
+                    if target_predicate(
+                        {
+                            "kind": "grant",
+                            "guildId": grant.guild_id,
+                            "grantId": grant.grant_id,
+                            "issuerRef": grant.issuer_ref,
+                            "source": grant.source,
+                            "issuedAt": grant.issued_at,
+                            "expiresAt": grant.expires_at,
+                        }
+                    ) is True:
+                        remaining += 1
+                for path in event_paths:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if line.strip() and target_predicate(
+                            {"kind": "event", **json.loads(line)}
+                        ) is True:
+                            remaining += 1
+                status = json.loads(self.status_path.read_text(encoding="utf-8"))
+                active_ids = {
+                    item.get("grantId")
+                    for item in status.get("activeGrants", [])
+                    if isinstance(item, dict)
+                }
+                if active_ids != {grant.grant_id for grant in self._grants.values()}:
+                    raise ValueError("autonomy_authorization_status_mismatch")
+            except Exception:
+                return (removed, 1, manual + 1)
+            return (removed, remaining, manual)
 
 
 __all__ = [

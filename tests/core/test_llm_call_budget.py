@@ -31,7 +31,7 @@ from evelyn_core.response_output_policy import (  # noqa: E402
     sanitize_model_output,
 )
 from evelyn_core.tts_playback import SpeechChunker  # noqa: E402
-from evelyn_core.skills import skill_registry  # noqa: E402
+from evelyn_core.skills import SkillResult, skill_registry  # noqa: E402
 from evelyn_core.voice_pipeline import RouteDecision  # noqa: E402
 from evelyn_core.voice_pipeline import action_result_to_answer_payload  # noqa: E402
 from evelyn_core.voice_orchestration import (  # noqa: E402
@@ -42,6 +42,7 @@ from evelyn_core.voice_route_execution import (  # noqa: E402
     execute_main_llm_streaming_turn,
     execute_search_then_answer_action,
     maybe_execute_registered_route,
+    make_skill_dispatch_key,
     retry_main_llm_with_existing_plan,
 )
 from evelyn_core.voice_stream_chunks import (  # noqa: E402
@@ -56,6 +57,55 @@ class _NoSkillRegistry:
 
 
 class LlmCallBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_specialist_result_is_rejected_if_target_retires_during_await(self) -> None:
+        current = True
+
+        async def execute_specialist(**_kwargs):
+            nonlocal current
+            current = False
+            return "late private result"
+
+        result = await maybe_execute_registered_route(
+            deps=SimpleNamespace(
+                archive_target_is_current=lambda **_target: current,
+                execute_selected_specialist=execute_specialist,
+                log=lambda *_args, **_kwargs: None,
+            ),
+            route_decision=SimpleNamespace(route="custom", specialist="deep_reasoning"),
+            user_text="private",
+            source="voice",
+            guild_id=7,
+            session_key="session-one",
+            room_key=None,
+            person_key="user:9",
+            session_memory_key=None,
+            debug_text=None,
+            metrics={"meta": {"turn_id": "turn-one"}},
+            cognitive_state=None,
+        )
+
+        self.assertIsNone(result)
+
+    def test_sessionless_dispatch_keys_are_person_scoped(self) -> None:
+        first = make_skill_dispatch_key(
+            route_name="route",
+            source="voice",
+            session_key=None,
+            person_key="user:1",
+            guild_id=7,
+            user_text="same private text",
+        )
+        second = make_skill_dispatch_key(
+            route_name="route",
+            source="voice",
+            session_key=None,
+            person_key="user:2",
+            guild_id=7,
+            user_text="same private text",
+        )
+
+        self.assertNotEqual(first, second)
+
     async def _run_core_voice_stream_policy_case(
         self,
         deltas: list[str],
@@ -300,6 +350,44 @@ class LlmCallBudgetTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, "final answer")
         self.assertEqual(len(main_calls), 1)
+
+    async def test_registered_route_rejects_retired_archive_target_first(self) -> None:
+        observed: list[dict[str, object]] = []
+
+        def target_is_current(**target):
+            observed.append(target)
+            return False
+
+        result = await maybe_execute_registered_route(
+            deps=SimpleNamespace(
+                archive_target_is_current=target_is_current,
+            ),
+            route_decision=SimpleNamespace(route="search", specialist="none"),
+            user_text="private request",
+            source="voice",
+            guild_id=7,
+            session_key="session-one",
+            room_key="room-one",
+            person_key="user:9",
+            session_memory_key="memory-one",
+            debug_text=None,
+            metrics={"meta": {"turn_id": "turn-one"}},
+            cognitive_state=None,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            observed,
+            [
+                {
+                    "guild_id": 7,
+                    "turn_id": "turn-one",
+                    "session_key": "session-one",
+                    "session_memory_key": "memory-one",
+                    "person_key": "user:9",
+                }
+            ],
+        )
 
     async def test_route_classifier_calls_route_purpose_once(self) -> None:
         router_calls: list[dict] = []

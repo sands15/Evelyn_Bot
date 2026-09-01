@@ -1678,49 +1678,6 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         return candidates
 
-    def _fallback_unmapped_user_id(self, *, ssrc: int) -> int | None:
-        candidates: list[int] = []
-
-        def add(value) -> None:
-            if value is None:
-                return
-            try:
-                value_i = int(value)
-            except Exception:
-                return
-            if value_i not in candidates:
-                candidates.append(value_i)
-
-        add(self.runtime.get_preferred_user_id(int(ssrc)))
-        add(self.runtime.current_speaking_user_id)
-
-        for pending_user_id in getattr(self.runtime, "pending_user_ids", ()):
-            add(pending_user_id)
-
-        try:
-            human_members = [m for m in getattr(self.channel, "members", []) if not getattr(m, "bot", False)]
-        except Exception:
-            human_members = []
-
-        if len(human_members) == 1:
-            add(human_members[0].id)
-
-        active_humans = []
-        for member in human_members:
-            voice_state = getattr(member, "voice", None)
-            if voice_state is None:
-                continue
-            if getattr(voice_state, "deaf", False) or getattr(voice_state, "self_deaf", False):
-                continue
-            active_humans.append(member)
-
-        if len(active_humans) == 1:
-            add(active_humans[0].id)
-
-        if len(candidates) == 1:
-            return candidates[0]
-        return None
-
     @staticmethod
     def _is_retryable_inner_reason(reason: str | None) -> bool:
         return reason in {"not_ready", "no_session", "no_valid_cryptor", "retry_candidate_failed", "cryptor_pending", "passthrough_not_ready"}
@@ -2616,14 +2573,6 @@ class EvelynVoiceClient(discord.VoiceClient):
         print(
             f"[VOICE STAGE] preferred_user_lookup idx={idx} ssrc={ssrc} user_id={user_id} current_speaking_user_id={self.runtime.current_speaking_user_id} pending={list(getattr(self.runtime, 'pending_user_ids', []))}"
         )
-
-        if user_id is None:
-            rescued_user_id = self._fallback_unmapped_user_id(ssrc=int(ssrc))
-            if rescued_user_id is not None:
-                user_id = int(rescued_user_id)
-                self.runtime.bind_ssrc(user_id, ssrc)
-                print(f"[VOICE STAGE] map_rescue user_id={user_id} ssrc={ssrc} pending={list(getattr(self.runtime, 'pending_user_ids', []))}")
-                log.warning("VOICE MAP RESCUE | user_id=%d ssrc=%d pending=%r", user_id, ssrc, list(getattr(self.runtime, "pending_user_ids", [])))
 
         if user_id is None:
             now = asyncio.get_running_loop().time()

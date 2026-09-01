@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .paths import get_runtime_artifacts_root
+from .runtime_artifact_io import atomic_json_write
 from .text import clean_text
 
 
@@ -173,6 +175,16 @@ def record_self_identity_turn(
     source: str = "text",
     queue_path: Path | None = None,
 ) -> dict[str, Any]:
+    if os.getenv("EVELYN_CONVERSATION_ARCHIVE_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return {
+            "recorded": False,
+            "reason": "conversation_archive_enabled_legacy_queue_disabled",
+        }
     labels = _identity_signal_labels(user_text, assistant_text)
     if not labels:
         return {"recorded": False, "reason": "no_identity_signal"}
@@ -394,8 +406,58 @@ def load_self_state(path: Path | None = None) -> EvelynSelfState:
 
 def save_self_state(state: EvelynSelfState, path: Path | None = None) -> None:
     target = path or SELF_STATE_PATH
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_json_write(target, asdict(state))
+
+
+def _path_is_local_regular(path: Path) -> bool:
+    for candidate in (path, *path.parents):
+        try:
+            if candidate.exists() and (
+                candidate.is_symlink()
+                or bool(
+                    callable(is_junction := getattr(candidate, "is_junction", None))
+                    and is_junction()
+                )
+            ):
+                return False
+        except OSError:
+            return False
+    try:
+        return not path.exists() or path.is_file()
+    except OSError:
+        return False
+
+
+def reset_persona_state_for_deletion(
+    *,
+    has_targets: bool,
+    state_path: Path | None = None,
+    process_states: Iterable[EvelynSelfState] = (),
+) -> tuple[int, int, int]:
+    """Reset the global derived persona aggregate without touching its profile."""
+
+    if not has_targets:
+        return (0, 0, 0)
+    target = Path(state_path or SELF_STATE_PATH)
+    states = tuple(process_states)
+    if not _path_is_local_regular(target) or any(
+        not isinstance(state, EvelynSelfState) for state in states
+    ):
+        return (0, 1, 1)
+    safe = EvelynSelfState(updated_at=0.0)
+    safe_payload = asdict(safe)
+    try:
+        atomic_json_write(target, safe_payload, durable=True)
+        for state in states:
+            for name, value in safe_payload.items():
+                setattr(state, name, value)
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        fresh = load_self_state(target)
+    except Exception:
+        return (0, 1, 1)
+    if raw != safe_payload or asdict(fresh) != safe_payload:
+        return (0, 1, 1)
+    return (1 + len(states), 0, 0)
 
 
 def _decay(state: EvelynSelfState, now: float) -> None:

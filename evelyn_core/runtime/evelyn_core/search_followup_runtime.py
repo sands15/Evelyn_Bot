@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, MutableMapping
 
 from .continuity_commit_contract import (
     await_continuity_commit_without_early_unlock,
@@ -71,6 +71,9 @@ class SearchFollowupRuntimeDeps:
     search_followup_recovery: Any | None = None
     continuity_status: Callable[[], dict[str, Any]] | None = None
     guild_is_open: Callable[[int], bool] | None = None
+    archive_task_targets: MutableMapping[
+        asyncio.Task, dict[str, Any]
+    ] | None = None
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
     log: Callable[..., Any] = print
 
@@ -606,6 +609,24 @@ def normalize_search_key(session_key: str, query: str) -> str:
     return f"{session_key}:{clean_text(query).lower()}"
 
 
+def _track_archive_task(
+    task: asyncio.Task,
+    target: dict[str, Any],
+    *,
+    deps: SearchFollowupRuntimeDeps,
+) -> None:
+    registry = getattr(deps, "archive_task_targets", None)
+    if registry is None:
+        return
+    registry[task] = dict(target)
+
+    def release(completed: asyncio.Task) -> None:
+        if registry.get(completed) == target:
+            registry.pop(completed, None)
+
+    task.add_done_callback(release)
+
+
 def _track_search_task_drain(
     guild_id: int,
     task: asyncio.Task,
@@ -837,6 +858,13 @@ async def recover_search_followups_from_runtime(
         guild_id = int(entry["guildId"])
         delivery_claimed = False
         owner_task = asyncio.current_task()
+        owner_target = {
+            "guild_id": guild_id,
+            "turn_id": entry.get("turnId"),
+            "session_key": session_key,
+            "session_memory_key": entry.get("sessionMemoryKey"),
+            "person_key": entry.get("personKey"),
+        }
         owner_key = (
             f"guild:{guild_id}:search-recovery:{intent_id}:{id(owner_task)}"
             if owner_task is not None
@@ -844,6 +872,9 @@ async def recover_search_followups_from_runtime(
         )
         if owner_key is not None:
             deps.background_search_tasks[owner_key] = owner_task
+        archive_registry = getattr(deps, "archive_task_targets", None)
+        if archive_registry is not None and owner_task is not None:
+            archive_registry[owner_task] = dict(owner_target)
         try:
             phase = str(entry["phase"])
             if not guild_open(guild_id):
@@ -1440,6 +1471,12 @@ async def recover_search_followups_from_runtime(
                 is owner_task
             ):
                 deps.background_search_tasks.pop(owner_key, None)
+            if (
+                archive_registry is not None
+                and owner_task is not None
+                and archive_registry.get(owner_task) == owner_target
+            ):
+                archive_registry.pop(owner_task, None)
     reset_memory_exposure_position()
     return counts
 
@@ -1530,6 +1567,17 @@ def schedule_search_followup_singleflight_from_runtime(
             recovery_intent_id=recovery_intent_id,
         ),
         turn_scope=turn_scope,
+    )
+    _track_archive_task(
+        task,
+        {
+            "guild_id": int(guild_id),
+            "turn_id": source_turn_id,
+            "session_key": session_key,
+            "session_memory_key": session_memory_key,
+            "person_key": person_key,
+        },
+        deps=deps,
     )
     deps.inflight_search_tasks[search_key] = task
     return task

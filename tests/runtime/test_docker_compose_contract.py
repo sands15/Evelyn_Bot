@@ -9,6 +9,9 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
+CONVERSATION_ARCHIVE_COMPOSE = (
+    REPO_ROOT / "docker-compose.conversation-archive.yml"
+)
 GPU1_BENCHMARK_COMPOSE = REPO_ROOT / "docker-compose.gpu1-benchmark.yml"
 CONTINUITY_AUTH_COMPOSE = (
     REPO_ROOT / "docker-compose.continuity-auth.yml"
@@ -44,6 +47,95 @@ def _omnivoice_recipe_tag() -> str:
 
 
 class DockerComposeContractTests(unittest.TestCase):
+    def test_private_archive_mounts_are_opt_in_and_bot_api_owned(self) -> None:
+        base = COMPOSE.read_text(encoding="utf-8")
+        archive = CONVERSATION_ARCHIVE_COMPOSE.read_text(encoding="utf-8")
+        bot_api = archive.split("  bot_api:\n", 1)[1].split(
+            "\n  discord_bot:", 1
+        )[0]
+        discord_bot = archive.split("\n  discord_bot:\n", 1)[1].split(
+            "\n  control_page:", 1
+        )[0]
+        control_page = archive.split("\n  control_page:\n", 1)[1].split(
+            "\n  voyager:", 1
+        )[0]
+        voyager = archive.split("\n  voyager:\n", 1)[1].split(
+            "\n  main_llm:", 1
+        )[0]
+
+        self.assertIn(
+            'EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"',
+            base,
+        )
+        self.assertNotIn("/run/evelyn-private-audit/primary", base)
+        self.assertNotIn("/run/secrets/evelyn-conversation-archive", base)
+        self.assertIn('EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"', bot_api)
+        self.assertIn(
+            ":/run/evelyn-private-audit/primary",
+            bot_api,
+        )
+        self.assertIn(
+            ":/run/evelyn-private-audit/backup",
+            bot_api,
+        )
+        self.assertIn(
+            ":/run/evelyn-private-audit/anchor",
+            bot_api,
+        )
+        self.assertIn(
+            "EVELYN_CONVERSATION_ARCHIVE_HOST_SESSION_FILE",
+            bot_api,
+        )
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/host-session.json:ro",
+            bot_api,
+        )
+        self.assertNotIn("/run/evelyn-private-audit/", discord_bot)
+        self.assertIn(
+            "EVELYN_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID",
+            discord_bot,
+        )
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/ingest.key:ro",
+            discord_bot,
+        )
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/user-view.key:ro",
+            bot_api,
+        )
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/user-view.key:ro",
+            discord_bot,
+        )
+        self.assertNotIn("/run/evelyn-private-audit/", control_page)
+        self.assertIn("CONTROL_PAGE_TLS_CERT_FILE", control_page)
+        self.assertIn("CONTROL_PAGE_TLS_KEY_FILE", control_page)
+        self.assertIn(
+            'EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN: "https://127.0.0.1:8800"',
+            bot_api,
+        )
+        self.assertIn(
+            'EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN: "https://127.0.0.1:8800"',
+            control_page,
+        )
+        self.assertIn('"127.0.0.1:8800:8799"', control_page)
+        self.assertNotIn("auth.key", control_page)
+        self.assertNotIn("ingest.key", control_page)
+        self.assertNotIn("user-view.key", control_page)
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/minecraft.key:ro",
+            bot_api,
+        )
+        self.assertIn(
+            ":/run/secrets/evelyn-conversation-archive/minecraft.key:ro",
+            voyager,
+        )
+        self.assertNotIn("/run/evelyn-private-audit/", voyager)
+        self.assertNotIn("auth.key", voyager)
+        self.assertNotIn("ingest.key", voyager)
+        self.assertNotIn("user-view.key", voyager)
+        self.assertNotIn("proxy.key", voyager)
+
     def test_main_llm_enables_prefill_and_prompt_cache_tuning(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
         main_llm = source.split("\n  main_llm:\n", 1)[1].split(
@@ -64,9 +156,10 @@ class DockerComposeContractTests(unittest.TestCase):
             "GGML_CUDA_DISABLE_GRAPHS=%s\\0",
             '--batch-size "$${MAIN_LLM_BATCH_SIZE}"',
             '--ubatch-size "$${MAIN_LLM_UBATCH_SIZE}"',
-            '--cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}"',
-            "--cache-prompt",
-            '--cache-reuse "$${MAIN_LLM_CACHE_REUSE}"',
+            'EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"',
+            '1|true|yes|on) prompt_cache_args=() ;;',
+            '0|false|no|off|\'\') prompt_cache_args=(--cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}" --cache-prompt --cache-reuse "$${MAIN_LLM_CACHE_REUSE}") ;;',
+            '"$${prompt_cache_args[@]}"',
         ):
             self.assertIn(expected, main_llm)
         for expected in (
@@ -88,6 +181,39 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertNotIn('eval "$VENV_ACT"', launcher)
         self.assertIn("MAIN_LLM_UBATCH_SIZE=2048", env_example)
         self.assertIn("MAIN_LLM_SWA_FULL_ENABLED=1", env_example)
+
+    def test_private_archive_disables_reusable_llm_prompt_caches(self) -> None:
+        base = COMPOSE.read_text(encoding="utf-8")
+        archive = CONVERSATION_ARCHIVE_COMPOSE.read_text(encoding="utf-8")
+        main_llm = base.split("\n  main_llm:\n", 1)[1].split(
+            "\n  router_llm:", 1
+        )[0]
+        minecraft_llm = base.split("\n  minecraft_llm:\n", 1)[1].split(
+            "\n  main_llm_gateway:", 1
+        )[0]
+        archive_main_llm = archive.split("\n  main_llm:\n", 1)[1].split(
+            "\n  minecraft_llm:", 1
+        )[0]
+        archive_minecraft_llm = archive.split("\n  minecraft_llm:\n", 1)[1]
+
+        self.assertIn('1|true|yes|on) prompt_cache_args=() ;;', main_llm)
+        self.assertIn(
+            '0|false|no|off|\'\') prompt_cache_args=(--cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}" --cache-prompt --cache-reuse "$${MAIN_LLM_CACHE_REUSE}") ;;',
+            main_llm,
+        )
+        self.assertIn('1|true|yes|on) prompt_cache_args=() ;;', minecraft_llm)
+        self.assertIn(
+            '0|false|no|off|\'\') prompt_cache_args=(--cache-prompt) ;;',
+            minecraft_llm,
+        )
+        self.assertIn(
+            'EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"',
+            archive_main_llm,
+        )
+        self.assertIn(
+            'EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"',
+            archive_minecraft_llm,
+        )
 
     def test_main_and_gateway_are_unprofiled_core_dependencies(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
@@ -413,6 +539,8 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("stop_signal: SIGINT", discord_bot)
         self.assertIn("stop_grace_period: 30s", discord_bot)
         self.assertIn('TTS_WARMUP_GENERATE_ENABLED: "true"', discord_bot)
+        self.assertIn('LOCAL_MIC_ENABLED: "false"', discord_bot)
+        self.assertIn('VOICE_INPUT_MODE: "discord"', discord_bot)
 
     def test_discord_voice_debug_audio_is_opt_in_private_bounded_tmpfs(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")

@@ -28,6 +28,7 @@ from evelyn_core.tts_playback import (  # noqa: E402
     TtsPlaybackTracker,
     add_omnivoice_stream_contract,
     clear_tts_playback_tracking,
+    cleanup_tts_playback_targets,
     cleanup_tts_stream_tasks,
     configure_tts_playback_logging,
     discord_pcm_silence_bytes,
@@ -59,6 +60,85 @@ from evelyn_core.observability_metrics import (  # noqa: E402
 class TtsPlaybackContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         configure_tts_playback_logging(lambda event, **payload: None)
+
+    def test_playback_manager_rejects_noncurrent_target_before_binding(self) -> None:
+        seen: list[dict] = []
+
+        class FakeVc:
+            guild = type("Guild", (), {"id": 123})()
+
+            def play(self, _source, *, after) -> None:
+                raise AssertionError("stale playback must not start")
+
+        class FakeSource:
+            def __init__(self) -> None:
+                self.cleaned = False
+
+            def cleanup(self) -> None:
+                self.cleaned = True
+
+        source = FakeSource()
+
+        def reject(target: dict) -> bool:
+            seen.append(target)
+            return False
+
+        manager = TtsPlaybackManager(
+            target_is_current=reject,
+        )
+        played = asyncio.run(
+            manager.play_source_once(
+                TtsSourcePlaybackRequest(
+                    FakeVc(),
+                    source,
+                    guild_id=123,
+                    turn_id="turn-deleted",
+                    session_key="session-deleted",
+                )
+            )
+        )
+
+        self.assertFalse(played)
+        self.assertTrue(source.cleaned)
+        self.assertFalse(manager.is_active(123))
+        self.assertEqual(seen[0]["turn_id"], "turn-deleted")
+
+    def test_play_audio_source_rechecks_target_after_idle_wait(self) -> None:
+        class FakeVc:
+            source = None
+            play_called = False
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, _source, *, after) -> None:
+                self.play_called = True
+                after(None)
+
+        class FakeSource:
+            def __init__(self) -> None:
+                self.cleaned = False
+
+            def cleanup(self) -> None:
+                self.cleaned = True
+
+        vc = FakeVc()
+        source = FakeSource()
+        completed = asyncio.run(
+            play_audio_source(
+                vc,
+                source,  # type: ignore[arg-type]
+                target_is_current=lambda _target: False,
+                target={"turn_id": "turn-deleted"},
+            )
+        )
+
+        self.assertFalse(completed)
+        self.assertFalse(vc.play_called)
+        self.assertTrue(source.cleaned)
 
     def test_stream_contract_adds_request_and_playback_fields(self) -> None:
         payload = add_omnivoice_stream_contract(
@@ -523,7 +603,8 @@ class TtsPlaybackContractTests(unittest.TestCase):
             async def replace_with_b() -> None:
                 vc.owner = "turn-b"
                 registry.set(123, vc=vc, turn_id="turn-b")
-                prepared_queue.get_nowait()
+                if not prepared_queue.empty():
+                    prepared_queue.get_nowait()
 
             replacement = asyncio.create_task(replace_with_b())
             stopped = await stop_tracked_tts_playback(
@@ -1643,8 +1724,44 @@ class TtsPlaybackContractTests(unittest.TestCase):
 
         self.assertTrue(vc.stopped)
         self.assertTrue(source.finished)
-        self.assertIsNone(sentence_queue.get_nowait())
-        self.assertIsNone(prepared_queue.get_nowait())
+        self.assertTrue(sentence_queue.empty())
+        self.assertTrue(prepared_queue.empty())
+
+    def test_target_cleanup_clears_pcm_and_preserves_replacement(self) -> None:
+        async def runner() -> tuple[int, int, TtsPlaybackRegistry, OmniVoicePCMStream]:
+            registry = TtsPlaybackRegistry()
+            target_pcm = OmniVoicePCMStream()
+            target_pcm.feed_pcm24_mono(b"\x01\x00" * 64)
+            target_source = QueuedAudioSource()
+            target_source.add_source(target_pcm)
+            sentence_queue: asyncio.Queue[object] = asyncio.Queue()
+            sentence_queue.put_nowait("private sentence")
+            prepared_queue: asyncio.Queue[object] = asyncio.Queue()
+            prepared_queue.put_nowait((0, OmniVoicePCMStream()))
+            registry.set(
+                1,
+                target="delete",
+                sentence_queue=sentence_queue,
+                prepared_queue=prepared_queue,
+                playback_source=target_source,
+                turn_id="turn-a",
+            )
+            registry.set(2, target="keep", turn_id="turn-b")
+
+            removed, remaining = await cleanup_tts_playback_targets(
+                lambda state: state.get("target") == "delete",
+                registry=registry,
+                cleanup_timeout_sec=1.0,
+            )
+            return removed, remaining, registry, target_pcm
+
+        removed, remaining, registry, target_pcm = asyncio.run(runner())
+        self.assertEqual((removed, remaining), (1, 0))
+        self.assertNotIn(1, registry)
+        self.assertEqual(registry.get(2)["turn_id"], "turn-b")
+        self.assertTrue(target_pcm._queue.empty())
+        self.assertEqual(target_pcm._buffer, bytearray())
+        self.assertEqual(target_pcm._input_remainder, b"")
 
     def test_stop_tracked_tts_playback_stops_and_clears_tracking(self) -> None:
         class FakeVc:

@@ -84,6 +84,8 @@ class SearchMemoryDependencyCompositionDeps:
     search_followup_recovery: Any | None = None
     continuity_status: Callable[[], dict[str, Any]] | None = None
     guild_is_open: Callable[[int], bool] | None = None
+    archive_target_is_current: Callable[..., bool] | None = None
+    archive_task_targets: MutableMapping[Any, dict[str, Any]] | None = None
 
 
 class SearchMemoryDependencyComposition:
@@ -120,6 +122,8 @@ class SearchMemoryDependencyComposition:
             update_long_term_memory=deps.update_long_term_memory,
             update_cognitive_state=deps.update_cognitive_state,
             log=deps.log,
+            archive_target_is_current=deps.archive_target_is_current,
+            archive_task_targets=deps.archive_task_targets,
         )
 
     def build_search_answer_runtime_deps(self) -> SearchAnswerRuntimeDeps:
@@ -184,6 +188,7 @@ class SearchMemoryDependencyComposition:
             search_followup_recovery=deps.search_followup_recovery,
             continuity_status=deps.continuity_status,
             guild_is_open=deps.guild_is_open,
+            archive_task_targets=deps.archive_task_targets,
             log=deps.log,
         )
 

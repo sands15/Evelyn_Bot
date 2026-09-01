@@ -218,6 +218,8 @@ class OmniVoicePCMStream(discord.AudioSource):
             )
 
     def finish(self) -> None:
+        if self._closed:
+            return
         self._done = True
         self._ready_event.set()
         tail_silence = discord_pcm_silence_bytes(TTS_CHUNK_TAIL_SILENCE_MS)
@@ -288,10 +290,15 @@ class OmniVoicePCMStream(discord.AudioSource):
         self._closed = True
         self._done = True
         self._ready_event.set()
-        try:
-            self._queue.put_nowait(None)
-        except Exception:
-            pass
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        self._buffer.clear()
+        self._input_remainder = b""
+        self._rate_state = None
+        self._queued_audio_bytes = 0
 
 
 class CachedWaveAudioSource(discord.AudioSource):
@@ -408,6 +415,8 @@ class QueuedAudioSource(discord.AudioSource):
         self._sources.put(source)
 
     def finish(self) -> None:
+        if self._closed:
+            return
         self._done = True
         self._sources.put(None)
 
@@ -440,6 +449,7 @@ class QueuedAudioSource(discord.AudioSource):
 
     def cleanup(self) -> None:
         self._closed = True
+        self._done = True
         if self._current is not None:
             self._current.cleanup()
             self._current = None
@@ -1133,6 +1143,7 @@ class TtsPlaybackState:
     turn_id: str | None = None
     session_key: str | None = None
     source_type: str | None = None
+    target: Any | None = None
     generation: object = field(default_factory=object, repr=False)
 
     @classmethod
@@ -1147,6 +1158,7 @@ class TtsPlaybackState:
             turn_id=value.get("turn_id"),
             session_key=value.get("session_key"),
             source_type=value.get("source_type"),
+            target=value.get("target"),
             generation=value.get("_generation") or object(),
         )
 
@@ -1161,7 +1173,16 @@ class TtsPlaybackState:
             "turn_id": self.turn_id,
             "session_key": self.session_key,
             "source_type": self.source_type,
+            "target": self.target,
         }
+
+    def clear_runtime_refs(self) -> None:
+        self.vc = None
+        self.sentence_queue = None
+        self.prepared_queue = None
+        self.playback_source = None
+        self.prefetch_task = None
+        self.playback_task = None
 
 
 class TtsPlaybackRegistry:
@@ -1192,6 +1213,11 @@ class TtsPlaybackRegistry:
             return None
         state = self._states.get(int(guild_id))
         return state.generation if state is not None else None
+
+    def state(self, guild_id: int | None) -> TtsPlaybackState | None:
+        if guild_id is None:
+            return None
+        return self._states.get(int(guild_id))
 
     def set(self, guild_id: int | None, **state: Any) -> dict[str, Any] | None:
         if guild_id is None:
@@ -1248,6 +1274,7 @@ class TtsStreamingPlaybackRequest:
     log: Callable[[str], None] | None = None
     on_prefetch_failure: Callable[[Exception], Any] | None = None
     on_prepared_failure: Callable[[Exception], Any] | None = None
+    target: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -1263,6 +1290,7 @@ class TtsSourcePlaybackRequest:
     mark_audio_end: bool = True
     clear_registry_on_finish: bool = True
     cleanup_source: bool = False
+    target: dict[str, Any] | None = None
 
 
 _SOURCE_METRICS_BINDING_UNSET = object()
@@ -1272,9 +1300,39 @@ _PLAYBACK_GENERATION_UNSET = object()
 class TtsPlaybackManager:
     """Small facade over the existing playback tracker/registry helpers."""
 
-    def __init__(self, tracker: TtsPlaybackTracker | None = None) -> None:
+    def __init__(
+        self,
+        tracker: TtsPlaybackTracker | None = None,
+        *,
+        target_is_current: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> None:
         self.tracker = tracker or TtsPlaybackTracker()
         self._source_metrics: dict[int, tuple[str, dict[str, Any]]] = {}
+        self._target_is_current = target_is_current
+
+    @staticmethod
+    def _request_target(request: Any, guild_id: int | None) -> dict[str, Any]:
+        target = dict(request.target or {})
+        target.setdefault("guild_id", guild_id)
+        target.setdefault("turn_id", request.turn_id)
+        target.setdefault("session_key", request.session_key)
+        return target
+
+    def _request_is_current(self, target: dict[str, Any]) -> bool:
+        callback = self._target_is_current
+        if callback is None:
+            return True
+        try:
+            return callback(dict(target)) is True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cleanup_rejected_source(source: Any) -> None:
+        cleanup = getattr(source, "cleanup", None)
+        if callable(cleanup):
+            with contextlib.suppress(Exception):
+                cleanup()
 
     def active_count(self) -> int:
         return tracked_tts_playback_count(self.tracker)
@@ -1512,6 +1570,10 @@ class TtsPlaybackManager:
         guild_id = request.guild_id
         if guild_id is None:
             guild_id = getattr(getattr(request.vc, "guild", None), "id", None)
+        target = self._request_target(request, guild_id)
+        if not self._request_is_current(target):
+            self._cleanup_rejected_source(request.source)
+            return False
         playback_task = asyncio.current_task()
         self.start(
             guild_id=guild_id,
@@ -1522,6 +1584,7 @@ class TtsPlaybackManager:
             turn_id=request.turn_id,
             session_key=request.session_key,
             source_type=type(request.source).__name__,
+            target=target,
         )
         playback_generation = self.tracker.registry.generation(guild_id)
         source_metrics_binding: tuple[str, dict[str, Any]] | None = None
@@ -1564,6 +1627,8 @@ class TtsPlaybackManager:
                     else None
                 ),
                 trace_payload=trace_payload,
+                target_is_current=self._target_is_current,
+                target=target,
             )
             completed = bool(transport_completed and did_start)
             return completed
@@ -1592,6 +1657,10 @@ class TtsPlaybackManager:
         guild_id = request.guild_id
         if guild_id is None:
             guild_id = getattr(getattr(request.vc, "guild", None), "id", None)
+        target = self._request_target(request, guild_id)
+        if not self._request_is_current(target):
+            _drain_tts_queue(request.sentence_queue)
+            return
         did_speak = False
         playback_completed = False
         create_task = request.create_task or asyncio.create_task
@@ -1617,6 +1686,9 @@ class TtsPlaybackManager:
         playback_task: Any | None = None
 
         def create_playback_task() -> Any:
+            if not self._request_is_current(target):
+                playback_source.finish()
+                return create_task(asyncio.sleep(0))
             return create_task(
                 play_audio_source(
                     request.vc,
@@ -1633,6 +1705,8 @@ class TtsPlaybackManager:
                         "session_key": request.session_key,
                         "source_type": type(playback_source).__name__,
                     },
+                    target_is_current=self._target_is_current,
+                    target=target,
                 )
             )
 
@@ -1683,6 +1757,7 @@ class TtsPlaybackManager:
             playback_task=playback_task,
             turn_id=request.turn_id,
             session_key=request.session_key,
+            target=target,
         )
         playback_generation = self.tracker.registry.generation(guild_id)
         source_metrics_binding: tuple[str, dict[str, Any]] | None = None
@@ -1920,7 +1995,42 @@ def finish_tts_playback_tracking(
         last_audio_end_at[key] = time.monotonic() if now is None else float(now)
 
 
-async def stop_tts_playback_state(state: dict[str, Any] | None) -> bool:
+def _drain_tts_queue(queue_value: Any) -> None:
+    if queue_value is None:
+        return
+    while True:
+        try:
+            item = queue_value.get_nowait()
+        except (asyncio.QueueEmpty, queue.Empty):
+            break
+        source = item[1] if isinstance(item, tuple) and len(item) == 2 else None
+        cleanup = getattr(source, "cleanup", None)
+        if callable(cleanup):
+            with contextlib.suppress(Exception):
+                cleanup()
+        task_done = getattr(queue_value, "task_done", None)
+        if callable(task_done):
+            with contextlib.suppress(Exception):
+                task_done()
+
+
+def _clear_tts_state_refs(state: dict[str, Any]) -> None:
+    for key in (
+        "vc",
+        "sentence_queue",
+        "prepared_queue",
+        "playback_source",
+        "prefetch_task",
+        "playback_task",
+    ):
+        state[key] = None
+
+
+async def stop_tts_playback_state(
+    state: dict[str, Any] | None,
+    *,
+    cleanup_timeout_sec: float | None = None,
+) -> bool:
     if not state:
         return False
 
@@ -1970,13 +2080,33 @@ async def stop_tts_playback_state(state: dict[str, Any] | None) -> bool:
             tasks_to_join.append(task)
         except Exception:
             stopped = False
-    for task in tasks_to_join:
+    if tasks_to_join and cleanup_timeout_sec is not None:
+        done, pending = await asyncio.wait(
+            tasks_to_join,
+            timeout=max(0.0, float(cleanup_timeout_sec)),
+        )
+        stopped = stopped and not pending
+        for task in done:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                task.result()
+    else:
+        for task in tasks_to_join:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                stopped = False
+    _drain_tts_queue(sentence_queue)
+    _drain_tts_queue(prepared_queue)
+    cleanup = getattr(playback_source, "cleanup", None)
+    if callable(cleanup):
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            cleanup()
         except Exception:
             stopped = False
+    if stopped:
+        _clear_tts_state_refs(state)
     return stopped
 
 
@@ -1989,6 +2119,7 @@ async def stop_tracked_tts_playback(
     guild_id: int | None,
     now: float | None = None,
     expected_generation: object = _PLAYBACK_GENERATION_UNSET,
+    cleanup_timeout_sec: float | None = None,
 ) -> bool:
     registry, speaking_guilds, last_audio_end_at = _resolve_tracker_parts(
         tracker,
@@ -2004,12 +2135,17 @@ async def stop_tracked_tts_playback(
         and playback_generation is not expected_generation
     ):
         return False
-    state = registry.get(guild_id)
-    if not state:
+    playback_state = registry.state(guild_id)
+    state = playback_state.to_mapping() if playback_state is not None else None
+    if state is None:
         return False
-    stopped = await stop_tts_playback_state(state)
+    stopped = await stop_tts_playback_state(
+        state,
+        cleanup_timeout_sec=cleanup_timeout_sec,
+    )
     if not stopped:
         return False
+    playback_state.clear_runtime_refs()
     if registry.generation(guild_id) is playback_generation:
         finish_tts_playback_tracking(
             registry=registry,
@@ -2020,6 +2156,48 @@ async def stop_tracked_tts_playback(
             now=now,
         )
     return True
+
+
+async def cleanup_tts_playback_targets(
+    target_predicate: Callable[[dict[str, Any]], bool],
+    *,
+    tracker: TtsPlaybackTracker | None = None,
+    registry: TtsPlaybackRegistry | None = None,
+    speaking_guilds: set[int] | None = None,
+    last_audio_end_at: dict[int, float] | None = None,
+    cleanup_timeout_sec: float = 1.0,
+) -> tuple[int, int]:
+    """Stop exact matching generations and report (removed, still_recalled)."""
+
+    registry, speaking_guilds, last_audio_end_at = _resolve_tracker_parts(
+        tracker,
+        registry=registry,
+        speaking_guilds=speaking_guilds,
+        last_audio_end_at=last_audio_end_at,
+    )
+    if registry is None:
+        return 0, 0
+    removed = 0
+    for guild_id in registry.keys():
+        generation = registry.generation(guild_id)
+        state = registry.get(guild_id)
+        if state is None or not target_predicate(state):
+            continue
+        if await stop_tracked_tts_playback(
+            registry=registry,
+            speaking_guilds=speaking_guilds,
+            last_audio_end_at=last_audio_end_at,
+            guild_id=guild_id,
+            expected_generation=generation,
+            cleanup_timeout_sec=cleanup_timeout_sec,
+        ):
+            removed += 1
+    remaining = sum(
+        target_predicate(state)
+        for guild_id in registry.keys()
+        if (state := registry.get(guild_id)) is not None
+    )
+    return removed, remaining
 
 
 async def cleanup_tts_stream_tasks(
@@ -2039,6 +2217,10 @@ async def cleanup_tts_stream_tasks(
         prefetch_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await prefetch_task
+    cleanup = getattr(playback_source, "cleanup", None)
+    if callable(cleanup):
+        with contextlib.suppress(Exception):
+            cleanup()
 
 
 async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
@@ -2086,6 +2268,8 @@ async def play_audio_source(
     validation_metadata: dict[str, Any] | None = None,
     trace_payload: dict[str, Any] | None = None,
     timeout_sec: float = OMNIVOICE_TIMEOUT_SEC,
+    target_is_current: Callable[[dict[str, Any]], bool] | None = None,
+    target: dict[str, Any] | None = None,
 ) -> bool:
     raw_source = source
     payload = dict(trace_payload or {})
@@ -2113,6 +2297,19 @@ async def play_audio_source(
             ),
         )
         raise error from None
+
+    if target_is_current is not None:
+        try:
+            current = target_is_current(dict(target or {})) is True
+        except Exception:
+            current = False
+        if not current:
+            cleanup = getattr(raw_source, "cleanup", None)
+            if callable(cleanup):
+                with contextlib.suppress(Exception):
+                    cleanup()
+            _log_turn_event("discord_playback_stale_target_blocked", **payload)
+            return False
 
     if not validation_attempt_binding_is_current(
         validation_metadata,

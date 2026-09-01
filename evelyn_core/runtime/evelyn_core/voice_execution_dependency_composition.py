@@ -76,6 +76,11 @@ class VoiceExecutionDependencyCompositionDeps:
     flush_streamed_answer_chunks: Callable[..., Awaitable[Any]]
     increment_inflight_llm_requests: Callable[[], Any]
     decrement_inflight_llm_requests: Callable[[], Any]
+    recent_skill_dispatch_targets: MutableMapping[
+        str, dict[str, Any]
+    ] | None = None
+    archive_target_is_current: Callable[..., bool] | None = None
+    task_guidance_provider: Callable[..., Awaitable[Any]] | None = None
     log: Callable[..., Any] = print
 
 
@@ -127,6 +132,11 @@ class VoiceExecutionDependencyComposition:
             router_route_timeout_sec=deps.router_route_timeout_sec,
             cognitive_timeout_sec=deps.cognitive_timeout_sec,
             router_llm_enabled=deps.router_llm_enabled,
+            recent_skill_dispatch_targets=(
+                deps.recent_skill_dispatch_targets
+            ),
+            archive_target_is_current=deps.archive_target_is_current,
+            task_guidance_provider=deps.task_guidance_provider,
             log=deps.log,
         )
 

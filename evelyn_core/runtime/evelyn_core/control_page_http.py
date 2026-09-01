@@ -176,7 +176,9 @@ def add_control_page_cors_headers(
 
 
 def control_page_security_error(error: str, *, status: int = 403) -> web.Response:
-    return control_page_json_response({"ok": False, "error": error}, status=status)
+    return add_control_page_no_store_headers(
+        control_page_json_response({"ok": False, "error": error}, status=status)
+    )
 
 
 def memory_deletion_journal_integrity_response() -> web.Response:

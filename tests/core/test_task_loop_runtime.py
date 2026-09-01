@@ -28,8 +28,16 @@ from evelyn_core.task_loop_runtime import (
     TaskGrant,
     TaskLoopDeps,
     TaskLoopResult,
+    TaskPlannerGuidance,
     TaskStepReceipt,
+    SkillOriginClass,
+    TASK_BASE_GUIDANCE_DIGEST,
+    TASK_BASE_GUIDANCE_VERSION,
     TASK_MAX_GOAL_CHARS,
+    TASK_EVAL_VERSION,
+    TASK_PUBLIC_RECORD_SCHEMA,
+    TASK_WORK_CONTRACT_SCHEMA,
+    TASK_WORKER_INSTRUCTION_DIGEST,
     TASK_WORKSPACE_READ_CHUNK_BYTES,
     build_task_grant,
     build_task_worker_payload,
@@ -37,6 +45,9 @@ from evelyn_core.task_loop_runtime import (
     parse_task_request,
     run_default_task_loop,
     run_task_loop_from_runtime,
+    task_goal_is_grounded_read_only,
+    validated_task_planner_guidance,
+    validated_public_task_record,
 )
 from evelyn_core.task_approval_runtime import (
     TaskApprovalManager,
@@ -760,6 +771,323 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         state_text = payload["messages"][1]["content"].split("\n", 1)[1]
         self.assertEqual(len(json.loads(state_text)["observations"]), 6)
+
+    def test_public_task_record_is_exact_content_free_and_detached(self) -> None:
+        result = TaskLoopResult(
+            task_id="task-public",
+            status="uncertain",
+            code="task_outcome_unverified",
+            summary="PRIVATE SUMMARY",
+            step_count=1,
+            model_call_count=2,
+            observations=(
+                {
+                    "step": 1,
+                    "tool": "workspace_read",
+                    "attempted": True,
+                    "executed": True,
+                    "observed": True,
+                    "verified": False,
+                    "outcome": "uncertain",
+                    "code": "task_outcome_unverified",
+                    "summary": "PRIVATE STEP SUMMARY",
+                    "evidence": "PRIVATE EVIDENCE /secret/module.py",
+                },
+            ),
+        )
+
+        record = result.public_task_record()
+
+        self.assertEqual(record["schema"], TASK_PUBLIC_RECORD_SCHEMA)
+        self.assertEqual(record["contractVersion"], TASK_WORK_CONTRACT_SCHEMA)
+        self.assertEqual(record["evalVersion"], TASK_EVAL_VERSION)
+        self.assertTrue(record["processLocal"])
+        self.assertFalse(record["durable"])
+        self.assertEqual(
+            set(record),
+            {
+                "schema",
+                "taskId",
+                "status",
+                "code",
+                "stepCount",
+                "modelCallCount",
+                "steps",
+                "contractVersion",
+                "evalVersion",
+                "guidanceVersion",
+                "guidanceDigest",
+                "guidanceMode",
+                "canaryRunId",
+                "processLocal",
+                "durable",
+            },
+        )
+        encoded = json.dumps(record, ensure_ascii=False)
+        self.assertNotIn("PRIVATE", encoded)
+        self.assertNotIn("module.py", encoded)
+        self.assertIsNotNone(validated_public_task_record(record))
+        record["steps"][0]["code"] = "caller_mutated"
+        self.assertEqual(
+            result.public_task_record()["steps"][0]["code"],
+            "task_outcome_unverified",
+        )
+        forged = result.public_task_record()
+        forged["rawEvidence"] = "PRIVATE"
+        self.assertIsNone(validated_public_task_record(forged))
+        with self.assertRaisesRegex(ValueError, "task_public_status_invalid"):
+            TaskLoopResult(
+                task_id="task-invalid",
+                status="new_unreviewed_status",
+                code="task_completed",
+                summary="",
+                step_count=0,
+                model_call_count=0,
+            ).public_task_record()
+
+    async def test_work_contract_tracks_only_actual_worker_context_and_authority(self) -> None:
+        decisions = iter(
+            (
+                {
+                    "type": "tool",
+                    "tool": "runtime_status",
+                    "args": {},
+                    "success_criteria": "runtime status collected",
+                },
+                {"type": "final", "summary": "done", "verified_step": 1},
+            )
+        )
+
+        async def decide_next(_state: dict) -> dict:
+            return next(decisions)
+
+        async def execute_tool(**kwargs) -> TaskStepReceipt:
+            return _receipt(
+                step_id=kwargs["step_id"],
+                tool=kwargs["tool"],
+                action_run_id=kwargs["action_run_id"],
+                grant_id=kwargs["grant_id"],
+                outcome="success",
+                verified=True,
+                evidence=_runtime_evidence(),
+            )
+
+        owner_token = object()
+        scope = TurnScope(turn_id="turn-contract")
+        result = await run_task_loop_from_runtime(
+            "런타임 상태를 확인해줘",
+            deps=TaskLoopDeps(
+                decide_next=decide_next,
+                execute_tool=execute_tool,
+                monotonic=lambda: 20.0,
+                wall_time=lambda: 20.0,
+            ),
+            grant=_grant(auto_tools=frozenset({"runtime_status"})),
+            turn_scope=scope,
+            principal_token=owner_token,
+            skill_origin_class=SkillOriginClass.BUNDLED,
+        )
+
+        contract = result.contract
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(contract.schema, TASK_WORK_CONTRACT_SCHEMA)
+        self.assertEqual(contract.task_id, result.task_id)
+        self.assertEqual(contract.route.value, "task_executor")
+        self.assertEqual(contract.source.value, "control_page")
+        self.assertEqual(contract.skill_origin_class, SkillOriginClass.BUNDLED)
+        self.assertEqual(contract.instruction_digest, TASK_WORKER_INSTRUCTION_DIGEST)
+        worker_payload = build_task_worker_payload({"goal": "x", "observations": []})
+        self.assertEqual(
+            hashlib.sha256(
+                worker_payload["messages"][0]["content"].encode("utf-8")
+            ).hexdigest(),
+            contract.instruction_digest,
+        )
+        self.assertEqual(len(contract.consumed_contexts), 2)
+        self.assertEqual(
+            set(contract.tool_guidance_names),
+            {"runtime_status", "service_restart"},
+        )
+        self.assertEqual(
+            (
+                contract.consumed_contexts[0].goal_present,
+                contract.consumed_contexts[0].step,
+                contract.consumed_contexts[0].observation_count,
+            ),
+            (True, 1, 0),
+        )
+        self.assertEqual(
+            contract.consumed_contexts[1].observations[0].tool,
+            "runtime_status",
+        )
+        self.assertEqual(
+            contract.consumed_contexts[1].observations[0].code,
+            "runtime_status_collected",
+        )
+        self.assertEqual(contract.authority.steps[0].outcome, "success")
+        self.assertTrue(contract.authority.turn_current)
+        self.assertTrue(contract.authority.grant_current)
+        self.assertFalse(contract.authority.budget_exhausted)
+        self.assertEqual(contract.authority.remaining_steps, 5)
+        self.assertTrue(contract.is_owned_by(owner_token))
+        self.assertFalse(contract.is_owned_by(object()))
+        self.assertTrue(contract.matches_grant("grant-test"))
+        self.assertNotIn("grant-test", repr(contract))
+        self.assertNotIn("principal", repr(contract))
+        self.assertNotIn("런타임 상태를 확인해줘", repr(contract))
+        self.assertFalse(hasattr(contract, "messages"))
+        self.assertFalse(hasattr(contract, "context_packet"))
+
+    async def test_active_guidance_is_advisory_and_exactly_bound_without_public_text(self) -> None:
+        guidance_text = (
+            "근거가 없는 결론은 완료로 표시하지 말고 확인할 다음 단계를 선택한다."
+        )
+        guidance = TaskPlannerGuidance(
+            version_id="guidance-v2",
+            guidance_digest=hashlib.sha256(
+                guidance_text.encode("utf-8")
+            ).hexdigest(),
+            guidance=guidance_text,
+        )
+        states: list[dict] = []
+        decisions = iter(
+            (
+                {
+                    "type": "tool",
+                    "tool": "runtime_status",
+                    "args": {},
+                    "success_criteria": "runtime status collected",
+                },
+                {"type": "final", "summary": "done", "verified_step": 1},
+            )
+        )
+
+        async def decide_next(state: dict) -> dict:
+            states.append(state)
+            return next(decisions)
+
+        async def execute_tool(**kwargs) -> TaskStepReceipt:
+            return _receipt(
+                step_id=kwargs["step_id"],
+                tool=kwargs["tool"],
+                action_run_id=kwargs["action_run_id"],
+                grant_id=kwargs["grant_id"],
+                outcome="success",
+                verified=True,
+                evidence=_runtime_evidence(),
+            )
+
+        result = await run_task_loop_from_runtime(
+            "런타임 상태를 확인해줘",
+            deps=TaskLoopDeps(
+                decide_next=decide_next,
+                execute_tool=execute_tool,
+                monotonic=lambda: 20.0,
+                wall_time=lambda: 20.0,
+            ),
+            grant=_grant(auto_tools=frozenset({"runtime_status"})),
+            principal_token=object(),
+            planner_guidance=guidance,
+        )
+
+        self.assertEqual(
+            states[0]["plannerGuidance"],
+            {
+                "schema": "evelyn.task-planner-guidance-binding.v1",
+                "versionId": "guidance-v2",
+                "guidanceDigest": guidance.guidance_digest,
+                "mode": "active",
+                "canaryRunId": None,
+                "authority": "advisory",
+                "text": guidance_text,
+            },
+        )
+        self.assertEqual(states[0]["autoTools"], ["runtime_status"])
+        self.assertNotIn("plannerGuidance", states[0]["toolGuidance"])
+        assert result.contract is not None
+        self.assertEqual(result.contract.guidance_version, "guidance-v2")
+        self.assertEqual(
+            result.contract.guidance_digest, guidance.guidance_digest
+        )
+        record = result.public_task_record()
+        self.assertEqual(record["guidanceVersion"], "guidance-v2")
+        self.assertEqual(record["guidanceMode"], "active")
+        self.assertNotIn(guidance_text, json.dumps(record, ensure_ascii=False))
+
+    async def test_canary_guidance_requires_local_read_only_grounded_scope(self) -> None:
+        text = "검토할 때 exact evidence reference만 사용한다."
+        guidance = TaskPlannerGuidance(
+            version_id="candidate-v1",
+            guidance_digest=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            mode="canary",
+            canary_run_id="canary-run-1",
+            guidance=text,
+        )
+        with self.assertRaisesRegex(ValueError, "task_canary_scope_denied"):
+            await run_task_loop_from_runtime(
+                "README.md를 검토해줘",
+                deps=TaskLoopDeps(
+                    decide_next=AsyncMock(),
+                    execute_tool=AsyncMock(),
+                ),
+                grant=_grant(auto_tools=frozenset({"workspace_read"})),
+                principal_token=object(),
+                planner_guidance=guidance,
+            )
+
+        grant = build_task_grant(
+            task_id="canary-read-only",
+            source="control_page",
+            goal="README.md를 검토해줘",
+            workspace_available=True,
+            read_only=True,
+        )
+        self.assertTrue(grant.read_only)
+        self.assertNotIn("workspace_edit", grant.auto_tools | grant.approval_tools)
+        self.assertNotIn("workspace_test", grant.auto_tools | grant.approval_tools)
+        self.assertTrue(task_goal_is_grounded_read_only("README.md를 검토해줘"))
+        self.assertFalse(
+            task_goal_is_grounded_read_only("README.md를 수정하고 검토해줘")
+        )
+
+    def test_base_guidance_identity_is_stable_and_forged_public_binding_fails(self) -> None:
+        self.assertEqual(TASK_BASE_GUIDANCE_VERSION, "base")
+        self.assertEqual(
+            TASK_BASE_GUIDANCE_DIGEST,
+            hashlib.sha256(b"").hexdigest(),
+        )
+        record = TaskLoopResult(
+            task_id="task-guidance-record",
+            status="failed",
+            code="task_failed",
+            summary="private",
+            step_count=0,
+            model_call_count=0,
+        ).public_task_record()
+        record["guidanceMode"] = "canary"
+        self.assertIsNone(validated_public_task_record(record))
+        record = TaskLoopResult(
+            task_id="task-guidance-record",
+            status="failed",
+            code="task_failed",
+            summary="private",
+            step_count=0,
+            model_call_count=0,
+        ).public_task_record()
+        record["guidanceDigest"] = "f" * 64
+        self.assertIsNone(validated_public_task_record(record))
+        with self.assertRaisesRegex(ValueError, "task_planner_guidance_invalid"):
+            validated_task_planner_guidance(
+                TaskPlannerGuidance(
+                    version_id="not-base",
+                    guidance_digest=TASK_BASE_GUIDANCE_DIGEST,
+                ),
+                source="control_page",
+                principal_token=object(),
+                read_only=False,
+                goal="런타임 상태를 확인해줘",
+            )
 
     async def test_unrelated_success_does_not_hide_failed_criterion(self) -> None:
         decisions = iter(
@@ -5746,6 +6074,7 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from evelyn_core.skills import task_loop as task_skill
 
         scope = TurnScope(turn_id="turn-skill")
+        principal_token = object()
         loop_result = TaskLoopResult(
             task_id="task-skill",
             status="completed",
@@ -5763,6 +6092,8 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     extras={
                         "user_text": "/작업 테스트를 고쳐줘",
                         "turn_scope": scope,
+                        "principal_token": principal_token,
+                        "skill_origin_class": "bundled",
                     },
                 ),
             )
@@ -5771,9 +6102,15 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "테스트를 고쳐줘",
             source="text",
             turn_scope=scope,
+            principal_token=principal_token,
+            skill_origin_class="bundled",
         )
         self.assertIn('"status":"completed"', result.display_text)
         self.assertIsNone(result.followup_route)
+        self.assertEqual(
+            result.metadata["taskRecord"],
+            loop_result.public_task_record(),
+        )
 
 
 if __name__ == "__main__":

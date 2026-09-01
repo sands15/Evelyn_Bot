@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <link rel="stylesheet" href="./assets/evelyn-runtime-errors.css?v=20260731-continuity-commit-1">
   <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-3">
-  <link rel="stylesheet" href="./assets/evelyn-task-approval.css?v=20260820-task-approval-1">
+  <link rel="stylesheet" href="./assets/evelyn-task-approval.css?v=20260828-task-record-1">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2280,6 +2280,13 @@
         <div id="taskApprovalMount" aria-live="polite">
           <span class="task-approval-meta">승인이 필요한 작업 단계를 기다리는 중입니다.</span>
         </div>
+        <div class="task-record-section">
+          <strong>최근 작업 계약</strong>
+          <span class="task-approval-subtitle">현재 프로세스의 종료 기록 최대 4건 · 재시작 시 초기화</span>
+          <div id="taskRecordMount" aria-live="polite">
+            <span class="task-approval-meta">종료된 작업 기록이 없습니다.</span>
+          </div>
+        </div>
       </section>
 
       <section class="ui-action-panel" aria-label="화면 행동 승인">
@@ -4148,9 +4155,18 @@
     const taskApproval = state.actions && typeof state.actions.approval === "object"
       ? state.actions.approval
       : null;
+    const taskRecordTasks = state.actions && Array.isArray(state.actions.tasks)
+      ? state.actions.tasks.map((task) => ({
+          taskRecord: task && typeof task === "object" ? task.taskRecord : null
+        }))
+      : [];
     window.EvelynTaskApprovalPublicState = taskApproval;
+    window.EvelynTaskRecordPublicState = taskRecordTasks;
     window.dispatchEvent(new CustomEvent("evelyn:task-approval-state", {
       detail: { approval: taskApproval }
+    }));
+    window.dispatchEvent(new CustomEvent("evelyn:task-record-state", {
+      detail: { tasks: taskRecordTasks }
     }));
     if (window.EvelynLive2D) {
       window.EvelynLive2D.setSpeaking(voiceSpeaking, latestAssistantChatText(chatMessages));
@@ -6414,7 +6430,7 @@
   <script src="./assets/evelyn-autonomy-validation.js?v=20260801-autonomy-p0-1"></script>
   <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
   <script src="./assets/evelyn-runtime-errors.js?v=20260731-continuity-commit-1"></script>
-  <script src="./assets/evelyn-task-approval.js?v=20260820-task-approval-1"></script>
+  <script src="./assets/evelyn-task-approval.js?v=20260828-task-record-1"></script>
   <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-3"></script>
 </body>
 </html>

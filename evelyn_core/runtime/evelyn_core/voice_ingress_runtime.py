@@ -92,6 +92,17 @@ def _observe_handed_off_voice_task(
             pass
 
 
+def _observe_registered_handed_off_voice_task(
+    task: asyncio.Task,
+    *,
+    registry: MutableMapping[asyncio.Task, dict[str, Any]] | None,
+    log: Callable[..., Any],
+) -> None:
+    if registry is not None:
+        registry.pop(task, None)
+    _observe_handed_off_voice_task(task, log=log)
+
+
 def set_voice_transition_pending(guild_id: int, pending: bool) -> None:
     if pending:
         _VOICE_TRANSITION_GUILD_IDS.add(int(guild_id))
@@ -124,6 +135,10 @@ class VoiceIngressRuntimeDeps:
     create_task: Callable[[Awaitable[Any]], asyncio.Task]
     log: Callable[..., Any] = print
     monotonic: Callable[[], float] = time.monotonic
+    voice_ingress_process_tasks: MutableMapping[
+        asyncio.Task, dict[str, Any]
+    ] | None = None
+    voice_ingress_target_is_current: Callable[[dict[str, Any]], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +221,135 @@ def _voice_ingress_item_epoch_is_current(
         )
     except Exception:
         return False
+
+
+def _voice_ingress_item_target_is_current(
+    item: dict[str, Any],
+    *,
+    deps: VoiceIngressRuntimeDeps,
+) -> bool:
+    callback = deps.voice_ingress_target_is_current
+    if callback is None:
+        return True
+    try:
+        return callback(item) is True
+    except Exception:
+        return False
+
+
+def _drain_matching_voice_ingress_items(
+    target_predicate: Callable[[dict[str, Any]], bool],
+    *,
+    deps: VoiceIngressRuntimeDeps,
+) -> int:
+    survivors: list[dict[str, Any]] = []
+    removed = 0
+    while True:
+        try:
+            item = deps.voice_ingress_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if target_predicate(item):
+            removed += 1
+        else:
+            survivors.append(item)
+        deps.voice_ingress_queue.task_done()
+    for item in survivors:
+        deps.voice_ingress_queue.put_nowait(item)
+    return removed
+
+
+def _drop_matching_voice_utterance_buffers(
+    target_predicate: Callable[[dict[str, Any]], bool],
+    *,
+    deps: VoiceIngressRuntimeDeps,
+) -> tuple[int, list[asyncio.Task]]:
+    removed = 0
+    cancelled_tasks: list[asyncio.Task] = []
+    for key, buffer in tuple(deps.voice_utterance_buffers.items()):
+        item = buffer.get("base_item") if isinstance(buffer, dict) else None
+        if not isinstance(item, dict) or not target_predicate(item):
+            continue
+        deps.voice_utterance_buffers.pop(key, None)
+        flush_task = deps.voice_utterance_flush_tasks.pop(key, None)
+        if flush_task is not None and not flush_task.done():
+            flush_task.cancel()
+            cancelled_tasks.append(flush_task)
+        removed += 1
+    return removed, cancelled_tasks
+
+
+async def cleanup_voice_ingress_targets_from_runtime(
+    target_predicate: Callable[[dict[str, Any]], bool],
+    *,
+    deps: VoiceIngressRuntimeDeps,
+    timeout_sec: float = 1.0,
+) -> tuple[int, int]:
+    """Bounded target cleanup; returns (removed, still_recalled)."""
+
+    removed, flush_tasks = _drop_matching_voice_utterance_buffers(
+        target_predicate,
+        deps=deps,
+    )
+    removed += _drain_matching_voice_ingress_items(
+        target_predicate,
+        deps=deps,
+    )
+    registry = deps.voice_ingress_process_tasks
+    matching_tasks = (
+        [
+            task
+            for task, item in tuple(registry.items())
+            if target_predicate(item)
+        ]
+        if registry is not None
+        else []
+    )
+    tasks_to_join = [*flush_tasks, *matching_tasks]
+    for task in tasks_to_join:
+        if not task.done():
+            task.cancel()
+    pending_tasks: set[asyncio.Task] = set()
+    if tasks_to_join:
+        _done, pending_tasks = await asyncio.wait(
+            tasks_to_join,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+    removed += sum(task.done() for task in tasks_to_join)
+
+    # A producer may have reached its next await while tasks were draining.
+    late_removed, late_flush_tasks = _drop_matching_voice_utterance_buffers(
+        target_predicate,
+        deps=deps,
+    )
+    removed += late_removed
+    for task in late_flush_tasks:
+        if not task.done():
+            task.cancel()
+    if late_flush_tasks:
+        _done, late_pending = await asyncio.wait(
+            late_flush_tasks,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+        pending_tasks.update(late_pending)
+        removed += sum(task.done() for task in late_flush_tasks)
+    removed += _drain_matching_voice_ingress_items(
+        target_predicate,
+        deps=deps,
+    )
+    remaining_tasks = set(pending_tasks)
+    remaining_buffers = 0
+    for buffer in deps.voice_utterance_buffers.values():
+        item = buffer.get("base_item") if isinstance(buffer, dict) else None
+        if isinstance(item, dict) and target_predicate(item):
+            remaining_buffers += 1
+    if registry is not None:
+        remaining_tasks.update(
+            task
+            for task, item in tuple(registry.items())
+            if not task.done() and target_predicate(item)
+        )
+    return removed, remaining_buffers + len(remaining_tasks)
 
 
 async def process_member_audio_from_runtime(
@@ -322,7 +466,9 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
     while True:
         item = await deps.voice_ingress_queue.get()
         try:
-            if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+            if not _voice_ingress_item_epoch_is_current(
+                item, deps=deps
+            ) or not _voice_ingress_item_target_is_current(item, deps=deps):
                 deps.increment_voice_pipeline_counter(
                     "voice_ingress_epoch_stale_drop_count"
                 )
@@ -370,6 +516,9 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
             process_task = deps.create_task(
                 deps.process_member_audio(**process_item)
             )
+            process_registry = deps.voice_ingress_process_tasks
+            if process_registry is not None:
+                process_registry[process_task] = dict(item)
             handoff_task = deps.create_task(handoff_event.wait())
             handed_off = False
             try:
@@ -382,13 +531,20 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
                 else:
                     handed_off = True
                     process_task.add_done_callback(
-                        lambda done_task: _observe_handed_off_voice_task(
+                        lambda done_task: _observe_registered_handed_off_voice_task(
                             done_task,
+                            registry=process_registry,
                             log=deps.log,
                         )
                     )
             except asyncio.CancelledError:
                 worker_task = asyncio.current_task()
+                if (
+                    process_task.cancelled()
+                    and worker_task is not None
+                    and not worker_task.cancelling()
+                ):
+                    continue
                 if worker_task is not None and worker_task.cancelling():
                     if not handed_off and not handoff_event.is_set():
                         process_task.cancel()
@@ -404,6 +560,8 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
             finally:
                 handoff_task.cancel()
                 await asyncio.gather(handoff_task, return_exceptions=True)
+                if not handed_off and process_registry is not None:
+                    process_registry.pop(process_task, None)
         except Exception as exc:
             deps.log(f"[VOICE WORKER] 실패: errorType={type(exc).__name__}")
         finally:
@@ -415,7 +573,9 @@ async def enqueue_voice_ingress_for_processing_from_runtime(
     *,
     deps: VoiceIngressRuntimeDeps,
 ) -> None:
-    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+    if not _voice_ingress_item_epoch_is_current(
+        item, deps=deps
+    ) or not _voice_ingress_item_target_is_current(item, deps=deps):
         deps.increment_voice_pipeline_counter(
             "voice_ingress_epoch_stale_drop_count"
         )
@@ -457,7 +617,9 @@ async def flush_voice_utterance_buffer_from_runtime(
     if not buffer:
         return
     base_item = dict(buffer["base_item"])
-    if not _voice_ingress_item_epoch_is_current(base_item, deps=deps):
+    if not _voice_ingress_item_epoch_is_current(
+        base_item, deps=deps
+    ) or not _voice_ingress_item_target_is_current(base_item, deps=deps):
         deps.increment_voice_pipeline_counter(
             "voice_ingress_epoch_stale_drop_count"
         )
@@ -513,7 +675,9 @@ async def schedule_voice_utterance_item_from_runtime(
     *,
     deps: VoiceIngressRuntimeDeps,
 ) -> None:
-    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+    if not _voice_ingress_item_epoch_is_current(
+        item, deps=deps
+    ) or not _voice_ingress_item_target_is_current(item, deps=deps):
         deps.increment_voice_pipeline_counter(
             "voice_ingress_epoch_stale_drop_count"
         )
@@ -546,7 +710,9 @@ async def schedule_voice_utterance_item_from_runtime(
     ):
         await flush_voice_utterance_buffer_from_runtime(key, deps=deps)
         buffer = None
-    if not _voice_ingress_item_epoch_is_current(item, deps=deps):
+    if not _voice_ingress_item_epoch_is_current(
+        item, deps=deps
+    ) or not _voice_ingress_item_target_is_current(item, deps=deps):
         deps.increment_voice_pipeline_counter(
             "voice_ingress_epoch_stale_drop_count"
         )

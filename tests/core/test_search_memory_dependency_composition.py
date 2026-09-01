@@ -50,6 +50,10 @@ class SearchMemoryDependencyCompositionTests(unittest.TestCase):
         self.assertIn("run_memory_writebehind_steps=deps.run_memory_writebehind_steps", source)
         self.assertIn("sanitize_model_output=deps.sanitize_model_output", source)
         self.assertIn("record_search_followup_queued=deps.record_search_followup_queued", source)
+        self.assertEqual(
+            source.count("archive_task_targets=deps.archive_task_targets"),
+            2,
+        )
 
 
 if __name__ == "__main__":

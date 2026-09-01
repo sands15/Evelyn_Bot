@@ -40,6 +40,7 @@ from evelyn_core.voice_pipeline import build_route_decision  # noqa: E402
 from evelyn_core.voice_route_execution import (  # noqa: E402
     maybe_execute_registered_route,
     prepare_route_context,
+    skill_origin_class,
 )
 
 
@@ -60,6 +61,11 @@ def _fast_path_deps() -> FastPathPolicyRuntimeDeps:
 
 
 class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_skill_origin_is_reduced_to_an_allowlisted_class(self) -> None:
+        self.assertEqual(skill_origin_class("evelyn_core.skills.task_loop"), "internal")
+        self.assertEqual(skill_origin_class("bundled:review"), "bundled")
+        self.assertEqual(skill_origin_class("C:\\private\\skill.py"), "external")
+
     async def test_missing_required_evidence_becomes_terminal_main_gate(self) -> None:
         async def prepare_messages(user_text: str, **_kwargs):
             policy = ContextPolicy(
@@ -269,6 +275,10 @@ class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 loop_mock = AsyncMock(return_value=loop_result)
+                first_metrics = {"meta": {}}
+                repeated_metrics = {"meta": {}}
+                uncertain_metrics = {"meta": {}}
+                principal_token = f"principal:{source}"
 
                 with patch.object(task_loop_skill, "run_default_task_loop", loop_mock):
                     result = await orchestrator.execute(
@@ -276,6 +286,8 @@ class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                             user_text="/작업 런타임 상태를 확인해줘",
                             source=source,
                             session_key=f"session-{source}",
+                            person_key=principal_token,
+                            metrics=first_metrics,
                         )
                     )
                     repeated = await orchestrator.execute(
@@ -283,6 +295,8 @@ class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                             user_text="/작업 런타임 상태를 확인해줘",
                             source=source,
                             session_key=f"session-{source}",
+                            person_key=principal_token,
+                            metrics=repeated_metrics,
                         )
                     )
                     loop_mock.return_value = TaskLoopResult(
@@ -299,6 +313,8 @@ class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                             user_text="/작업 런타임 상태를 확인해줘",
                             source=source,
                             session_key=f"session-{source}",
+                            person_key=principal_token,
+                            metrics=uncertain_metrics,
                         )
                     )
 
@@ -312,7 +328,15 @@ class TaskRouteOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                     "런타임 상태를 확인해줘",
                     source=source,
                     turn_scope=None,
+                    principal_token=principal_token,
+                    skill_origin_class="internal",
                 )
+                task_record = first_metrics["meta"]["taskRecord"]
+                self.assertEqual(task_record["taskId"], f"task-{source}")
+                self.assertTrue(task_record["processLocal"])
+                self.assertFalse(task_record["durable"])
+                self.assertNotIn("evidence", json.dumps(task_record))
+                self.assertNotIn(principal_token, json.dumps(task_record))
                 self.assertEqual(main_calls, [])
                 self.assertIn("overallState=down", result.answer_text)
                 self.assertEqual(result.handled_by, "task_loop_outcome")

@@ -9,12 +9,17 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
 from .json_safety import safe_json_dumps, safe_json_value
 from .text import clean_text
+
+
+CONVERSATION_ARCHIVE_ENABLED_ENV = (
+    "EVELYN_CONVERSATION_ARCHIVE_ENABLED"
+)
 
 
 def sanitize_debug_label(value: str | None, *, fallback: str = "unknown") -> str:
@@ -29,6 +34,22 @@ def resolve_voice_debug_base_dir(project_root: Path, configured_dir: str) -> Pat
     if not base_dir.is_absolute():
         base_dir = project_root / base_dir
     return base_dir
+
+
+def conversation_archive_blocks_voice_debug(
+    conversation_archive_enabled: bool | None = None,
+) -> bool:
+    """Fail closed for raw debug audio whenever private archive mode is on."""
+
+    if conversation_archive_enabled is not None:
+        if type(conversation_archive_enabled) is not bool:
+            return True
+        if conversation_archive_enabled:
+            return True
+    configured = os.environ.get(CONVERSATION_ARCHIVE_ENABLED_ENV, "").strip()
+    if not configured:
+        return False
+    return configured.lower() not in {"0", "false", "no", "off"}
 
 
 @dataclass(frozen=True)
@@ -55,7 +76,7 @@ def _voice_debug_stem(path: Path) -> str | None:
         return name[: -len("_raw48k.wav")]
     if name.endswith("_stt16k.wav"):
         return name[: -len("_stt16k.wav")]
-    if path.suffix.lower() in {".wav", ".json"}:
+    if path.suffix.lower() in {".wav", ".pcm", ".json"}:
         return path.stem
     return None
 
@@ -66,7 +87,7 @@ def inventory_voice_debug_bundles(guild_dir: Path) -> list[VoiceDebugBundle]:
     resolved_root = guild_dir.resolve()
     grouped: dict[str, list[Path]] = {}
     for path in guild_dir.iterdir():
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         try:
             resolved = path.resolve()
@@ -75,7 +96,7 @@ def inventory_voice_debug_bundles(guild_dir: Path) -> list[VoiceDebugBundle]:
             continue
         stem = _voice_debug_stem(resolved)
         if stem is not None:
-            grouped.setdefault(stem, []).append(resolved)
+            grouped.setdefault(stem, []).append(path)
 
     bundles: list[VoiceDebugBundle] = []
     for stem, paths in grouped.items():
@@ -226,6 +247,190 @@ def trim_voice_debug_root(
     }
 
 
+def purge_voice_debug_audio_for_turns(
+    root: Path,
+    *,
+    deletion_generation: int,
+    turn_ids: Iterable[str],
+    guild_id: int | None = None,
+) -> dict[str, Any]:
+    """Delete exact turn-linked debug bundles and return a content-free receipt."""
+
+    if (
+        isinstance(deletion_generation, bool)
+        or not isinstance(deletion_generation, int)
+        or deletion_generation < 0
+        or (
+            guild_id is not None
+            and (
+                isinstance(guild_id, bool)
+                or not isinstance(guild_id, int)
+                or guild_id < 0
+            )
+        )
+    ):
+        raise ValueError("voice_debug_purge_scope_invalid")
+    if isinstance(turn_ids, (str, bytes)):
+        raise ValueError("voice_debug_purge_scope_invalid")
+    try:
+        supplied_turn_ids = tuple(turn_ids)
+    except TypeError:
+        raise ValueError("voice_debug_purge_scope_invalid") from None
+    if any(
+        not isinstance(value, str) or not value or len(value) > 256
+        for value in supplied_turn_ids
+    ):
+        raise ValueError("voice_debug_purge_scope_invalid")
+    targets = set(supplied_turn_ids)
+    scanned = matched = deleted = failed = unresolved = 0
+    candidate_root = Path(root)
+    if candidate_root.is_symlink():
+        unresolved = 1
+        resolved_root = candidate_root.absolute()
+    else:
+        try:
+            resolved_root = candidate_root.resolve()
+        except OSError:
+            unresolved = 1
+            resolved_root = candidate_root.absolute()
+
+    guild_dirs: list[Path] = []
+    if unresolved == 0 and resolved_root.exists():
+        if not resolved_root.is_dir():
+            unresolved = 1
+        elif guild_id is not None:
+            guild_dirs = [resolved_root / str(guild_id)]
+        else:
+            try:
+                guild_dirs = sorted(
+                    path
+                    for path in resolved_root.iterdir()
+                    if path.is_dir() or path.is_symlink()
+                )
+            except OSError:
+                unresolved = 1
+
+    for guild_dir in guild_dirs:
+        if guild_dir.is_symlink():
+            unresolved += 1
+            continue
+        if not guild_dir.exists():
+            continue
+        if not guild_dir.is_dir():
+            unresolved += 1
+            continue
+        try:
+            resolved_guild = guild_dir.resolve()
+            resolved_guild.relative_to(resolved_root)
+            files = tuple(guild_dir.iterdir())
+        except (OSError, ValueError):
+            unresolved += 1
+            continue
+        bundles: dict[str, list[Path]] = {}
+        for path in files:
+            if path.is_symlink():
+                if _voice_debug_stem(path) is not None:
+                    unresolved += 1
+                continue
+            if not path.is_file():
+                continue
+            stem = _voice_debug_stem(path)
+            if stem is not None:
+                bundles.setdefault(stem, []).append(path)
+        scanned += len(bundles)
+        for stem, paths in bundles.items():
+            metadata_paths = [
+                path
+                for path in paths
+                if path.suffix.lower() == ".json" and path.stem == stem
+            ]
+            if len(metadata_paths) != 1:
+                unresolved += 1
+                continue
+            metadata_path = metadata_paths[0]
+            try:
+                if metadata_path.stat().st_size > 1024 * 1024:
+                    raise ValueError("metadata too large")
+                metadata = json.loads(
+                    metadata_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                unresolved += 1
+                continue
+            turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
+            if not isinstance(turn_id, str) or not turn_id:
+                unresolved += 1
+                continue
+            if turn_id not in targets:
+                continue
+            matched += 1
+            data_paths = [path for path in paths if path != metadata_path]
+            bundle_failed = False
+            for path in (*data_paths, metadata_path):
+                if path == metadata_path and bundle_failed:
+                    break
+                try:
+                    resolved = path.resolve()
+                    resolved.relative_to(resolved_guild)
+                    path.unlink()
+                except (OSError, ValueError):
+                    failed += 1
+                    bundle_failed = True
+            if not bundle_failed:
+                deleted += 1
+
+    if failed == 0 and unresolved == 0:
+        for guild_dir in guild_dirs:
+            if not guild_dir.exists() or not guild_dir.is_dir():
+                continue
+            try:
+                metadata_paths = tuple(guild_dir.glob("*.json"))
+            except OSError:
+                unresolved += 1
+                break
+            for metadata_path in metadata_paths:
+                try:
+                    if (
+                        metadata_path.is_symlink()
+                        or metadata_path.stat().st_size > 1024 * 1024
+                    ):
+                        raise ValueError("metadata unavailable")
+                    metadata = json.loads(
+                        metadata_path.read_text(encoding="utf-8")
+                    )
+                except (
+                    OSError,
+                    UnicodeError,
+                    json.JSONDecodeError,
+                    ValueError,
+                ):
+                    unresolved += 1
+                    break
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get("turn_id") in targets
+                ):
+                    unresolved += 1
+                    break
+            if unresolved:
+                break
+
+    complete = failed == 0 and unresolved == 0 and deleted == matched
+    return {
+        "schema": "voice_debug_audio.purge-receipt.v1",
+        "sink": "voice_debug_audio",
+        "deletionGeneration": deletion_generation,
+        "status": "purged" if complete else "cleanup_pending",
+        "scannedCount": scanned,
+        "matchedCount": matched,
+        "deletedCount": deleted,
+        "failedCount": failed,
+        "unresolvedCount": unresolved,
+        "complete": complete,
+        "contentFree": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Plan or apply Evelyn voice debug retention cleanup.")
     parser.add_argument("--root", type=Path, default=Path("debug_audio"), help="voice debug root")
@@ -312,6 +517,7 @@ def ensure_debug_write_worker_started_from_runtime(
 def enqueue_voice_debug_audio_from_runtime(
     *,
     enabled: bool,
+    conversation_archive_enabled: bool | None = None,
     ensure_worker_started: Callable[[], Any],
     queue: Any,
     log: Callable[[str], Any],
@@ -327,6 +533,15 @@ def enqueue_voice_debug_audio_from_runtime(
     session_key: str | None = None,
     stage_label: str | None = None,
 ) -> bool:
+    if conversation_archive_blocks_voice_debug(
+        conversation_archive_enabled
+    ):
+        stage = clean_text(stage_label or "ingress") or "ingress"
+        log(
+            "[VOICE DEBUG BLOCK] "
+            f"stage={stage} reason=conversation_archive_enabled"
+        )
+        return False
     if not enabled:
         return False
     ensure_worker_started()
@@ -376,7 +591,17 @@ def save_voice_debug_audio_now(
     stt_meta: dict | None = None,
     session_key: str | None = None,
     stage_label: str | None = None,
+    conversation_archive_enabled: bool | None = None,
 ) -> None:
+    if conversation_archive_blocks_voice_debug(
+        conversation_archive_enabled
+    ):
+        stage = clean_text(stage_label or "ingress") or "ingress"
+        log(
+            "[VOICE DEBUG BLOCK] "
+            f"stage={stage} reason=conversation_archive_enabled"
+        )
+        return
     try:
         base_dir = resolve_voice_debug_base_dir(project_root, configured_dir)
         guild_dir = base_dir / str(guild_id)
@@ -461,10 +686,12 @@ def save_voice_debug_audio_now(
 
 __all__ = [
     "build_voice_debug_audio_item",
+    "conversation_archive_blocks_voice_debug",
     "debug_write_worker_from_runtime",
     "enqueue_voice_debug_audio_from_runtime",
     "ensure_debug_write_worker_started_from_runtime",
     "inventory_voice_debug_bundles",
+    "purge_voice_debug_audio_for_turns",
     "sanitize_debug_label",
     "save_voice_debug_audio_now",
     "select_voice_debug_cleanup_bundles",

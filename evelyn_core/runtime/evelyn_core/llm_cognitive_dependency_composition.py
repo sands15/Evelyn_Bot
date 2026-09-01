@@ -60,6 +60,7 @@ class LlmCognitiveDependencyCompositionDeps:
     build_cognitive_fallback_state: Callable[..., dict[str, Any]]
     finalize_cognitive_state: Callable[..., dict[str, Any]]
     log: Callable[..., Any]
+    archive_target_is_current: Callable[..., bool] | None = None
 
 
 class LlmCognitiveDependencyComposition:
@@ -162,6 +163,7 @@ class LlmCognitiveDependencyComposition:
             build_cognitive_fallback_state=deps.build_cognitive_fallback_state,
             finalize_cognitive_state=deps.finalize_cognitive_state,
             log=deps.log,
+            archive_target_is_current=deps.archive_target_is_current,
         )
 
 

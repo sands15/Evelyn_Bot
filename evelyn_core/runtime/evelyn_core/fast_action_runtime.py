@@ -10,6 +10,7 @@ from .conversation_memory_receipt import (
     unattributed_memory_receipt_ref,
 )
 from .public_error_contract import public_error_code
+from .task_loop_runtime import validated_public_task_record
 from .text import clean_text
 
 
@@ -508,9 +509,13 @@ class FastActionTask:
         default=None,
         repr=False,
     )
+    task_record: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.task_id,
             "kind": self.kind,
             "source": self.source,
@@ -522,6 +527,11 @@ class FastActionTask:
             "finalReply": self.final_reply,
             "error": self.error,
         }
+        if self.status != "running":
+            task_record = validated_public_task_record(self.task_record)
+            if task_record is not None:
+                payload["taskRecord"] = task_record
+        return payload
 
     def to_internal_dict(self) -> dict[str, Any]:
         payload = self.to_dict()
@@ -672,6 +682,18 @@ class FastActionCoordinator:
 
     def get(self, task_id: str) -> FastActionTask | None:
         return self._tasks.get(clean_text(task_id))
+
+    def attach_task_record(
+        self,
+        task_id: str,
+        task_record: dict[str, Any],
+    ) -> FastActionTask:
+        task = self._require_task(task_id)
+        validated = validated_public_task_record(task_record)
+        if validated is None:
+            raise ValueError("task_public_record_invalid")
+        task.task_record = validated
+        return task
 
     def events_after(self, event_id: int = 0) -> list[dict[str, Any]]:
         try:

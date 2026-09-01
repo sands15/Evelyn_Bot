@@ -71,6 +71,7 @@ services:
       EVELYN_INTERNAL_CONTROL_TOKEN: "${EVELYN_INTERNAL_CONTROL_TOKEN:-}"
       EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN: "${EVELYN_WORKSPACE_SANDBOX_AUTH_TOKEN:-}"
       EVELYN_VOICE_INPUT_LEASE_TOKEN: "${EVELYN_VOICE_INPUT_LEASE_TOKEN:-}"
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"
       START_WAIT_TIMEOUT_SEC: "8"
       START_WAIT_INTERVAL_SEC: "1"
       OPUS_ERROR_TO_SILENCE: "false"
@@ -201,6 +202,8 @@ services:
       LOCAL_ONLY: "false"
       DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:?Set DISCORD_BOT_TOKEN before starting discord_bot}"
       EVELYN_VOICE_INPUT_LEASE_TOKEN: "${EVELYN_VOICE_INPUT_LEASE_TOKEN:-}"
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"
+      EVELYN_CONVERSATION_ARCHIVE_BOT_API_URL: "http://bot_api:8798"
       CROSS_SURFACE_CONTINUITY_ENABLED: "${CROSS_SURFACE_CONTINUITY_ENABLED:-false}"
       CROSS_SURFACE_CONTINUITY_GUILD_ID: "${CROSS_SURFACE_CONTINUITY_GUILD_ID:-0}"
       CROSS_SURFACE_CONTINUITY_USER_ID: "${CROSS_SURFACE_CONTINUITY_USER_ID:-0}"
@@ -313,6 +316,7 @@ services:
       MAIN_LLM_UBATCH_SIZE: "${MAIN_LLM_UBATCH_SIZE:-2048}"
       MAIN_LLM_CACHE_RAM_MIB: "${MAIN_LLM_CACHE_RAM_MIB:-8192}"
       MAIN_LLM_CACHE_REUSE: "${MAIN_LLM_CACHE_REUSE:-256}"
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"
       MAIN_LLM_CUDA_GRAPHS_ENABLED: "${MAIN_LLM_CUDA_GRAPHS_ENABLED:-1}"
       GGML_CUDA_GRAPH_OPT: "${MAIN_LLM_CUDA_GRAPH_OPT:-1}"
       MAIN_LLM_SWA_FULL_ENABLED: "${MAIN_LLM_SWA_FULL_ENABLED:-1}"
@@ -338,6 +342,11 @@ services:
         0) swa_full_args=() ;;
         *) exit 64 ;;
         esac;
+        case "$${EVELYN_CONVERSATION_ARCHIVE_ENABLED,,}" in
+        1|true|yes|on) prompt_cache_args=() ;;
+        0|false|no|off|'') prompt_cache_args=(--cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}" --cache-prompt --cache-reuse "$${MAIN_LLM_CACHE_REUSE}") ;;
+        *) exit 64 ;;
+        esac;
         server_args=(
         -m "$${model_path}"
         --host 0.0.0.0
@@ -349,9 +358,7 @@ services:
         -np "$${MAIN_LLM_N_PARALLEL}"
         --batch-size "$${MAIN_LLM_BATCH_SIZE}"
         --ubatch-size "$${MAIN_LLM_UBATCH_SIZE}"
-        --cache-ram "$${MAIN_LLM_CACHE_RAM_MIB}"
-        --cache-prompt
-        --cache-reuse "$${MAIN_LLM_CACHE_REUSE}"
+        "$${prompt_cache_args[@]}"
         --metrics
         --repeat-last-n 256
         --repeat-penalty 1.10
@@ -457,6 +464,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       CUDA_VISIBLE_DEVICES: "1"
       LLAMA_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "${EVELYN_CONVERSATION_ARCHIVE_ENABLED:-false}"
     volumes:
       - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
       - qwen_admission_epoch:/qwen-admission
@@ -478,6 +486,11 @@ services:
         sync /qwen-admission/epoch.tmp;
         mv -f /qwen-admission/epoch.tmp /qwen-admission/epoch;
         export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        case "$${EVELYN_CONVERSATION_ARCHIVE_ENABLED,,}" in
+        1|true|yes|on) prompt_cache_args=() ;;
+        0|false|no|off|'') prompt_cache_args=(--cache-prompt) ;;
+        *) exit 64 ;;
+        esac;
         exec ./build/bin/llama-server
         -m /llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf
         --host 0.0.0.0
@@ -491,7 +504,7 @@ services:
         --ubatch-size 128
         --cache-type-k q8_0
         --cache-type-v q8_0
-        --cache-prompt
+        "$${prompt_cache_args[@]}"
         --reasoning off
         --reasoning-budget 0
         --reasoning-format none

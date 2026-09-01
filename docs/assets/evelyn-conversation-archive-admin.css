@@ -1,0 +1,173 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  background: #111715;
+  color: #eef7f2;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(145deg, #111715, #17251f);
+}
+
+main {
+  width: min(880px, calc(100% - 32px));
+  margin: 32px auto;
+}
+
+button,
+input,
+select,
+textarea { font: inherit; }
+
+button {
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 1px solid #4c7c66;
+  border-radius: 7px;
+  background: #203c30;
+  color: #f4fbf7;
+  cursor: pointer;
+}
+
+button:disabled { cursor: not-allowed; opacity: .55; }
+
+.conversation-archive-admin-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #4c7c66;
+  border-radius: 10px;
+  background: #18221e;
+  box-shadow: 0 16px 48px #0006;
+}
+
+.conversation-archive-admin-panel[hidden],
+.conversation-archive-admin-panel [hidden] { display: none !important; }
+
+.conversation-archive-admin-head,
+.conversation-archive-admin-actions,
+.conversation-archive-admin-record-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conversation-archive-admin-head span,
+.conversation-archive-admin-status,
+.conversation-archive-admin-meta {
+  display: block;
+  color: #b9c9c1;
+  font-size: .84rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.conversation-archive-admin-form,
+.conversation-archive-admin-delete {
+  display: grid;
+  gap: 10px;
+}
+
+.conversation-archive-admin-section {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid #344b40;
+}
+
+.conversation-archive-admin-form input,
+.conversation-archive-admin-form select,
+.conversation-archive-admin-form textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid #4c6258;
+  border-radius: 7px;
+  background: #0f1714;
+  color: #fff;
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+}
+
+.conversation-archive-admin-form textarea {
+  min-height: 112px;
+  padding: 9px 10px;
+  resize: vertical;
+  font-weight: 500;
+}
+
+.conversation-archive-admin-form label {
+  display: grid;
+  gap: 6px;
+  color: #dbe8e1;
+  font-size: .88rem;
+}
+
+.conversation-archive-admin-form .conversation-archive-admin-check {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  line-height: 1.45;
+}
+
+.conversation-archive-admin-form .conversation-archive-admin-check input {
+  width: auto;
+  min-height: auto;
+  margin-top: 3px;
+}
+
+.conversation-archive-admin-section details {
+  padding: 9px 10px;
+  border: 1px solid #344b40;
+  border-radius: 7px;
+  background: #101814;
+}
+
+.conversation-archive-admin-section summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.conversation-archive-admin-section details > .conversation-archive-admin-form,
+.conversation-archive-admin-section details > pre {
+  margin-top: 10px;
+}
+
+.conversation-archive-admin-records {
+  display: grid;
+  gap: 8px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.conversation-archive-admin-section .conversation-archive-admin-records {
+  max-height: 34vh;
+}
+
+.conversation-archive-admin-record {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #344b40;
+  border-radius: 7px;
+  background: #101814;
+}
+
+.conversation-archive-admin-record pre {
+  margin: 0;
+  color: #eef7f2;
+  font: .84rem/1.5 system-ui, sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.conversation-archive-admin-delete {
+  padding-top: 10px;
+  border-top: 1px solid #344b40;
+}
+
+.conversation-archive-admin-delete button { color: #ffc2c2; }

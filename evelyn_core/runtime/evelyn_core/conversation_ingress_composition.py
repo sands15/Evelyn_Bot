@@ -25,6 +25,15 @@ CONVERSATION_INGRESS_CONTEXT_SCHEMA = (
 )
 
 
+def _manual_exact_lineage_counts() -> dict[str, Any]:
+    return {
+        "removedCount": 0,
+        "remainingCopies": 0,
+        "manualReviewCount": 1,
+        "contentFree": True,
+    }
+
+
 @dataclass(frozen=True)
 class ConversationIngressCompositionDeps:
     journal_factory: Callable[[], ConversationIngressRecoveryJournal]
@@ -676,6 +685,87 @@ class ConversationIngressComposition:
 
         return self._ready_journal().record_for(entry_id)
 
+    def _exact_lineage_operation(
+        self,
+        operation_name: str,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if not self._owner_ready or self._journal is None:
+                return _manual_exact_lineage_counts()
+            try:
+                status = self._journal.public_status()
+                if (
+                    not isinstance(status, dict)
+                    or status.get("enabled") is not True
+                    or status.get("state") != "ready"
+                    or status.get("rollbackProtected") is not True
+                ):
+                    return _manual_exact_lineage_counts()
+                operation = getattr(self._journal, operation_name)
+                if not callable(operation):
+                    return _manual_exact_lineage_counts()
+                result = operation(
+                    match_turn=match_turn,
+                    match_session=match_session,
+                    full_user_delete=full_user_delete,
+                )
+                if (
+                    not isinstance(result, dict)
+                    or frozenset(result)
+                    != {
+                        "removedCount",
+                        "remainingCopies",
+                        "manualReviewCount",
+                        "contentFree",
+                    }
+                    or result.get("contentFree") is not True
+                    or any(
+                        type(result.get(key)) is not int
+                        or int(result[key]) < 0
+                        for key in (
+                            "removedCount",
+                            "remainingCopies",
+                            "manualReviewCount",
+                        )
+                    )
+                ):
+                    return _manual_exact_lineage_counts()
+                return dict(result)
+            except Exception:
+                return _manual_exact_lineage_counts()
+
+    def purge_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        return self._exact_lineage_operation(
+            "purge_exact_lineage",
+            match_turn=match_turn,
+            match_session=match_session,
+            full_user_delete=full_user_delete,
+        )
+
+    def negative_recall_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        return self._exact_lineage_operation(
+            "negative_recall_exact_lineage",
+            match_turn=match_turn,
+            match_session=match_session,
+            full_user_delete=full_user_delete,
+        )
+
     def public_status(self) -> dict[str, Any]:
         with self._lock:
             if self._journal is None:
@@ -739,6 +829,7 @@ def build_main_conversation_ingress_composition(
     question_ttl_sec: float,
     log: Callable[..., Any],
     reset_guild_recovery_metadata: Callable[[int], Any],
+    mutation_target_is_current: Callable[..., bool] | None = None,
 ) -> ConversationIngressComposition:
     restart_deps = ConversationIngressRestartDeps(
         session_state_store=session_continuity_checkpoint.store,
@@ -766,6 +857,7 @@ def build_main_conversation_ingress_composition(
                     "commit_artifact_deadline_sec",
                     5.0,
                 ),
+                mutation_target_is_current=mutation_target_is_current,
             ),
             log=log,
             active_guild_revocation_ids=(

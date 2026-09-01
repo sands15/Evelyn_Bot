@@ -20,6 +20,10 @@ from evelyn_core.main_llm_runtime import (  # noqa: E402
     ask_llm_once_from_runtime,
     task_loop_completed_evidence,
 )
+from evelyn_core.task_grounded_draft_runtime import (  # noqa: E402
+    GROUNDED_DRAFT_SCHEMA,
+    grounded_evidence_fragments,
+)
 
 
 class AskLlmOnceRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -509,6 +513,83 @@ class AskLlmOnceRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.execute_calls, [])
         self.assertEqual(self.payloads, [])
         self.assertNotEqual(result, "display:작업 완료")
+
+    async def test_grounded_draft_is_reviewable_terminal_without_main(self) -> None:
+        self.route_decision.route = "task_executor"
+        task_id = "task-main-grounded"
+        source_body = "PRIVATE_MAIN_GROUNDED_SOURCE_BODY_SENTINEL"
+        encoded = source_body.encode("utf-8")
+        observation = {
+            "step": 1,
+            "tool": "workspace_read",
+            "verified": True,
+            "outcome": "success",
+            "code": "workspace_read_completed",
+            "summary": "verified read",
+            "evidence": json.dumps(
+                {
+                    "path": "docs/source.md",
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                    "bytes": len(encoded),
+                    "offset": 0,
+                    "length": len(encoded),
+                    "nextOffset": len(encoded),
+                    "eof": True,
+                    "content": source_body,
+                    "truncated": False,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        fragment = grounded_evidence_fragments(task_id, [observation])[0]
+        claim = "현재 실행 근거에 연결된 검토 대상 주장이다."
+        self.skill_answer = json.dumps(
+            {
+                "schema": "evelyn.task-loop.v1",
+                "taskId": task_id,
+                "status": "grounded_draft_ready",
+                "code": "grounded_draft_ready",
+                "summary": "reviewable draft",
+                "stepCount": 1,
+                "modelCallCount": 2,
+                "approvalTool": "",
+                "observations": [observation],
+                "groundedDraft": {
+                    "schema": GROUNDED_DRAFT_SCHEMA,
+                    "taskId": task_id,
+                    "kind": "summarize",
+                    "sections": [
+                        {
+                            "title": "핵심",
+                            "claims": [
+                                {
+                                    "text": claim,
+                                    "stepId": fragment.step_id,
+                                    "evidenceRef": fragment.evidence_ref,
+                                }
+                            ],
+                        }
+                    ],
+                    "semanticVerified": False,
+                    "humanReviewRequired": True,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        result = await ask_llm_once_from_runtime(
+            "/작업 docs/source.md 내용을 요약해줘",
+            deps=self.build_deps(),
+        )
+
+        self.assertIn(claim, result)
+        self.assertIn("docs/source.md", result)
+        self.assertNotIn(source_body, result)
+        self.assertIn("사람의 검토", result)
+        self.assertEqual(self.execute_calls, [])
+        self.assertEqual(self.payloads, [])
 
     async def test_completed_workspace_mutation_uses_bounded_outcome_without_main(self) -> None:
         self.route_decision.route = "task_executor"

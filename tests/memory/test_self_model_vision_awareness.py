@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import sys
 import time
 import unittest
@@ -21,7 +22,9 @@ from evelyn_core.self_model import (
     build_self_judgment,
     ensure_idle_activity,
     ensure_self_identity_profile,
+    load_self_state,
     record_self_identity_turn,
+    reset_persona_state_for_deletion,
     render_self_judgment_context,
     render_self_state_context,
     select_self_impulse,
@@ -48,6 +51,34 @@ class DummyVisionPolicy:
 
 
 class SelfModelVisionAwarenessTests(unittest.TestCase):
+    def test_persona_deletion_resets_file_and_process_without_profile(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "self.json"
+            profile_path = root / "profile.md"
+            profile_path.write_text("reviewed profile", encoding="utf-8")
+            state_path.write_text(
+                '{"mood":"PRIVATE_MOOD","last_observation":"PRIVATE"}',
+                encoding="utf-8",
+            )
+            process_state = EvelynSelfState(
+                mood="PRIVATE_MOOD",
+                idle_activity_label="PRIVATE_LABEL",
+                last_vision_fingerprint="PRIVATE_FINGERPRINT",
+            )
+
+            result = reset_persona_state_for_deletion(
+                has_targets=True,
+                state_path=state_path,
+                process_states=(process_state,),
+            )
+
+            self.assertEqual(result, (2, 0, 0))
+            self.assertEqual(load_self_state(state_path).mood, "calm")
+            self.assertEqual(process_state.idle_activity_label, "")
+            self.assertNotIn("PRIVATE", state_path.read_text(encoding="utf-8"))
+            self.assertEqual(profile_path.read_text(encoding="utf-8"), "reviewed profile")
+
     def test_vision_impulse_is_gated_by_runtime_activity(self) -> None:
         state = EvelynSelfState(curiosity=0.8, restraint=0.2)
 
@@ -158,12 +189,16 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
             self.assertIn("Evelyn Identity Profile", profile)
             self.assertTrue(profile_path.exists())
 
-            decision = record_self_identity_turn(
-                "말투가 아직 친근하지 않아. ~할게도 줄였으면 좋겠어.",
-                "응, 바로 고쳐볼게.",
-                source="test",
-                queue_path=queue_path,
-            )
+            with patch.dict(
+                os.environ,
+                {"EVELYN_CONVERSATION_ARCHIVE_ENABLED": "false"},
+            ):
+                decision = record_self_identity_turn(
+                    "말투가 아직 친근하지 않아. ~할게도 줄였으면 좋겠어.",
+                    "응, 바로 고쳐볼게.",
+                    source="test",
+                    queue_path=queue_path,
+                )
             self.assertTrue(decision["recorded"])
             queue_text = queue_path.read_text(encoding="utf-8")
             self.assertIn("tone_feedback", queue_text)
@@ -213,6 +248,29 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
             },
         )
         self.assertNotIn(private_error, repr(decision))
+
+    def test_private_archive_disables_legacy_identity_review_queue(self) -> None:
+        with TemporaryDirectory() as tmp:
+            queue_path = Path(tmp) / "identity_queue.jsonl"
+            with patch.dict(
+                os.environ,
+                {"EVELYN_CONVERSATION_ARCHIVE_ENABLED": "true"},
+            ):
+                decision = record_self_identity_turn(
+                    "말투를 더 자연스럽게 바꿔줘.",
+                    "알겠어.",
+                    source="test",
+                    queue_path=queue_path,
+                )
+
+            self.assertEqual(
+                decision,
+                {
+                    "recorded": False,
+                    "reason": "conversation_archive_enabled_legacy_queue_disabled",
+                },
+            )
+            self.assertFalse(queue_path.exists())
 
     def test_self_judgment_detects_identity_and_stance_topic(self) -> None:
         state = EvelynSelfState(mood="curious", curiosity=0.7, restraint=0.35)

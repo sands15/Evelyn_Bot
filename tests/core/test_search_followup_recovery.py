@@ -429,6 +429,276 @@ class SearchFollowupRecoveryJournalTests(unittest.TestCase):
         self.assertEqual(journal.pending(), [])
         self.assertEqual(self.journal().pending(), [])
 
+    def test_mutation_callback_keeps_legacy_none_and_blocks_begin(
+        self,
+    ) -> None:
+        targets: list[dict[str, object]] = []
+        journal = SearchFollowupRecoveryJournal(
+            path=self.path,
+            wall_time=lambda: 1000.0,
+            intent_id_factory=lambda: next(self.ids),
+            mutation_target_is_current=lambda **target: (
+                targets.append(target) or False
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^search_followup_target_retired$",
+        ):
+            journal.begin(
+                guild_id=7,
+                session_key="guild:7:text:8:user:9",
+                source="text",
+                turn_id=None,
+                room_key="text:8",
+                person_key="user:9",
+                session_memory_key=None,
+                channel_id=8,
+                reply_to_message_id=10,
+                request_user_text="질문",
+                request_answer_text="약속",
+                query="검색어",
+                continuity_generation=4,
+            )
+
+        self.assertEqual(
+            targets,
+            [
+                {
+                    "turn_id": None,
+                    "delivery_turn_id": None,
+                    "session_key": "guild:7:text:8:user:9",
+                    "session_memory_key": None,
+                }
+            ],
+        )
+        self.assertEqual(journal.pending(), [])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(journal.head_path.exists())
+
+    def test_mutation_callback_exception_blocks_update_before_memory_or_disk(
+        self,
+    ) -> None:
+        targets: list[dict[str, object]] = []
+        rejecting = False
+
+        def current(**target):
+            targets.append(target)
+            if rejecting:
+                raise OSError("callback unavailable")
+            return True
+
+        journal = SearchFollowupRecoveryJournal(
+            path=self.path,
+            wall_time=lambda: 1000.0,
+            intent_id_factory=lambda: next(self.ids),
+            mutation_target_is_current=current,
+        )
+        intent_id = self.begin(journal)
+        before_entries = journal.pending()
+        before_journal = self.path.read_bytes()
+        before_head = journal.head_path.read_bytes()
+        rejecting = True
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^search_followup_target_retired$",
+        ):
+            journal.begin_delivery_prepare(
+                intent_id,
+                answer="민감한 결과",
+                display_text="민감한 결과",
+                delivery_turn_id="turn-delivery-1",
+            )
+
+        self.assertEqual(
+            targets[-1],
+            {
+                "turn_id": "turn-1",
+                "delivery_turn_id": "turn-delivery-1",
+                "session_key": "guild:7:text:8:user:9",
+                "session_memory_key": "guild:7:text:8:user:9",
+            },
+        )
+        self.assertEqual(journal.pending(), before_entries)
+        self.assertEqual(self.path.read_bytes(), before_journal)
+        self.assertEqual(journal.head_path.read_bytes(), before_head)
+
+    def test_false_mutation_callback_blocks_terminal_without_side_effects(
+        self,
+    ) -> None:
+        current = True
+        journal = SearchFollowupRecoveryJournal(
+            path=self.path,
+            wall_time=lambda: 1000.0,
+            intent_id_factory=lambda: next(self.ids),
+            mutation_target_is_current=lambda **_target: current,
+        )
+        intent_id = self.begin(journal)
+        self.assertTrue(journal.claim_recovery(intent_id))
+        before_entries = journal.pending()
+        before_claims = set(journal._recovery_claims)
+        before_journal = self.path.read_bytes()
+        before_head = journal.head_path.read_bytes()
+        current = False
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^search_followup_target_retired$",
+        ):
+            journal.complete(intent_id)
+
+        self.assertEqual(journal.pending(), before_entries)
+        self.assertEqual(journal._recovery_claims, before_claims)
+        self.assertEqual(self.path.read_bytes(), before_journal)
+        self.assertEqual(journal.head_path.read_bytes(), before_head)
+
+    def test_exact_lineage_purge_bypasses_mutation_callback(self) -> None:
+        current = True
+        callback_calls = 0
+
+        def target_is_current(**_target):
+            nonlocal callback_calls
+            callback_calls += 1
+            return current
+
+        journal = SearchFollowupRecoveryJournal(
+            path=self.path,
+            wall_time=lambda: 1000.0,
+            intent_id_factory=lambda: next(self.ids),
+            mutation_target_is_current=target_is_current,
+        )
+        self.begin(journal)
+        calls_before_purge = callback_calls
+        current = False
+
+        result = journal.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-1",
+            match_session=lambda _value: False,
+            full_user_delete=False,
+        )
+
+        self.assertEqual(result["removedCount"], 1)
+        self.assertEqual(result["remainingCopies"], 0)
+        self.assertEqual(callback_calls, calls_before_purge)
+        self.assertEqual(journal.pending(), [])
+
+    def test_exact_lineage_purge_removes_private_row_and_claim(self) -> None:
+        journal = self.journal()
+        target = self.begin(journal)
+        journal.begin_delivery_prepare(
+            target,
+            answer="삭제할 비공개 준비 답변",
+            display_text="삭제할 비공개 준비 답변",
+            delivery_turn_id="turn-delivery-1",
+        )
+        self.assertTrue(journal.claim_recovery(target))
+        survivor = journal.begin(
+            guild_id=8,
+            session_key="guild:8:text:9:user:10",
+            source="text",
+            turn_id="turn-2",
+            room_key="text:9",
+            person_key="user:10",
+            session_memory_key="guild:8:text:9:user:10",
+            channel_id=9,
+            reply_to_message_id=11,
+            request_user_text="보존할 질문",
+            request_answer_text="보존할 약속",
+            query="보존할 검색어",
+            continuity_generation=4,
+        )
+        assert survivor is not None
+
+        result = journal.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-1",
+            match_session=lambda value: value
+            == "guild:7:text:8:user:9",
+            full_user_delete=False,
+        )
+        recalled = journal.negative_recall_exact_lineage(
+            match_turn=lambda value: value == "turn-1",
+            match_session=lambda value: value
+            == "guild:7:text:8:user:9",
+            full_user_delete=False,
+        )
+        restarted = self.journal()
+
+        self.assertEqual(result["removedCount"], 1)
+        self.assertTrue(result["contentFree"])
+        self.assertEqual(recalled["remainingCopies"], 0)
+        self.assertNotIn(target, journal._recovery_claims)
+        self.assertNotIn("삭제할 비공개 준비 답변", self.path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [row["intentId"] for row in restarted.pending()],
+            [survivor],
+        )
+
+    def test_exact_lineage_session_only_row_requires_full_delete(self) -> None:
+        journal = self.journal()
+        intent_id = journal.begin(
+            guild_id=7,
+            session_key="guild:7:text:8:user:9",
+            source="text",
+            turn_id=None,
+            room_key="text:8",
+            person_key="user:9",
+            session_memory_key="guild:7:text:8:user:9",
+            channel_id=8,
+            reply_to_message_id=10,
+            request_user_text="민감한 질문",
+            request_answer_text="찾아볼게",
+            query="민감한 검색어",
+            continuity_generation=4,
+        )
+        assert intent_id is not None
+        before = self.path.read_bytes()
+
+        bounded = journal.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value
+            == "guild:7:text:8:user:9",
+            full_user_delete=False,
+        )
+        after_bounded = self.path.read_bytes()
+        full = journal.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value
+            == "guild:7:text:8:user:9",
+            full_user_delete=True,
+        )
+
+        self.assertEqual(bounded["manualReviewCount"], 1)
+        self.assertEqual(bounded["remainingCopies"], 1)
+        self.assertEqual(after_bounded, before)
+        self.assertEqual(full["removedCount"], 1)
+        self.assertEqual(journal.pending(), [])
+
+    def test_exact_lineage_head_mismatch_fails_without_mutation(self) -> None:
+        journal = self.journal()
+        self.begin(journal)
+        head = json.loads(
+            journal.head_path.read_text(encoding="utf-8")
+        )
+        head["journalHash"] = "0" * 64
+        journal.head_path.write_text(
+            json.dumps(head, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        before = self.path.read_bytes()
+        in_memory_before = journal.pending()
+
+        result = journal.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-1",
+            match_session=lambda _value: False,
+            full_user_delete=False,
+        )
+
+        self.assertEqual(result["manualReviewCount"], 1)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(journal.pending(), in_memory_before)
+
     def test_guild_reset_write_failure_fences_then_retries_exact_target(
         self,
     ) -> None:

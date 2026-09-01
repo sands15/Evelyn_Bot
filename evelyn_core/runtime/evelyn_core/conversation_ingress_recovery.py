@@ -348,6 +348,32 @@ def _clone_entries(
     return {key: dict(value) for key, value in entries.items()}
 
 
+def _exact_lineage_counts(
+    *,
+    removed: int = 0,
+    remaining: int = 0,
+    manual: int = 0,
+) -> dict[str, Any]:
+    """Return a reusable, content-free result for both logical sinks."""
+
+    return {
+        "removedCount": max(0, int(removed)),
+        "remainingCopies": max(0, int(remaining)),
+        "manualReviewCount": max(0, int(manual)),
+        "contentFree": True,
+    }
+
+
+def _exact_selector_matches(
+    selector: Callable[[str], bool],
+    value: str,
+) -> bool:
+    matched = selector(value)
+    if type(matched) is not bool:
+        raise TypeError("conversation_ingress_lineage_selector_invalid")
+    return matched
+
+
 def _logical_entry_updated_at(
     entry: dict[str, Any],
     now: float,
@@ -387,6 +413,7 @@ class ConversationIngressRecoveryJournal:
         artifact_deadline_sec: float = (
             DEFAULT_INGRESS_ARTIFACT_DEADLINE_SEC
         ),
+        mutation_target_is_current: Callable[..., bool] | None = None,
     ) -> None:
         self.path = Path(path)
         self.head_path = Path(
@@ -438,6 +465,7 @@ class ConversationIngressRecoveryJournal:
         self.turn_id_factory = turn_id_factory or (
             lambda: f"ingress-{uuid.uuid4().hex}"
         )
+        self.mutation_target_is_current = mutation_target_is_current
         self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
         self._generation = 0
@@ -786,11 +814,33 @@ class ConversationIngressRecoveryJournal:
         return artifact_target_allowed(path)
 
     def _write(self) -> None:
+        self._require_mutation_targets_current()
         with durable_artifact_process_scope(
             self.artifact_process,
             timeout_sec=self.artifact_deadline_sec,
         ):
             self._write_scoped()
+
+    def _require_mutation_targets_current(self) -> None:
+        callback = self.mutation_target_is_current
+        if callback is None:
+            return
+        for entry in self._entries.values():
+            scope = str(entry["scope"])
+            try:
+                current = callback(
+                    turn_id=str(entry["turnId"]),
+                    scope=scope,
+                    session_key=scope,
+                    surface=str(entry["surface"]),
+                    source_delivery_id=str(entry["sourceDeliveryId"]),
+                ) is True
+            except Exception:
+                current = False
+            if not current:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_target_retired"
+                )
 
     def _write_scoped(self) -> None:
         self._require_ready()
@@ -956,6 +1006,161 @@ class ConversationIngressRecoveryJournal:
             self._last_error_code = (
                 "conversation_ingress_recovery_write_failed"
             )
+
+    def _fresh_exact_lineage_entries(
+        self,
+    ) -> dict[str, dict[str, Any]]:
+        """Read the authoritative journal without repairing either chain file."""
+
+        head = self._load_head()
+        raw_text = read_bounded_text(
+            self.path,
+            maximum_bytes=self.max_bytes,
+            missing_ok=True,
+        )
+        if raw_text is None:
+            if head is not None or self._generation != 0 or self._entries:
+                raise ConversationIngressRecoveryError(
+                    "conversation_ingress_exact_lineage_state_mismatch"
+                )
+            return {}
+        payload = _strict_json_loads(raw_text)
+        entries, generation, _previous_hash, journal_hash = (
+            self._validated_payload(payload)
+        )
+        if (
+            head is None
+            or generation != int(head["generation"])
+            or journal_hash != str(head["journalHash"])
+            or generation != self._generation
+            or journal_hash != self._journal_hash
+            or entries != self._entries
+        ):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_exact_lineage_state_mismatch"
+            )
+        return entries
+
+    @staticmethod
+    def _exact_lineage_targets(
+        entries: dict[str, dict[str, Any]],
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> tuple[set[str], int]:
+        targets: set[str] = set()
+        incomplete = 0
+        for entry_id, entry in entries.items():
+            scope = str(entry["scope"])
+            turn_id = str(entry["turnId"])
+            if full_user_delete:
+                if _exact_selector_matches(match_session, scope):
+                    targets.add(entry_id)
+                continue
+            if turn_id:
+                if _exact_selector_matches(match_turn, turn_id):
+                    targets.add(entry_id)
+            elif _exact_selector_matches(match_session, scope):
+                incomplete += 1
+        return targets, incomplete
+
+    def negative_recall_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Freshly count exact target rows without exposing stored content."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError(
+                "conversation_ingress_lineage_selector_invalid"
+            )
+        with self._lock:
+            with durable_artifact_process_scope(
+                self.artifact_process,
+                timeout_sec=self.artifact_deadline_sec,
+            ):
+                try:
+                    entries = self._fresh_exact_lineage_entries()
+                    targets, incomplete = self._exact_lineage_targets(
+                        entries,
+                        match_turn=match_turn,
+                        match_session=match_session,
+                        full_user_delete=full_user_delete,
+                    )
+                except Exception:
+                    return _exact_lineage_counts(manual=1)
+                return _exact_lineage_counts(
+                    remaining=len(targets) + incomplete,
+                    manual=1 if incomplete else 0,
+                )
+
+    def purge_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Atomically remove only rows selected by exact raw lineage."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError(
+                "conversation_ingress_lineage_selector_invalid"
+            )
+        with self._lock:
+            with durable_artifact_process_scope(
+                self.artifact_process,
+                timeout_sec=self.artifact_deadline_sec,
+            ):
+                try:
+                    entries = self._fresh_exact_lineage_entries()
+                    targets, incomplete = self._exact_lineage_targets(
+                        entries,
+                        match_turn=match_turn,
+                        match_session=match_session,
+                        full_user_delete=full_user_delete,
+                    )
+                except Exception:
+                    return _exact_lineage_counts(manual=1)
+                if incomplete:
+                    return _exact_lineage_counts(
+                        remaining=len(targets) + incomplete,
+                        manual=1,
+                    )
+                if not targets:
+                    return _exact_lineage_counts()
+                before = _clone_entries(self._entries)
+                for entry_id in targets:
+                    self._entries.pop(entry_id, None)
+                try:
+                    self._write_scoped()
+                    fresh = self._fresh_exact_lineage_entries()
+                    remaining, incomplete = self._exact_lineage_targets(
+                        fresh,
+                        match_turn=match_turn,
+                        match_session=match_session,
+                        full_user_delete=full_user_delete,
+                    )
+                except Exception:
+                    self._entries = before
+                    return _exact_lineage_counts(manual=1)
+                return _exact_lineage_counts(
+                    removed=len(targets),
+                    remaining=len(remaining) + incomplete,
+                    manual=1 if incomplete else 0,
+                )
 
     def _recover_after_restart(self) -> None:
         now = self._now()

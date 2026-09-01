@@ -62,6 +62,28 @@ class FastTaskLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/작업 <목표>", commands)
         self.assertIn("/작업취소 <task-id>", commands)
 
+    async def test_direct_api_task_has_no_local_principal_authority(self) -> None:
+        fast_control_api.BACKGROUND_ACTION_HANDLERS.clear()
+        fast_control_api.register_builtin_background_action_handlers()
+        handler = next(
+            item
+            for item in fast_control_api.BACKGROUND_ACTION_HANDLERS
+            if item["kind"] == "iterative_task"
+        )
+        loop = AsyncMock()
+
+        with patch.object(fast_control_api, "run_default_task_loop", loop):
+            with self.assertRaisesRegex(
+                FastActionExecutionError,
+                "task_principal_unverified",
+            ):
+                await handler["runner"](
+                    "/작업 런타임 상태를 확인해줘",
+                    "direct_api",
+                )
+
+        loop.assert_not_awaited()
+
     async def test_completed_read_only_task_uses_typed_receipt_without_main_finalizer(self) -> None:
         fast_control_api.BACKGROUND_ACTION_HANDLERS.clear()
         fast_control_api.register_builtin_background_action_handlers()
@@ -112,6 +134,8 @@ class FastTaskLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         loop.assert_awaited_once_with(
             "런타임 상태를 확인해줘",
             source="control_page",
+            principal_token=fast_control_api._FAST_CONTROL_LOCAL_PRINCIPAL_TOKEN,
+            skill_origin_class="internal",
         )
         finalizer.assert_not_awaited()
         self.assertIn("overallState=down", reply)
@@ -656,6 +680,11 @@ class FastTaskLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(background.done())
             self.assertEqual(captured["task_id"], task.task_id)
             self.assertIs(
+                captured["principal_token"],
+                fast_control_api._FAST_CONTROL_LOCAL_PRINCIPAL_TOKEN,
+            )
+            self.assertEqual(captured["skill_origin_class"], "internal")
+            self.assertIs(
                 captured["request_approval"].__self__,
                 fast_control_api.TASK_APPROVAL_MANAGER,
             )
@@ -663,6 +692,11 @@ class FastTaskLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await background
 
         self.assertEqual(task.status, "completed")
+        public_task = task.to_dict()["taskRecord"]
+        self.assertEqual(public_task["taskId"], task.task_id)
+        self.assertTrue(public_task["processLocal"])
+        self.assertFalse(public_task["durable"])
+        self.assertNotIn("evidence", json.dumps(public_task))
 
     async def test_launched_invalid_completed_receipt_finishes_failed(self) -> None:
         fast_control_api.BACKGROUND_ACTION_HANDLERS.clear()
@@ -707,6 +741,7 @@ class FastTaskLoopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.status, "failed")
         self.assertEqual(task.error, "task_result_invalid")
         self.assertEqual(task.final_reply, TASK_LOOP_INVALID_RESULT)
+        self.assertNotIn("taskRecord", task.to_dict())
 
     async def test_task_command_bypasses_generic_unknown_slash_reply(self) -> None:
         self.assertIsNone(

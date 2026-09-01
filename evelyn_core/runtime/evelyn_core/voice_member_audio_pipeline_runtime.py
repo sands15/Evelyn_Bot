@@ -50,6 +50,8 @@ class VoiceMemberAudioPipelineDeps:
     transcribe_completed_audio: Callable[..., Awaitable[Any]] | None = None
     reserve_main_foreground: Callable[..., Awaitable[Any]] | None = None
     cancel_main_foreground: Callable[..., Awaitable[Any]] | None = None
+    authorize_archive_capture: Callable[..., Awaitable[bool]] | None = None
+    archive_final_transcript: Callable[..., Awaitable[Any]] | None = None
 
 
 async def _try_reserve_main_foreground(
@@ -181,6 +183,25 @@ async def _process_member_audio_pipeline_from_runtime(
         reject_unbound_when_active=True,
     ):
         return
+    if deps.authorize_archive_capture is not None:
+        voice_state = getattr(member, "voice", None)
+        voice_channel = getattr(voice_state, "channel", None)
+        voice_channel_id = getattr(voice_channel, "id", None)
+        if voice_channel_id is None:
+            return
+        try:
+            archive_capture_allowed = await deps.authorize_archive_capture(
+                guild_id=int(getattr(getattr(member, "guild", None), "id")),
+                channel_id=int(voice_channel_id),
+                user_id=int(member.id),
+                voice_ingress_epoch=int(voice_ingress_epoch),
+            )
+        except Exception:
+            # The archive is an admission boundary.  When enabled, an
+            # unavailable/ambiguous authorization cannot fall back to STT.
+            return
+        if archive_capture_allowed is not True:
+            return
     ingress = deps.prepare_audio_ingress(
         member,
         pcm_bytes,
@@ -390,6 +411,38 @@ async def _process_member_audio_pipeline_from_runtime(
         metrics=metrics,
         deps=deps.build_transcript_finalize_deps(),
     )
+    if deps.archive_final_transcript is not None:
+        final_text = str(
+            getattr(transcript_finalization.transcript_result, "final_text", "")
+            or ""
+        ).strip()
+        if final_text:
+            voice_channel = getattr(getattr(member, "voice", None), "channel", None)
+            voice_channel_id = getattr(voice_channel, "id", None)
+            if voice_channel_id is None:
+                return
+            ended_at = time.time()
+            try:
+                await deps.archive_final_transcript(
+                    guild_id=int(guild_id),
+                    channel_id=int(voice_channel_id),
+                    user_id=int(member.id),
+                    owner_name=str(
+                        getattr(member, "display_name", None)
+                        or getattr(member, "global_name", None)
+                        or getattr(member, "name", None)
+                        or member.id
+                    ),
+                    turn_id=str(turn_id),
+                    segment_id=int(segment_id),
+                    started_at=max(0.0, ended_at - max(0.0, float(duration_sec))),
+                    ended_at=ended_at,
+                    text=final_text,
+                )
+            except Exception:
+                # Do not run the LLM or create downstream state when the
+                # canonical archive cannot durably accept the final STT.
+                return
 
     session_gate = deps.run_session_gate(
         member=member,

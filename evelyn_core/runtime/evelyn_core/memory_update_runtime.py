@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, MutableMapping
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,69 @@ class MemoryUpdateRuntimeDeps:
     update_long_term_memory: Callable[..., Any]
     update_cognitive_state: Callable[..., Any]
     log: Callable[..., Any] = print
+    archive_target_is_current: Callable[..., bool] | None = None
+    archive_task_targets: MutableMapping[
+        asyncio.Task, dict[str, Any]
+    ] | None = None
+
+
+def _archive_target(
+    *,
+    guild_id: int,
+    turn_scope: Any,
+    session_key: str | None,
+    session_memory_key: str | None,
+    person_key: str | None,
+) -> dict[str, Any]:
+    return {
+        "guild_id": int(guild_id),
+        "turn_id": getattr(turn_scope, "turn_id", None),
+        "session_key": session_key,
+        "session_memory_key": session_memory_key,
+        "person_key": person_key,
+    }
+
+
+def _archive_target_current(
+    target: dict[str, Any],
+    *,
+    deps: MemoryUpdateRuntimeDeps,
+) -> bool:
+    callback = getattr(deps, "archive_target_is_current", None)
+    if callback is None:
+        return True
+    try:
+        return callback(**target) is True
+    except Exception:
+        return False
+
+
+def _track_archive_task(
+    task: asyncio.Task,
+    target: dict[str, Any],
+    *,
+    deps: MemoryUpdateRuntimeDeps,
+) -> None:
+    registry = getattr(deps, "archive_task_targets", None)
+    if registry is None:
+        return
+    registry[task] = dict(target)
+
+    def release(completed: asyncio.Task) -> None:
+        if registry.get(completed) == target:
+            registry.pop(completed, None)
+
+    task.add_done_callback(release)
+
+
+def _archive_target_retired_payload() -> dict[str, Any]:
+    return {
+        "decision": "skipped",
+        "reason": "archive_target_retired",
+        "raw_transcript_written": False,
+        "vault_mirrored": False,
+        "writebehind": "skipped",
+    }
 
 
 def _track_memory_task_drain(
@@ -70,6 +133,15 @@ def schedule_memory_update_from_runtime(
     turn_scope: Any = None,
     runtime_mode: str | None = None,
 ) -> dict[str, Any]:
+    archive_target = _archive_target(
+        guild_id=guild_id,
+        turn_scope=turn_scope,
+        session_key=session_key,
+        session_memory_key=session_memory_key,
+        person_key=person_key,
+    )
+    if not _archive_target_current(archive_target, deps=deps):
+        return _archive_target_retired_payload()
     turn_write = deps.write_memory_turn_records(
         guild_id,
         user_text,
@@ -162,6 +234,8 @@ def schedule_memory_update_from_runtime(
                 await asyncio.sleep(1.5)
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
+                if not _archive_target_current(archive_target, deps=deps):
+                    return
                 await deps.run_memory_writebehind_steps(
                     decision_payload,
                     [
@@ -201,10 +275,17 @@ def schedule_memory_update_from_runtime(
             log=deps.log,
             writebehind_mode=schedule_plan.writebehind_mode,
         )
-        deps.background_memory_tasks[memory_task_key] = deps.create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
+        task = deps.create_turn_scoped_task(
+            _batched_memory_refresh(),
+            turn_scope=turn_scope,
+        )
+        deps.background_memory_tasks[memory_task_key] = task
+        _track_archive_task(task, archive_target, deps=deps)
         return decision_payload
 
     async def _memory_writebehind() -> None:
+        if not _archive_target_current(archive_target, deps=deps):
+            return
         await deps.run_memory_writebehind_steps(
             decision_payload,
             [
@@ -244,6 +325,7 @@ def schedule_memory_update_from_runtime(
         _memory_writebehind(),
         turn_scope=turn_scope,
     )
+    _track_archive_task(task, archive_target, deps=deps)
     memory_task_key = (
         f"guild:{guild_id}:memory-writebehind:normal:{id(task)}"
     )

@@ -439,6 +439,7 @@ class MinecraftWorldLeaseRemote:
         source: str,
         goal: str | None = None,
         ttl_sec: float | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         lease_id = ""
         payload: dict[str, Any] = {
@@ -450,6 +451,8 @@ class MinecraftWorldLeaseRemote:
             payload["goal"] = str(goal)
         if ttl_sec is not None:
             payload["ttlSec"] = float(ttl_sec)
+        if parent_record_ids:
+            payload["parentRecordIds"] = list(parent_record_ids)
         try:
             response = await self._call(
                 "POST",
@@ -608,6 +611,7 @@ class MinecraftWorldLeaseRemote:
         guild_id: int,
         *,
         expected_lease_id: str | None = None,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"guildId": int(guild_id)}
         if expected_lease_id is not None:
@@ -620,6 +624,8 @@ class MinecraftWorldLeaseRemote:
                     "minecraft_world_disconnect_lease_invalid"
                 )
             payload["leaseId"] = expected_lease_id
+        if parent_record_ids:
+            payload["parentRecordIds"] = list(parent_record_ids)
         response = await self._call(
             "POST",
             "/internal/minecraft-world-lease/disconnect",
@@ -639,6 +645,8 @@ class MinecraftWorldLeaseRemote:
         self,
         guild_id: int,
         goal: str,
+        *,
+        parent_record_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         status = self.status()
         lease = status.get("lease")
@@ -654,14 +662,17 @@ class MinecraftWorldLeaseRemote:
                 "minecraft_world_authorization_required"
             )
         try:
+            payload = {
+                "guildId": int(guild_id),
+                "goal": str(goal),
+                "leaseId": lease_id,
+            }
+            if parent_record_ids:
+                payload["parentRecordIds"] = list(parent_record_ids)
             response = await self._call(
                 "POST",
                 "/internal/minecraft-world-lease/goal",
-                payload={
-                    "guildId": int(guild_id),
-                    "goal": str(goal),
-                    "leaseId": lease_id,
-                },
+                payload=payload,
                 mutation=True,
             )
             result = response.get("result")

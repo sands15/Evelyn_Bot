@@ -86,6 +86,7 @@ class _ActiveLocalTtsBinding:
     turn_id: str | None
     session_key: str | None
     metrics: dict[str, Any] | None
+    target: Any | None = None
     stream: Any | None = None
     worker: asyncio.Task[int] | None = None
     stop_requested: bool = False
@@ -93,6 +94,7 @@ class _ActiveLocalTtsBinding:
     playback_started: bool = False
     worker_terminal: bool = False
     qualified_interrupt_committed: bool = False
+    cleanup_succeeded: bool | None = None
 
 
 class LocalTtsPlaybackManager:
@@ -103,6 +105,7 @@ class LocalTtsPlaybackManager:
         device: str | int | None = None,
         log: Callable[[str], None] | None = None,
         stop_wait_timeout_sec: float = 1.0,
+        target_is_current: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         self.enabled = bool(enabled)
         self.device = normalize_output_device(device)
@@ -120,6 +123,27 @@ class LocalTtsPlaybackManager:
         self._active_binding: _ActiveLocalTtsBinding | None = None
         self._generation = 0
         self._stop_wait_timeout_sec = max(0.01, float(stop_wait_timeout_sec))
+        self._target_is_current = target_is_current
+
+    def _playback_target_is_current(
+        self,
+        *,
+        turn_id: str | None,
+        session_key: str | None,
+        target: Any | None,
+    ) -> bool:
+        callback = self._target_is_current
+        if callback is None:
+            return True
+        snapshot = {
+            "target": target,
+            "turn_id": turn_id,
+            "session_key": session_key,
+        }
+        try:
+            return callback(snapshot) is True
+        except Exception:
+            return False
 
     def snapshot(self) -> dict[str, Any]:
         return LocalTtsPlaybackSnapshot(
@@ -160,6 +184,20 @@ class LocalTtsPlaybackManager:
             binding = self._active_binding
             return self._source_context(binding) if binding is not None else None
 
+    @staticmethod
+    def _target_snapshot(binding: _ActiveLocalTtsBinding) -> dict[str, Any]:
+        return {
+            "generation": binding.generation,
+            "target": binding.target,
+            "turn_id": binding.turn_id,
+            "session_key": binding.session_key,
+        }
+
+    def active_target_snapshot(self) -> dict[str, Any] | None:
+        with self._state_lock:
+            binding = self._active_binding
+            return self._target_snapshot(binding) if binding is not None else None
+
     def request_stop(
         self,
         *,
@@ -183,6 +221,9 @@ class LocalTtsPlaybackManager:
         self,
         *,
         reason: str = "interrupt",
+        expected_generation: int | None = None,
+        target_predicate: Callable[[dict[str, Any]], bool] | None = None,
+        timeout_sec: float | None = None,
     ) -> LocalTtsSourceContext | None:
         """Stop one exact binding and return evidence only after clean teardown.
 
@@ -197,12 +238,26 @@ class LocalTtsPlaybackManager:
             worker = binding.worker if binding is not None else None
             playback_started = bool(binding and binding.playback_started)
             worker_terminal = bool(binding and binding.worker_terminal)
+            target_snapshot = (
+                self._target_snapshot(binding) if binding is not None else None
+            )
         if binding is None or worker_terminal:
             return None
+        if expected_generation is not None and generation != expected_generation:
+            return None
+        if target_predicate is not None:
+            try:
+                if target_snapshot is None or target_predicate(target_snapshot) is not True:
+                    return None
+            except Exception:
+                return None
 
         validation_current = self._validation_attempt_is_current(binding)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._stop_wait_timeout_sec
+        deadline = loop.time() + max(
+            0.01,
+            self._stop_wait_timeout_sec if timeout_sec is None else float(timeout_sec),
+        )
         stop_result = await self._request_stop_for_binding_bounded(
             binding,
             reason=reason,
@@ -224,7 +279,7 @@ class LocalTtsPlaybackManager:
             )
         ):
             return None
-        if context is None or worker is None or not controls_ok:
+        if context is None or worker is None:
             return None
 
         remaining = deadline - loop.time()
@@ -251,14 +306,40 @@ class LocalTtsPlaybackManager:
         with self._state_lock:
             stale_generation = self._generation != generation
         if stale_generation or not self._validation_attempt_is_current(binding):
+            self._clear_binding_refs(binding)
             return None
+        result = context if controls_ok else None
         if reason == "qualified_user_audio":
             if not self._commit_qualified_interrupt(
                 binding,
                 stop_acceptance_token=stop_acceptance_token,
             ):
+                self._clear_binding_refs(binding)
                 return None
-        return context
+            result = context
+        return result if self._clear_binding_refs(binding) else None
+
+    async def cleanup_matching_source(
+        self,
+        target_predicate: Callable[[dict[str, Any]], bool],
+        *,
+        timeout_sec: float | None = None,
+    ) -> tuple[int, int]:
+        snapshot = self.active_target_snapshot()
+        if snapshot is None or target_predicate(snapshot) is not True:
+            return 0, 0
+        generation = int(snapshot["generation"])
+        stopped = await self.request_stop_and_wait(
+            reason="privacy_purge",
+            expected_generation=generation,
+            target_predicate=target_predicate,
+            timeout_sec=timeout_sec,
+        )
+        current = self.active_target_snapshot()
+        remaining = int(
+            current is not None and target_predicate(current) is True
+        )
+        return int(stopped is not None and remaining == 0), remaining
 
     async def _request_stop_for_binding_bounded(
         self,
@@ -367,8 +448,16 @@ class LocalTtsPlaybackManager:
         turn_id: str | None = None,
         session_key: str | None = None,
         metrics: dict[str, Any] | None = None,
+        target: Any | None = None,
     ) -> bool:
         if not self.enabled:
+            return False
+        if not self._playback_target_is_current(
+            turn_id=turn_id,
+            session_key=session_key,
+            target=target,
+        ):
+            self._cleanup_source(source)
             return False
         if sd is None:
             self.last_error = "sounddevice import failed"
@@ -378,6 +467,13 @@ class LocalTtsPlaybackManager:
             return False
 
         async with self._lock:
+            if not self._playback_target_is_current(
+                turn_id=turn_id,
+                session_key=session_key,
+                target=target,
+            ):
+                self._cleanup_source(source)
+                return False
             with self._state_lock:
                 stopped_by_turn_lease = bool(
                     isinstance(metrics, dict)
@@ -397,6 +493,7 @@ class LocalTtsPlaybackManager:
                     turn_id=turn_id,
                     session_key=session_key,
                     metrics=metrics,
+                    target=target,
                 )
                 self._active_binding = binding
                 self._current_source = source
@@ -441,15 +538,21 @@ class LocalTtsPlaybackManager:
                 )
                 return False
             finally:
+                cleanup_succeeded = False
                 if cleanup_source:
-                    self._cleanup_source(source)
+                    cleanup_succeeded = self._cleanup_source(source)
                 with self._state_lock:
+                    binding.cleanup_succeeded = cleanup_succeeded
                     if self._active_binding is binding:
                         self.last_finished_at = time.time()
                         self.active = False
                         self._active_binding = None
                         self._current_source = None
                         self._current_stream = None
+                    binding.source = None
+                    binding.stream = None
+                    binding.worker = None
+                    binding.target = None
 
     @staticmethod
     async def _await_worker_termination(worker: asyncio.Task[int]) -> None:
@@ -632,11 +735,35 @@ class LocalTtsPlaybackManager:
         with self._state_lock:
             return self._active_binding is not binding or binding.stop_requested
 
+    def _clear_binding_refs(self, binding: _ActiveLocalTtsBinding) -> bool:
+        cleanup_ok = binding.cleanup_succeeded
+        if binding.source is not None:
+            cleanup_ok = self._cleanup_source(binding.source)
+            binding.cleanup_succeeded = cleanup_ok
+        if cleanup_ok is None:
+            cleanup_ok = False
+        with self._state_lock:
+            if self._active_binding is binding:
+                self.last_finished_at = time.time()
+                self.active = False
+                self._active_binding = None
+                self._current_source = None
+                self._current_stream = None
+            binding.source = None
+            binding.stream = None
+            binding.worker = None
+            binding.target = None
+            binding.turn_id = None
+            binding.session_key = None
+            binding.metrics = None
+        return cleanup_ok is True
+
     @staticmethod
-    def _cleanup_source(source: Any) -> None:
+    def _cleanup_source(source: Any) -> bool:
         cleanup = getattr(source, "cleanup", None)
         if cleanup is not None:
             try:
                 cleanup()
             except Exception:
-                pass
+                return False
+        return True

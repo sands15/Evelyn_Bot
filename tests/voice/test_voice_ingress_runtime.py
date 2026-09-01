@@ -21,6 +21,7 @@ from evelyn_core.voice_ingress_runtime import (  # noqa: E402
     VoiceIngressEntrypointDeps,
     VoiceIngressRuntimeDeps,
     advance_voice_ingress_epoch,
+    cleanup_voice_ingress_targets_from_runtime,
     current_voice_ingress_epoch,
     flush_voice_utterance_buffer_from_runtime,
     process_member_audio_from_runtime,
@@ -119,6 +120,84 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued["enqueued_at"], 100.0)
         self.assertEqual(queued["debug_meta"]["voice_queue_depth_at_enqueue"], 0)
         self.assertEqual(harness.buffers, {})
+
+    async def test_target_cleanup_cancels_handed_off_task_and_rejects_late_item(
+        self,
+    ) -> None:
+        harness = IngressHarness(config=UtteranceAssemblyConfig(enabled=False))
+        registry: dict[asyncio.Task, dict[str, Any]] = {}
+        started = asyncio.Event()
+
+        async def process_member_audio(**kwargs: Any) -> None:
+            started.set()
+            kwargs["release_ingress_worker"]()
+            await asyncio.Event().wait()
+
+        deps = replace(
+            harness.deps(),
+            process_member_audio=process_member_audio,
+            voice_ingress_process_tasks=registry,
+            voice_ingress_target_is_current=lambda item: (
+                item.get("deletion_generation") == 2
+            ),
+        )
+        member = SimpleNamespace(
+            id=42,
+            guild=SimpleNamespace(id=7, voice_client=SimpleNamespace()),
+        )
+        stale = {
+            "session_key": "target",
+            "member": member,
+            "pcm_bytes": b"stale-private-pcm",
+            "debug_meta": {},
+            "voice_ingress_epoch": 0,
+            "deletion_generation": 1,
+        }
+        await schedule_voice_utterance_item_from_runtime(stale, deps=deps)
+        self.assertTrue(harness.queue.empty())
+
+        current = {**stale, "deletion_generation": 2}
+        await schedule_voice_utterance_item_from_runtime(current, deps=deps)
+        worker = asyncio.create_task(voice_ingress_worker_from_runtime(deps=deps))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        self.assertEqual(len(registry), 1)
+
+        removed, remaining = await cleanup_voice_ingress_targets_from_runtime(
+            lambda item: item.get("session_key") == "target",
+            deps=deps,
+            timeout_sec=1.0,
+        )
+        self.assertEqual((removed, remaining), (1, 0))
+        self.assertEqual(registry, {})
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_target_cleanup_preserves_unrelated_queue_and_buffer(self) -> None:
+        harness = IngressHarness()
+        deps = harness.deps()
+        target = {"session_key": "target", "pcm_bytes": b"target"}
+        survivor = {"session_key": "survivor", "pcm_bytes": b"survivor"}
+        await harness.queue.put(target)
+        await harness.queue.put(survivor)
+        harness.buffers.update(
+            {
+                "target": {"base_item": target, "segments": [b"target"]},
+                "survivor": {
+                    "base_item": survivor,
+                    "segments": [b"survivor"],
+                },
+            }
+        )
+
+        removed, remaining = await cleanup_voice_ingress_targets_from_runtime(
+            lambda item: item.get("session_key") == "target",
+            deps=deps,
+        )
+
+        self.assertEqual((removed, remaining), (2, 0))
+        self.assertEqual(set(harness.buffers), {"survivor"})
+        self.assertEqual((await harness.queue.get())["session_key"], "survivor")
 
     async def test_validation_attempts_use_distinct_utterance_buffers(self) -> None:
         base = {

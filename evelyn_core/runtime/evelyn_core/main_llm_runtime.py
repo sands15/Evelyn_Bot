@@ -16,6 +16,13 @@ from .main_inference_contract import (
     main_request_kind_from_payload,
 )
 from .text import clean_text
+from .task_grounded_draft_runtime import (
+    GROUNDED_DRAFT_STATUS,
+    GroundedDraftError,
+    explicit_link_requested,
+    grounded_draft_from_task_payload,
+    render_grounded_draft,
+)
 
 
 SPECIALIST_EVIDENCE_SCHEMA = "evelyn.specialist-evidence.v1"
@@ -86,6 +93,7 @@ _REGISTERED_ROUTE_STATUSES = {
     "awaiting_approval",
     "budget_exhausted",
     "cancelled",
+    GROUNDED_DRAFT_STATUS,
 }
 _TASK_LOOP_TERMINAL_PREFIXES = {
     "failed": "작업을 완료하지 못했어.",
@@ -647,6 +655,21 @@ def task_loop_terminal_outcome(
     if not isinstance(payload, dict) or payload.get("schema") != _TASK_LOOP_EVIDENCE_SCHEMA:
         return None
     status = clean_text(str(payload.get("status") or "failed")).lower()
+    if status == GROUNDED_DRAFT_STATUS:
+        if set(payload) != _TASK_LOOP_EVIDENCE_KEYS | {"groundedDraft"}:
+            return None
+        try:
+            draft, fragments = grounded_draft_from_task_payload(
+                payload,
+                goal=str(goal or ""),
+            )
+        except GroundedDraftError:
+            return None
+        return render_grounded_draft(
+            draft,
+            fragments,
+            include_links=explicit_link_requested(goal),
+        )
     if status == "completed":
         completed_payload = _task_loop_completed_payload(raw, goal=goal)
         if completed_payload is None:
@@ -666,6 +689,27 @@ def task_loop_terminal_outcome(
         parts.append(f"승인 필요 도구: {approval_tool}.")
     parts.append(f"(코드: {code})")
     return " ".join(parts)
+
+
+def task_loop_grounded_draft_evidence(
+    evidence: str,
+    *,
+    goal: str | None = None,
+) -> bool:
+    try:
+        payload = json.loads(str(evidence or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _TASK_LOOP_EVIDENCE_KEYS | {"groundedDraft"}
+    ):
+        return False
+    try:
+        grounded_draft_from_task_payload(payload, goal=str(goal or ""))
+    except GroundedDraftError:
+        return False
+    return True
 
 
 def _bounded_registered_route_evidence(evidence: str) -> tuple[str, str]:

@@ -145,13 +145,18 @@ def _clean_memory_evidence_id(value: object, *, max_chars: int = 120) -> str:
     return cleaned if _MEMORY_EVIDENCE_ID_RE.fullmatch(cleaned) else ""
 
 
-def _clean_memory_evidence_ids(value: object, *, max_items: int = 64) -> list[str]:
+def _clean_memory_evidence_ids(
+    value: object,
+    *,
+    max_items: int | None = 64,
+) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
+    items = value if max_items is None else value[:max_items]
     return list(
         dict.fromkeys(
             cleaned
-            for item in value[:max_items]
+            for item in items
             if (cleaned := _clean_memory_evidence_id(item))
         )
     )
@@ -186,10 +191,13 @@ def write_memory_summary_with_provenance(
             "schema": MEMORY_LEGACY_EVIDENCE_SCHEMA,
             "evidence_id": _clean_memory_evidence_id(evidence_id),
             "evidence_kind": "derived_summary",
-            "source_evidence_ids": _clean_memory_evidence_ids(source_evidence_ids),
+            "source_evidence_ids": _clean_memory_evidence_ids(
+                source_evidence_ids,
+                max_items=None,
+            ),
             "source_turn_ids": _clean_memory_evidence_ids(
                 source_turn_ids,
-                max_items=32,
+                max_items=None,
             ),
             "content_sha256": hashlib.sha256(
                 normalized_summary.encode("utf-8", errors="ignore")
@@ -231,11 +239,12 @@ def read_memory_summary_provenance(
         return {}
     evidence_id = _clean_memory_evidence_id(payload.get("evidence_id"))
     source_evidence_ids = _clean_memory_evidence_ids(
-        payload.get("source_evidence_ids")
+        payload.get("source_evidence_ids"),
+        max_items=None,
     )
     source_turn_ids = _clean_memory_evidence_ids(
         payload.get("source_turn_ids"),
-        max_items=32,
+        max_items=None,
     )
     if not evidence_id or not source_evidence_ids:
         return {}
@@ -433,11 +442,12 @@ def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirro
         evidence_id = _clean_memory_evidence_id(row.get("evidence_id"))
         evidence_kind = clean_text(str(row.get("evidence_kind") or ""))
         source_evidence_ids = _clean_memory_evidence_ids(
-            row.get("source_evidence_ids")
+            row.get("source_evidence_ids"),
+            max_items=None,
         )
         source_turn_ids = _clean_memory_evidence_ids(
             row.get("source_turn_ids"),
-            max_items=32,
+            max_items=None,
         )
         if (
             evidence_id

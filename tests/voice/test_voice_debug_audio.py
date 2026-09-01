@@ -9,6 +9,7 @@ import unittest
 import wave
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
@@ -24,6 +25,7 @@ try:
         enqueue_voice_debug_audio_from_runtime,
         ensure_debug_write_worker_started_from_runtime,
         inventory_voice_debug_bundles,
+        purge_voice_debug_audio_for_turns,
         sanitize_debug_label,
         save_voice_debug_audio_now,
         trim_voice_debug_dir,
@@ -111,7 +113,12 @@ class VoiceDebugAudioTests(unittest.TestCase):
             guild_dir = Path(temp_dir)
             for idx in range(4):
                 old_time = time.time() - (10 - idx)
-                for suffix in ("_raw48k.wav", "_stt16k.wav", ".json"):
+                for suffix in (
+                    "_raw48k.wav",
+                    "_stt16k.wav",
+                    ".pcm",
+                    ".json",
+                ):
                     path = guild_dir / f"{idx}{suffix}"
                     path.write_bytes(b"x")
                     os.utime(path, (old_time, old_time))
@@ -122,8 +129,8 @@ class VoiceDebugAudioTests(unittest.TestCase):
             self.assertEqual(result.candidate_count, 2)
             self.assertEqual(result.deleted_count, 2)
             self.assertEqual(sorted(path.name for path in guild_dir.iterdir()), [
-                "2.json", "2_raw48k.wav", "2_stt16k.wav",
-                "3.json", "3_raw48k.wav", "3_stt16k.wav",
+                "2.json", "2.pcm", "2_raw48k.wav", "2_stt16k.wav",
+                "3.json", "3.pcm", "3_raw48k.wav", "3_stt16k.wav",
             ])
 
     def test_trim_voice_debug_dir_dry_run_applies_age_without_deleting(self) -> None:
@@ -173,6 +180,22 @@ class VoiceDebugAudioTests(unittest.TestCase):
             self.assertEqual(result["candidate_count"], 4)
             self.assertEqual(result["deleted_count"], 0)
             self.assertEqual(len(list(root.rglob("*.json"))), 6)
+
+    def test_inventory_ignores_symlinks_instead_of_owning_their_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            guild_dir = Path(temp_dir)
+            target = guild_dir / "keep.json"
+            target.write_text("{}", encoding="utf-8")
+            link = guild_dir / "alias.json"
+            try:
+                link.symlink_to(target)
+            except OSError:
+                self.skipTest("file symlinks are unavailable")
+
+            bundles = inventory_voice_debug_bundles(guild_dir)
+
+            self.assertEqual([bundle.stem for bundle in bundles], ["keep"])
+            self.assertEqual(bundles[0].paths, (target,))
 
     def test_drop_message_is_stable(self) -> None:
         self.assertEqual(
@@ -244,6 +267,114 @@ class VoiceDebugAudioTests(unittest.TestCase):
         self.assertFalse(dropped)
         self.assertEqual(started, [True])
         self.assertEqual(logs, ["[VOICE DEBUG DROP] speaker=user stage=stage reason=queue_full"])
+
+    def test_archive_mode_blocks_queue_and_direct_debug_writes(self) -> None:
+        class CaptureQueue:
+            def __init__(self) -> None:
+                self.items: list[dict] = []
+
+            def put_nowait(self, item: dict) -> None:
+                self.items.append(item)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            queue = CaptureQueue()
+            started: list[bool] = []
+            logs: list[str] = []
+            with patch.dict(
+                os.environ,
+                {"EVELYN_CONVERSATION_ARCHIVE_ENABLED": "true"},
+            ):
+                admitted = enqueue_voice_debug_audio_from_runtime(
+                    enabled=True,
+                    ensure_worker_started=lambda: started.append(True),
+                    queue=queue,
+                    log=logs.append,
+                    guild_id=1,
+                    speaker="private-speaker",
+                    pcm_bytes=b"12",
+                    audio16k=np.array([0.0], dtype=np.float32),
+                    stage_label="final",
+                )
+                save_voice_debug_audio_now(
+                    project_root=root,
+                    configured_dir="debug_audio",
+                    max_files_per_guild=20,
+                    raw_channels=2,
+                    raw_rate=48000,
+                    stt_rate=16000,
+                    counts={},
+                    stems={},
+                    log=logs.append,
+                    guild_id=1,
+                    speaker="private-speaker",
+                    pcm_bytes=b"12",
+                    audio16k=np.array([0.0], dtype=np.float32),
+                    stage_label="final",
+                )
+
+            self.assertFalse(admitted)
+            self.assertEqual(started, [])
+            self.assertEqual(queue.items, [])
+            self.assertFalse((root / "debug_audio").exists())
+            self.assertEqual(len(logs), 2)
+            self.assertTrue(
+                all("reason=conversation_archive_enabled" in row for row in logs)
+            )
+            self.assertNotIn("private-speaker", " ".join(logs))
+
+    def test_exact_turn_purge_returns_content_free_generation_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            guild_dir = root / "42"
+            guild_dir.mkdir()
+            for stem, turn_id in (
+                ("target", "PRIVATE-turn-target"),
+                ("survivor", "turn-survivor"),
+            ):
+                (guild_dir / f"{stem}_raw48k.wav").write_bytes(b"raw")
+                (guild_dir / f"{stem}_stt16k.wav").write_bytes(b"stt")
+                (guild_dir / f"{stem}.json").write_text(
+                    json.dumps({"turn_id": turn_id}),
+                    encoding="utf-8",
+                )
+
+            receipt = purge_voice_debug_audio_for_turns(
+                root,
+                deletion_generation=9,
+                turn_ids=("PRIVATE-turn-target",),
+                guild_id=42,
+            )
+
+            self.assertTrue(receipt["complete"])
+            self.assertEqual(receipt["deletionGeneration"], 9)
+            self.assertEqual(receipt["matchedCount"], 1)
+            self.assertEqual(receipt["deletedCount"], 1)
+            self.assertFalse((guild_dir / "target.json").exists())
+            self.assertFalse((guild_dir / "target_raw48k.wav").exists())
+            self.assertTrue((guild_dir / "survivor.json").exists())
+            self.assertNotIn(
+                "PRIVATE-turn-target",
+                json.dumps(receipt, ensure_ascii=False),
+            )
+
+    def test_unattributed_debug_bundle_keeps_purge_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            guild_dir = root / "7"
+            guild_dir.mkdir()
+            (guild_dir / "orphan_raw48k.wav").write_bytes(b"raw")
+
+            receipt = purge_voice_debug_audio_for_turns(
+                root,
+                deletion_generation=3,
+                turn_ids=("turn-1",),
+            )
+
+            self.assertFalse(receipt["complete"])
+            self.assertEqual(receipt["status"], "cleanup_pending")
+            self.assertEqual(receipt["unresolvedCount"], 1)
+            self.assertTrue((guild_dir / "orphan_raw48k.wav").exists())
 
 
 @unittest.skipUnless(NUMPY_AVAILABLE, "numpy is required for voice debug audio tests")

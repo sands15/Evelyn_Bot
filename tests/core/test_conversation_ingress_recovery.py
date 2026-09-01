@@ -71,6 +71,7 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
         turn_ids: TurnIds | None = None,
         max_age_sec: float = 60.0,
         max_entries: int = 4,
+        mutation_target_is_current=None,
     ) -> ConversationIngressRecoveryJournal:
         return ConversationIngressRecoveryJournal(
             path=root / "ingress.json",
@@ -78,6 +79,7 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
             turn_id_factory=turn_ids or TurnIds(),
             max_age_sec=max_age_sec,
             max_entries=max_entries,
+            mutation_target_is_current=mutation_target_is_current,
         )
 
     @staticmethod
@@ -156,6 +158,142 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["entries"], [])
         self.assertEqual(head["generation"], 1)
         self.assertEqual(head["journalHash"], payload["journalHash"])
+
+    def test_retired_new_claim_has_no_mutation_or_disk_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            seen: list[dict] = []
+
+            def retired(**target) -> bool:
+                seen.append(target)
+                return False
+
+            journal = self.make_journal(
+                root,
+                mutation_target_is_current=retired,
+            )
+            before = (root / "ingress.json").read_bytes()
+            with (
+                patch.object(ingress_module, "atomic_json_write") as write,
+                self.assertRaisesRegex(
+                    ConversationIngressRecoveryError,
+                    "^conversation_ingress_target_retired$",
+                ),
+            ):
+                self.claim(journal)
+
+            self.assertEqual(write.call_count, 0)
+            self.assertEqual((root / "ingress.json").read_bytes(), before)
+            self.assertEqual(journal.public_status()["entryCount"], 0)
+            self.assertEqual(
+                seen,
+                [
+                    {
+                        "turn_id": "turn-1",
+                        "scope": "guild:1:text:2:user:3",
+                        "session_key": "guild:1:text:2:user:3",
+                        "surface": "discord_text",
+                        "source_delivery_id": "message-1",
+                    }
+                ],
+            )
+
+    def test_currentness_exception_blocks_late_phase_and_restores_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            should_raise = False
+
+            def currentness(**_target) -> bool:
+                if should_raise:
+                    raise RuntimeError("private callback failure")
+                return True
+
+            journal = self.make_journal(
+                root,
+                mutation_target_is_current=currentness,
+            )
+            claimed = self.claim(journal)
+            before = (root / "ingress.json").read_bytes()
+            should_raise = True
+            with (
+                patch.object(ingress_module, "atomic_json_write") as write,
+                self.assertRaisesRegex(
+                    ConversationIngressRecoveryError,
+                    "^conversation_ingress_target_retired$",
+                ),
+            ):
+                journal.mark_response_ready(
+                    claimed["entryId"],
+                    assistant_text="private answer",
+                    memory_receipt_ref=not_used_memory_receipt_ref(),
+                )
+
+            self.assertEqual(write.call_count, 0)
+            self.assertEqual((root / "ingress.json").read_bytes(), before)
+            self.assertEqual(
+                journal.record_for(claimed["entryId"])["phase"],
+                "accepted",
+            )
+
+    def test_retired_complete_is_blocked_but_exact_purge_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = True
+            callback_calls = 0
+
+            def currentness(**_target) -> bool:
+                nonlocal callback_calls
+                callback_calls += 1
+                return current
+
+            journal = self.make_journal(
+                root,
+                mutation_target_is_current=currentness,
+            )
+            claimed = self.claim(journal)
+            answer = "private answer"
+            memory_ref = not_used_memory_receipt_ref()
+            journal.mark_response_ready(
+                claimed["entryId"],
+                assistant_text=answer,
+                memory_receipt_ref=memory_ref,
+            )
+            journal.mark_delivery_inflight(claimed["entryId"])
+            journal.mark_delivery_succeeded(claimed["entryId"])
+            journal.begin_terminal_commit(
+                claimed["entryId"],
+                continuity_generation=3,
+                assistant_text=answer,
+                memory_receipt_ref=memory_ref,
+            )
+            before = (root / "ingress.json").read_bytes()
+            current = False
+            with (
+                patch.object(ingress_module, "atomic_json_write") as write,
+                self.assertRaisesRegex(
+                    ConversationIngressRecoveryError,
+                    "^conversation_ingress_target_retired$",
+                ),
+            ):
+                journal.complete(
+                    claimed["entryId"],
+                    continuity_generation=3,
+                    assistant_text=answer,
+                    memory_receipt_ref=memory_ref,
+                )
+            self.assertEqual(write.call_count, 0)
+            self.assertEqual((root / "ingress.json").read_bytes(), before)
+            calls_before_purge = callback_calls
+
+            purged = journal.purge_exact_lineage(
+                match_turn=lambda value: value == claimed["turnId"],
+                match_session=lambda _value: False,
+                full_user_delete=False,
+            )
+
+            self.assertEqual(purged["removedCount"], 1)
+            self.assertEqual(purged["remainingCopies"], 0)
+            self.assertEqual(callback_calls, calls_before_purge)
 
     def test_first_claim_advances_bootstrap_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1271,6 +1409,91 @@ class ConversationIngressRecoveryTests(unittest.TestCase):
         self.assertTrue(calls[1][0].name.endswith("ingress.head.json"))
         self.assertTrue(calls[2][0].name.endswith("ingress.json"))
         self.assertTrue(calls[3][0].name.endswith("ingress.head.json"))
+
+    def test_exact_lineage_purge_is_shared_content_free_and_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            target = self.claim(journal, delivery_id="target")
+            survivor = journal.claim(
+                surface="discord_text",
+                scope="guild:2:text:4:user:5",
+                source_delivery_id="survivor",
+                accepted_text="보존할 대화",
+            )
+
+            result = journal.purge_exact_lineage(
+                match_turn=lambda value: value == target["turnId"],
+                match_session=lambda value: value
+                == "guild:1:text:2:user:3",
+                full_user_delete=False,
+            )
+            recalled = journal.negative_recall_exact_lineage(
+                match_turn=lambda value: value == target["turnId"],
+                match_session=lambda value: value
+                == "guild:1:text:2:user:3",
+                full_user_delete=False,
+            )
+            restarted = self.make_journal(root)
+
+        self.assertEqual(
+            result,
+            {
+                "removedCount": 1,
+                "remainingCopies": 0,
+                "manualReviewCount": 0,
+                "contentFree": True,
+            },
+        )
+        self.assertNotIn("sink", result)
+        self.assertEqual(recalled["remainingCopies"], 0)
+        self.assertIsNone(restarted.record_for(target["entryId"]))
+        self.assertIsNotNone(restarted.record_for(survivor["entryId"]))
+
+    def test_exact_lineage_full_delete_accepts_exact_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            first = self.claim(journal, delivery_id="first")
+            second = self.claim(journal, delivery_id="second")
+
+            result = journal.purge_exact_lineage(
+                match_turn=lambda _value: False,
+                match_session=lambda value: value
+                == "guild:1:text:2:user:3",
+                full_user_delete=True,
+            )
+
+        self.assertEqual(result["removedCount"], 2)
+        self.assertNotIn(first["entryId"], journal._entries)
+        self.assertNotIn(second["entryId"], journal._entries)
+
+    def test_exact_lineage_head_mismatch_fails_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            journal = self.make_journal(root)
+            target = self.claim(journal)
+            path = root / "ingress.json"
+            head_path = root / "ingress.head.json"
+            head = json.loads(head_path.read_text(encoding="utf-8"))
+            head["journalHash"] = "0" * 64
+            head_path.write_text(
+                json.dumps(head, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+            in_memory_before = dict(journal._entries)
+
+            result = journal.purge_exact_lineage(
+                match_turn=lambda value: value == target["turnId"],
+                match_session=lambda _value: False,
+                full_user_delete=False,
+            )
+            after = path.read_bytes()
+
+        self.assertEqual(result["manualReviewCount"], 1)
+        self.assertEqual(after, before)
+        self.assertEqual(journal._entries, in_memory_before)
 
     def test_configuration_has_finite_hard_bounds_and_closed_error_codes(
         self,

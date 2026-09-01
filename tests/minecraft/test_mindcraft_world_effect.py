@@ -20,6 +20,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.mindcraft_world_effect import (  # noqa: E402
     MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA,
+    MINDCRAFT_WORLD_EFFECT_ARCHIVE_EVENT_SCHEMA,
     MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA,
     MINDCRAFT_WORLD_EFFECT_STATUS_SCHEMA,
     MINDCRAFT_WORLD_EFFECT_TELEMETRY_SCHEMA,
@@ -103,6 +104,29 @@ def candidate(*, observed_at: float = 1_001.0, sequence: int = 1) -> dict:
     }
 
 
+def archive_context(*, command_parent: str | None = None) -> dict:
+    source = binding()
+    context = {
+        "guildId": 7,
+        "authorizationGrantId": "grant-1",
+        **{
+            key: source[key]
+            for key in (
+                "goalRunId",
+                "actionRunId",
+                "actionKey",
+                "contractCode",
+                "leaseId",
+                "leaseProcessNonce",
+            )
+        },
+        "parameters": {"privateCommand": "PRIVATE command canary"},
+    }
+    if command_parent is not None:
+        context["parentRecordIds"] = [command_parent]
+    return context
+
+
 class MindcraftWorldEffectTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -174,6 +198,158 @@ class MindcraftWorldEffectTests(unittest.TestCase):
         self.assertEqual(
             verified_events[0]["schema"],
             MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA,
+        )
+
+    def test_archive_callback_receives_only_verified_final_result(self) -> None:
+        archived: list[dict] = []
+        projector = MindcraftWorldEffectProjector(
+            status_path=self.root / "archive-status.json",
+            events_dir=self.root / "archive-events",
+            validate_guarded_lease=self.guards.lease,
+            validate_readiness=self.guards.readiness,
+            now=self.clock,
+            telemetry_max_age_sec=5.0,
+            archive_verified_effect=lambda event: (
+                archived.append(event) is None,
+                "",
+            ),
+            validate_archive_ready=lambda: (True, ""),
+            archive_required=True,
+        )
+
+        self.assertTrue(projector.arm(binding())["accepted"])
+        self.assertEqual(archived, [])
+        self.clock.value = 1_001.0
+        observed = projector.observe(
+            candidate(),
+            archive_context=archive_context(
+                command_parent="minecraft-command-1"
+            ),
+        )
+
+        self.assertTrue(observed["verified"])
+        self.assertEqual(len(archived), 1)
+        event = archived[0]
+        self.assertEqual(
+            event["schema"],
+            MINDCRAFT_WORLD_EFFECT_ARCHIVE_EVENT_SCHEMA,
+        )
+        self.assertEqual(event["recordType"], "minecraft_result")
+        self.assertEqual(event["guildId"], "7")
+        self.assertEqual(
+            event["parentRecordIds"],
+            ["grant-1", "minecraft-command-1"],
+        )
+        self.assertTrue(event["verified"])
+        self.assertTrue(event["worldChanged"])
+        serialized = json.dumps(event, ensure_ascii=False)
+        self.assertNotIn("PRIVATE command canary", serialized)
+        self.assertNotIn("parameters", event)
+
+    def test_verified_lifecycle_result_is_typed_under_exact_command_root(
+        self,
+    ) -> None:
+        archived: list[dict] = []
+        projector = MindcraftWorldEffectProjector(
+            status_path=self.root / "lifecycle-status.json",
+            events_dir=self.root / "lifecycle-events",
+            validate_guarded_lease=self.guards.lease,
+            validate_readiness=self.guards.readiness,
+            now=self.clock,
+            archive_verified_effect=lambda event: (
+                archived.append(event) is None,
+                "",
+            ),
+            validate_archive_ready=lambda: (True, ""),
+            archive_required=True,
+        )
+
+        accepted, error = projector.archive_verified_lifecycle(
+            guild_id=7,
+            parent_record_ids=("minecraft-command-1",),
+            operation="goal",
+            outcome_code="minecraft_goal_confirmed",
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(error, "")
+        self.assertEqual(archived[0]["recordType"], "minecraft_result")
+        self.assertEqual(
+            archived[0]["parentRecordIds"],
+            ["minecraft-command-1"],
+        )
+        self.assertEqual(archived[0]["operation"], "goal")
+        self.assertTrue(archived[0]["contentFree"])
+
+    def test_archive_failure_blocks_result_and_future_actions(self) -> None:
+        archived: list[dict] = []
+
+        def reject(event: dict) -> tuple[bool, str]:
+            archived.append(event)
+            return False, "archive_primary_write_rejected"
+
+        projector = MindcraftWorldEffectProjector(
+            status_path=self.root / "blocked-status.json",
+            events_dir=self.root / "blocked-events",
+            validate_guarded_lease=self.guards.lease,
+            validate_readiness=self.guards.readiness,
+            now=self.clock,
+            telemetry_max_age_sec=5.0,
+            archive_verified_effect=reject,
+            validate_archive_ready=lambda: (True, ""),
+            archive_required=True,
+        )
+        self.assertTrue(projector.arm(binding())["accepted"])
+        self.clock.value = 1_001.0
+
+        observed = projector.observe(
+            candidate(),
+            archive_context=archive_context(),
+        )
+
+        self.assertFalse(observed["verified"])
+        self.assertEqual(observed["code"], "archive_primary_write_rejected")
+        self.assertEqual(
+            observed["status"]["state"],
+            "manual_intervention_required",
+        )
+        self.assertFalse(projector.archive_ready())
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(
+            projector.arm(binding(sequence=2))["code"],
+            "mindcraft_world_effect_archive_unavailable",
+        )
+        rows: list[dict] = []
+        for path in (self.root / "blocked-events").glob("*.jsonl"):
+            rows.extend(
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        self.assertEqual(
+            [row["event"] for row in rows].count("effect_verified"),
+            0,
+        )
+        self.assertEqual(
+            [row["event"] for row in rows].count("audit_failed"),
+            1,
+        )
+
+    def test_required_archive_without_callback_blocks_arm(self) -> None:
+        projector = MindcraftWorldEffectProjector(
+            status_path=self.root / "missing-status.json",
+            events_dir=self.root / "missing-events",
+            validate_guarded_lease=self.guards.lease,
+            validate_readiness=self.guards.readiness,
+            archive_required=True,
+        )
+
+        result = projector.arm(binding())
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(
+            result["code"],
+            "mindcraft_world_effect_archive_unavailable",
         )
 
     def test_every_identity_field_must_match_exactly(self) -> None:

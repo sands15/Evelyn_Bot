@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
+import os
+import tempfile
 from collections import Counter
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -99,11 +103,11 @@ def read_identity_review_rows(path: Path | None = None, *, include_all: bool = F
 
 
 def write_identity_review_tsv(rows: list[dict[str, str]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=REVIEW_FIELDNAMES, delimiter="\t", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=REVIEW_FIELDNAMES, delimiter="\t", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    _atomic_text_write(path, "\ufeff" + stream.getvalue())
 
 
 def _escape_md_cell(text: str) -> str:
@@ -159,7 +163,7 @@ def write_identity_review_markdown(rows: list[dict[str, str]], path: Path) -> No
             )
             + " |"
         )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_text_write(path, "\n".join(lines) + "\n")
 
 
 def write_identity_review_summary(rows: list[dict[str, str]], path: Path) -> None:
@@ -180,7 +184,155 @@ def write_identity_review_summary(rows: list[dict[str, str]], path: Path) -> Non
         "statuses": dict(sorted(statuses.items())),
         "sources": dict(sorted(sources.items())),
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_text_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _path_is_local_regular(path: Path, *, directory: bool = False) -> bool:
+    for candidate in (path, *path.parents):
+        try:
+            junction = getattr(candidate, "is_junction", None)
+            if candidate.exists() and (
+                candidate.is_symlink()
+                or bool(callable(junction) and junction())
+            ):
+                return False
+        except OSError:
+            return False
+    try:
+        return not path.exists() or (path.is_dir() if directory else path.is_file())
+    except OSError:
+        return False
+
+
+def _atomic_text_write(path: Path, text: str) -> None:
+    if not _path_is_local_regular(path):
+        raise OSError("identity_review_path_unsafe")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _strict_queue_rows(path: Path) -> list[dict[str, Any]]:
+    if not _path_is_local_regular(path):
+        raise OSError("identity_review_path_unsafe")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError("identity_review_row_invalid")
+        rows.append(value)
+    return rows
+
+
+def cleanup_identity_review_artifacts(
+    *,
+    time_predicate: Callable[[dict[str, Any]], bool],
+    lineage_predicate: Callable[[dict[str, Any]], bool],
+    queue_path: Path | None = None,
+    registered_export_dirs: Iterable[Path] = (),
+    allowed_export_root: Path | None = None,
+) -> tuple[int, int, int]:
+    """Remove only time-selected rows with explicit, exactly matching lineage."""
+
+    target = Path(queue_path or IDENTITY_REVIEW_QUEUE_PATH)
+    export_dirs = tuple(Path(item) for item in registered_export_dirs)
+    if not callable(time_predicate) or not callable(lineage_predicate):
+        return (0, 1, 1)
+    if export_dirs:
+        if allowed_export_root is None:
+            return (0, 1, 1)
+        root = Path(allowed_export_root)
+        if not _path_is_local_regular(root, directory=True):
+            return (0, 1, 1)
+        try:
+            root_resolved = root.resolve(strict=False)
+            for directory in export_dirs:
+                if not _path_is_local_regular(directory, directory=True):
+                    return (0, 1, 1)
+                directory.resolve(strict=False).relative_to(root_resolved)
+        except (OSError, ValueError):
+            return (0, 1, 1)
+    removed = 0
+    manual = 0
+    try:
+        rows = _strict_queue_rows(target)
+        survivors: list[dict[str, Any]] = []
+        for row in rows:
+            if not bool(time_predicate(dict(row))):
+                survivors.append(row)
+                continue
+            lineage = row.get("lineage")
+            if not isinstance(lineage, dict) or not lineage:
+                survivors.append(row)
+                manual += 1
+                continue
+            if bool(lineage_predicate(dict(lineage))):
+                removed += 1
+            else:
+                survivors.append(row)
+        if removed:
+            body = "".join(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                for row in survivors
+            )
+            _atomic_text_write(target, body)
+        if export_dirs:
+            for directory in export_dirs:
+                export_identity_review(
+                    input_path=target,
+                    output_dir=directory,
+                    include_all=True,
+                )
+                expected_count = len(
+                    read_identity_review_rows(target, include_all=True)
+                )
+                summary = json.loads(
+                    (directory / "evelyn_identity_review_summary.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                with (directory / "evelyn_identity_review.tsv").open(
+                    "r", encoding="utf-8-sig", newline=""
+                ) as stream:
+                    tsv_count = sum(1 for _row in csv.DictReader(stream, delimiter="\t"))
+                if (
+                    summary.get("candidate_count") != expected_count
+                    or tsv_count != expected_count
+                    or not (directory / "evelyn_identity_review.md").is_file()
+                ):
+                    raise ValueError("identity_review_export_mismatch")
+        fresh = _strict_queue_rows(target)
+        remaining = 0
+        for row in fresh:
+            if not bool(time_predicate(dict(row))):
+                continue
+            lineage = row.get("lineage")
+            if isinstance(lineage, dict) and lineage and bool(
+                lineage_predicate(dict(lineage))
+            ):
+                remaining += 1
+    except Exception:
+        return (removed, 1, manual + 1)
+    return (removed, remaining, manual)
 
 
 def export_identity_review(

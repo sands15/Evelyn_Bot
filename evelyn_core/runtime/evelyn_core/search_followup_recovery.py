@@ -33,6 +33,57 @@ _PHASES = frozenset(
         "request_unrecoverable",
     }
 )
+_ENTRY_KEYS = frozenset(
+    {
+        "intentId",
+        "phase",
+        "source",
+        "guildId",
+        "sessionKey",
+        "turnId",
+        "deliveryTurnId",
+        "roomKey",
+        "personKey",
+        "sessionMemoryKey",
+        "channelId",
+        "replyToMessageId",
+        "requestUserHash",
+        "requestAnswerHash",
+        "queryHash",
+        "answerHash",
+        "displayHash",
+        "preparedAnswer",
+        "deliveryMessageId",
+        "continuityGeneration",
+        "deliveryGeneration",
+        "attemptCount",
+        "createdAt",
+        "updatedAt",
+        "lastErrorCode",
+    }
+)
+_PAYLOAD_KEYS = frozenset(
+    {
+        "schema",
+        "generation",
+        "previousHash",
+        "journalHash",
+        "updatedAt",
+        "entries",
+        "lastErrorCode",
+        "policy",
+    }
+)
+_HEAD_KEYS = frozenset(
+    {
+        "schema",
+        "generation",
+        "journalHash",
+        "updatedAt",
+        "contentFree",
+        "privatePreparedAnswer",
+    }
+)
 
 
 def content_sha256(
@@ -120,6 +171,44 @@ def _journal_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _strict_json_loads(raw_text: str) -> Any:
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("search_followup_duplicate_json_key")
+            result[key] = value
+        return result
+
+    return json.loads(raw_text, object_pairs_hook=reject_duplicate_keys)
+
+
+def _exact_lineage_counts(
+    *,
+    removed: int = 0,
+    remaining: int = 0,
+    manual: int = 0,
+) -> dict[str, Any]:
+    return {
+        "removedCount": max(0, int(removed)),
+        "remainingCopies": max(0, int(remaining)),
+        "manualReviewCount": max(0, int(manual)),
+        "contentFree": True,
+    }
+
+
+def _exact_selector_matches(
+    selector: Callable[[str], bool],
+    value: str,
+) -> bool:
+    matched = selector(value)
+    if type(matched) is not bool:
+        raise TypeError("search_followup_lineage_selector_invalid")
+    return matched
+
+
 class SearchFollowupRecoveryJournal:
     """Durable private state for promised search follow-ups."""
 
@@ -131,6 +220,7 @@ class SearchFollowupRecoveryJournal:
         enabled: bool = True,
         wall_time: Callable[[], float] = time.time,
         intent_id_factory: Callable[[], str] | None = None,
+        mutation_target_is_current: Callable[..., bool] | None = None,
     ) -> None:
         self.path = Path(path)
         self.head_path = Path(
@@ -143,6 +233,7 @@ class SearchFollowupRecoveryJournal:
         self.intent_id_factory = intent_id_factory or (
             lambda: f"search-followup-{uuid.uuid4().hex[:24]}"
         )
+        self.mutation_target_is_current = mutation_target_is_current
         self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
         self._recovery_claims: set[str] = set()
@@ -180,7 +271,7 @@ class SearchFollowupRecoveryJournal:
         return payload
 
     def _validated_entry(self, raw: Any) -> dict[str, Any]:
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or frozenset(raw) != _ENTRY_KEYS:
             raise ValueError("search_followup_entry_invalid")
         intent_id = clean_text(raw.get("intentId"))
         if not _INTENT_ID.fullmatch(intent_id):
@@ -266,13 +357,28 @@ class SearchFollowupRecoveryJournal:
         return entry
 
     def _validated_payload(self, payload: Any) -> tuple[dict[str, dict[str, Any]], int, str, str, str]:
-        if not isinstance(payload, dict) or clean_text(payload.get("schema")) != SEARCH_FOLLOWUP_RECOVERY_SCHEMA:
+        if (
+            not isinstance(payload, dict)
+            or frozenset(payload) != _PAYLOAD_KEYS
+            or clean_text(payload.get("schema"))
+            != SEARCH_FOLLOWUP_RECOVERY_SCHEMA
+        ):
             raise ValueError("search_followup_schema_invalid")
         generation = _nonnegative_int(payload.get("generation"), code="search_followup_generation_invalid")
         if generation < 1:
             raise ValueError("search_followup_generation_invalid")
         previous_hash = _valid_sha256(payload.get("previousHash"))
         journal_hash = _valid_sha256(payload.get("journalHash"))
+        _finite_nonnegative(payload.get("updatedAt"))
+        if payload.get("policy") != {
+            "contentFree": False,
+            "privatePreparedAnswer": True,
+            "rawQuery": False,
+            "rawTranscript": False,
+            "duplicateDeliveryPolicy": "verify_text_or_fail_closed",
+            "maxEntries": SEARCH_FOLLOWUP_RECOVERY_MAX_ENTRIES,
+        }:
+            raise ValueError("search_followup_policy_invalid")
         if journal_hash != _journal_hash(payload):
             raise ValueError("search_followup_self_hash_mismatch")
         entries_raw = payload.get("entries")
@@ -293,12 +399,28 @@ class SearchFollowupRecoveryJournal:
             return None
         if self.head_path.is_symlink() or not self.head_path.is_file():
             raise ValueError("search_followup_head_invalid")
-        payload = json.loads(self.head_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or clean_text(payload.get("schema")) != SEARCH_FOLLOWUP_RECOVERY_HEAD_SCHEMA:
+        payload = _strict_json_loads(
+            self.head_path.read_text(encoding="utf-8")
+        )
+        if (
+            not isinstance(payload, dict)
+            or frozenset(payload) != _HEAD_KEYS
+            or clean_text(payload.get("schema"))
+            != SEARCH_FOLLOWUP_RECOVERY_HEAD_SCHEMA
+            or payload.get("contentFree") is not False
+            or payload.get("privatePreparedAnswer") is not True
+        ):
             raise ValueError("search_followup_head_invalid")
+        generation = _nonnegative_int(
+            payload.get("generation"),
+            code="search_followup_head_generation_invalid",
+        )
+        if generation < 1:
+            raise ValueError("search_followup_head_generation_invalid")
         return {
-            "generation": _nonnegative_int(payload.get("generation"), code="search_followup_head_generation_invalid"),
+            "generation": generation,
             "journalHash": _valid_sha256(payload.get("journalHash")),
+            "updatedAt": _finite_nonnegative(payload.get("updatedAt")),
         }
 
     def _write_head(self, *, generation: int, journal_hash: str) -> None:
@@ -327,7 +449,9 @@ class SearchFollowupRecoveryJournal:
                 return
             if self.path.is_symlink() or not self.path.is_file() or self.path.stat().st_size > SEARCH_FOLLOWUP_RECOVERY_MAX_BYTES:
                 raise ValueError("search_followup_journal_invalid")
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = _strict_json_loads(
+                self.path.read_text(encoding="utf-8")
+            )
             entries, generation, previous_hash, journal_hash, error_code = self._validated_payload(payload)
             if head is None:
                 if generation != 1 or previous_hash != SEARCH_FOLLOWUP_RECOVERY_CHAIN_GENESIS:
@@ -377,6 +501,49 @@ class SearchFollowupRecoveryJournal:
                 "search_followup_recovery_unavailable"
             )
 
+    def _require_mutation_targets_current(
+        self,
+        entries: Any,
+    ) -> None:
+        callback = self.mutation_target_is_current
+        if callback is None:
+            return
+        seen: set[tuple[Any, Any, Any, Any]] = set()
+        for entry in entries:
+            lineage = (
+                entry.get("turnId"),
+                entry.get("deliveryTurnId"),
+                entry.get("sessionKey"),
+                entry.get("sessionMemoryKey"),
+            )
+            if lineage in seen:
+                continue
+            seen.add(lineage)
+            try:
+                current = callback(
+                    turn_id=lineage[0],
+                    delivery_turn_id=lineage[1],
+                    session_key=lineage[2],
+                    session_memory_key=lineage[3],
+                ) is True
+            except Exception:
+                current = False
+            if not current:
+                raise RuntimeError("search_followup_target_retired")
+
+    def _commit_entry_update(
+        self,
+        entry: dict[str, Any],
+        update: dict[str, Any],
+    ) -> None:
+        candidate = dict(entry)
+        candidate.update(update)
+        entries = dict(self._entries)
+        entries[str(entry["intentId"])] = candidate
+        self._require_mutation_targets_current(entries.values())
+        self._entries = entries
+        self._write()
+
     def _write(self) -> None:
         if not self.enabled:
             return
@@ -411,6 +578,185 @@ class SearchFollowupRecoveryJournal:
         self._journal_hash = journal_hash
         self._integrity = "verified"
         self._head_state = "current"
+
+    def _fresh_exact_lineage_entries(
+        self,
+    ) -> dict[str, dict[str, Any]]:
+        """Read the journal and head without startup repair."""
+
+        head = self._load_head()
+        missing = not self.path.exists() and not self.path.is_symlink()
+        if missing:
+            if head is not None or self._generation != 0 or self._entries:
+                raise ValueError(
+                    "search_followup_exact_lineage_state_mismatch"
+                )
+            return {}
+        if (
+            self.path.is_symlink()
+            or not self.path.is_file()
+            or self.path.stat().st_size
+            > SEARCH_FOLLOWUP_RECOVERY_MAX_BYTES
+        ):
+            raise ValueError("search_followup_journal_invalid")
+        payload = _strict_json_loads(
+            self.path.read_text(encoding="utf-8")
+        )
+        entries, generation, _previous_hash, journal_hash, _error = (
+            self._validated_payload(payload)
+        )
+        if (
+            head is None
+            or generation != int(head["generation"])
+            or journal_hash != str(head["journalHash"])
+            or generation != self._generation
+            or journal_hash != self._journal_hash
+            or entries != self._entries
+        ):
+            raise ValueError(
+                "search_followup_exact_lineage_state_mismatch"
+            )
+        return entries
+
+    @staticmethod
+    def _exact_lineage_targets(
+        entries: dict[str, dict[str, Any]],
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> tuple[set[str], int]:
+        targets: set[str] = set()
+        incomplete = 0
+        for intent_id, entry in entries.items():
+            sessions = tuple(
+                value
+                for value in (
+                    entry.get("sessionKey"),
+                    entry.get("sessionMemoryKey"),
+                )
+                if isinstance(value, str) and value
+            )
+            turns = tuple(
+                value
+                for value in (
+                    entry.get("turnId"),
+                    entry.get("deliveryTurnId"),
+                )
+                if isinstance(value, str) and value
+            )
+            if full_user_delete:
+                if any(
+                    _exact_selector_matches(match_session, value)
+                    for value in sessions
+                ):
+                    targets.add(intent_id)
+                continue
+            if any(
+                _exact_selector_matches(match_turn, value)
+                for value in turns
+            ):
+                targets.add(intent_id)
+            elif not turns and any(
+                _exact_selector_matches(match_session, value)
+                for value in sessions
+            ):
+                incomplete += 1
+        return targets, incomplete
+
+    def negative_recall_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Freshly count exact target rows without returning their content."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError("search_followup_lineage_selector_invalid")
+        with self._lock:
+            try:
+                entries = self._fresh_exact_lineage_entries()
+                targets, incomplete = self._exact_lineage_targets(
+                    entries,
+                    match_turn=match_turn,
+                    match_session=match_session,
+                    full_user_delete=full_user_delete,
+                )
+            except Exception:
+                return _exact_lineage_counts(manual=1)
+            return _exact_lineage_counts(
+                remaining=len(targets) + incomplete,
+                manual=1 if incomplete else 0,
+            )
+
+    def purge_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Rewrite one exact target set and clear its recovery claims."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError("search_followup_lineage_selector_invalid")
+        with self._lock:
+            try:
+                entries = self._fresh_exact_lineage_entries()
+                targets, incomplete = self._exact_lineage_targets(
+                    entries,
+                    match_turn=match_turn,
+                    match_session=match_session,
+                    full_user_delete=full_user_delete,
+                )
+            except Exception:
+                return _exact_lineage_counts(manual=1)
+            if incomplete:
+                return _exact_lineage_counts(
+                    remaining=len(targets) + incomplete,
+                    manual=1,
+                )
+            if not targets:
+                return _exact_lineage_counts()
+            before_entries = {
+                key: dict(value)
+                for key, value in self._entries.items()
+            }
+            before_claims = set(self._recovery_claims)
+            self._entries = {
+                intent_id: entry
+                for intent_id, entry in self._entries.items()
+                if intent_id not in targets
+            }
+            self._recovery_claims.difference_update(targets)
+            try:
+                self._write()
+                fresh = self._fresh_exact_lineage_entries()
+                remaining, incomplete = self._exact_lineage_targets(
+                    fresh,
+                    match_turn=match_turn,
+                    match_session=match_session,
+                    full_user_delete=full_user_delete,
+                )
+            except Exception:
+                self._entries = before_entries
+                self._recovery_claims = before_claims
+                return _exact_lineage_counts(manual=1)
+            return _exact_lineage_counts(
+                removed=len(targets),
+                remaining=len(remaining) + incomplete,
+                manual=1 if incomplete else 0,
+            )
 
     def begin(
         self,
@@ -506,6 +852,9 @@ class SearchFollowupRecoveryJournal:
                 }
             )
             retained_entries[intent_id] = entry
+            self._require_mutation_targets_current(
+                retained_entries.values()
+            )
             self._entries = retained_entries
             self._recovery_claims.intersection_update(self._entries)
             self._write()
@@ -569,7 +918,8 @@ class SearchFollowupRecoveryJournal:
                 raise RuntimeError(
                     "search_followup_delivery_not_prepared"
                 )
-            entry.update(
+            self._commit_entry_update(
+                entry,
                 {
                     "phase": "delivery_ready",
                     "answerHash": content_sha256(answer),
@@ -582,9 +932,8 @@ class SearchFollowupRecoveryJournal:
                     "deliveryGeneration": int(continuity_generation),
                     "updatedAt": self._now(),
                     "lastErrorCode": "",
-                }
+                },
             )
-            self._write()
 
     def begin_delivery_prepare(
         self,
@@ -631,8 +980,7 @@ class SearchFollowupRecoveryJournal:
                     delivery_turn_id,
                     required=True,
                 )
-            entry.update(update)
-            self._write()
+            self._commit_entry_update(entry, update)
 
     def mark_delivery_baseline(
         self,
@@ -670,14 +1018,14 @@ class SearchFollowupRecoveryJournal:
                 raise RuntimeError(
                     "search_followup_delivery_baseline_invalid"
                 )
-            entry.update(
+            self._commit_entry_update(
+                entry,
                 {
                     "deliveryGeneration": generation,
                     "updatedAt": self._now(),
                     "lastErrorCode": "",
-                }
+                },
             )
-            self._write()
 
     def mark_delivery_attempted(self, intent_id: str | None) -> None:
         if not intent_id:
@@ -694,9 +1042,13 @@ class SearchFollowupRecoveryJournal:
                 "delivery_uncertain",
             }:
                 raise RuntimeError("search_followup_delivery_not_ready")
-            entry["phase"] = "delivery_attempted"
-            entry["updatedAt"] = self._now()
-            self._write()
+            self._commit_entry_update(
+                entry,
+                {
+                    "phase": "delivery_attempted",
+                    "updatedAt": self._now(),
+                },
+            )
 
     def mark_delivery_succeeded(
         self,
@@ -728,7 +1080,8 @@ class SearchFollowupRecoveryJournal:
                 raise RuntimeError(
                     "search_followup_delivery_baseline_invalid"
                 )
-            entry.update(
+            self._commit_entry_update(
+                entry,
                 {
                     "phase": "delivery_succeeded",
                     "deliveryMessageId": _optional_positive_int(
@@ -739,9 +1092,8 @@ class SearchFollowupRecoveryJournal:
                     ),
                     "updatedAt": self._now(),
                     "lastErrorCode": "",
-                }
+                },
             )
-            self._write()
 
     def mark_canonical_committed(
         self,
@@ -792,15 +1144,15 @@ class SearchFollowupRecoveryJournal:
                 raise ValueError(
                     "search_followup_delivery_generation_invalid"
                 )
-            entry.update(
+            self._commit_entry_update(
+                entry,
                 {
                     "phase": "canonical_committed",
                     "deliveryGeneration": generation,
                     "updatedAt": self._now(),
                     "lastErrorCode": "",
-                }
+                },
             )
-            self._write()
 
     def mark_delivery_uncertain(self, intent_id: str | None, *, error_code: str) -> None:
         if not intent_id:
@@ -810,11 +1162,12 @@ class SearchFollowupRecoveryJournal:
             entry = self._entries.get(intent_id)
             if entry is None:
                 return
+            update: dict[str, Any] = {}
             if entry["phase"] not in {
                 "delivery_succeeded",
                 "canonical_committed",
             }:
-                entry["phase"] = (
+                update["phase"] = (
                     "delivery_uncertain"
                     if entry.get("answerHash")
                     and (
@@ -823,9 +1176,9 @@ class SearchFollowupRecoveryJournal:
                     )
                     else "request_unrecoverable"
                 )
-            entry["lastErrorCode"] = clean_text(error_code)[:120]
-            entry["updatedAt"] = self._now()
-            self._write()
+            update["lastErrorCode"] = clean_text(error_code)[:120]
+            update["updatedAt"] = self._now()
+            self._commit_entry_update(entry, update)
 
     def record_attempt_failure(self, intent_id: str | None, *, error_code: str) -> int:
         if not intent_id:
@@ -835,20 +1188,36 @@ class SearchFollowupRecoveryJournal:
             entry = self._entries.get(intent_id)
             if entry is None:
                 return 0
-            entry["attemptCount"] = int(entry["attemptCount"]) + 1
-            entry["lastErrorCode"] = clean_text(error_code)[:120]
-            entry["updatedAt"] = self._now()
-            self._write()
-            return int(entry["attemptCount"])
+            attempt_count = int(entry["attemptCount"]) + 1
+            self._commit_entry_update(
+                entry,
+                {
+                    "attemptCount": attempt_count,
+                    "lastErrorCode": clean_text(error_code)[:120],
+                    "updatedAt": self._now(),
+                },
+            )
+            return attempt_count
 
     def complete(self, intent_id: str | None) -> None:
         if not intent_id:
             return
         with self._lock:
             self._require_ready()
-            if self._entries.pop(intent_id, None) is not None:
-                self._recovery_claims.discard(intent_id)
-                self._write()
+            entry = self._entries.get(intent_id)
+            if entry is None:
+                return
+            entries = {
+                key: value
+                for key, value in self._entries.items()
+                if key != intent_id
+            }
+            self._require_mutation_targets_current(
+                (*entries.values(), entry)
+            )
+            self._entries = entries
+            self._recovery_claims.discard(intent_id)
+            self._write()
 
     def reset_guild(self, guild_id: int) -> int:
         normalized_guild_id = _nonnegative_int(
@@ -878,6 +1247,9 @@ class SearchFollowupRecoveryJournal:
             }
             if not removed_ids:
                 return 0
+            self._require_mutation_targets_current(
+                self._entries.values()
+            )
             self._entries = {
                 intent_id: entry
                 for intent_id, entry in self._entries.items()

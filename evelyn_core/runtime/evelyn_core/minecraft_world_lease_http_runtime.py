@@ -117,7 +117,41 @@ class MinecraftWorldLeaseHttpRuntime:
             raise RuntimeError("minecraft_goal_unverified")
         status["outcome_verified"] = True
         status["outcome_code"] = "minecraft_goal_confirmed"
+        parent_record_ids = tuple(
+            (world_lease or {}).get("parentRecordIds") or ()
+        )
+        if parent_record_ids:
+            await self.archive_lifecycle_result(
+                guild_id=int((world_lease or {}).get("guildId")),
+                parent_record_ids=parent_record_ids,
+                operation="goal",
+                outcome_code="minecraft_goal_confirmed",
+            )
         return status
+
+    async def archive_lifecycle_result(
+        self,
+        *,
+        guild_id: int,
+        parent_record_ids: tuple[str, ...],
+        operation: str,
+        outcome_code: str,
+    ) -> None:
+        response = await self._request(
+            "POST",
+            "/archive-result",
+            {
+                "guildId": int(guild_id),
+                "parentRecordIds": list(parent_record_ids),
+                "operation": str(operation),
+                "outcomeCode": str(outcome_code),
+            },
+        )
+        if (
+            response.get("archived") is not True
+            or response.get("contentFree") is not True
+        ):
+            raise RuntimeError("minecraft_archive_result_unverified")
 
     async def dispatch_action(
         self,

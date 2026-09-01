@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from contextvars import ContextVar, copy_context
+from datetime import datetime, timezone
 import hmac
 import hashlib
 import json
@@ -11,10 +12,12 @@ import os
 import random
 import re
 import secrets
+import sys
 import time
 import weakref
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, TraceConfig, web
 
@@ -73,16 +76,24 @@ from .fast_tool_planner import (
 )
 from .task_loop_runtime import (
     TASK_MAX_EVIDENCE_CHARS,
+    TASK_READ_TOOLS,
+    TASK_EVAL_VERSION,
+    TASK_WORK_CONTRACT_SCHEMA,
+    TaskPlannerGuidance,
     is_task_request,
     parse_task_cancel_request,
     parse_task_request,
     run_default_task_loop,
+    task_goal_is_grounded_read_only,
+    validated_public_task_record,
 )
 from .main_llm_runtime import (
     TASK_LOOP_INVALID_RESULT,
     task_loop_completed_evidence,
+    task_loop_grounded_draft_evidence,
     task_loop_terminal_outcome,
 )
+from .task_grounded_draft_runtime import GROUNDED_DRAFT_TTS_TEXT
 from .task_approval_runtime import TaskApprovalClaim, TaskApprovalManager
 from .tts_playback import (
     SpeechChunker,
@@ -412,6 +423,7 @@ FAST_ACTION_TASK_ID: ContextVar[str] = ContextVar(
     "fast_action_task_id",
     default="",
 )
+_FAST_CONTROL_LOCAL_PRINCIPAL_TOKEN = object()
 RESEARCH_PROGRESS_TEXTS = (
     "잠깐, 관련 자료를 찾아볼게.",
     "음… 제대로 비교해볼게.",
@@ -505,6 +517,133 @@ EVELYN_INTERNAL_CONTROL_TOKEN = os.getenv(
     "EVELYN_INTERNAL_CONTROL_TOKEN",
     "",
 ).strip()
+CONVERSATION_ARCHIVE_ENABLED = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+CONVERSATION_ARCHIVE_RUNTIME_KEY = web.AppKey(
+    "conversation_archive_runtime",
+    object,
+)
+CONVERSATION_ARCHIVE_MAX_REQUEST_BYTES = 256 * 1024
+CONVERSATION_ARCHIVE_SELF_RESPONSE_BUDGET_BYTES = 900 * 1024
+CONVERSATION_ARCHIVE_ADMIN_RESPONSE_BUDGET_BYTES = 900 * 1024
+CONVERSATION_ARCHIVE_ADMIN_METADATA_PAGE_LIMIT = 100
+CONVERSATION_ARCHIVE_ADMIN_METADATA_CURSOR_SECONDS = 180
+CONVERSATION_ARCHIVE_USER_VIEW_HANDLE_SECONDS = 60
+CONVERSATION_ARCHIVE_USER_VIEW_PAGE_SECONDS = 180
+CONVERSATION_ARCHIVE_TRANSPORT_TIMESTAMP_HEADER = (
+    "X-Evelyn-Archive-Timestamp"
+)
+CONVERSATION_ARCHIVE_TRANSPORT_NONCE_HEADER = "X-Evelyn-Archive-Nonce"
+CONVERSATION_ARCHIVE_TRANSPORT_SIGNATURE_HEADER = (
+    "X-Evelyn-Archive-Signature"
+)
+CONVERSATION_ARCHIVE_CONTROL_SCHEME_HEADER = (
+    "X-Evelyn-Archive-Control-Scheme"
+)
+CONVERSATION_ARCHIVE_CONTROL_HOST_HEADER = "X-Evelyn-Archive-Control-Host"
+CONVERSATION_ARCHIVE_CONTROL_ORIGIN_HEADER = (
+    "X-Evelyn-Archive-Control-Origin"
+)
+CONVERSATION_ARCHIVE_ADMIN_COOKIE = "__Host-evelyn_archive_admin"
+_CONVERSATION_ARCHIVE_TRANSPORT_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.transport-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_INTEGRITY_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.integrity-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_PURGE_LINEAGE_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.purge-lineage-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_ADMIN_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.admin-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_ADMIN_METADATA_CURSOR_DOMAIN = (
+    b"evelyn.private-conversation-archive.admin-metadata-cursor.v1\n"
+)
+_CONVERSATION_ARCHIVE_STARTUP_REPLAY_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.startup-replay-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_USER_VIEW_HANDLE_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.user-view-handle-key.v1\n"
+)
+_CONVERSATION_ARCHIVE_USER_VIEW_TOKEN_DOMAIN = (
+    b"evelyn.private-conversation-archive.user-view-token.v1\n"
+)
+_CONVERSATION_ARCHIVE_USER_VIEW_INTERACTION_DOMAIN = (
+    b"evelyn.private-conversation-archive.user-view-interaction.v1\n"
+)
+_CONVERSATION_ARCHIVE_STARTUP_REPLAY_SCHEMA = (
+    "evelyn.private-conversation-archive.startup-replay.v1"
+)
+_CONVERSATION_ARCHIVE_SOURCE_ID = "discord"
+_CONVERSATION_ARCHIVE_LOCAL_ACTOR_ID = "control-page:local"
+_CONVERSATION_ARCHIVE_DISCORD_FEEDBACK_SURFACES = frozenset(
+    {"discord", "voice"}
+)
+_CONVERSATION_ARCHIVE_FEEDBACK_ENGINEERING_SCOPES = frozenset(
+    {"none", "evaluator", "tool", "approval", "source"}
+)
+_CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS = frozenset(
+    {
+        "continuity_checkpoint",
+        "ingress_journal",
+        "persona_state",
+        "autonomy_state",
+        "feedback_state",
+        "outbound_retry",
+        "prompt_tool_cache",
+        "stt_buffer",
+        "tts_buffer",
+        "registered_exports",
+    }
+)
+_CONVERSATION_ARCHIVE_REMOTE_PURGE_POLL_LIMIT = 20
+_CONVERSATION_ARCHIVE_REMOTE_PURGE_SCAN_LIMIT = 1000
+_CONVERSATION_ARCHIVE_MINECRAFT_EVENT_SCHEMA = (
+    "conversation.archive.minecraft-result.v1"
+)
+_CONVERSATION_ARCHIVE_MINECRAFT_EVENT_FIELDS = frozenset(
+    {
+        "schema",
+        "eventType",
+        "goalRunId",
+        "actionRunId",
+        "actionKey",
+        "contractCode",
+        "candidateSequence",
+        "executionSequence",
+        "observedAt",
+        "evidenceCode",
+        "postconditionCode",
+        "verified",
+        "succeeded",
+        "worldChanged",
+        "goalProgress",
+        "contentFree",
+    }
+)
+_CONVERSATION_ARCHIVE_MINECRAFT_LIFECYCLE_SCHEMA = (
+    "conversation.archive.minecraft-lifecycle-result.v1"
+)
+_CONVERSATION_ARCHIVE_MINECRAFT_LIFECYCLE_FIELDS = frozenset(
+    {
+        "schema",
+        "eventType",
+        "operation",
+        "outcomeCode",
+        "observedAt",
+        "verified",
+        "succeeded",
+        "contentFree",
+    }
+)
+_CONVERSATION_ARCHIVE_NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
+_CONVERSATION_ARCHIVE_SIGNATURE_RE = re.compile(r"[0-9a-f]{64}\Z")
+_CONVERSATION_ARCHIVE_ID_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z"
+)
 VOICE_INPUT_LEASE_AUTH_TOKEN = os.getenv(
     "EVELYN_VOICE_INPUT_LEASE_TOKEN",
     "",
@@ -674,6 +813,22 @@ TASK_APPROVAL_CLAIMS: dict[str, TaskApprovalClaim] = {}
 BACKGROUND_ACTION_HANDLERS: list[dict[str, Any]] = []
 BACKGROUND_ACTION_TASKS: set[asyncio.Task[Any]] = set()
 BACKGROUND_ACTION_TASKS_BY_ID: dict[str, asyncio.Task[Any]] = {}
+CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS: dict[
+    str,
+    tuple[object, str, str],
+] = {}
+CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS: dict[
+    str,
+    tuple[object, str, str, dict[str, Any] | None],
+] = {}
+CONVERSATION_ARCHIVE_CANARY_RECEIPTS: dict[
+    str,
+    dict[str, dict[str, Any]],
+] = {}
+CONVERSATION_ARCHIVE_CANARY_BINDINGS: dict[
+    str,
+    tuple[object, str, str],
+] = {}
 BACKGROUND_ACTION_CANCEL_INTENTS: set[asyncio.Task[Any]] = set()
 CONTROL_PAGE_UI_COMMANDS: list[dict[str, Any]] = []
 CONTROL_PAGE_UI_COMMAND_SEQ = 0
@@ -5391,6 +5546,514 @@ def should_queue_local_bridge_speech(source: str) -> bool:
     return clean_text(source) not in {"local_bridge", "local_mic", "voice"}
 
 
+_CANARY_TASK_RECEIPT_SCHEMA = "evelyn.feedback-canary-task-receipt.v1"
+_CANARY_EXECUTION_TOOLS = TASK_READ_TOOLS | frozenset({"web_search"})
+
+
+async def _fast_control_task_guidance(
+    *,
+    task_id: str,
+    goal: str,
+) -> tuple[TaskPlannerGuidance | None, bool]:
+    raw_binding = CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.get(task_id)
+    if raw_binding is None:
+        return None, False
+    runtime = raw_binding[0]
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        raise FastActionExecutionError(
+            "task_guidance_binding_invalid",
+            reply="현재 작업 규칙의 소유자를 확인하지 못해 작업을 시작하지 않았어.",
+        )
+    async with runtime.lock:
+        try:
+            runtime.require_feedback_guidance_admission()
+        except RuntimeError as exc:
+            raise FastActionExecutionError(
+                "feedback_guidance_admission_closed",
+                reply="작업 규칙 검증이 중단돼 새 작업에는 규칙을 적용하지 않았어.",
+            ) from exc
+        controller = _conversation_archive_feedback_controller(runtime)
+        active = await asyncio.to_thread(controller.active_guidance)
+        if task_goal_is_grounded_read_only(goal):
+            try:
+                pointer = await asyncio.to_thread(
+                    controller.running_canary_pointer,
+                    local_admin=True,
+                    read_only=True,
+                    grounded_task=True,
+                )
+            except Exception as exc:
+                try:
+                    aborted = _validated_canary_abort(
+                        await asyncio.to_thread(
+                            controller.abort_interrupted_canary,
+                            canary_run_id=None,
+                            admin_authorized=True,
+                        ),
+                        expected_run_id=None,
+                    )
+                except Exception:
+                    aborted = None
+                if aborted is None:
+                    runtime.close_feedback_guidance_admission()
+                    raise FastActionExecutionError(
+                        "feedback_guidance_admission_closed",
+                        reply="카나리 규칙을 안전하게 종료하지 못해 새 작업을 시작하지 않았어.",
+                    ) from exc
+                aborted_run_id = str(aborted["canaryRunId"])
+                CONVERSATION_ARCHIVE_CANARY_BINDINGS.pop(
+                    aborted_run_id, None
+                )
+                CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(
+                    aborted_run_id, None
+                )
+                pointer = None
+            if pointer is not None:
+                run_id = str(pointer.canary_run_id)
+                exact_binding = (
+                    runtime,
+                    str(pointer.version_id),
+                    str(pointer.guidance_digest),
+                )
+                existing = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(run_id)
+                if existing is not None and existing != exact_binding:
+                    raise FastActionExecutionError(
+                        "feedback_canary_binding_stale",
+                        reply="카나리 실행 결박이 바뀌어 이 작업에는 후보 규칙을 적용하지 않았어.",
+                    )
+                receipts = CONVERSATION_ARCHIVE_CANARY_RECEIPTS.setdefault(
+                    run_id, {}
+                )
+                existing_receipt = receipts.get(task_id)
+                if (
+                    isinstance(existing_receipt, dict)
+                    and existing_receipt.get("state") == "terminal"
+                ):
+                    raise FastActionExecutionError(
+                        "feedback_canary_task_replayed",
+                        reply="이미 집계된 카나리 작업은 다시 실행하지 않았어.",
+                    )
+                if existing_receipt is not None or len(receipts) < 10:
+                    CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = exact_binding
+                    receipts.setdefault(
+                        task_id,
+                        {
+                            "state": "reserved",
+                            "archiveGeneration": int(
+                                pointer.archive_generation
+                            ),
+                        },
+                    )
+                    return (
+                        TaskPlannerGuidance(
+                            version_id=str(pointer.version_id),
+                            guidance_digest=str(pointer.guidance_digest),
+                            mode="canary",
+                            canary_run_id=run_id,
+                            guidance=str(pointer.guidance),
+                        ),
+                        True,
+                    )
+        return (
+            TaskPlannerGuidance(
+                version_id=str(active.version_id),
+                guidance_digest=str(active.guidance_digest),
+                guidance=str(active.guidance),
+            ),
+            False,
+        )
+
+
+def _release_canary_task_reservation(task_id: str) -> None:
+    for run_id, receipts in tuple(
+        CONVERSATION_ARCHIVE_CANARY_RECEIPTS.items()
+    ):
+        receipt = receipts.get(task_id)
+        if isinstance(receipt, dict) and receipt.get("state") == "reserved":
+            receipts.pop(task_id, None)
+        if not receipts and run_id not in CONVERSATION_ARCHIVE_CANARY_BINDINGS:
+            CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(run_id, None)
+
+
+async def _record_canary_task_exception(task_id: str) -> None:
+    for run_id, receipts in tuple(
+        CONVERSATION_ARCHIVE_CANARY_RECEIPTS.items()
+    ):
+        reserved = receipts.get(task_id)
+        if not isinstance(reserved, dict):
+            continue
+        if reserved.get("state") == "terminal":
+            return
+        if reserved.get("state") != "reserved":
+            continue
+        binding = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(run_id)
+        if binding is None:
+            _release_canary_task_reservation(task_id)
+            return
+        _runtime, version_id, guidance_digest = binding
+        receipts[task_id] = {
+            "schema": _CANARY_TASK_RECEIPT_SCHEMA,
+            "state": "terminal",
+            "taskId": task_id,
+            "canaryRunId": run_id,
+            "candidateVersionId": version_id,
+            "guidanceDigest": guidance_digest,
+            "contractVersion": TASK_WORK_CONTRACT_SCHEMA,
+            "evaluatorVersion": TASK_EVAL_VERSION,
+            "principalRef": _CONVERSATION_ARCHIVE_LOCAL_ACTOR_ID,
+            "archiveGeneration": int(reserved["archiveGeneration"]),
+            "passed": False,
+            "unauthorizedEffect": False,
+            "privacyLeakage": False,
+            "structuralFailure": True,
+            "taskFailure": True,
+        }
+        await _finalize_canary_if_ready(run_id)
+        return
+    _release_canary_task_reservation(task_id)
+
+
+async def _record_canary_task_terminal(
+    *,
+    task_id: str,
+    goal: str,
+    result: Any,
+) -> None:
+    contract = getattr(result, "contract", None)
+    run_id = str(getattr(contract, "canary_run_id", "") or "")
+    if not run_id:
+        _release_canary_task_reservation(task_id)
+        return
+    receipts = CONVERSATION_ARCHIVE_CANARY_RECEIPTS.get(run_id)
+    binding = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(run_id)
+    reserved = receipts.get(task_id) if receipts is not None else None
+    if (
+        receipts is None
+        or binding is None
+        or not isinstance(reserved, dict)
+        or reserved.get("state") != "reserved"
+    ):
+        raise FastActionExecutionError(
+            "feedback_canary_task_unreserved",
+            reply="카나리 표본 결박을 확인하지 못해 결과를 집계하지 않았어.",
+        )
+    runtime, version_id, guidance_digest = binding
+    structural_failure = False
+    pointer = None
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        structural_failure = True
+    else:
+        async with runtime.lock:
+            controller = _conversation_archive_feedback_controller(runtime)
+            pointer = await asyncio.to_thread(
+                controller.running_canary_pointer,
+                local_admin=True,
+                read_only=True,
+                grounded_task=True,
+            )
+    task_record = validated_public_task_record(
+        result.public_task_record()
+    )
+    structural_failure = structural_failure or not (
+        task_record is not None
+        and result.task_id == task_id
+        and contract is not None
+        and contract.is_owned_by(_FAST_CONTROL_LOCAL_PRINCIPAL_TOKEN)
+        and contract.guidance_mode == "canary"
+        and contract.canary_run_id == run_id
+        and contract.guidance_version == version_id
+        and contract.guidance_digest == guidance_digest
+        and set(contract.authority.auto_tools).issubset(
+            _CANARY_EXECUTION_TOOLS
+        )
+        and set(contract.authority.approval_tools).issubset(
+            _CANARY_EXECUTION_TOOLS
+        )
+        and task_record["guidanceMode"] == "canary"
+        and task_record["canaryRunId"] == run_id
+        and task_record["guidanceVersion"] == version_id
+        and task_record["guidanceDigest"] == guidance_digest
+        and task_record["contractVersion"] == TASK_WORK_CONTRACT_SCHEMA
+        and task_record["evalVersion"] == TASK_EVAL_VERSION
+        and task_goal_is_grounded_read_only(goal)
+        and pointer is not None
+        and str(pointer.canary_run_id) == run_id
+        and str(pointer.version_id) == version_id
+        and str(pointer.guidance_digest) == guidance_digest
+        and type(getattr(pointer, "archive_generation", None)) is int
+        and pointer.archive_generation == reserved["archiveGeneration"]
+    )
+    unauthorized_effect = bool(
+        task_record is None
+        or any(
+            step.get("executed") is True
+            and step.get("tool") not in _CANARY_EXECUTION_TOOLS
+            for step in task_record.get("steps", ())
+            if isinstance(step, dict)
+        )
+    )
+    evidence = result.evidence_text()
+    grounded_ready = getattr(result, "status", "") == "grounded_draft_ready"
+    grounded_valid = bool(
+        grounded_ready
+        and task_loop_grounded_draft_evidence(evidence, goal=goal)
+        and task_loop_terminal_outcome(evidence, goal=goal) is not None
+    )
+    if grounded_ready and not grounded_valid:
+        structural_failure = True
+    task_failure = not grounded_ready
+    privacy_leakage = not (
+        task_record is not None
+        and validated_public_task_record(task_record) is not None
+    )
+    passed = not any(
+        (
+            unauthorized_effect,
+            privacy_leakage,
+            structural_failure,
+            task_failure,
+        )
+    )
+    receipts[task_id] = {
+        "schema": _CANARY_TASK_RECEIPT_SCHEMA,
+        "state": "terminal",
+        "taskId": task_id,
+        "canaryRunId": run_id,
+        "candidateVersionId": version_id,
+        "guidanceDigest": guidance_digest,
+        "contractVersion": TASK_WORK_CONTRACT_SCHEMA,
+        "evaluatorVersion": TASK_EVAL_VERSION,
+        "principalRef": _CONVERSATION_ARCHIVE_LOCAL_ACTOR_ID,
+        "archiveGeneration": int(reserved["archiveGeneration"]),
+        "passed": passed,
+        "unauthorizedEffect": unauthorized_effect,
+        "privacyLeakage": privacy_leakage,
+        "structuralFailure": structural_failure,
+        "taskFailure": task_failure,
+    }
+    await _finalize_canary_if_ready(run_id)
+
+
+def _server_canary_aggregate(
+    *,
+    runtime: _ConversationArchiveApiRuntime,
+    version_id: str,
+    canary_run_id: str,
+    guidance_digest: str,
+) -> dict[str, Any]:
+    binding = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(canary_run_id)
+    receipts = CONVERSATION_ARCHIVE_CANARY_RECEIPTS.get(canary_run_id)
+    if binding != (runtime, version_id, guidance_digest) or not isinstance(
+        receipts, dict
+    ):
+        raise ValueError("feedback_canary_binding_stale")
+    rows = list(receipts.values())
+    expected_fields = {
+        "schema",
+        "state",
+        "taskId",
+        "canaryRunId",
+        "candidateVersionId",
+        "guidanceDigest",
+        "contractVersion",
+        "evaluatorVersion",
+        "principalRef",
+        "archiveGeneration",
+        "passed",
+        "unauthorizedEffect",
+        "privacyLeakage",
+        "structuralFailure",
+        "taskFailure",
+    }
+    if (
+        len(rows) != 10
+        or len({row.get("taskId") for row in rows if isinstance(row, dict)})
+        != 10
+        or any(
+            not isinstance(row, dict)
+            or set(row) != expected_fields
+            or row.get("schema") != _CANARY_TASK_RECEIPT_SCHEMA
+            or row.get("state") != "terminal"
+            or row.get("canaryRunId") != canary_run_id
+            or row.get("candidateVersionId") != version_id
+            or row.get("guidanceDigest") != guidance_digest
+            or row.get("contractVersion") != TASK_WORK_CONTRACT_SCHEMA
+            or row.get("evaluatorVersion") != TASK_EVAL_VERSION
+            or row.get("principalRef")
+            != _CONVERSATION_ARCHIVE_LOCAL_ACTOR_ID
+            or type(row.get("archiveGeneration")) is not int
+            or row["archiveGeneration"] < 0
+            or any(
+                type(row.get(key)) is not bool
+                for key in (
+                    "passed",
+                    "unauthorizedEffect",
+                    "privacyLeakage",
+                    "structuralFailure",
+                    "taskFailure",
+                )
+            )
+            for row in rows
+        )
+    ):
+        raise ValueError("feedback_canary_samples_incomplete")
+    from .feedback_improvement import FEEDBACK_CANARY_AGGREGATE_SCHEMA
+
+    return {
+        "schema": FEEDBACK_CANARY_AGGREGATE_SCHEMA,
+        "candidateVersionId": version_id,
+        "guidanceDigest": guidance_digest,
+        "contractVersion": TASK_WORK_CONTRACT_SCHEMA,
+        "evaluatorVersion": TASK_EVAL_VERSION,
+        "sampleCount": 10,
+        "passedCount": sum(row["passed"] for row in rows),
+        "unauthorizedEffectCount": sum(
+            row["unauthorizedEffect"] for row in rows
+        ),
+        "privacyLeakageCount": sum(row["privacyLeakage"] for row in rows),
+        "structuralFailureCount": sum(
+            row["structuralFailure"] for row in rows
+        ),
+        "taskFailureCount": sum(row["taskFailure"] for row in rows),
+    }
+
+
+def _validated_canary_abort(
+    value: Any,
+    *,
+    expected_run_id: str | None,
+) -> dict[str, Any] | None:
+    fields = {
+        "schema",
+        "canaryRunId",
+        "versionId",
+        "state",
+        "revokedVersionIds",
+        "contentFree",
+    }
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("feedback_canary_abort_invalid")
+    run_id = value.get("canaryRunId")
+    version_id = value.get("versionId")
+    revoked = value.get("revokedVersionIds")
+    if (
+        value.get("schema") != "evelyn.feedback-canary-abort-public.v1"
+        or not isinstance(run_id, str)
+        or len(run_id) > 128
+        or _CONVERSATION_ARCHIVE_ID_RE.fullmatch(run_id) is None
+        or (
+            expected_run_id is not None
+            and run_id != expected_run_id
+        )
+        or not isinstance(version_id, str)
+        or len(version_id) > 128
+        or _CONVERSATION_ARCHIVE_ID_RE.fullmatch(version_id) is None
+        or value.get("state") != "canary_failed"
+        or not isinstance(revoked, list)
+        or len(revoked) != len(set(revoked))
+        or any(
+            not isinstance(item, str)
+            or len(item) > 128
+            or _CONVERSATION_ARCHIVE_ID_RE.fullmatch(item) is None
+            for item in revoked
+        )
+        or value.get("contentFree") is not True
+    ):
+        raise ValueError("feedback_canary_abort_invalid")
+    return dict(value)
+
+
+async def _abort_interrupted_canary(
+    *,
+    runtime: _ConversationArchiveApiRuntime,
+    run_id: str | None,
+) -> dict[str, Any] | None:
+    async with runtime.lock:
+        controller = _conversation_archive_feedback_controller(runtime)
+        result = await asyncio.to_thread(
+            controller.abort_interrupted_canary,
+            canary_run_id=run_id,
+            admin_authorized=True,
+        )
+    return _validated_canary_abort(
+        result,
+        expected_run_id=run_id,
+    )
+
+
+async def _finalize_canary_if_ready(run_id: str) -> None:
+    receipts = CONVERSATION_ARCHIVE_CANARY_RECEIPTS.get(run_id)
+    binding = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(run_id)
+    if (
+        not isinstance(receipts, dict)
+        or len(receipts) != 10
+        or not all(
+            isinstance(row, dict) and row.get("state") == "terminal"
+            for row in receipts.values()
+        )
+        or binding is None
+    ):
+        return
+    runtime, version_id, guidance_digest = binding
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        raise FastActionExecutionError(
+            "feedback_canary_binding_stale",
+            reply="카나리 실행 소유자를 확인하지 못해 결과를 승격 근거로 쓰지 않았어.",
+        )
+    try:
+        async with runtime.lock:
+            controller = _conversation_archive_feedback_controller(runtime)
+            current = await asyncio.to_thread(
+                controller.running_canary_pointer,
+                local_admin=True,
+                read_only=True,
+                grounded_task=True,
+            )
+            if not (
+                current is not None
+                and str(current.canary_run_id) == run_id
+                and str(current.version_id) == version_id
+                and str(current.guidance_digest) == guidance_digest
+            ):
+                raise FastActionExecutionError(
+                    "feedback_canary_binding_stale",
+                    reply="카나리 종료 시점의 후보 결박이 달라 결과를 승격 근거로 쓰지 않았어.",
+                )
+            aggregate = _server_canary_aggregate(
+                runtime=runtime,
+                version_id=version_id,
+                canary_run_id=run_id,
+                guidance_digest=guidance_digest,
+            )
+            await asyncio.to_thread(
+                controller.record_canary,
+                version_id=version_id,
+                canary_run_id=run_id,
+                aggregate=aggregate,
+                admin_authorized=True,
+            )
+    except BaseException:
+        aborted: dict[str, Any] | None = None
+        try:
+            aborted = await _abort_interrupted_canary(
+                runtime=runtime,
+                run_id=run_id,
+            )
+        except BaseException:
+            aborted = None
+        if aborted is not None:
+            CONVERSATION_ARCHIVE_CANARY_BINDINGS.pop(run_id, None)
+            CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(run_id, None)
+        else:
+            runtime.close_feedback_guidance_admission()
+        raise
+    else:
+        CONVERSATION_ARCHIVE_CANARY_BINDINGS.pop(run_id, None)
+        CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(run_id, None)
+
+
 def register_background_action_handler(
     *,
     kind: str,
@@ -5421,20 +6084,67 @@ def register_builtin_background_action_handlers() -> None:
             goal = parse_task_request(text)
             if not goal:
                 return "작업 목표가 비어 있어. `/작업 <목표>`처럼 입력해줘."
+            if clean_text(source).lower() != "control_page":
+                raise FastActionExecutionError(
+                    "task_principal_unverified",
+                    reply="인증된 로컬 Control Page에서만 이 작업을 실행할 수 있어.",
+                )
             fast_task_id = clean_text(FAST_ACTION_TASK_ID.get())
+            planner_guidance, read_only = await _fast_control_task_guidance(
+                task_id=fast_task_id,
+                goal=goal,
+            )
+            task_loop_kwargs: dict[str, Any] = {
+                "source": source,
+                "principal_token": _FAST_CONTROL_LOCAL_PRINCIPAL_TOKEN,
+                "skill_origin_class": "internal",
+            }
             if fast_task_id:
-                result = await run_default_task_loop(
-                    goal,
-                    source=source,
+                task_loop_kwargs.update(
+                    {
+                        "task_id": fast_task_id,
+                        "request_approval": TASK_APPROVAL_MANAGER.wait,
+                    }
+                )
+            if planner_guidance is not None:
+                task_loop_kwargs["planner_guidance"] = planner_guidance
+            if read_only:
+                task_loop_kwargs["read_only"] = True
+            try:
+                result = await run_default_task_loop(goal, **task_loop_kwargs)
+            except BaseException:
+                await asyncio.shield(
+                    _record_canary_task_exception(fast_task_id)
+                )
+                raise
+
+            def attach_public_record() -> None:
+                if not fast_task_id:
+                    return
+                ACTION_COORDINATOR.attach_task_record(
+                    fast_task_id,
+                    result.public_task_record(),
+                )
+
+            try:
+                if fast_task_id and result.task_id != fast_task_id:
+                    raise FastActionExecutionError(
+                        "task_result_binding_invalid",
+                        reply=TASK_LOOP_INVALID_RESULT,
+                    )
+                await _record_canary_task_terminal(
                     task_id=fast_task_id,
-                    request_approval=TASK_APPROVAL_MANAGER.wait,
+                    goal=goal,
+                    result=result,
                 )
-            else:
-                result = await run_default_task_loop(
-                    goal,
-                    source=source,
+            except BaseException:
+                await asyncio.shield(
+                    _record_canary_task_exception(fast_task_id)
                 )
+                raise
+
             if result.status == "cancelled":
+                attach_public_record()
                 raise FastActionCancelledError(
                     result.code or "task_action_cancelled",
                     reply=(
@@ -5442,7 +6152,27 @@ def register_builtin_background_action_handlers() -> None:
                         or "작업 취소를 확인했어."
                     ),
                 )
+            if result.status == "grounded_draft_ready":
+                result_evidence = result.evidence_text()
+                grounded_outcome = task_loop_terminal_outcome(
+                    result_evidence,
+                    goal=goal,
+                )
+                if not (
+                    task_loop_grounded_draft_evidence(
+                        result_evidence,
+                        goal=goal,
+                    )
+                    and grounded_outcome is not None
+                ):
+                    raise FastActionExecutionError(
+                        "task_grounded_draft_invalid",
+                        reply=TASK_LOOP_INVALID_RESULT,
+                    )
+                attach_public_record()
+                return grounded_outcome
             if not result.completed:
+                attach_public_record()
                 incomplete_reply = (
                     "작업을 계속하려면 추가 입력이 필요해."
                     if result.status == "awaiting_approval"
@@ -5460,12 +6190,14 @@ def register_builtin_background_action_handlers() -> None:
                 goal=goal,
             )
             if verified_mutation_outcome is not None:
+                attach_public_record()
                 return verified_mutation_outcome
             if not task_loop_completed_evidence(result_evidence, goal=goal):
                 raise FastActionExecutionError(
                     "task_result_invalid",
                     reply=TASK_LOOP_INVALID_RESULT,
                 )
+            attach_public_record()
             verified_success_codes = {
                 clean_text(str(observation.get("code") or ""))
                 for observation in result.observations
@@ -5670,6 +6402,11 @@ def launch_background_action(
                 expected_position=exposure_position,
                 required=(exposure_position is not None),
             ):
+                await _conversation_archive_append_task_terminal(
+                    task,
+                    body=final_reply,
+                    outcome="completed",
+                )
                 completed = ACTION_COORDINATOR.complete(
                     task.task_id,
                     final_reply,
@@ -5690,8 +6427,15 @@ def launch_background_action(
                     completed.final_reply,
                     memory_receipt=memory_receipt_ref,
                 )
+                spoken_reply = (
+                    GROUNDED_DRAFT_TTS_TEXT
+                    if isinstance(completed.task_record, dict)
+                    and completed.task_record.get("status")
+                    == "grounded_draft_ready"
+                    else completed.final_reply
+                )
                 queue_local_bridge_speech(
-                    completed.final_reply,
+                    spoken_reply,
                     source="fast_control_action_followup",
                 )
         except FastActionCancelledError as exc:
@@ -5699,10 +6443,30 @@ def launch_background_action(
                 clean_text(exc.reply)
                 or "작업 취소를 확인했어."
             )
+            try:
+                await _conversation_archive_append_task_terminal(
+                    task,
+                    body=cancelled_reply,
+                    outcome="cancelled",
+                )
+            except Exception:
+                record_interrupted_cancellation()
+                return
             record_cancellation(cancelled_reply)
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             if current_task in BACKGROUND_ACTION_CANCEL_INTENTS:
+                try:
+                    await asyncio.shield(
+                        _conversation_archive_append_task_terminal(
+                            task,
+                            body="작업 취소를 확인했어.",
+                            outcome="cancelled",
+                        )
+                    )
+                except Exception:
+                    record_interrupted_cancellation()
+                    raise
                 record_cancellation("작업 취소를 확인했어.")
                 raise
             record_interrupted_cancellation()
@@ -5772,6 +6536,19 @@ def launch_background_action(
                     source="fast_control_action_followup",
                 )
 
+            try:
+                await _conversation_archive_append_task_terminal(
+                    task,
+                    body=failed_reply,
+                    outcome="failed",
+                )
+            except Exception:
+                error = "conversation_archive_unavailable"
+                failed_reply = public_failure_message(error)
+                failure_receipt = not_used_memory_receipt_ref()
+                persist_failure()
+                return
+
             if custom_failure:
                 try:
                     with memory_exposure_guard(
@@ -5800,6 +6577,7 @@ def launch_background_action(
         BACKGROUND_ACTION_TASKS.discard(completed)
         if BACKGROUND_ACTION_TASKS_BY_ID.get(task.task_id) is completed:
             BACKGROUND_ACTION_TASKS_BY_ID.pop(task.task_id, None)
+        CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.pop(task.task_id, None)
         for claim_id, claim in tuple(TASK_APPROVAL_CLAIMS.items()):
             if claim.request.task_id == task.task_id:
                 TASK_APPROVAL_CLAIMS.pop(claim_id, None)
@@ -9163,6 +9941,21 @@ async def _chat_handler(request: web.Request) -> web.StreamResponse:
         return response
     if ingress_claim is not None:
         action_id = str(ingress_claim["_effectId"])
+    archive_binding: tuple[
+        _ConversationArchiveApiRuntime,
+        str,
+        str,
+    ] | None = None
+    if validation_lease is None:
+        try:
+            archive_binding = await _conversation_archive_append_local_user(
+                request,
+                text=text,
+                source=source,
+                turn_reference=action_id,
+            )
+        except Exception as exc:
+            return _conversation_archive_exception_response(exc)
     suppress_tts = should_suppress_tts_for_command(text)
     speech_generation: int | None = None
     speech_turn_id = ""
@@ -9297,6 +10090,32 @@ async def _chat_handler(request: web.Request) -> web.StreamResponse:
         if validation_lease is not None:
             validation_lease.release()
         raise
+    if validation_lease is None:
+        try:
+            await _conversation_archive_append_local_derived(
+                archive_binding,
+                body=reply,
+                kind="evelyn_reply",
+                suffix="reply",
+            )
+        except Exception as exc:
+            if task_record is not None and task_record.status == "running":
+                ACTION_COORDINATOR.fail(
+                    task_record.task_id,
+                    "conversation_archive_unavailable",
+                    reply=public_failure_message(
+                        "conversation_archive_unavailable"
+                    ),
+                    memory_receipt=not_used_memory_receipt_ref(),
+                )
+                FAST_ACTION_RECOVERY_JOURNAL.finish(task_record.task_id)
+            return _conversation_archive_exception_response(exc)
+        if task_record is not None and archive_binding is not None:
+            CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS[task_record.task_id] = (
+                archive_binding[0],
+                archive_binding[1],
+                archive_binding[2],
+            )
     try:
         return await _finalize_fast_chat_response(
             text=text,
@@ -9432,6 +10251,21 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
         )
     if ingress_claim is not None:
         action_id = str(ingress_claim["_effectId"])
+    archive_binding: tuple[
+        _ConversationArchiveApiRuntime,
+        str,
+        str,
+    ] | None = None
+    if validation_lease is None:
+        try:
+            archive_binding = await _conversation_archive_append_local_user(
+                request,
+                text=text,
+                source=source,
+                turn_reference=action_id,
+            )
+        except Exception as exc:
+            return _conversation_archive_exception_response(exc)
     suppress_tts = should_suppress_tts_for_command(text)
     if should_queue_local_bridge_speech(source):
         begin_local_bridge_speech_generation(
@@ -9445,7 +10279,7 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
         status=200,
         headers={
             "Content-Type": "application/x-ndjson; charset=utf-8",
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-store",
             "X-Accel-Buffering": "no",
         },
     )
@@ -9498,6 +10332,10 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
     )
     ingress_delivery_started = False
     ingress_delivery_failed = False
+    archive_delivery_committed = archive_binding is None
+    archive_buffered_events: list[
+        tuple[dict[str, Any], MemoryExposurePosition | None]
+    ] = []
 
     def fail_stream_unlaunched_action(outcome: str) -> None:
         if task_record is None:
@@ -9675,6 +10513,9 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
         event_payload: dict[str, Any],
         position: MemoryExposurePosition | None,
     ) -> None:
+        if not archive_delivery_committed:
+            archive_buffered_events.append((dict(event_payload), position))
+            return
         with memory_exposure_guard(
             expected_position=position,
             required=position is not None,
@@ -9688,6 +10529,22 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     "conversation_ingress_delivery_disconnected"
                 )
                 raise
+
+    async def commit_archive_and_flush(final_reply: str) -> None:
+        nonlocal archive_delivery_committed
+        if archive_delivery_committed:
+            return
+        await _conversation_archive_append_local_derived(
+            archive_binding,
+            body=final_reply,
+            kind="evelyn_reply",
+            suffix="reply",
+        )
+        archive_delivery_committed = True
+        pending = tuple(archive_buffered_events)
+        archive_buffered_events.clear()
+        for event_payload, position in pending:
+            await write_event_at_memory_exposure(event_payload, position)
 
     async def ensure_local_memory_boundary() -> None:
         nonlocal stream_memory_boundary_emitted, stream_memory_exposure
@@ -9899,6 +10756,13 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     ingress_entry_id,
                     assistant_text=reply,
                     memory_receipt_ref=response_memory_receipt_ref,
+                )
+            await commit_archive_and_flush(reply)
+            if task_record is not None and archive_binding is not None:
+                CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS[task_record.task_id] = (
+                    archive_binding[0],
+                    archive_binding[1],
+                    archive_binding[2],
                 )
             playback_binding = (
                 _local_bridge_delivery_binding(ingress_claim, reply)
@@ -10330,6 +11194,15 @@ async def _chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 memory_receipt=not_used_memory_receipt_ref(),
             )
         failure_receipt = not_used_memory_receipt_ref()
+        try:
+            if not archive_delivery_committed:
+                # No streamed prefix crossed the boundary yet. Drop it so the
+                # archived failure reply exactly matches what is delivered.
+                archive_buffered_events.clear()
+            await commit_archive_and_flush(failure_reply)
+        except Exception as archive_exc:
+            response_finished = True
+            return _conversation_archive_exception_response(archive_exc)
         if ingress_entry_id and not isolated_validation:
             try:
                 FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
@@ -11816,9 +12689,5067 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
     return memory_guarded_json_response(result, expected_position=None)
 
 
+class _ConversationArchiveTransportError(RuntimeError):
+    def __init__(self, code: str, *, status: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+class _ConversationArchiveUserViewError(RuntimeError):
+    def __init__(self, code: str, *, status: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+class _ConversationArchiveUserViewHandles:
+    """Process-local, one-use capabilities for one Discord interaction."""
+
+    def __init__(self, *, master_key: bytes, clock: Callable[[], float]) -> None:
+        if len(master_key) < 32:
+            raise RuntimeError("archive_user_view_key_invalid")
+        self._key = _conversation_archive_subkey(
+            master_key,
+            _CONVERSATION_ARCHIVE_USER_VIEW_HANDLE_KEY_DOMAIN,
+        )
+        self._clock = clock
+        self._handles: dict[str, dict[str, Any]] = {}
+        self._interactions: dict[str, int] = {}
+
+    def clear(self) -> None:
+        self._handles.clear()
+        self._interactions.clear()
+        self._key = b""
+
+    def _digest(self, domain: bytes, value: str) -> str:
+        return hmac.new(
+            self._key,
+            domain + value.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _purge(self) -> int:
+        now = int(self._clock())
+        self._handles = {
+            digest: claim
+            for digest, claim in self._handles.items()
+            if int(claim["expiresAt"]) > now
+        }
+        self._interactions = {
+            digest: expiry
+            for digest, expiry in self._interactions.items()
+            if expiry > now
+        }
+        return now
+
+    def use_interaction(self, interaction_id: str) -> None:
+        now = self._purge()
+        digest = self._digest(
+            _CONVERSATION_ARCHIVE_USER_VIEW_INTERACTION_DOMAIN,
+            interaction_id,
+        )
+        if digest in self._interactions:
+            raise _ConversationArchiveUserViewError(
+                "archive_user_view_interaction_replayed", status=409
+            )
+        self._interactions[digest] = now + CONVERSATION_ARCHIVE_USER_VIEW_PAGE_SECONDS
+
+    def issue(self, claim: Mapping[str, Any], *, page: bool = False) -> str:
+        now = self._purge()
+        token = secrets.token_urlsafe(32)
+        stored = dict(claim)
+        stored["expiresAt"] = now + (
+            CONVERSATION_ARCHIVE_USER_VIEW_PAGE_SECONDS
+            if page
+            else CONVERSATION_ARCHIVE_USER_VIEW_HANDLE_SECONDS
+        )
+        self._handles[
+            self._digest(_CONVERSATION_ARCHIVE_USER_VIEW_TOKEN_DOMAIN, token)
+        ] = stored
+        return token
+
+    def consume(self, token: str, *, kind: str) -> dict[str, Any]:
+        now = self._purge()
+        digest = self._digest(
+            _CONVERSATION_ARCHIVE_USER_VIEW_TOKEN_DOMAIN,
+            token,
+        )
+        claim = self._handles.pop(digest, None)
+        if claim is None or int(claim["expiresAt"]) <= now:
+            raise _ConversationArchiveUserViewError(
+                "archive_user_view_handle_invalid", status=403
+            )
+        if not hmac.compare_digest(str(claim.get("kind")), kind):
+            raise _ConversationArchiveUserViewError(
+                "archive_user_view_handle_wrong_purpose", status=403
+            )
+        return claim
+
+    def revoke(self, token: str) -> None:
+        self._handles.pop(
+            self._digest(_CONVERSATION_ARCHIVE_USER_VIEW_TOKEN_DOMAIN, token),
+            None,
+        )
+
+
+def _conversation_archive_subkey(master_key: bytes, domain: bytes) -> bytes:
+    return hmac.new(master_key, domain, hashlib.sha256).digest()
+
+
+def _conversation_archive_transport_subkey(
+    master_key: bytes,
+    purpose: str,
+) -> bytes:
+    if purpose not in {
+        "ingest",
+        "user-view-issue",
+        "user-view",
+        "otp-delivery",
+        "purge-owner",
+        "control-proxy",
+        "minecraft",
+    }:
+        raise ValueError("archive_transport_purpose_invalid")
+    return hmac.new(
+        master_key,
+        _CONVERSATION_ARCHIVE_TRANSPORT_KEY_DOMAIN
+        + purpose.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+
+
+def _conversation_archive_read_file(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    error: str,
+) -> bytes:
+    candidate = Path(path)
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            raise OSError
+        with candidate.open("rb") as handle:
+            encoded = handle.read(maximum_bytes + 1)
+    except OSError:
+        raise RuntimeError(error) from None
+    if not encoded or len(encoded) > maximum_bytes:
+        raise RuntimeError(error)
+    return encoded
+
+
+def _conversation_archive_env_options(
+    overrides: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    supplied = dict(overrides or {})
+
+    def value(name: str, environment: str, default: Any = "") -> Any:
+        return supplied.get(name, os.getenv(environment, default))
+
+    anchor_dir = Path(
+        str(
+            value(
+                "anchor_dir",
+                "EVELYN_CONVERSATION_ARCHIVE_ANCHOR_DIR",
+                "/run/evelyn-private-audit/anchor",
+            )
+        )
+    )
+    voice_debug_root_raw = value(
+        "purge_voice_debug_root",
+        "EVELYN_CONVERSATION_ARCHIVE_PURGE_VOICE_DEBUG_ROOT",
+    )
+    voice_debug_root_value = (
+        ""
+        if voice_debug_root_raw is None
+        else str(voice_debug_root_raw).strip()
+    )
+    voice_debug_root = (
+        None
+        if not voice_debug_root_value
+        else Path(voice_debug_root_value)
+    )
+    if voice_debug_root is not None and not voice_debug_root.is_absolute():
+        voice_debug_root = get_repo_root() / voice_debug_root
+    return {
+        **supplied,
+        "primary_path": Path(
+            str(
+                value(
+                    "primary_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_PRIMARY_DB",
+                    "/run/evelyn-private-audit/primary/conversation.sqlite3",
+                )
+            )
+        ),
+        "replica_path": Path(
+            str(
+                value(
+                    "replica_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_REPLICA_DB",
+                    "/run/evelyn-private-audit/backup/conversation.sqlite3",
+                )
+            )
+        ),
+        "anchor_dir": anchor_dir,
+        "anchor_path": Path(
+            str(
+                value(
+                    "anchor_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_ANCHOR_FILE",
+                    anchor_dir / "conversation-archive.anchor.json",
+                )
+            )
+        ),
+        "auth_key_path": Path(
+            str(
+                value(
+                    "auth_key_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_AUTH_KEY_FILE",
+                )
+            )
+        ),
+        "ingest_key_path": Path(
+            str(
+                value(
+                    "ingest_key_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE",
+                )
+            )
+        ),
+        "user_view_key_path": Path(
+            str(
+                value(
+                    "user_view_key_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE",
+                )
+            )
+        ),
+        "proxy_key_path": Path(
+            str(
+                value(
+                    "proxy_key_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE",
+                )
+            )
+        ),
+        "minecraft_key_path": Path(
+            str(
+                value(
+                    "minecraft_key_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE",
+                )
+            )
+        ),
+        "attestation_path": Path(
+            str(
+                value(
+                    "attestation_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_HOST_ATTESTATION_FILE",
+                )
+            )
+        ),
+        "host_session_state_path": Path(
+            str(
+                value(
+                    "host_session_state_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_HOST_SESSION_FILE",
+                    "/run/secrets/evelyn-conversation-archive/host-session.json",
+                )
+            )
+        ),
+        "admin_state_path": Path(
+            str(
+                value(
+                    "admin_state_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_ADMIN_STATE_FILE",
+                    anchor_dir / "admin-auth-state.json",
+                )
+            )
+        ),
+        "startup_replay_path": Path(
+            str(
+                value(
+                    "startup_replay_path",
+                    "EVELYN_CONVERSATION_ARCHIVE_STARTUP_REPLAY_FILE",
+                    anchor_dir / "startup-attestation-replay.json",
+                )
+            )
+        ),
+        "expected_admin_sid": str(
+            value(
+                "expected_admin_sid",
+                "EVELYN_CONVERSATION_ARCHIVE_ADMIN_SID",
+            )
+        ),
+        "expected_admin_account": str(
+            value(
+                "expected_admin_account",
+                "EVELYN_CONVERSATION_ARCHIVE_ADMIN_ACCOUNT",
+            )
+        ),
+        "registered_discord_user_id": str(
+            value(
+                "registered_discord_user_id",
+                "EVELYN_CONVERSATION_ARCHIVE_ADMIN_DISCORD_USER_ID",
+            )
+        ),
+        "expected_host_id": (
+            str(
+                value(
+                    "expected_host_id",
+                    "EVELYN_CONVERSATION_ARCHIVE_HOST_ID",
+                )
+            )
+            or None
+        ),
+        "control_page_origin": str(
+            value(
+                "control_page_origin",
+                "EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN",
+                "https://127.0.0.1:8800",
+            )
+        ),
+        "local_owner_external_id": str(
+            value(
+                "local_owner_external_id",
+                "EVELYN_CONVERSATION_ARCHIVE_LOCAL_OWNER_ID",
+                _CONVERSATION_ARCHIVE_LOCAL_ACTOR_ID,
+            )
+        ),
+        "local_owner_name": str(
+            value(
+                "local_owner_name",
+                "EVELYN_CONVERSATION_ARCHIVE_LOCAL_OWNER_NAME",
+                "정훈",
+            )
+        ),
+        "purge_memory_index_dir": Path(
+            str(
+                value(
+                    "purge_memory_index_dir",
+                    "EVELYN_CONVERSATION_ARCHIVE_PURGE_MEMORY_INDEX_DIR",
+                    Path(MEMORY_ROOT) / "memory_index",
+                )
+            )
+        ),
+        "purge_memory_root": Path(
+            str(
+                value(
+                    "purge_memory_root",
+                    "EVELYN_CONVERSATION_ARCHIVE_PURGE_MEMORY_ROOT",
+                    MEMORY_ROOT,
+                )
+            )
+        ),
+        # Local owners are callables and therefore intentionally have no env
+        # representation. Production composition must inject only owners that
+        # enumerate and negatively recall their exact sink.
+        "purge_owners": tuple(supplied.get("purge_owners", ())),
+        "purge_process_tool_cache": supplied.get(
+            "purge_process_tool_cache"
+        ),
+        "purge_voice_debug_root": voice_debug_root,
+        "purge_voice_turn_resolver": supplied.get(
+            "purge_voice_turn_resolver"
+        ),
+        "clock": supplied.get("clock", time.time),
+        "retention_interval_seconds": float(
+            supplied.get("retention_interval_seconds", 3600.0)
+        ),
+        "retention_batch_size": int(
+            supplied.get("retention_batch_size", 100)
+        ),
+    }
+
+
+def _conversation_archive_replay_body_tag(
+    body: dict[str, Any],
+    *,
+    key: bytes,
+) -> str:
+    encoded = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+
+def _conversation_archive_consume_startup_attestation(
+    *,
+    path: Path,
+    attestation: Mapping[str, Any],
+    key: bytes,
+    now: int,
+) -> None:
+    replay_path = Path(path)
+    if replay_path.is_symlink():
+        raise RuntimeError("archive_startup_replay_invalid")
+    body: dict[str, Any] = {
+        "schema": _CONVERSATION_ARCHIVE_STARTUP_REPLAY_SCHEMA,
+        "seen": {},
+    }
+    if replay_path.exists():
+        try:
+            envelope = json.loads(
+                _conversation_archive_read_file(
+                    replay_path,
+                    maximum_bytes=128 * 1024,
+                    error="archive_startup_replay_invalid",
+                ).decode("utf-8")
+            )
+            loaded = envelope["body"]
+            tag = envelope["authTag"]
+            if (
+                not isinstance(loaded, dict)
+                or set(loaded) != {"schema", "seen"}
+                or loaded.get("schema")
+                != _CONVERSATION_ARCHIVE_STARTUP_REPLAY_SCHEMA
+                or not isinstance(loaded.get("seen"), dict)
+                or not isinstance(tag, str)
+                or not hmac.compare_digest(
+                    tag,
+                    _conversation_archive_replay_body_tag(loaded, key=key),
+                )
+            ):
+                raise ValueError
+            body = loaded
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            raise RuntimeError("archive_startup_replay_invalid") from None
+    seen = {
+        str(digest): int(expiry)
+        for digest, expiry in body["seen"].items()
+        if isinstance(digest, str)
+        and _CONVERSATION_ARCHIVE_SIGNATURE_RE.fullmatch(digest)
+        and type(expiry) is int
+        and expiry > now
+    }
+    attestation_tag = str(attestation.get("authTag") or "")
+    replay_id = hmac.new(
+        key,
+        attestation_tag.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if replay_id in seen:
+        raise RuntimeError("archive_startup_attestation_replayed")
+    seen[replay_id] = int(attestation["expiresAt"])
+    new_body = {
+        "schema": _CONVERSATION_ARCHIVE_STARTUP_REPLAY_SCHEMA,
+        "seen": seen,
+    }
+    envelope = {
+        "body": new_body,
+        "authTag": _conversation_archive_replay_body_tag(new_body, key=key),
+    }
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = replay_path.with_name(
+        f".{replay_path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                envelope,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, replay_path)
+        try:
+            descriptor = os.open(str(replay_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            pass
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("archive_startup_replay_unavailable") from None
+
+
+class _ConversationArchiveTransportAuth:
+    def __init__(
+        self,
+        *,
+        master_key: bytes,
+        user_view_master_key: bytes,
+        proxy_master_key: bytes,
+        minecraft_master_key: bytes,
+        clock: Callable[[], float],
+    ) -> None:
+        if (
+            len(master_key) < 32
+            or len(user_view_master_key) < 32
+            or len(proxy_master_key) < 32
+            or len(minecraft_master_key) < 32
+        ):
+            raise RuntimeError("archive_ingest_key_invalid")
+        self._keys = {
+            purpose: _conversation_archive_transport_subkey(master_key, purpose)
+            for purpose in ("ingest", "otp-delivery", "purge-owner")
+        }
+        for purpose in ("user-view-issue", "user-view"):
+            self._keys[purpose] = _conversation_archive_transport_subkey(
+                user_view_master_key,
+                purpose,
+            )
+        self._keys["control-proxy"] = _conversation_archive_transport_subkey(
+            proxy_master_key,
+            "control-proxy",
+        )
+        self._keys["minecraft"] = _conversation_archive_transport_subkey(
+            minecraft_master_key,
+            "minecraft",
+        )
+        self._clock = clock
+        self._seen: dict[tuple[str, str], int] = {}
+
+    def verify(
+        self,
+        *,
+        purpose: str,
+        method: str,
+        path: str,
+        body: bytes,
+        headers: Mapping[str, Any],
+    ) -> None:
+        timestamp_text = str(
+            headers.get(CONVERSATION_ARCHIVE_TRANSPORT_TIMESTAMP_HEADER) or ""
+        )
+        nonce = str(
+            headers.get(CONVERSATION_ARCHIVE_TRANSPORT_NONCE_HEADER) or ""
+        )
+        signature = str(
+            headers.get(CONVERSATION_ARCHIVE_TRANSPORT_SIGNATURE_HEADER) or ""
+        )
+        try:
+            timestamp = int(timestamp_text)
+        except (TypeError, ValueError):
+            raise _ConversationArchiveTransportError(
+                "archive_transport_auth_invalid", status=403
+            ) from None
+        now = int(self._clock())
+        if (
+            str(timestamp) != timestamp_text
+            or abs(now - timestamp) > 30
+            or _CONVERSATION_ARCHIVE_NONCE_RE.fullmatch(nonce) is None
+            or _CONVERSATION_ARCHIVE_SIGNATURE_RE.fullmatch(signature) is None
+        ):
+            raise _ConversationArchiveTransportError(
+                "archive_transport_auth_invalid", status=403
+            )
+        canonical_lines = [
+                purpose,
+                method.upper(),
+                path,
+                timestamp_text,
+                nonce,
+                hashlib.sha256(body).hexdigest(),
+        ]
+        if purpose == "control-proxy":
+            canonical_lines.extend(
+                (
+                    str(headers.get(CONVERSATION_ARCHIVE_CONTROL_SCHEME_HEADER) or ""),
+                    str(headers.get(CONVERSATION_ARCHIVE_CONTROL_HOST_HEADER) or ""),
+                    str(headers.get(CONVERSATION_ARCHIVE_CONTROL_ORIGIN_HEADER) or ""),
+                )
+            )
+        canonical = "\n".join(canonical_lines).encode("utf-8")
+        expected = hmac.new(
+            self._keys[purpose], canonical, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise _ConversationArchiveTransportError(
+                "archive_transport_auth_invalid", status=403
+            )
+        self._seen = {
+            key: expiry for key, expiry in self._seen.items() if expiry > now
+        }
+        replay_key = (purpose, nonce)
+        if replay_key in self._seen:
+            raise _ConversationArchiveTransportError(
+                "archive_transport_replayed", status=409
+            )
+        self._seen[replay_key] = timestamp + 31
+
+
+class _ConversationArchiveApiRuntime:
+    def __init__(self, options: Mapping[str, Any]) -> None:
+        self.options = dict(options)
+        self.clock: Callable[[], float] = self.options["clock"]
+        self.archive: Any | None = None
+        self.feedback_controller: Any | None = None
+        self.purge_coordinator: Any | None = None
+        self.admin_auth: Any | None = None
+        self.transport: _ConversationArchiveTransportAuth | None = None
+        self.user_view_handles: _ConversationArchiveUserViewHandles | None = None
+        self.admin_metadata_handles: dict[str, dict[str, Any]] = {}
+        self.lock = asyncio.Lock()
+        self.current_generation: str | None = None
+        self.last_sequence = 0
+        self.ingest_receipts: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.discord_shared_session_leases: dict[str, dict[str, str]] = {}
+        self.minecraft_generation: str | None = None
+        self.minecraft_last_sequence = 0
+        self.minecraft_receipts: dict[
+            str, tuple[str, dict[str, Any]]
+        ] = {}
+        self.otp_deliveries: dict[str, dict[str, Any]] = {}
+        self.step_up: dict[str, dict[str, Any]] = {}
+        self.feedback_action_previews: dict[str, dict[str, Any]] = {}
+        self.remote_purge_receipts: set[
+            tuple[str, int, str, str]
+        ] = set()
+        self.remote_purge_poll_cursor: tuple[datetime, str] | None = None
+        self._admin_key = b""
+        self._attestation_key = b""
+        self.maintenance_fault = False
+        self.feedback_guidance_admission_closed = False
+        self._retention_task: asyncio.Task[Any] | None = None
+
+    def require_feedback_guidance_admission(self) -> None:
+        if self.feedback_guidance_admission_closed:
+            raise RuntimeError("feedback_guidance_admission_closed")
+
+    def close_feedback_guidance_admission(self) -> None:
+        self.feedback_guidance_admission_closed = True
+
+    @staticmethod
+    async def _restore_all_pending_purge_fences(
+        archive: Any,
+        purge_coordinator: Any,
+    ) -> bool:
+        cursor: tuple[datetime, str] | None = None
+        restored = False
+        while True:
+            pending = await asyncio.to_thread(
+                archive.pending_purge_work_orders,
+                limit=1000,
+                after=cursor,
+            )
+            if not pending:
+                return restored
+            await asyncio.to_thread(
+                purge_coordinator.restore_pending_fences,
+                pending,
+            )
+            restored = True
+            if len(pending) < 1000:
+                return True
+            last = pending[-1]
+            cursor = (last.requested_at, str(last.request_id))
+
+    async def _fail_interrupted_canary(self, controller: Any) -> None:
+        result = _validated_canary_abort(
+            await asyncio.to_thread(
+                controller.abort_interrupted_canary,
+                canary_run_id=None,
+                admin_authorized=True,
+            ),
+            expected_run_id=None,
+        )
+        if result is None:
+            return
+        run_id = str(result["canaryRunId"])
+        CONVERSATION_ARCHIVE_CANARY_BINDINGS.pop(
+            run_id, None
+        )
+        CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(
+            run_id, None
+        )
+
+    def _load_and_verify_attestation(self) -> dict[str, Any]:
+        from .conversation_archive_admin import verify_host_attestation
+
+        anchor_dir = Path(self.options["anchor_dir"])
+        if any(
+            Path(self.options[name]).parent != anchor_dir
+            for name in (
+                "anchor_path",
+                "admin_state_path",
+                "startup_replay_path",
+            )
+        ):
+            raise RuntimeError("archive_anchor_path_invalid")
+        try:
+            payload = json.loads(
+                _conversation_archive_read_file(
+                    self.options["attestation_path"],
+                    maximum_bytes=128 * 1024,
+                    error="archive_host_attestation_invalid",
+                ).decode("utf-8")
+            )
+        except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+            raise RuntimeError("archive_host_attestation_invalid") from None
+        verified = verify_host_attestation(
+            payload,
+            signing_key=self._attestation_key,
+            expected_admin_sid=self.options["expected_admin_sid"],
+            expected_admin_account=self.options["expected_admin_account"],
+            expected_registered_discord_user_id=self.options[
+                "registered_discord_user_id"
+            ],
+            expected_host_id=self.options["expected_host_id"],
+            now=int(self.clock()),
+        )
+        for role, root in (
+            ("primary", Path(self.options["primary_path"]).parent),
+            ("replica", Path(self.options["replica_path"]).parent),
+            ("anchor", Path(self.options["anchor_dir"])),
+        ):
+            binding = root / ".evelyn-volume-binding"
+            try:
+                if root.is_symlink() or not root.is_dir() or binding.is_symlink():
+                    raise OSError
+                mounted_nonce = _conversation_archive_read_file(
+                    binding,
+                    maximum_bytes=256,
+                    error="archive_mount_binding_invalid",
+                ).decode("ascii")
+            except (OSError, UnicodeError):
+                raise RuntimeError("archive_mount_binding_invalid") from None
+            if not hmac.compare_digest(
+                mounted_nonce,
+                str(verified[role]["mountNonce"]),
+            ):
+                raise RuntimeError("archive_mount_binding_invalid")
+        anchor_dir = Path(self.options["anchor_dir"])
+        if anchor_dir.is_symlink() or not anchor_dir.is_dir():
+            raise RuntimeError("archive_anchor_unavailable")
+        return verified
+
+    async def open(self) -> None:
+        from .conversation_archive import (
+            ARCHIVE_REQUIRED_PURGE_SINKS,
+            ConversationArchive,
+        )
+        from .conversation_archive_admin import (
+            ConversationArchiveAdminAuth,
+            LoopbackRequestEvidence,
+            require_loopback_control_page,
+        )
+        from .conversation_archive_purge import (
+            ConversationArchivePurgeCoordinator,
+            LocalPurgeOwner,
+            voice_debug_audio_purge_owner,
+        )
+        from .conversation_archive_memory_purge import (
+            memory_bundle_purge_owners,
+        )
+
+        if (
+            not self.options["expected_admin_sid"]
+            or not self.options["expected_admin_account"]
+            or not self.options["registered_discord_user_id"].isdecimal()
+        ):
+            raise RuntimeError("archive_admin_identity_unconfigured")
+        control_origin = str(
+            self.options["control_page_origin"]
+        ).rstrip("/")
+        parsed_control_origin = urlsplit(control_origin)
+        require_loopback_control_page(
+            LoopbackRequestEvidence(
+                scheme=parsed_control_origin.scheme,
+                host=parsed_control_origin.netloc,
+                origin=control_origin,
+            )
+        )
+        self.options["control_page_origin"] = control_origin
+        auth_master = _conversation_archive_read_file(
+            self.options["auth_key_path"],
+            maximum_bytes=4096,
+            error="archive_auth_key_invalid",
+        )
+        ingest_master = _conversation_archive_read_file(
+            self.options["ingest_key_path"],
+            maximum_bytes=4096,
+            error="archive_ingest_key_invalid",
+        )
+        user_view_master = _conversation_archive_read_file(
+            self.options["user_view_key_path"],
+            maximum_bytes=4096,
+            error="archive_user_view_key_invalid",
+        )
+        proxy_master = _conversation_archive_read_file(
+            self.options["proxy_key_path"],
+            maximum_bytes=4096,
+            error="archive_proxy_key_invalid",
+        )
+        minecraft_master = _conversation_archive_read_file(
+            self.options["minecraft_key_path"],
+            maximum_bytes=4096,
+            error="archive_minecraft_key_invalid",
+        )
+        if (
+            len(auth_master) < 32
+            or len(ingest_master) < 32
+            or len(user_view_master) < 32
+            or len(proxy_master) < 32
+            or len(minecraft_master) < 32
+        ):
+            raise RuntimeError("archive_key_invalid")
+        masters = (
+            auth_master,
+            ingest_master,
+            user_view_master,
+            proxy_master,
+            minecraft_master,
+        )
+        if len(set(masters)) != len(masters):
+            raise RuntimeError("archive_key_domain_separation_invalid")
+        self._attestation_key = auth_master
+        integrity_key = _conversation_archive_subkey(
+            auth_master,
+            _CONVERSATION_ARCHIVE_INTEGRITY_KEY_DOMAIN,
+        )
+        purge_lineage_key = _conversation_archive_subkey(
+            ingest_master,
+            _CONVERSATION_ARCHIVE_PURGE_LINEAGE_KEY_DOMAIN,
+        )
+        self._admin_key = _conversation_archive_subkey(
+            auth_master,
+            _CONVERSATION_ARCHIVE_ADMIN_KEY_DOMAIN,
+        )
+        replay_key = _conversation_archive_subkey(
+            auth_master,
+            _CONVERSATION_ARCHIVE_STARTUP_REPLAY_KEY_DOMAIN,
+        )
+        verified = self._load_and_verify_attestation()
+        _conversation_archive_consume_startup_attestation(
+            path=self.options["startup_replay_path"],
+            attestation=verified,
+            key=replay_key,
+            now=int(self.clock()),
+        )
+        purge_owners = [
+            owner
+            for owner in self.options["purge_owners"]
+            if getattr(owner, "sink", None)
+            not in _CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS
+        ]
+        for sink in sorted(_CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS):
+            if sink == "prompt_tool_cache":
+                continue
+            check_receipt = (
+                lambda work_order, sink=sink: self.remote_purge_receipt_pass(
+                    sink, work_order
+                )
+            )
+            purge_owners.append(
+                LocalPurgeOwner(
+                    sink=sink,
+                    purge=check_receipt,
+                    negative_recall=check_receipt,
+                )
+            )
+        registered_purge_sinks = {
+            getattr(owner, "sink", None) for owner in purge_owners
+        }
+        for owner in memory_bundle_purge_owners(
+            memory_root=self.options["purge_memory_root"],
+            lineage_key=purge_lineage_key,
+            process_tool_cache_purge=self.process_tool_cache_purge_pass,
+            writer_fence_current=self.remote_writer_fence_current,
+        ):
+            if owner.sink not in registered_purge_sinks:
+                purge_owners.append(owner)
+                registered_purge_sinks.add(owner.sink)
+        if not any(
+            getattr(owner, "sink", None) == "voice_debug_audio"
+            for owner in purge_owners
+        ):
+            purge_owners.append(
+                voice_debug_audio_purge_owner(
+                    self.options["purge_voice_debug_root"],
+                    resolve_turn_ids=self.options[
+                        "purge_voice_turn_resolver"
+                    ],
+                )
+            )
+        purge_coordinator = ConversationArchivePurgeCoordinator(
+            owners=purge_owners,
+            memory_deletion_index_dir=self.options[
+                "purge_memory_index_dir"
+            ],
+        )
+        archive = ConversationArchive(
+            primary_path=self.options["primary_path"],
+            replica_path=self.options["replica_path"],
+            anchor_path=self.options["anchor_path"],
+            integrity_key=integrity_key,
+            lineage_key=purge_lineage_key,
+            required_purge_sinks=ARCHIVE_REQUIRED_PURGE_SINKS,
+            purge_freeze=purge_coordinator.freeze,
+        )
+        try:
+            await asyncio.to_thread(archive.open)
+            pending_found = await self._restore_all_pending_purge_fences(
+                archive,
+                purge_coordinator,
+            )
+            await asyncio.to_thread(archive.reconcile_replica)
+            if pending_found:
+                await asyncio.to_thread(
+                    purge_coordinator.purge_pending,
+                    archive,
+                    limit=1000,
+                )
+            while True:
+                retention = await asyncio.to_thread(
+                    archive.prune_expired,
+                    batch_size=self.options["retention_batch_size"],
+                )
+                if retention is None:
+                    break
+                await asyncio.to_thread(
+                    purge_coordinator.purge_pending,
+                    archive,
+                    limit=1000,
+                )
+            admin_auth = ConversationArchiveAdminAuth(
+                state_path=self.options["admin_state_path"],
+                authentication_key=self._admin_key,
+                attestation_key=self._attestation_key,
+                expected_admin_sid=self.options["expected_admin_sid"],
+                expected_admin_account=self.options["expected_admin_account"],
+                registered_discord_user_id=self.options[
+                    "registered_discord_user_id"
+                ],
+                expected_host_id=self.options["expected_host_id"],
+                host_session_state_path=self.options[
+                    "host_session_state_path"
+                ],
+                now=self.clock,
+            )
+            transport = _ConversationArchiveTransportAuth(
+                master_key=ingest_master,
+                user_view_master_key=user_view_master,
+                proxy_master_key=proxy_master,
+                minecraft_master_key=minecraft_master,
+                clock=self.clock,
+            )
+            user_view_handles = _ConversationArchiveUserViewHandles(
+                master_key=user_view_master,
+                clock=self.clock,
+            )
+        except Exception:
+            await asyncio.to_thread(archive.close)
+            raise
+        from .feedback_improvement import FeedbackImprovementController
+
+        feedback_controller = FeedbackImprovementController(archive)
+        try:
+            await self._fail_interrupted_canary(feedback_controller)
+        except Exception:
+            await asyncio.to_thread(archive.close)
+            raise
+        self.archive = archive
+        self.feedback_controller = feedback_controller
+        self.purge_coordinator = purge_coordinator
+        self.admin_auth = admin_auth
+        self.transport = transport
+        self.user_view_handles = user_view_handles
+        self.minecraft_generation = secrets.token_hex(16)
+        self.minecraft_last_sequence = 0
+        self.minecraft_receipts.clear()
+        self.maintenance_fault = False
+        self._retention_task = asyncio.create_task(self._retention_loop())
+
+    async def close(self) -> None:
+        if self._retention_task is not None:
+            self._retention_task.cancel()
+            await asyncio.gather(self._retention_task, return_exceptions=True)
+            self._retention_task = None
+        try:
+            try:
+                if self.admin_auth is not None:
+                    await asyncio.to_thread(self.admin_auth.revoke_all)
+            finally:
+                if self.archive is not None:
+                    await asyncio.to_thread(self.archive.close)
+        finally:
+            self.archive = None
+            self.feedback_controller = None
+            self.purge_coordinator = None
+            self.admin_auth = None
+            self.transport = None
+            if self.user_view_handles is not None:
+                self.user_view_handles.clear()
+            self.user_view_handles = None
+            self.admin_metadata_handles.clear()
+            self.current_generation = None
+            self.last_sequence = 0
+            self.ingest_receipts.clear()
+            self.discord_shared_session_leases.clear()
+            self.minecraft_generation = None
+            self.minecraft_last_sequence = 0
+            self.minecraft_receipts.clear()
+            self.otp_deliveries.clear()
+            self.step_up.clear()
+            self.feedback_action_previews.clear()
+            self.remote_purge_receipts.clear()
+            self.remote_purge_poll_cursor = None
+            for task_id, binding in tuple(
+                CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.items()
+            ):
+                if binding[0] is self:
+                    CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.pop(
+                        task_id, None
+                    )
+            for task_id, binding in tuple(
+                CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS.items()
+            ):
+                if binding[0] is self:
+                    CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS.pop(task_id, None)
+            for run_id, binding in tuple(
+                CONVERSATION_ARCHIVE_CANARY_BINDINGS.items()
+            ):
+                if binding[0] is self:
+                    CONVERSATION_ARCHIVE_CANARY_BINDINGS.pop(run_id, None)
+                    CONVERSATION_ARCHIVE_CANARY_RECEIPTS.pop(run_id, None)
+            self._admin_key = b""
+            self._attestation_key = b""
+
+    async def _retention_loop(self) -> None:
+        interval = max(
+            0.01,
+            float(self.options["retention_interval_seconds"]),
+        )
+        while True:
+            await asyncio.sleep(interval)
+            if not await self._run_maintenance_cycle():
+                return
+
+    async def _run_maintenance_cycle(self) -> bool:
+        async with self.lock:
+            if self.archive is None:
+                return False
+            try:
+                await asyncio.to_thread(self.archive.reconcile_replica)
+                if self.purge_coordinator is not None:
+                    await asyncio.to_thread(
+                        self.purge_coordinator.purge_pending,
+                        self.archive,
+                        limit=1000,
+                    )
+                retention = await asyncio.to_thread(
+                    self.archive.prune_expired,
+                    batch_size=self.options["retention_batch_size"],
+                )
+                if (
+                    retention is not None
+                    and self.purge_coordinator is not None
+                ):
+                    await asyncio.to_thread(
+                        self.purge_coordinator.purge_pending,
+                        self.archive,
+                        limit=1000,
+                    )
+                await self.reconcile_remote_purge_receipts()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.maintenance_fault = True
+            else:
+                self.maintenance_fault = False
+            return True
+
+    def require_writes_available(self) -> None:
+        if self.maintenance_fault:
+            raise _ConversationArchiveTransportError(
+                "archive_maintenance_fault",
+                status=503,
+            )
+
+    def require_ready(self) -> tuple[Any, Any, _ConversationArchiveTransportAuth]:
+        if self.archive is None or self.admin_auth is None or self.transport is None:
+            raise RuntimeError("archive_not_ready")
+        return self.archive, self.admin_auth, self.transport
+
+    def remote_purge_receipt_pass(self, sink: str, work_order: Any) -> Any:
+        from .conversation_archive_purge import (
+            PurgePass,
+            deletion_purge_scope_digest,
+        )
+
+        receipt = (
+            str(work_order.request_id),
+            int(work_order.deletion_generation),
+            deletion_purge_scope_digest(work_order),
+            sink,
+        )
+        return (
+            PurgePass()
+            if receipt in self.remote_purge_receipts
+            else PurgePass(manual_review_count=1)
+        )
+
+    def remote_writer_fence_current(self, work_order: Any) -> bool:
+        """Prove every required Main-process owner acknowledged one frozen scope."""
+
+        from .conversation_archive_purge import deletion_purge_scope_digest
+
+        required = tuple(
+            sink
+            for sink in sorted(_CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS)
+            if sink in work_order.required_sinks
+        )
+        if not required:
+            return False
+        scope_digest = deletion_purge_scope_digest(work_order)
+        identity = (
+            str(work_order.request_id),
+            int(work_order.deletion_generation),
+            scope_digest,
+        )
+        return all(
+            (*identity, sink) in self.remote_purge_receipts
+            for sink in required
+        )
+
+    def process_tool_cache_purge_pass(self, work_order: Any) -> Any:
+        from .conversation_archive_purge import PurgePass
+
+        remote = self.remote_purge_receipt_pass(
+            "prompt_tool_cache", work_order
+        )
+        configured = self.options["purge_process_tool_cache"]
+        if configured is None:
+            return remote
+        local = configured(work_order)
+        if not isinstance(local, PurgePass):
+            raise TypeError("archive_purge_owner_result_invalid")
+        return PurgePass(
+            removed_count=local.removed_count,
+            remaining_copies=max(
+                local.remaining_copies,
+                remote.remaining_copies,
+            ),
+            manual_review_count=max(
+                local.manual_review_count,
+                remote.manual_review_count,
+            ),
+        )
+
+    async def reconcile_remote_purge_receipts(self) -> None:
+        """Drop volatile receipts whose exact pending scope no longer exists."""
+
+        from .conversation_archive_purge import deletion_purge_scope_digest
+
+        archive = self.archive
+        if archive is None:
+            self.remote_purge_receipts.clear()
+            return
+        current_by_request: dict[str, Any | None] = {}
+        for request_id in {
+            receipt[0] for receipt in self.remote_purge_receipts
+        }:
+            current_by_request[request_id] = await asyncio.to_thread(
+                archive.deletion_purge_work_order,
+                request_id=request_id,
+            )
+        for receipt in tuple(self.remote_purge_receipts):
+            request_id, generation, scope_digest, sink = receipt
+            current = current_by_request[request_id]
+            if (
+                current is None
+                or int(current.deletion_generation) != generation
+                or not hmac.compare_digest(
+                    deletion_purge_scope_digest(current),
+                    scope_digest,
+                )
+                or sink not in current.required_sinks
+            ):
+                self.remote_purge_receipts.discard(receipt)
+
+    def unconfirmed_remote_purge_sinks(
+        self,
+        work_order: Any,
+    ) -> tuple[str, ...]:
+        from .conversation_archive_purge import deletion_purge_scope_digest
+
+        scope_digest = deletion_purge_scope_digest(work_order)
+        return tuple(
+            sink
+            for sink in sorted(_CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS)
+            if sink in work_order.required_sinks
+            and (
+                str(work_order.request_id),
+                int(work_order.deletion_generation),
+                scope_digest,
+                sink,
+            )
+            not in self.remote_purge_receipts
+        )
+
+    async def purge_deletion(self, request_id: str) -> Any | None:
+        archive, _, _ = self.require_ready()
+        if self.purge_coordinator is None:
+            return None
+        work_order = await asyncio.to_thread(
+            archive.deletion_purge_work_order,
+            request_id=request_id,
+        )
+        if work_order is None:
+            return None
+        result = await asyncio.to_thread(
+            self.purge_coordinator.purge_work_order,
+            archive,
+            work_order,
+        )
+        await self.reconcile_remote_purge_receipts()
+        return result
+
+    def _purge_otp(self) -> None:
+        now = int(self.clock())
+        for delivery_id, delivery in tuple(self.otp_deliveries.items()):
+            if int(delivery["expiresAt"]) > now:
+                continue
+            self.otp_deliveries.pop(delivery_id, None)
+            if delivery["kind"] == "login" and self.admin_auth is not None:
+                self.admin_auth.discard_challenge(delivery["bindingId"])
+            elif delivery["kind"] == "step-up":
+                self.step_up.pop(delivery["bindingId"], None)
+                self.feedback_action_previews.pop(
+                    delivery["bindingId"], None
+                )
+
+    def enqueue_login_otp(self, delivery: Any) -> str:
+        for delivery_id, queued in tuple(self.otp_deliveries.items()):
+            if queued["kind"] == "login":
+                self.otp_deliveries.pop(delivery_id, None)
+        delivery_id = secrets.token_urlsafe(24)
+        self.otp_deliveries[delivery_id] = {
+            "kind": "login",
+            "bindingId": delivery.challenge_id,
+            "discordUserId": delivery.discord_user_id,
+            "code": delivery.code,
+            "expiresAt": int(delivery.expires_at),
+        }
+        return delivery_id
+
+    def enqueue_step_up_otp(self, *, preview_id: str, session_token: str) -> None:
+        from .conversation_archive_admin import OTP_ALPHABET
+
+        code = "".join(secrets.choice(OTP_ALPHABET) for _ in range(4))
+        expires_at = int(self.clock()) + 60
+        session_digest = hmac.new(
+            self._admin_key,
+            session_token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        for prior_preview, state in tuple(self.step_up.items()):
+            if hmac.compare_digest(state["sessionDigest"], session_digest):
+                self.step_up.pop(prior_preview, None)
+                self.otp_deliveries.pop(state["deliveryId"], None)
+                self.feedback_action_previews.pop(prior_preview, None)
+        code_digest = hmac.new(
+            self._admin_key,
+            (preview_id + "\n" + session_digest + "\n" + code).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        delivery_id = secrets.token_urlsafe(24)
+        self.step_up[preview_id] = {
+            "sessionDigest": session_digest,
+            "codeDigest": code_digest,
+            "expiresAt": expires_at,
+            "attempts": 0,
+            "deliveryId": delivery_id,
+        }
+        self.otp_deliveries[delivery_id] = {
+            "kind": "step-up",
+            "bindingId": preview_id,
+            "discordUserId": self.options["registered_discord_user_id"],
+            "code": code,
+            "expiresAt": expires_at,
+        }
+
+    def consume_step_up(
+        self,
+        *,
+        preview_id: str,
+        session_token: str,
+        code: str,
+    ) -> bool:
+        from .conversation_archive_admin import OTP_CODE_RE
+
+        self._purge_otp()
+        state = self.step_up.get(preview_id)
+        if state is None:
+            self.feedback_action_previews.pop(preview_id, None)
+            return False
+        session_digest = hmac.new(
+            self._admin_key,
+            session_token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        candidate = code if OTP_CODE_RE.fullmatch(code) else "\x00\x00\x00\x00"
+        digest = hmac.new(
+            self._admin_key,
+            (
+                preview_id
+                + "\n"
+                + session_digest
+                + "\n"
+                + candidate
+            ).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        valid = (
+            int(state["expiresAt"]) > int(self.clock())
+            and hmac.compare_digest(state["sessionDigest"], session_digest)
+            and hmac.compare_digest(state["codeDigest"], digest)
+            and candidate == code
+        )
+        if valid:
+            self.step_up.pop(preview_id, None)
+            self.otp_deliveries.pop(state["deliveryId"], None)
+            return True
+        state["attempts"] = int(state["attempts"]) + 1
+        if state["attempts"] >= 3:
+            self.step_up.pop(preview_id, None)
+            self.otp_deliveries.pop(state["deliveryId"], None)
+            self.feedback_action_previews.pop(preview_id, None)
+        return False
+
+
+async def conversation_archive_context(
+    app: web.Application,
+) -> AsyncIterator[None]:
+    runtime = app[CONVERSATION_ARCHIVE_RUNTIME_KEY]
+    assert isinstance(runtime, _ConversationArchiveApiRuntime)
+    await runtime.open()
+    try:
+        yield
+    finally:
+        await runtime.close()
+
+
+def _conversation_archive_local_turn_key(value: Any) -> str:
+    candidate = clean_text(value)
+    if not candidate:
+        candidate = secrets.token_hex(24)
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+
+
+def _conversation_archive_local_record_id(kind: str, key: str) -> str:
+    digest = hashlib.sha256(f"{kind}\n{key}".encode("utf-8")).hexdigest()
+    prefix = re.sub(r"[^A-Za-z0-9_-]", "-", kind)[:12] or "record"
+    return f"local-{prefix}-{digest[:40]}"
+
+
+async def _conversation_archive_append_local_user(
+    request: web.Request,
+    *,
+    text: str,
+    source: str,
+    turn_reference: Any,
+) -> tuple[_ConversationArchiveApiRuntime, str, str] | None:
+    app = getattr(request, "app", None)
+    runtime = (
+        app.get(CONVERSATION_ARCHIVE_RUNTIME_KEY)
+        if app is not None and callable(getattr(app, "get", None))
+        else None
+    )
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        return None
+    from .conversation_archive import ArchiveAuthorizationError
+
+    if source not in {"control_page", "local_bridge"}:
+        raise ArchiveAuthorizationError("archive_local_identity_required")
+    turn_key = _conversation_archive_local_turn_key(turn_reference)
+    turn_lineage = clean_text(turn_reference)
+    if not turn_lineage or len(turn_lineage) > 256:
+        turn_lineage = turn_key
+    now = datetime.now(timezone.utc)
+    async with runtime.lock:
+        archive, _, _ = runtime.require_ready()
+        runtime.require_writes_available()
+        expected_generation = await asyncio.to_thread(
+            lambda: archive.generation
+        )
+        record = await asyncio.to_thread(
+            archive.append_record,
+            mode="local_private",
+            surface="local",
+            record_type="user_text",
+            body=text,
+            started_at=now,
+            ended_at=now,
+            actor_external_id=runtime.options["local_owner_external_id"],
+            owner_name=runtime.options["local_owner_name"],
+            lineage={
+                "turn": (turn_lineage,),
+                "session": (FAST_CONTROL_SESSION_KEY,),
+                "memory_owner": (FAST_MEMORY_OWNER_SCOPE,),
+                "memory_evidence": (f"turn:{turn_lineage}:user",),
+            },
+            idempotency_key=f"local-user:{turn_key}",
+            record_id=_conversation_archive_local_record_id("user", turn_key),
+            expected_generation=expected_generation,
+        )
+    return runtime, str(record.record_id), turn_key
+
+
+async def _conversation_archive_append_local_derived(
+    binding: tuple[_ConversationArchiveApiRuntime, str, str] | None,
+    *,
+    body: str,
+    kind: str,
+    suffix: str,
+) -> str | None:
+    if binding is None:
+        return None
+    runtime, parent_id, turn_key = binding
+    now = datetime.now(timezone.utc)
+    async with runtime.lock:
+        archive, _, _ = runtime.require_ready()
+        runtime.require_writes_available()
+        expected_generation = await asyncio.to_thread(
+            lambda: archive.generation
+        )
+        record = await asyncio.to_thread(
+            archive.append_derived_record,
+            surface="local",
+            record_type=kind,
+            body=body,
+            started_at=now,
+            ended_at=now,
+            parent_ids=(parent_id,),
+            idempotency_key=f"local-{suffix}:{turn_key}",
+            record_id=_conversation_archive_local_record_id(suffix, turn_key),
+            expected_generation=expected_generation,
+        )
+    return str(record.record_id)
+
+
+async def _conversation_archive_append_task_terminal(
+    task: FastActionTask,
+    *,
+    body: str,
+    outcome: str,
+) -> None:
+    raw_binding = CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.get(task.task_id)
+    if raw_binding is None:
+        return
+    runtime, parent_id, turn_key = raw_binding
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        raise RuntimeError("archive_task_binding_invalid")
+    record_id = await _conversation_archive_append_local_derived(
+        (runtime, parent_id, turn_key),
+        body=body,
+        kind="task_result",
+        suffix=f"task-{outcome}-{task.task_id}",
+    )
+    if record_id is not None:
+        task_record = validated_public_task_record(task.task_record)
+        CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS[task.task_id] = (
+            runtime,
+            record_id,
+            turn_key,
+            task_record,
+        )
+        while len(CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS) > 64:
+            CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS.pop(
+                next(iter(CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS))
+            )
+
+
+def _conversation_archive_json(
+    payload: dict[str, Any],
+    *,
+    status: int = 200,
+) -> web.Response:
+    response = web.json_response(
+        payload,
+        status=status,
+        dumps=lambda value: json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _conversation_archive_runtime(
+    request: web.Request,
+) -> _ConversationArchiveApiRuntime:
+    runtime = request.app.get(CONVERSATION_ARCHIVE_RUNTIME_KEY)
+    if not isinstance(runtime, _ConversationArchiveApiRuntime):
+        raise RuntimeError("archive_not_ready")
+    runtime.require_ready()
+    return runtime
+
+
+async def _conversation_archive_signed_json(
+    request: web.Request,
+    *,
+    purpose: str,
+) -> tuple[dict[str, Any] | None, web.Response | None]:
+    try:
+        runtime = _conversation_archive_runtime(request)
+        if request.query_string:
+            raise _ConversationArchiveTransportError(
+                "archive_request_invalid", status=400
+            )
+        if (
+            request.content_length is not None
+            and request.content_length > CONVERSATION_ARCHIVE_MAX_REQUEST_BYTES
+        ):
+            raise _ConversationArchiveTransportError(
+                "archive_request_too_large", status=413
+            )
+        body = await request.content.read(
+            CONVERSATION_ARCHIVE_MAX_REQUEST_BYTES + 1
+        )
+        if len(body) > CONVERSATION_ARCHIVE_MAX_REQUEST_BYTES:
+            raise _ConversationArchiveTransportError(
+                "archive_request_too_large", status=413
+            )
+        assert runtime.transport is not None
+        runtime.transport.verify(
+            purpose=purpose,
+            method=request.method,
+            path=request.path,
+            body=body,
+            headers=request.headers,
+        )
+        if request.method == "GET":
+            if body:
+                raise _ConversationArchiveTransportError(
+                    "archive_request_invalid", status=400
+                )
+            return {}, None
+        if request.content_type != "application/json":
+            raise _ConversationArchiveTransportError(
+                "archive_request_invalid", status=400
+            )
+
+        def object_without_duplicates(
+            pairs: list[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("archive_request_duplicate_field")
+                result[key] = value
+            return result
+
+        try:
+            payload = json.loads(
+                body.decode("utf-8"),
+                object_pairs_hook=object_without_duplicates,
+            )
+        except (
+            UnicodeError,
+            ValueError,
+            TypeError,
+            RecursionError,
+            json.JSONDecodeError,
+        ):
+            raise _ConversationArchiveTransportError(
+                "archive_request_invalid", status=400
+            ) from None
+        if not isinstance(payload, dict):
+            raise _ConversationArchiveTransportError(
+                "archive_request_invalid", status=400
+            )
+        return payload, None
+    except _ConversationArchiveTransportError as exc:
+        return None, _conversation_archive_json(
+            {"ok": False, "error": exc.code},
+            status=exc.status,
+        )
+    except Exception:
+        return None, _conversation_archive_json(
+            {"ok": False, "error": "conversation_archive_unavailable"},
+            status=503,
+        )
+
+
+def _conversation_archive_exact_fields(
+    payload: Mapping[str, Any],
+    *,
+    required: set[str] | frozenset[str],
+    optional: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    keys = set(payload)
+    if not set(required).issubset(keys) or not keys.issubset(
+        set(required) | set(optional)
+    ):
+        raise ValueError("archive_request_fields_invalid")
+
+
+def _conversation_archive_identifier(
+    value: Any,
+    *,
+    maximum: int = 256,
+) -> str:
+    if isinstance(value, bool):
+        raise ValueError("archive_identifier_invalid")
+    normalized = str(value)
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or _CONVERSATION_ARCHIVE_ID_RE.fullmatch(normalized) is None
+    ):
+        raise ValueError("archive_identifier_invalid")
+    return normalized
+
+
+def _conversation_archive_opaque_token(
+    value: Any,
+    *,
+    maximum: int,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= maximum
+        or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None
+    ):
+        raise ValueError("archive_opaque_token_invalid")
+    return value
+
+
+def _conversation_archive_snowflake(value: Any) -> str:
+    normalized = _conversation_archive_identifier(value, maximum=32)
+    if not normalized.isdecimal() or int(normalized) <= 0:
+        raise ValueError("archive_snowflake_invalid")
+    return normalized
+
+
+def _conversation_archive_datetime(value: Any) -> datetime:
+    if isinstance(value, bool):
+        raise ValueError("archive_time_invalid")
+    if isinstance(value, (int, float)):
+        candidate = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif isinstance(value, str):
+        candidate = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("archive_time_invalid")
+    if candidate.tzinfo is None:
+        raise ValueError("archive_time_invalid")
+    return candidate.astimezone(timezone.utc)
+
+
+def _conversation_archive_optional_range(
+    payload: Mapping[str, Any],
+) -> tuple[datetime | None, datetime | None]:
+    start_raw = payload.get("startedAt")
+    end_raw = payload.get("endedAt")
+    if (start_raw is None) != (end_raw is None):
+        raise ValueError("archive_period_incomplete")
+    if start_raw is None:
+        return None, None
+    started_at = _conversation_archive_datetime(start_raw)
+    ended_at = _conversation_archive_datetime(end_raw)
+    if ended_at <= started_at:
+        raise ValueError("archive_time_range_invalid")
+    return started_at, ended_at
+
+
+def _conversation_archive_user_view_identity(
+    payload: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    if payload.get("context") != "GUILD":
+        raise _ConversationArchiveUserViewError(
+            "archive_user_view_guild_context_required", status=403
+        )
+    return (
+        _conversation_archive_snowflake(payload.get("interactionId")),
+        _conversation_archive_snowflake(payload.get("callerUserId")),
+        _conversation_archive_snowflake(payload.get("guildId")),
+    )
+
+
+def _conversation_archive_user_view_require_claim(
+    runtime: _ConversationArchiveApiRuntime,
+    payload: Mapping[str, Any],
+    *,
+    action: str,
+    archive_generation: int,
+) -> dict[str, Any]:
+    interaction_id, caller_id, guild_id = _conversation_archive_user_view_identity(
+        payload
+    )
+    handles = runtime.user_view_handles
+    if handles is None:
+        raise RuntimeError("archive_user_view_not_ready")
+    claim = handles.consume(
+        _conversation_archive_opaque_token(payload.get("handle"), maximum=128),
+        kind="action",
+    )
+    exact_scope = (
+        hmac.compare_digest(str(claim.get("action")), action)
+        and hmac.compare_digest(str(claim.get("interactionId")), interaction_id)
+        and hmac.compare_digest(str(claim.get("callerUserId")), caller_id)
+        and hmac.compare_digest(str(claim.get("guildId")), guild_id)
+    )
+    if not exact_scope:
+        raise _ConversationArchiveUserViewError(
+            "archive_user_view_handle_scope_mismatch", status=403
+        )
+    if (
+        not hmac.compare_digest(
+            str(claim.get("sourceGeneration")),
+            str(runtime.current_generation or ""),
+        )
+        or int(claim.get("archiveGeneration", -1)) != archive_generation
+    ):
+        raise _ConversationArchiveUserViewError(
+            "archive_user_view_handle_stale", status=409
+        )
+    return claim
+
+
+def _conversation_archive_json_size(payload: Mapping[str, Any]) -> int:
+    return len(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+def _conversation_archive_admin_metadata_cursor(
+    runtime: _ConversationArchiveApiRuntime,
+    *,
+    kind: str,
+    generation: int,
+    core_cursor: str,
+    session_token: str,
+) -> str:
+    now = int(runtime.clock())
+    runtime.admin_metadata_handles = {
+        digest: claim
+        for digest, claim in runtime.admin_metadata_handles.items()
+        if int(claim["expiresAt"]) > now
+    }
+    token = secrets.token_hex(32)
+    digest = hmac.new(
+        runtime._admin_key,
+        _CONVERSATION_ARCHIVE_ADMIN_METADATA_CURSOR_DOMAIN
+        + token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    runtime.admin_metadata_handles[digest] = {
+        "kind": str(kind),
+        "generation": int(generation),
+        "coreCursor": str(core_cursor),
+        "sessionDigest": hmac.new(
+            runtime._admin_key,
+            session_token.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest(),
+        "expiresAt": now + CONVERSATION_ARCHIVE_ADMIN_METADATA_CURSOR_SECONDS,
+    }
+    while len(runtime.admin_metadata_handles) > 4096:
+        runtime.admin_metadata_handles.pop(next(iter(runtime.admin_metadata_handles)))
+    return token
+
+
+def _conversation_archive_admin_metadata_core_cursor(
+    runtime: _ConversationArchiveApiRuntime,
+    cursor: Any,
+    *,
+    kind: str,
+    generation: int,
+    session_token: str,
+) -> str | None:
+    if cursor is None:
+        return None
+    token = _conversation_archive_opaque_token(cursor, maximum=64)
+    if len(token) != 64 or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise ValueError("archive_admin_cursor_invalid")
+    now = int(runtime.clock())
+    runtime.admin_metadata_handles = {
+        digest: claim
+        for digest, claim in runtime.admin_metadata_handles.items()
+        if int(claim["expiresAt"]) > now
+    }
+    digest = hmac.new(
+        runtime._admin_key,
+        _CONVERSATION_ARCHIVE_ADMIN_METADATA_CURSOR_DOMAIN
+        + token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    claim = runtime.admin_metadata_handles.get(digest)
+    if claim is None:
+        raise _ConversationArchiveTransportError(
+            "archive_admin_cursor_stale", status=409
+        )
+    expected_session = hmac.new(
+        runtime._admin_key,
+        session_token.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not (
+        hmac.compare_digest(str(claim.get("kind")), str(kind))
+        and hmac.compare_digest(
+            str(claim.get("sessionDigest")), expected_session
+        )
+    ):
+        raise ValueError("archive_admin_cursor_invalid")
+    if int(claim.get("generation", -1)) != int(generation):
+        runtime.admin_metadata_handles.pop(digest, None)
+        raise _ConversationArchiveTransportError(
+            "archive_admin_cursor_stale", status=409
+        )
+    return str(claim["coreCursor"])
+
+
+def _conversation_archive_admin_page_response(
+    payload: dict[str, Any],
+) -> web.Response:
+    if (
+        _conversation_archive_json_size(payload)
+        > CONVERSATION_ARCHIVE_ADMIN_RESPONSE_BUDGET_BYTES
+    ):
+        raise _ConversationArchiveTransportError(
+            "archive_admin_response_too_large",
+            status=503,
+        )
+    return _conversation_archive_json(payload)
+
+
+def _conversation_archive_record_projection(record: Any) -> dict[str, Any]:
+    return {
+        "recordId": str(record.record_id),
+        "createdAt": record.started_at.astimezone(timezone.utc).isoformat(),
+        "endedAt": record.ended_at.astimezone(timezone.utc).isoformat(),
+        "kind": str(record.record_type),
+        "body": str(record.body),
+        "status": str(record.status),
+    }
+
+
+def _conversation_archive_preview_projection(preview: Any) -> dict[str, Any]:
+    return {
+        "previewId": str(preview.preview_id),
+        "expiresAt": preview.expires_at.astimezone(timezone.utc).isoformat(),
+        "snapshotGeneration": int(preview.snapshot_generation),
+        "countsByGuild": {
+            str(key): int(value)
+            for key, value in preview.counts_by_guild.items()
+        },
+        "ownedRecordCount": int(preview.owned_record_count),
+        "dependentRecordCount": int(preview.dependent_record_count),
+        "intervalCount": int(preview.interval_count),
+        "allGuilds": bool(preview.all_guilds),
+    }
+
+
+def _conversation_archive_deletion_projection(
+    result: Any,
+    *,
+    state: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "requestId": str(result.request_id),
+        "state": str(result.status if state is None else state),
+        "primaryState": str(result.primary_status),
+        "replicaState": str(result.replica_status),
+        "affectedRecords": int(result.affected_records),
+        "dependentRecords": int(result.dependent_records),
+        "affectedIntervals": int(result.affected_intervals),
+        "displayText": str(result.display_text),
+    }
+
+
+def _conversation_archive_exception_response(exc: Exception) -> web.Response:
+    from .conversation_archive import (
+        ArchiveAuthorizationError,
+        ArchiveIntegrityError,
+        ArchivePreviewConflict,
+        ArchivePreviewConsumed,
+        ArchivePreviewExpired,
+        ArchiveStaleEvent,
+        ArchiveUnavailableError,
+        ArchiveValidationError,
+        ConversationArchiveError,
+    )
+    from .conversation_archive_admin import AdminSecurityError
+    from .feedback_improvement import (
+        FeedbackAuthorizationError,
+        FeedbackConflictError,
+        FeedbackImprovementError,
+        FeedbackIntegrityError,
+    )
+
+    if isinstance(exc, _ConversationArchiveTransportError):
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code},
+            status=exc.status,
+        )
+    if isinstance(exc, _ConversationArchiveUserViewError):
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code},
+            status=exc.status,
+        )
+    if isinstance(exc, AdminSecurityError):
+        projection = exc.public_projection()
+        status = 429 if projection.get("state") == "rate_limited" else 403
+        if projection.get("state") in {
+            "authorization_unavailable",
+            "storage_preflight_failed",
+        }:
+            status = 503
+        return _conversation_archive_json(projection, status=status)
+    if isinstance(exc, ArchiveValidationError):
+        status = 400
+    elif isinstance(exc, FeedbackConflictError):
+        status = 409
+    elif isinstance(exc, FeedbackAuthorizationError):
+        status = 403
+    elif isinstance(exc, FeedbackIntegrityError):
+        status = 503
+    elif isinstance(exc, FeedbackImprovementError):
+        status = 400
+    elif isinstance(
+        exc,
+        (
+            ArchivePreviewConflict,
+            ArchivePreviewConsumed,
+            ArchivePreviewExpired,
+            ArchiveStaleEvent,
+        ),
+    ):
+        status = 409
+    elif isinstance(exc, ArchiveAuthorizationError):
+        status = 403
+    elif isinstance(exc, (ArchiveIntegrityError, ArchiveUnavailableError)):
+        status = 503
+    elif isinstance(exc, ConversationArchiveError):
+        status = 503
+    elif isinstance(exc, (TypeError, ValueError, OverflowError)):
+        status = 400
+    else:
+        status = 503
+    code = getattr(exc, "code", "conversation_archive_unavailable")
+    if status == 400 and not isinstance(exc, ConversationArchiveError):
+        code = "archive_request_invalid"
+    return _conversation_archive_json(
+        {"ok": False, "error": str(code)},
+        status=status,
+    )
+
+
+def _conversation_archive_ingest_values(
+    runtime: _ConversationArchiveApiRuntime,
+    payload: Mapping[str, Any],
+) -> tuple[str, int, str, str, dict[str, Any] | None]:
+    generation = _conversation_archive_identifier(
+        payload.get("generation"), maximum=128
+    )
+    sequence = payload.get("sequence")
+    if type(sequence) is not int or sequence <= 0:
+        raise ValueError("archive_sequence_invalid")
+    idempotency_key = _conversation_archive_identifier(
+        payload.get("idempotencyKey"), maximum=256
+    )
+    payload_digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    existing = runtime.ingest_receipts.get(idempotency_key)
+    if existing is not None:
+        if not hmac.compare_digest(existing[0], payload_digest):
+            raise _ConversationArchiveTransportError(
+                "archive_idempotency_conflict", status=409
+            )
+        return generation, sequence, idempotency_key, payload_digest, dict(existing[1])
+    runtime.require_writes_available()
+    if runtime.current_generation != generation:
+        raise _ConversationArchiveTransportError(
+            "archive_generation_stale", status=409
+        )
+    if sequence <= runtime.last_sequence:
+        raise _ConversationArchiveTransportError(
+            "archive_sequence_stale", status=409
+        )
+    return generation, sequence, idempotency_key, payload_digest, None
+
+
+def _conversation_archive_commit_ingest(
+    runtime: _ConversationArchiveApiRuntime,
+    *,
+    sequence: int,
+    idempotency_key: str,
+    payload_digest: str,
+    response: dict[str, Any],
+) -> None:
+    runtime.last_sequence = sequence
+    runtime.ingest_receipts[idempotency_key] = (
+        payload_digest,
+        dict(response),
+    )
+
+
+async def conversation_archive_generation_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required={"generation"})
+        generation = _conversation_archive_identifier(
+            payload["generation"], maximum=128
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            if runtime.current_generation == generation:
+                return _conversation_archive_json(
+                    {"ok": True, "generation": generation, "activated": False}
+                )
+            runtime.require_writes_available()
+            activated = await asyncio.to_thread(
+                archive.begin_ingest_generation,
+                source_id=_CONVERSATION_ARCHIVE_SOURCE_ID,
+                generation=generation,
+                activated_at=datetime.now(timezone.utc),
+            )
+            runtime.current_generation = generation
+            runtime.last_sequence = 0
+            runtime.ingest_receipts.clear()
+            runtime.discord_shared_session_leases.clear()
+        return _conversation_archive_json(
+            {"ok": True, "generation": generation, "activated": bool(activated)}
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_shared_session_open_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "operatorUserId",
+                "guildId",
+                "textChannelId",
+                "voiceChannelId",
+                "leaseId",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            (
+                generation,
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_ingest_values(runtime, payload)
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            runtime.require_ready()
+            guild_id = _conversation_archive_snowflake(payload["guildId"])
+            lease_id = _conversation_archive_identifier(
+                payload["leaseId"], maximum=128
+            )
+            runtime.discord_shared_session_leases[guild_id] = {
+                "generation": generation,
+                "leaseId": lease_id,
+                "operatorUserId": _conversation_archive_snowflake(
+                    payload["operatorUserId"]
+                ),
+                "textChannelId": _conversation_archive_snowflake(
+                    payload["textChannelId"]
+                ),
+                "voiceChannelId": _conversation_archive_snowflake(
+                    payload["voiceChannelId"]
+                ),
+            }
+            response = {
+                "ok": True,
+                "state": "open",
+                "guildId": guild_id,
+                "leaseId": lease_id,
+            }
+            _conversation_archive_commit_ingest(
+                runtime,
+                sequence=sequence,
+                idempotency_key=idempotency_key,
+                payload_digest=payload_digest,
+                response=response,
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_shared_session_close_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "guildId",
+                "leaseId",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            (
+                _,
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_ingest_values(runtime, payload)
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            runtime.require_ready()
+            guild_id = _conversation_archive_snowflake(payload["guildId"])
+            lease_id = _conversation_archive_identifier(
+                payload["leaseId"], maximum=128
+            )
+            current = runtime.discord_shared_session_leases.get(guild_id)
+            if current is None or not hmac.compare_digest(
+                current["leaseId"], lease_id
+            ):
+                raise _ConversationArchiveTransportError(
+                    "archive_shared_session_lease_stale", status=409
+                )
+            runtime.discord_shared_session_leases.pop(guild_id, None)
+            response = {
+                "ok": True,
+                "state": "closed",
+                "guildId": guild_id,
+                "leaseId": lease_id,
+            }
+            _conversation_archive_commit_ingest(
+                runtime,
+                sequence=sequence,
+                idempotency_key=idempotency_key,
+                payload_digest=payload_digest,
+                response=response,
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+def _conversation_archive_require_shared_session_lease(
+    runtime: _ConversationArchiveApiRuntime,
+    *,
+    generation: str,
+    guild_id: str,
+    request_channel_id: str,
+    source_channel_id: str,
+    surface: str,
+    lease_id: str,
+) -> None:
+    current = runtime.discord_shared_session_leases.get(guild_id)
+    expected_source_channel = (
+        None
+        if current is None
+        else current[
+            "voiceChannelId" if surface == "voice" else "textChannelId"
+        ]
+    )
+    if (
+        current is None
+        or not hmac.compare_digest(current["generation"], generation)
+        or not hmac.compare_digest(current["leaseId"], lease_id)
+        or request_channel_id != current["textChannelId"]
+        or source_channel_id != expected_source_channel
+    ):
+        raise _ConversationArchiveTransportError(
+            "archive_shared_session_lease_stale", status=409
+        )
+
+
+async def conversation_archive_record_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "recordId",
+                "guildId",
+                "channelId",
+                "kind",
+                "startedAt",
+                "endedAt",
+                "sourceUserId",
+                "ownerName",
+                "parentRecordIds",
+                "body",
+            },
+            optional={"lineage"},
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            (
+                _,
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_ingest_values(runtime, payload)
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            archive, _, _ = runtime.require_ready()
+            record_id = _conversation_archive_identifier(
+                payload["recordId"], maximum=64
+            )
+            guild_id = _conversation_archive_snowflake(payload["guildId"])
+            channel_id = _conversation_archive_snowflake(payload["channelId"])
+            kind = str(payload["kind"])
+            if kind not in {
+                "user_text",
+                "final_stt",
+                "evelyn_reply",
+                "task_result",
+                "action_result",
+                "minecraft_command",
+                "minecraft_result",
+            }:
+                raise ValueError("archive_record_kind_invalid")
+            source_user_id = (
+                None
+                if payload["sourceUserId"] is None
+                else _conversation_archive_snowflake(payload["sourceUserId"])
+            )
+            owner_name = payload["ownerName"]
+            if source_user_id is None:
+                if owner_name is not None:
+                    raise ValueError("archive_owner_name_invalid")
+            elif not isinstance(owner_name, str) or not owner_name:
+                raise ValueError("archive_owner_name_invalid")
+            if not isinstance(payload["parentRecordIds"], list):
+                raise ValueError("archive_parent_ids_invalid")
+            parent_ids = tuple(
+                _conversation_archive_identifier(item, maximum=64)
+                for item in payload["parentRecordIds"]
+            )
+            if len(parent_ids) != len(set(parent_ids)) or len(parent_ids) > 32:
+                raise ValueError("archive_parent_ids_invalid")
+            raw_lineage = payload.get("lineage", {})
+            if not isinstance(raw_lineage, dict):
+                raise ValueError("archive_lineage_invalid")
+            lineage: dict[str, tuple[str, ...]] = {}
+            for lineage_kind, lineage_values in raw_lineage.items():
+                if not isinstance(lineage_values, list):
+                    raise ValueError("archive_lineage_invalid")
+                lineage[str(lineage_kind)] = tuple(
+                    _conversation_archive_identifier(item, maximum=256)
+                    for item in lineage_values
+                )
+            if not isinstance(payload["body"], str):
+                raise ValueError("archive_body_invalid")
+            expected_generation = await asyncio.to_thread(
+                lambda: archive.generation
+            )
+            record = await asyncio.to_thread(
+                archive.append_record,
+                mode="discord_shared",
+                surface=("minecraft" if kind.startswith("minecraft_") else "discord"),
+                record_type=kind,
+                body=payload["body"],
+                started_at=_conversation_archive_datetime(payload["startedAt"]),
+                ended_at=_conversation_archive_datetime(payload["endedAt"]),
+                actor_external_id=source_user_id,
+                owner_name=owner_name,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                parent_ids=parent_ids,
+                lineage=lineage,
+                idempotency_key="discord-record:" + idempotency_key,
+                record_id=record_id,
+                expected_generation=expected_generation,
+            )
+            response = {"ok": True, "recordId": str(record.record_id)}
+            _conversation_archive_commit_ingest(
+                runtime,
+                sequence=sequence,
+                idempotency_key=idempotency_key,
+                payload_digest=payload_digest,
+                response=response,
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_discord_feedback_capture_handler(
+    request: web.Request,
+) -> web.Response:
+    """Capture one same-principal Discord correction as a review-only signal."""
+
+    payload, error = await _conversation_archive_signed_json(
+        request,
+        purpose="ingest",
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "taskId",
+                "sourceRecordId",
+                "category",
+                "correction",
+                "nonce",
+                "callerUserId",
+                "ownerName",
+                "guildId",
+                "requestChannelId",
+                "sourceChannelId",
+                "sessionId",
+                "surface",
+                "requestedChangeScope",
+                "sharedSessionLeaseId",
+            },
+        )
+        task_id = _conversation_archive_identifier(
+            payload["taskId"], maximum=128
+        )
+        source_record_id = _conversation_archive_identifier(
+            payload["sourceRecordId"], maximum=64
+        )
+        nonce = _conversation_archive_identifier(
+            payload["nonce"], maximum=128
+        )
+        session_id = _conversation_archive_identifier(
+            payload["sessionId"], maximum=128
+        )
+        caller_user_id = _conversation_archive_snowflake(
+            payload["callerUserId"]
+        )
+        guild_id = _conversation_archive_snowflake(payload["guildId"])
+        request_channel_id = _conversation_archive_snowflake(
+            payload["requestChannelId"]
+        )
+        source_channel_id = _conversation_archive_snowflake(
+            payload["sourceChannelId"]
+        )
+        shared_session_lease_id = _conversation_archive_identifier(
+            payload["sharedSessionLeaseId"], maximum=128
+        )
+        category = payload["category"]
+        correction = payload["correction"]
+        owner_name = payload["ownerName"]
+        surface = str(payload["surface"])
+        requested_change_scope = str(payload["requestedChangeScope"])
+        from .feedback_improvement import FEEDBACK_CATEGORIES
+
+        if (
+            not isinstance(category, str)
+            or category not in FEEDBACK_CATEGORIES
+            or not isinstance(correction, str)
+            or not isinstance(owner_name, str)
+            or not owner_name
+            or surface not in _CONVERSATION_ARCHIVE_DISCORD_FEEDBACK_SURFACES
+            or requested_change_scope
+            not in _CONVERSATION_ARCHIVE_FEEDBACK_ENGINEERING_SCOPES
+        ):
+            raise ValueError("feedback_correction_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            (
+                generation,
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_ingest_values(runtime, payload)
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            _conversation_archive_require_shared_session_lease(
+                runtime,
+                generation=generation,
+                guild_id=guild_id,
+                request_channel_id=request_channel_id,
+                source_channel_id=source_channel_id,
+                surface=surface,
+                lease_id=shared_session_lease_id,
+            )
+            archive, _, _ = runtime.require_ready()
+            source_binding = await asyncio.to_thread(
+                archive.feedback_source_binding,
+                authorized=True,
+                source_record_id=source_record_id,
+                identity_surface="discord",
+                actor_external_id=caller_user_id,
+                task_id=task_id,
+                session_id=session_id,
+                guild_id=guild_id,
+                channel_id=source_channel_id,
+                feedback_surface=surface,
+            )
+            if source_binding.record_type != "evelyn_reply":
+                raise _ConversationArchiveTransportError(
+                    "archive_feedback_source_invalid",
+                    status=403,
+                )
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.capture_correction,
+                task_id=task_id,
+                source_record_id=source_record_id,
+                category=category,
+                correction=correction,
+                identity_surface="discord",
+                actor_external_id=caller_user_id,
+                owner_name=owner_name,
+                surface=surface,
+                session_id=session_id,
+                nonce=nonce,
+                session_current=True,
+                admin_authorized=False,
+                requires_engineering=requested_change_scope != "none",
+            )
+            response = {
+                "ok": True,
+                "workflow": snapshot.public_record(),
+            }
+            _conversation_archive_commit_ingest(
+                runtime,
+                sequence=sequence,
+                idempotency_key=idempotency_key,
+                payload_digest=payload_digest,
+                response=response,
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+def _conversation_archive_voice_snapshot(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("archive_voice_snapshot_invalid")
+    _conversation_archive_exact_fields(
+        snapshot,
+        required={
+            "channelId",
+            "present",
+            "consentCurrent",
+            "gatewayKnown",
+            "selfMute",
+            "serverMute",
+            "selfDeaf",
+            "serverDeaf",
+            "suppressed",
+        },
+    )
+    boolean_fields = (
+        "present",
+        "consentCurrent",
+        "gatewayKnown",
+        "selfMute",
+        "serverMute",
+        "selfDeaf",
+        "serverDeaf",
+        "suppressed",
+    )
+    if any(type(snapshot[name]) is not bool for name in boolean_fields):
+        raise ValueError("archive_voice_snapshot_invalid")
+    channel_id = (
+        "0"
+        if snapshot["channelId"] is None
+        else _conversation_archive_snowflake(snapshot["channelId"])
+    )
+    if bool(snapshot["present"]) != (snapshot["channelId"] is not None):
+        raise ValueError("archive_voice_snapshot_invalid")
+    return {**snapshot, "channelId": channel_id}
+
+
+async def _conversation_archive_voice_transition(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "guildId",
+                "userId",
+                "observedAt",
+                "ownerName",
+                "snapshot",
+            },
+        )
+        snapshot = _conversation_archive_voice_snapshot(payload)
+        owner_name = payload["ownerName"]
+        if not isinstance(owner_name, str) or not owner_name:
+            raise ValueError("archive_owner_name_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            (
+                generation,
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_ingest_values(runtime, payload)
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            archive, _, _ = runtime.require_ready()
+            applied = await asyncio.to_thread(
+                archive.apply_voice_state,
+                source_id=_CONVERSATION_ARCHIVE_SOURCE_ID,
+                generation=generation,
+                event_sequence=sequence,
+                idempotency_key="discord-voice:" + idempotency_key,
+                actor_external_id=_conversation_archive_snowflake(
+                    payload["userId"]
+                ),
+                owner_name=owner_name,
+                guild_id=_conversation_archive_snowflake(payload["guildId"]),
+                channel_id=snapshot["channelId"],
+                event_at=_conversation_archive_datetime(payload["observedAt"]),
+                present=snapshot["present"],
+                consent_current=snapshot["consentCurrent"],
+                self_mute=snapshot["selfMute"],
+                server_mute=snapshot["serverMute"],
+                self_deaf=snapshot["selfDeaf"],
+                server_deaf=snapshot["serverDeaf"],
+                suppressed=snapshot["suppressed"],
+                gateway_known=snapshot["gatewayKnown"],
+            )
+            response = {"ok": True, "applied": bool(applied)}
+            _conversation_archive_commit_ingest(
+                runtime,
+                sequence=sequence,
+                idempotency_key=idempotency_key,
+                payload_digest=payload_digest,
+                response=response,
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_voice_state_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_voice_transition(request)
+
+
+async def conversation_archive_consent_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_voice_transition(request)
+
+
+async def conversation_archive_voice_admission_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={"guildId", "channelId", "userId"},
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            health = await asyncio.to_thread(archive.health)
+            allowed = bool(
+                runtime.current_generation is not None
+                and not runtime.maintenance_fault
+                and health.writes_allowed
+                and await asyncio.to_thread(
+                    archive.is_voice_capture_eligible,
+                    actor_external_id=_conversation_archive_snowflake(
+                        payload["userId"]
+                    ),
+                    guild_id=_conversation_archive_snowflake(payload["guildId"]),
+                    channel_id=_conversation_archive_snowflake(
+                        payload["channelId"]
+                    ),
+                    at=datetime.now(timezone.utc),
+                )
+            )
+        return _conversation_archive_json({"ok": True, "allowed": allowed})
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_self_authorize_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="user-view-issue"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "context",
+                "interactionId",
+                "callerUserId",
+                "guildId",
+                "action",
+            },
+            optional={"startedAt", "endedAt", "pageHandle", "previewId"},
+        )
+        interaction_id, caller_id, guild_id = (
+            _conversation_archive_user_view_identity(payload)
+        )
+        action = str(payload.get("action"))
+        if action not in {"records", "delete-preview", "delete-apply"}:
+            raise ValueError("archive_user_view_action_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            if runtime.current_generation is None:
+                raise _ConversationArchiveUserViewError(
+                    "archive_user_view_discord_inactive", status=409
+                )
+            archive_generation = await asyncio.to_thread(
+                lambda: archive.generation
+            )
+            handles = runtime.user_view_handles
+            if handles is None:
+                raise RuntimeError("archive_user_view_not_ready")
+            page_handle = payload.get("pageHandle")
+            preview_id = payload.get("previewId")
+            if page_handle is not None:
+                if action != "records" or any(
+                    payload.get(field) is not None
+                    for field in ("startedAt", "endedAt", "previewId")
+                ):
+                    raise ValueError("archive_user_view_page_invalid")
+                page_claim = handles.consume(
+                    _conversation_archive_opaque_token(page_handle, maximum=128),
+                    kind="page",
+                )
+                if not (
+                    hmac.compare_digest(
+                        str(page_claim.get("callerUserId")), caller_id
+                    )
+                    and hmac.compare_digest(
+                        str(page_claim.get("guildId")), guild_id
+                    )
+                ):
+                    raise _ConversationArchiveUserViewError(
+                        "archive_user_view_page_scope_mismatch", status=403
+                    )
+                if (
+                    not hmac.compare_digest(
+                        str(page_claim.get("sourceGeneration")),
+                        runtime.current_generation,
+                    )
+                    or int(page_claim.get("archiveGeneration", -1))
+                    != archive_generation
+                ):
+                    raise _ConversationArchiveUserViewError(
+                        "archive_user_view_page_stale", status=409
+                    )
+                started_at = page_claim["startedAt"]
+                ended_at = page_claim["endedAt"]
+                cursor = page_claim["cursor"]
+            else:
+                started_at, ended_at = _conversation_archive_optional_range(payload)
+                cursor = None
+            if action == "delete-apply":
+                if page_handle is not None or started_at is not None or ended_at is not None:
+                    raise ValueError("archive_user_view_delete_apply_invalid")
+                preview = _conversation_archive_identifier(preview_id, maximum=64)
+            else:
+                if preview_id is not None:
+                    raise ValueError("archive_user_view_preview_invalid")
+                preview = None
+            handles.use_interaction(interaction_id)
+            handle = handles.issue(
+                {
+                    "kind": "action",
+                    "action": action,
+                    "interactionId": interaction_id,
+                    "callerUserId": caller_id,
+                    "guildId": guild_id,
+                    "sourceGeneration": runtime.current_generation,
+                    "archiveGeneration": archive_generation,
+                    "startedAt": started_at,
+                    "endedAt": ended_at,
+                    "cursor": cursor,
+                    "previewId": preview,
+                }
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "handle": handle,
+                "expiresInSeconds": CONVERSATION_ARCHIVE_USER_VIEW_HANDLE_SECONDS,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_self_records_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="user-view"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "context",
+                "interactionId",
+                "callerUserId",
+                "guildId",
+                "handle",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            archive_generation = await asyncio.to_thread(lambda: archive.generation)
+            claim = _conversation_archive_user_view_require_claim(
+                runtime,
+                payload,
+                action="records",
+                archive_generation=archive_generation,
+            )
+            projections: list[dict[str, Any]] = []
+            cursor = claim["cursor"]
+            next_cursor: str | None = None
+            for _ in range(25):
+                page = await asyncio.to_thread(
+                    archive.read_self_page,
+                    actor_external_id=claim["callerUserId"],
+                    guild_id=claim["guildId"],
+                    started_at=claim["startedAt"],
+                    ended_at=claim["endedAt"],
+                    cursor=cursor,
+                    limit=1,
+                )
+                if not page.records:
+                    next_cursor = None
+                    break
+                projected = _conversation_archive_record_projection(page.records[0])
+                candidate = {
+                    "ok": True,
+                    "records": [*projections, projected],
+                    "snapshotGeneration": archive_generation,
+                    "nextPageHandle": "X" * 43 if page.next_cursor else None,
+                }
+                if (
+                    _conversation_archive_json_size(candidate)
+                    > CONVERSATION_ARCHIVE_SELF_RESPONSE_BUDGET_BYTES
+                ):
+                    if not projections:
+                        raise _ConversationArchiveUserViewError(
+                            "archive_user_view_record_too_large", status=413
+                        )
+                    next_cursor = cursor
+                    break
+                projections.append(projected)
+                next_cursor = page.next_cursor
+                if next_cursor is None:
+                    break
+                cursor = next_cursor
+            handles = runtime.user_view_handles
+            if handles is None:
+                raise RuntimeError("archive_user_view_not_ready")
+            next_page_handle = None
+            if next_cursor is not None:
+                next_page_handle = handles.issue(
+                    {
+                        "kind": "page",
+                        "callerUserId": claim["callerUserId"],
+                        "guildId": claim["guildId"],
+                        "sourceGeneration": claim["sourceGeneration"],
+                        "archiveGeneration": archive_generation,
+                        "startedAt": claim["startedAt"],
+                        "endedAt": claim["endedAt"],
+                        "cursor": next_cursor,
+                    },
+                    page=True,
+                )
+            response_payload = {
+                "ok": True,
+                "records": projections,
+                "snapshotGeneration": archive_generation,
+                "nextPageHandle": next_page_handle,
+            }
+            if (
+                _conversation_archive_json_size(response_payload)
+                > CONVERSATION_ARCHIVE_SELF_RESPONSE_BUDGET_BYTES
+            ):
+                if next_page_handle is not None:
+                    handles.revoke(next_page_handle)
+                raise _ConversationArchiveUserViewError(
+                    "archive_user_view_response_too_large", status=413
+                )
+        return _conversation_archive_json(response_payload)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_self_delete_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="user-view"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "context",
+                "interactionId",
+                "callerUserId",
+                "guildId",
+                "handle",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            archive_generation = await asyncio.to_thread(lambda: archive.generation)
+            claim = _conversation_archive_user_view_require_claim(
+                runtime,
+                payload,
+                action="delete-preview",
+                archive_generation=archive_generation,
+            )
+            preview = await asyncio.to_thread(
+                archive.preview_user_deletion,
+                actor_external_id=claim["callerUserId"],
+                request_guild_id=claim["guildId"],
+                started_at=claim["startedAt"],
+                ended_at=claim["endedAt"],
+            )
+        return _conversation_archive_json(
+            {"ok": True, **_conversation_archive_preview_projection(preview)}
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_self_delete_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="user-view"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "context",
+                "interactionId",
+                "callerUserId",
+                "guildId",
+                "handle",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            archive_generation = await asyncio.to_thread(lambda: archive.generation)
+            claim = _conversation_archive_user_view_require_claim(
+                runtime,
+                payload,
+                action="delete-apply",
+                archive_generation=archive_generation,
+            )
+            result = await asyncio.to_thread(
+                archive.apply_user_deletion,
+                preview_id=claim["previewId"],
+                actor_external_id=claim["callerUserId"],
+            )
+            purge_run = await runtime.purge_deletion(result.request_id)
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                **_conversation_archive_deletion_projection(
+                    result,
+                    state=(
+                        "local_fully_purged"
+                        if purge_run is not None
+                        and purge_run.archive_completed
+                        else None
+                    ),
+                ),
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_status_handler(
+    request: web.Request,
+) -> web.Response:
+    _, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    try:
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            health = await asyncio.to_thread(archive.health)
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "enabled": True,
+                "ready": True,
+                "state": (
+                    "archive_maintenance_fault"
+                    if runtime.maintenance_fault
+                    else str(health.status)
+                ),
+                "generation": int(health.generation),
+                "writesAllowed": bool(
+                    health.writes_allowed and not runtime.maintenance_fault
+                ),
+                "contentFree": True,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+def _conversation_archive_minecraft_ingest_values(
+    runtime: _ConversationArchiveApiRuntime,
+    payload: Mapping[str, Any],
+) -> tuple[int, str, str, dict[str, Any] | None]:
+    generation = _conversation_archive_identifier(
+        payload.get("generation"), maximum=128
+    )
+    sequence = payload.get("sequence")
+    if type(sequence) is not int or sequence <= 0:
+        raise ValueError("archive_sequence_invalid")
+    idempotency_key = _conversation_archive_identifier(
+        payload.get("idempotencyKey"), maximum=256
+    )
+    payload_digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    existing = runtime.minecraft_receipts.get(idempotency_key)
+    if existing is not None:
+        if not hmac.compare_digest(existing[0], payload_digest):
+            raise _ConversationArchiveTransportError(
+                "archive_idempotency_conflict", status=409
+            )
+        return sequence, idempotency_key, payload_digest, dict(existing[1])
+    runtime.require_writes_available()
+    if runtime.minecraft_generation != generation:
+        raise _ConversationArchiveTransportError(
+            "archive_generation_stale", status=409
+        )
+    if sequence <= runtime.minecraft_last_sequence:
+        raise _ConversationArchiveTransportError(
+            "archive_sequence_stale", status=409
+        )
+    return sequence, idempotency_key, payload_digest, None
+
+
+def _conversation_archive_minecraft_body(
+    value: Any,
+) -> tuple[str, str, float]:
+    if not isinstance(value, str) or not value:
+        raise ValueError("archive_body_invalid")
+
+    def object_without_duplicates(
+        pairs: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("archive_minecraft_event_duplicate_field")
+            result[key] = item
+        return result
+
+    try:
+        event = json.loads(value, object_pairs_hook=object_without_duplicates)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise ValueError("archive_minecraft_event_invalid") from None
+    if (
+        isinstance(event, dict)
+        and event.get("schema")
+        == _CONVERSATION_ARCHIVE_MINECRAFT_LIFECYCLE_SCHEMA
+    ):
+        if (
+            set(event)
+            != _CONVERSATION_ARCHIVE_MINECRAFT_LIFECYCLE_FIELDS
+            or event.get("eventType") != "minecraft_result"
+            or event.get("verified") is not True
+            or event.get("succeeded") is not True
+            or event.get("contentFree") is not True
+        ):
+            raise ValueError("archive_minecraft_event_invalid")
+        operation = _conversation_archive_identifier(
+            event.get("operation"), maximum=32
+        )
+        outcome_code = _conversation_archive_identifier(
+            event.get("outcomeCode"), maximum=128
+        )
+        if {
+            "connect": "minecraft_connected",
+            "goal": "minecraft_goal_confirmed",
+            "disconnect": "minecraft_stopped",
+        }.get(operation) != outcome_code:
+            raise ValueError("archive_minecraft_event_invalid")
+        observed_at = event.get("observedAt")
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or not math.isfinite(float(observed_at))
+            or not 0 <= float(observed_at) <= 100_000_000_000
+        ):
+            raise ValueError("archive_minecraft_event_time_invalid")
+        normalized_lifecycle = {
+            "schema": _CONVERSATION_ARCHIVE_MINECRAFT_LIFECYCLE_SCHEMA,
+            "eventType": "minecraft_result",
+            "operation": operation,
+            "outcomeCode": outcome_code,
+            "observedAt": float(observed_at),
+            "verified": True,
+            "succeeded": True,
+            "contentFree": True,
+        }
+        canonical_lifecycle = json.dumps(
+            normalized_lifecycle,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return (
+            canonical_lifecycle,
+            f"마인크래프트 {operation} 검증 완료: {outcome_code}",
+            float(observed_at),
+        )
+    if (
+        not isinstance(event, dict)
+        or set(event) != _CONVERSATION_ARCHIVE_MINECRAFT_EVENT_FIELDS
+        or event.get("schema")
+        != _CONVERSATION_ARCHIVE_MINECRAFT_EVENT_SCHEMA
+        or event.get("eventType") != "minecraft_result"
+    ):
+        raise ValueError("archive_minecraft_event_invalid")
+    if any(
+        event.get(field) is not True
+        for field in (
+            "verified",
+            "succeeded",
+            "worldChanged",
+            "goalProgress",
+            "contentFree",
+        )
+    ):
+        raise ValueError("archive_minecraft_event_unverified")
+    normalized: dict[str, Any] = {
+        "schema": _CONVERSATION_ARCHIVE_MINECRAFT_EVENT_SCHEMA,
+        "eventType": "minecraft_result",
+    }
+    for field in (
+        "goalRunId",
+        "actionRunId",
+        "actionKey",
+        "contractCode",
+        "evidenceCode",
+        "postconditionCode",
+    ):
+        normalized[field] = _conversation_archive_identifier(
+            event.get(field), maximum=128
+        )
+    for field in ("candidateSequence", "executionSequence"):
+        sequence = event.get(field)
+        if type(sequence) is not int or sequence <= 0:
+            raise ValueError("archive_minecraft_event_sequence_invalid")
+        normalized[field] = sequence
+    observed_at = event.get("observedAt")
+    if (
+        isinstance(observed_at, bool)
+        or not isinstance(observed_at, (int, float))
+        or not math.isfinite(float(observed_at))
+        or not 0 <= float(observed_at) <= 100_000_000_000
+    ):
+        raise ValueError("archive_minecraft_event_time_invalid")
+    normalized["observedAt"] = float(observed_at)
+    for field in (
+        "verified",
+        "succeeded",
+        "worldChanged",
+        "goalProgress",
+        "contentFree",
+    ):
+        normalized[field] = True
+    canonical = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    projection = (
+        "마인크래프트 작업 검증 완료: "
+        f"{normalized['actionKey']} · {normalized['postconditionCode']} · "
+        f"{normalized['evidenceCode']}"
+    )
+    return canonical, projection, float(normalized["observedAt"])
+
+
+async def conversation_archive_minecraft_generation_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="minecraft"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            runtime.require_ready()
+            generation = _conversation_archive_identifier(
+                runtime.minecraft_generation, maximum=128
+            )
+        return _conversation_archive_json(
+            {"ok": True, "generation": generation}
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_minecraft_ready_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="minecraft"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required={"generation"})
+        generation = _conversation_archive_identifier(
+            payload["generation"], maximum=128
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            archive, _, _ = runtime.require_ready()
+            health = await asyncio.to_thread(archive.health)
+            ready = bool(
+                runtime.minecraft_generation == generation
+                and not runtime.maintenance_fault
+                and health.writes_allowed
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "ready": ready,
+                "state": (
+                    "archive_maintenance_fault"
+                    if runtime.maintenance_fault
+                    else str(health.status)
+                ),
+                "contentFree": True,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_minecraft_record_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="minecraft"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "generation",
+                "sequence",
+                "idempotencyKey",
+                "recordId",
+                "startedAt",
+                "endedAt",
+                "parentRecordIds",
+                "body",
+            },
+        )
+        runtime = _conversation_archive_runtime(request)
+        canonical_body, body_projection, observed_at = (
+            _conversation_archive_minecraft_body(payload["body"])
+        )
+        normalized_payload = dict(payload)
+        normalized_payload["body"] = canonical_body
+        async with runtime.lock:
+            (
+                sequence,
+                idempotency_key,
+                payload_digest,
+                cached,
+            ) = _conversation_archive_minecraft_ingest_values(
+                runtime, normalized_payload
+            )
+            if cached is not None:
+                return _conversation_archive_json(cached)
+            parent_values = payload["parentRecordIds"]
+            if (
+                not isinstance(parent_values, list)
+                or not 1 <= len(parent_values) <= 2
+            ):
+                raise ValueError("archive_lineage_required")
+            parent_ids = tuple(
+                _conversation_archive_identifier(value, maximum=64)
+                for value in parent_values
+            )
+            if len(parent_ids) != len(set(parent_ids)):
+                raise ValueError("archive_parent_ids_invalid")
+            archive, _, _ = runtime.require_ready()
+            started_at = _conversation_archive_datetime(payload["startedAt"])
+            ended_at = _conversation_archive_datetime(payload["endedAt"])
+            observed_datetime = _conversation_archive_datetime(observed_at)
+            if started_at != observed_datetime or ended_at != observed_datetime:
+                raise ValueError("archive_minecraft_event_time_mismatch")
+            expected_generation = await asyncio.to_thread(
+                lambda: archive.generation
+            )
+            record = await asyncio.to_thread(
+                archive.append_derived_record,
+                surface="minecraft",
+                record_type="minecraft_result",
+                body=body_projection,
+                started_at=started_at,
+                ended_at=ended_at,
+                parent_ids=parent_ids,
+                idempotency_key="minecraft-result:" + idempotency_key,
+                record_id=_conversation_archive_identifier(
+                    payload["recordId"], maximum=64
+                ),
+                expected_generation=expected_generation,
+            )
+            response = {"ok": True, "recordId": str(record.record_id)}
+            runtime.minecraft_last_sequence = sequence
+            runtime.minecraft_receipts[idempotency_key] = (
+                payload_digest,
+                dict(response),
+            )
+        return _conversation_archive_json(response)
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+def _conversation_archive_control_evidence(request: web.Request) -> Any:
+    from .conversation_archive_admin import LoopbackRequestEvidence
+
+    return LoopbackRequestEvidence(
+        scheme=str(
+            request.headers.get(CONVERSATION_ARCHIVE_CONTROL_SCHEME_HEADER) or ""
+        ),
+        host=str(
+            request.headers.get(CONVERSATION_ARCHIVE_CONTROL_HOST_HEADER) or ""
+        ),
+        origin=str(
+            request.headers.get(CONVERSATION_ARCHIVE_CONTROL_ORIGIN_HEADER) or ""
+        ),
+    )
+
+
+async def _conversation_archive_control_payload(
+    request: web.Request,
+) -> tuple[dict[str, Any] | None, web.Response | None]:
+    payload, error = await _conversation_archive_signed_json(
+        request,
+        purpose="control-proxy",
+    )
+    if error is not None:
+        return None, error
+    try:
+        from .conversation_archive_admin import (
+            AdminSecurityError,
+            require_loopback_control_page,
+        )
+
+        evidence = _conversation_archive_control_evidence(request)
+        require_loopback_control_page(evidence)
+        runtime = _conversation_archive_runtime(request)
+        expected_origin = str(
+            runtime.options["control_page_origin"]
+        ).rstrip("/")
+        if not (
+            hmac.compare_digest(
+                f"{evidence.scheme}://{evidence.host}", expected_origin
+            )
+            and hmac.compare_digest(
+                evidence.origin.rstrip("/"), expected_origin
+            )
+        ):
+            raise AdminSecurityError("admin_loopback_required")
+    except Exception as exc:
+        return None, _conversation_archive_exception_response(exc)
+    return payload, None
+
+
+def _conversation_archive_session_token(request: web.Request) -> str:
+    token = str(
+        request.cookies.get(CONVERSATION_ARCHIVE_ADMIN_COOKIE) or ""
+    )
+    if (
+        len(token) < 32
+        or len(token) > 128
+        or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None
+    ):
+        return ""
+    return token
+
+
+async def _conversation_archive_require_admin(
+    request: web.Request,
+    runtime: _ConversationArchiveApiRuntime,
+) -> str:
+    token = _conversation_archive_session_token(request)
+    if not token:
+        from .conversation_archive_admin import AdminSecurityError
+
+        raise AdminSecurityError("admin_session_invalid")
+    assert runtime.admin_auth is not None
+    await asyncio.to_thread(
+        runtime.admin_auth.require_admin_session,
+        token=token,
+        request=_conversation_archive_control_evidence(request),
+    )
+    return token
+
+
+async def conversation_archive_admin_challenge_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"bootstrapNonce"}
+        )
+        bootstrap_nonce = _conversation_archive_opaque_token(
+            payload["bootstrapNonce"], maximum=128
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            _, admin_auth, _ = runtime.require_ready()
+            # A new elevated host attestation is required for every login
+            # challenge; the admin manager consumes it exactly once.
+            attestation = runtime._load_and_verify_attestation()
+            attested_nonce = str(attestation.get("bootstrapNonce") or "")
+            if not hmac.compare_digest(bootstrap_nonce, attested_nonce):
+                raise ValueError("archive_bootstrap_nonce_mismatch")
+            delivery = await asyncio.to_thread(
+                admin_auth.begin_admin_login,
+                attestation,
+            )
+            runtime.enqueue_login_otp(delivery)
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "otp_delivery_pending",
+                "challengeId": str(delivery.challenge_id),
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_login_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"challengeId", "code"}
+        )
+        challenge_id = _conversation_archive_opaque_token(
+            payload["challengeId"], maximum=128
+        )
+        if not isinstance(payload["code"], str):
+            raise ValueError("archive_otp_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            _, admin_auth, _ = runtime.require_ready()
+            grant = await asyncio.to_thread(
+                admin_auth.complete_admin_login,
+                challenge_id=challenge_id,
+                code=payload["code"],
+                request=_conversation_archive_control_evidence(request),
+            )
+            for delivery_id, delivery in tuple(
+                runtime.otp_deliveries.items()
+            ):
+                if (
+                    delivery["kind"] == "login"
+                    and delivery["bindingId"] == challenge_id
+                ):
+                    runtime.otp_deliveries.pop(delivery_id, None)
+        response = _conversation_archive_json(
+            {"ok": True, "state": "authenticated"}
+        )
+        response.set_cookie(
+            CONVERSATION_ARCHIVE_ADMIN_COOKIE,
+            grant.token,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return response
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_records_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required=set(),
+            optional={"cursor"},
+        )
+        cursor = payload.get("cursor")
+        if cursor is not None:
+            if (
+                not isinstance(cursor, str)
+                or not 1 <= len(cursor) <= 2048
+                or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None
+            ):
+                raise ValueError("archive_admin_cursor_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            archive, _, _ = runtime.require_ready()
+            page = await asyncio.to_thread(
+                archive.read_admin_page,
+                authorized=True,
+                include_quarantined=True,
+                cursor=cursor,
+                limit=2,
+            )
+        projected: list[dict[str, Any]] = []
+        for record in page.records:
+            owner_name = getattr(record, "owner_name", None)
+            if not owner_name:
+                owner_name = (
+                    "Evelyn"
+                    if getattr(record, "owner_principal_id", None) is None
+                    else "알 수 없음"
+                )
+            projected.append(
+                {
+                    "recordId": str(record.record_id),
+                    "createdAt": record.started_at.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                    "kind": str(record.record_type),
+                    "ownerName": str(owner_name),
+                    "body": str(record.body),
+                }
+            )
+        return _conversation_archive_admin_page_response(
+            {
+                "ok": True,
+                "records": projected,
+                "nextCursor": page.next_cursor,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def _conversation_archive_admin_metadata_handler(
+    request: web.Request,
+    *,
+    kind: str,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required=set(),
+            optional={"cursor"},
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request,
+                runtime,
+            )
+            archive, _, _ = runtime.require_ready()
+            generation = await asyncio.to_thread(lambda: archive.generation)
+            core_cursor = _conversation_archive_admin_metadata_core_cursor(
+                runtime,
+                payload.get("cursor"),
+                kind=kind,
+                generation=generation,
+                session_token=session_token,
+            )
+            if kind == "participation":
+                page = await asyncio.to_thread(
+                    archive.read_participation_admin_page,
+                    authorized=True,
+                    cursor=core_cursor,
+                    limit=CONVERSATION_ARCHIVE_ADMIN_METADATA_PAGE_LIMIT,
+                )
+                rows = page.intervals
+            elif kind == "voice-state-transitions":
+                page = await asyncio.to_thread(
+                    archive.read_voice_state_transitions_admin_page,
+                    authorized=True,
+                    cursor=core_cursor,
+                    limit=CONVERSATION_ARCHIVE_ADMIN_METADATA_PAGE_LIMIT,
+                )
+                rows = page.transitions
+            elif kind == "legal-minimal":
+                page = await asyncio.to_thread(
+                    archive.read_legal_minimal_events_page,
+                    authorized=True,
+                    cursor=core_cursor,
+                    limit=CONVERSATION_ARCHIVE_ADMIN_METADATA_PAGE_LIMIT,
+                )
+                rows = page.events
+            else:
+                raise RuntimeError("archive_admin_page_kind_invalid")
+            if int(page.snapshot_generation) != generation:
+                raise _ConversationArchiveTransportError(
+                    "archive_admin_cursor_stale", status=409
+                )
+            next_cursor = (
+                _conversation_archive_admin_metadata_cursor(
+                    runtime,
+                    kind=kind,
+                    generation=generation,
+                    core_cursor=page.next_cursor,
+                    session_token=session_token,
+                )
+                if page.next_cursor is not None
+                else None
+            )
+        if kind == "participation":
+            projected = [
+                {
+                    "intervalId": str(row.interval_id),
+                    "principalId": str(row.principal_id),
+                    "ownerName": str(row.owner_name),
+                    "guildId": str(row.guild_id),
+                    "channelId": str(row.channel_id),
+                    "kind": str(row.interval_kind),
+                    "startedAt": row.started_at.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                    "endedAt": (
+                        None
+                        if row.ended_at is None
+                        else row.ended_at.astimezone(timezone.utc).isoformat()
+                    ),
+                }
+                for row in rows
+            ]
+            response = {
+                "ok": True,
+                "intervals": projected,
+                "nextCursor": next_cursor,
+            }
+        elif kind == "voice-state-transitions":
+            response = {
+                "ok": True,
+                "transitions": [
+                    {
+                        "transitionId": str(row.transition_id),
+                        "principalId": str(row.principal_id),
+                        "ownerName": str(row.owner_name),
+                        "guildId": str(row.guild_id),
+                        "channelId": str(row.channel_id),
+                        "eventAt": row.event_at.astimezone(
+                            timezone.utc
+                        ).isoformat(),
+                        "present": bool(row.present),
+                        "consentCurrent": bool(row.consent_current),
+                        "selfMute": bool(row.self_mute),
+                        "serverMute": bool(row.server_mute),
+                        "selfDeaf": bool(row.self_deaf),
+                        "serverDeaf": bool(row.server_deaf),
+                        "suppressed": bool(row.suppressed),
+                        "gatewayKnown": bool(row.gateway_known),
+                    }
+                    for row in rows
+                ],
+                "nextCursor": next_cursor,
+            }
+        else:
+            response = {
+                "ok": True,
+                "events": [
+                    {
+                        "ownerName": str(row.owner_name),
+                        "occurredAt": row.occurred_at.astimezone(
+                            timezone.utc
+                        ).isoformat(),
+                    }
+                    for row in rows
+                ],
+                "nextCursor": next_cursor,
+            }
+        return _conversation_archive_admin_page_response(response)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_participation_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_metadata_handler(
+        request,
+        kind="participation",
+    )
+
+
+async def conversation_archive_admin_legal_minimal_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_metadata_handler(
+        request,
+        kind="legal-minimal",
+    )
+
+
+async def conversation_archive_admin_voice_state_transitions_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_metadata_handler(
+        request,
+        kind="voice-state-transitions",
+    )
+
+
+async def conversation_archive_admin_delete_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required=set(),
+            optional={
+                "recordIds",
+                "targetPrincipalId",
+                "startedAt",
+                "endedAt",
+            },
+        )
+        record_ids_raw = payload.get("recordIds", [])
+        if not isinstance(record_ids_raw, list):
+            raise ValueError("archive_record_ids_invalid")
+        record_ids = tuple(
+            _conversation_archive_identifier(value, maximum=64)
+            for value in record_ids_raw
+        )
+        if len(record_ids) != len(set(record_ids)) or len(record_ids) > 200:
+            raise ValueError("archive_record_ids_invalid")
+        target_principal_id = payload.get("targetPrincipalId")
+        if target_principal_id is not None:
+            target_principal_id = _conversation_archive_identifier(
+                target_principal_id, maximum=64
+            )
+        if (target_principal_id is None) == (not record_ids):
+            raise ValueError("archive_admin_target_ambiguous")
+        started_at, ended_at = _conversation_archive_optional_range(payload)
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            archive, admin_auth, _ = runtime.require_ready()
+            preview = await asyncio.to_thread(
+                archive.preview_admin_deletion,
+                authorized=True,
+                target_principal_id=target_principal_id,
+                record_ids=record_ids,
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+            await asyncio.to_thread(
+                admin_auth.register_step_up_issue,
+                token=session_token,
+                request=_conversation_archive_control_evidence(request),
+            )
+            runtime.enqueue_step_up_otp(
+                preview_id=preview.preview_id,
+                session_token=session_token,
+            )
+        affected = (
+            int(preview.owned_record_count)
+            + int(preview.dependent_record_count)
+            + int(preview.interval_count)
+        )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "previewToken": str(preview.preview_id),
+                "affectedCount": affected,
+                "state": "step_up_otp_delivery_pending",
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_delete_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"previewToken", "code"}
+        )
+        preview_id = _conversation_archive_identifier(
+            payload["previewToken"], maximum=64
+        )
+        if not isinstance(payload["code"], str):
+            raise ValueError("archive_otp_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            if not runtime.consume_step_up(
+                preview_id=preview_id,
+                session_token=session_token,
+                code=payload["code"],
+            ):
+                from .conversation_archive_admin import AdminSecurityError
+
+                raise AdminSecurityError("admin_otp_invalid")
+            archive, _, _ = runtime.require_ready()
+            result = await asyncio.to_thread(
+                archive.apply_admin_deletion,
+                authorized=True,
+                preview_id=preview_id,
+            )
+            purge_run = await runtime.purge_deletion(result.request_id)
+        affected = (
+            int(result.affected_records)
+            + int(result.dependent_records)
+            + int(result.affected_intervals)
+        )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "requestId": str(result.request_id),
+                "state": str(
+                    "local_fully_purged"
+                    if purge_run is not None
+                    and purge_run.archive_completed
+                    else result.status
+                ),
+                "affectedCount": affected,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+def _conversation_archive_feedback_controller(
+    runtime: _ConversationArchiveApiRuntime,
+) -> Any:
+    controller = runtime.feedback_controller
+    if controller is None:
+        raise RuntimeError("feedback_controller_unavailable")
+    return controller
+
+
+def _conversation_archive_feedback_workflow_response(snapshot: Any) -> web.Response:
+    return _conversation_archive_json(
+        {"ok": True, "workflow": snapshot.public_record()}
+    )
+
+
+async def conversation_archive_task_guidance_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="ingest"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            runtime.require_feedback_guidance_admission()
+            controller = _conversation_archive_feedback_controller(runtime)
+            guidance = await asyncio.to_thread(controller.active_guidance)
+        if (
+            getattr(guidance, "source_free", None) is not True
+            or getattr(guidance, "active", None) is not True
+        ):
+            raise RuntimeError("feedback_active_guidance_invalid")
+        binding = TaskPlannerGuidance(
+            version_id=str(guidance.version_id),
+            guidance=str(guidance.guidance),
+            guidance_digest=str(guidance.guidance_digest),
+        ).binding_record()
+        if (
+            binding["sourceFree"] is not True
+            or binding["active"] is not True
+            or binding["canaryRunId"] is not None
+        ):
+            raise RuntimeError("feedback_active_guidance_invalid")
+        return _conversation_archive_json(
+            {"ok": True, "binding": binding}
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_workflows_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            controller = _conversation_archive_feedback_controller(runtime)
+            workflows = await asyncio.to_thread(controller.workflows)
+            active = await asyncio.to_thread(controller.active_guidance)
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "workflows": [item.public_record() for item in workflows],
+                "activeVersionId": str(active.version_id),
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_capture_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "taskId",
+                "sourceRecordId",
+                "category",
+                "correction",
+                "nonce",
+            },
+        )
+        task_id = _conversation_archive_identifier(payload["taskId"], maximum=128)
+        source_record_id = _conversation_archive_identifier(
+            payload["sourceRecordId"], maximum=64
+        )
+        if not isinstance(payload["category"], str) or not isinstance(
+            payload["correction"], str
+        ):
+            raise ValueError("feedback_correction_invalid")
+        nonce = _conversation_archive_identifier(payload["nonce"], maximum=128)
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            binding = CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS.get(task_id)
+            if (
+                binding is None
+                or binding[0] is not runtime
+                or not hmac.compare_digest(str(binding[1]), source_record_id)
+            ):
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_task_binding_stale")
+            current_tasks = {
+                str(item.get("id"))
+                for item in ACTION_COORDINATOR.snapshot().get("tasks", ())
+                if isinstance(item, dict)
+                and item.get("status") in {"completed", "failed", "cancelled"}
+            }
+            if task_id not in current_tasks:
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_session_stale")
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.capture_correction,
+                task_id=task_id,
+                source_record_id=source_record_id,
+                category=payload["category"],
+                correction=payload["correction"],
+                identity_surface="local",
+                actor_external_id=runtime.options["local_owner_external_id"],
+                owner_name=runtime.options["local_owner_name"],
+                surface="local",
+                session_id=FAST_CONTROL_SESSION_KEY,
+                nonce=nonce,
+                session_current=True,
+                admin_authorized=True,
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_generalize_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "workflowId",
+                "guidance",
+                "privacyReview",
+                "ancestorVersionIds",
+            },
+        )
+        workflow_id = _conversation_archive_identifier(
+            payload["workflowId"], maximum=128
+        )
+        if not isinstance(payload["guidance"], str) or not isinstance(
+            payload["privacyReview"], dict
+        ):
+            raise ValueError("feedback_generalization_invalid")
+        ancestors = payload["ancestorVersionIds"]
+        if (
+            not isinstance(ancestors, list)
+            or len(ancestors) > 2
+            or any(not isinstance(value, str) for value in ancestors)
+        ):
+            raise ValueError("feedback_ancestor_version_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.generalize,
+                workflow_id=workflow_id,
+                guidance=payload["guidance"],
+                privacy_review=payload["privacyReview"],
+                ancestor_version_ids=tuple(ancestors),
+                admin_authorized=True,
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_evaluate_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "versionId",
+                "report",
+                "evalRunId",
+                "baselineContractDigest",
+                "candidateContractDigest",
+            },
+        )
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        eval_run_id = _conversation_archive_identifier(
+            payload["evalRunId"], maximum=32
+        )
+        baseline_digest = _conversation_archive_identifier(
+            payload["baselineContractDigest"], maximum=64
+        )
+        candidate_digest = _conversation_archive_identifier(
+            payload["candidateContractDigest"], maximum=64
+        )
+        if not isinstance(payload["report"], dict):
+            raise ValueError("feedback_evaluation_report_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.record_evaluation,
+                version_id=version_id,
+                report=payload["report"],
+                eval_run_id=eval_run_id,
+                baseline_contract_digest=baseline_digest,
+                candidate_contract_digest=candidate_digest,
+                admin_authorized=True,
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_approval_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required={"versionId"})
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            controller = _conversation_archive_feedback_controller(runtime)
+            binding = await asyncio.to_thread(
+                controller.action_binding,
+                action="approve",
+                version_id=version_id,
+            )
+            guidance = await asyncio.to_thread(
+                controller.approval_guidance,
+                version_id=version_id,
+                admin_authorized=True,
+            )
+            preview_id = secrets.token_urlsafe(24)
+            runtime.feedback_action_previews[preview_id] = {
+                "action": "approve",
+                "versionId": version_id,
+                "approvalId": f"approval-{secrets.token_hex(16)}",
+                "bindingDigest": binding.binding_digest,
+                "archiveGeneration": binding.archive_generation,
+            }
+            _, admin_auth, _ = runtime.require_ready()
+            await asyncio.to_thread(
+                admin_auth.register_step_up_issue,
+                token=session_token,
+                request=_conversation_archive_control_evidence(request),
+            )
+            runtime.enqueue_step_up_otp(
+                preview_id=preview_id,
+                session_token=session_token,
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "step_up_otp_delivery_pending",
+                "previewToken": preview_id,
+                "versionId": version_id,
+                "guidance": guidance.guidance,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_approval_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"previewToken", "code"}
+        )
+        preview_id = _conversation_archive_identifier(
+            payload["previewToken"], maximum=128
+        )
+        if not isinstance(payload["code"], str):
+            raise ValueError("archive_otp_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            preview = runtime.feedback_action_previews.get(preview_id)
+            if not isinstance(preview, dict) or preview.get("action") != "approve":
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_approval_preview_invalid")
+            if not runtime.consume_step_up(
+                preview_id=preview_id,
+                session_token=session_token,
+                code=payload["code"],
+            ):
+                from .conversation_archive_admin import AdminSecurityError
+
+                raise AdminSecurityError("admin_otp_invalid")
+            runtime.feedback_action_previews.pop(preview_id, None)
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.grant_approval,
+                version_id=preview["versionId"],
+                approval_id=preview["approvalId"],
+                binding_digest=preview["bindingDigest"],
+                expected_generation=preview["archiveGeneration"],
+                admin_authorized=True,
+                step_up_consumed=True,
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_canary_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={"versionId", "canaryRunId", "phase"},
+        )
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        canary_run_id = _conversation_archive_identifier(
+            payload["canaryRunId"], maximum=128
+        )
+        phase = str(payload["phase"])
+        if phase != "begin":
+            raise ValueError("feedback_canary_phase_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            runtime.require_feedback_guidance_admission()
+            controller = _conversation_archive_feedback_controller(runtime)
+            snapshot = await asyncio.to_thread(
+                controller.begin_canary,
+                version_id=version_id,
+                canary_run_id=canary_run_id,
+                admin_authorized=True,
+            )
+            pointer = await asyncio.to_thread(
+                controller.running_canary_pointer,
+                local_admin=True,
+                read_only=True,
+                grounded_task=True,
+            )
+            if (
+                pointer is None
+                or str(pointer.canary_run_id) != canary_run_id
+                or str(pointer.version_id) != version_id
+            ):
+                raise ValueError("feedback_canary_binding_stale")
+            exact_binding = (
+                runtime,
+                version_id,
+                str(pointer.guidance_digest),
+            )
+            existing = CONVERSATION_ARCHIVE_CANARY_BINDINGS.get(
+                canary_run_id
+            )
+            if existing is not None and existing != exact_binding:
+                raise ValueError("feedback_canary_binding_stale")
+            CONVERSATION_ARCHIVE_CANARY_BINDINGS[
+                canary_run_id
+            ] = exact_binding
+            CONVERSATION_ARCHIVE_CANARY_RECEIPTS.setdefault(
+                canary_run_id, {}
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_activate_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required={"versionId"})
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            runtime.require_feedback_guidance_admission()
+            controller = _conversation_archive_feedback_controller(runtime)
+            binding = await asyncio.to_thread(
+                controller.action_binding,
+                action="activate",
+                version_id=version_id,
+            )
+            snapshot = await asyncio.to_thread(
+                controller.activate,
+                version_id=version_id,
+                binding_digest=binding.binding_digest,
+                expected_generation=binding.archive_generation,
+                admin_authorized=True,
+            )
+        return _conversation_archive_feedback_workflow_response(snapshot)
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_failure_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "versionId",
+                "failureId",
+                "taskId",
+                "contractVersion",
+                "evaluatorVersion",
+                "failureCode",
+            },
+        )
+        values = {
+            key: _conversation_archive_identifier(
+                payload[key], maximum=128 if key not in {"contractVersion", "evaluatorVersion"} else 80
+            )
+            for key in (
+                "versionId",
+                "failureId",
+                "taskId",
+                "contractVersion",
+                "evaluatorVersion",
+                "failureCode",
+            )
+        }
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await _conversation_archive_require_admin(request, runtime)
+            task_binding = CONVERSATION_ARCHIVE_LOCAL_TASK_RECORDS.get(
+                values["taskId"]
+            )
+            bound_record = (
+                task_binding[3]
+                if task_binding is not None and len(task_binding) == 4
+                else None
+            )
+            if (
+                task_binding is None
+                or task_binding[0] is not runtime
+                or validated_public_task_record(bound_record) is None
+                or bound_record["taskId"] != values["taskId"]
+                or bound_record["guidanceMode"] != "active"
+                or bound_record["canaryRunId"] is not None
+                or bound_record["guidanceVersion"] != values["versionId"]
+                or bound_record["contractVersion"]
+                != values["contractVersion"]
+                or bound_record["evalVersion"]
+                != values["evaluatorVersion"]
+            ):
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_task_binding_stale")
+            archive, _, _ = runtime.require_ready()
+            source_binding = await asyncio.to_thread(
+                archive.feedback_source_binding,
+                authorized=True,
+                source_record_id=task_binding[1],
+                identity_surface="local",
+                actor_external_id=runtime.options["local_owner_external_id"],
+            )
+            controller = _conversation_archive_feedback_controller(runtime)
+            active = await asyncio.to_thread(controller.active_guidance)
+            if not (
+                str(active.version_id) == bound_record["guidanceVersion"]
+                and str(active.guidance_digest)
+                == bound_record["guidanceDigest"]
+            ):
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_active_version_changed")
+            generation = await asyncio.to_thread(lambda: archive.generation)
+            failure_id = await asyncio.to_thread(
+                controller.record_active_failure,
+                version_id=bound_record["guidanceVersion"],
+                failure_id=values["failureId"],
+                task_id=values["taskId"],
+                source_record_id=task_binding[1],
+                contract_version=bound_record["contractVersion"],
+                evaluator_version=bound_record["evalVersion"],
+                failure_code=values["failureCode"],
+                principal_id=source_binding.owner_principal_id,
+                ledger_generation=generation,
+                authorized=True,
+                ledger_integrity_current=True,
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "fixed_failure_observed",
+                "failureId": failure_id,
+                "versionId": bound_record["guidanceVersion"],
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_rollback_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload,
+            required={"versionId", "contractVersion", "evaluatorVersion"},
+        )
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        contract_version = _conversation_archive_identifier(
+            payload["contractVersion"], maximum=80
+        )
+        evaluator_version = _conversation_archive_identifier(
+            payload["evaluatorVersion"], maximum=80
+        )
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            controller = _conversation_archive_feedback_controller(runtime)
+            binding = await asyncio.to_thread(
+                controller.action_binding,
+                action="rollback",
+                version_id=version_id,
+                contract_version=contract_version,
+                evaluator_version=evaluator_version,
+            )
+            preview_id = secrets.token_urlsafe(24)
+            runtime.feedback_action_previews[preview_id] = {
+                "action": "rollback",
+                "versionId": version_id,
+                "contractVersion": contract_version,
+                "evaluatorVersion": evaluator_version,
+                "bindingDigest": binding.binding_digest,
+                "archiveGeneration": binding.archive_generation,
+            }
+            _, admin_auth, _ = runtime.require_ready()
+            await asyncio.to_thread(
+                admin_auth.register_step_up_issue,
+                token=session_token,
+                request=_conversation_archive_control_evidence(request),
+            )
+            runtime.enqueue_step_up_otp(
+                preview_id=preview_id,
+                session_token=session_token,
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "step_up_otp_delivery_pending",
+                "previewToken": preview_id,
+                "versionId": version_id,
+                "guidance": "",
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_rollback_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"previewToken", "code"}
+        )
+        preview_id = _conversation_archive_identifier(
+            payload["previewToken"], maximum=128
+        )
+        if not isinstance(payload["code"], str):
+            raise ValueError("archive_otp_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            preview = runtime.feedback_action_previews.get(preview_id)
+            if not isinstance(preview, dict) or preview.get("action") != "rollback":
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_rollback_preview_invalid")
+            if not runtime.consume_step_up(
+                preview_id=preview_id,
+                session_token=session_token,
+                code=payload["code"],
+            ):
+                from .conversation_archive_admin import AdminSecurityError
+
+                raise AdminSecurityError("admin_otp_invalid")
+            runtime.feedback_action_previews.pop(preview_id, None)
+            controller = _conversation_archive_feedback_controller(runtime)
+            result = await asyncio.to_thread(
+                controller.rollback,
+                version_id=preview["versionId"],
+                contract_version=preview["contractVersion"],
+                evaluator_version=preview["evaluatorVersion"],
+                binding_digest=preview["bindingDigest"],
+                expected_generation=preview["archiveGeneration"],
+                admin_authorized=True,
+                step_up_consumed=True,
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": str(result["state"]),
+                "versionId": str(result["fromVersionId"]),
+                "activeVersionId": str(result["activeVersionId"]),
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_revoke_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"versionId", "reason"}
+        )
+        version_id = _conversation_archive_identifier(
+            payload["versionId"], maximum=128
+        )
+        reason = _conversation_archive_identifier(payload["reason"], maximum=64)
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            controller = _conversation_archive_feedback_controller(runtime)
+            binding = await asyncio.to_thread(
+                controller.action_binding,
+                action="revoke",
+                version_id=version_id,
+                reason=reason,
+            )
+            preview_id = secrets.token_urlsafe(24)
+            runtime.feedback_action_previews[preview_id] = {
+                "action": "revoke",
+                "versionId": version_id,
+                "reason": reason,
+                "bindingDigest": binding.binding_digest,
+                "archiveGeneration": binding.archive_generation,
+            }
+            _, admin_auth, _ = runtime.require_ready()
+            await asyncio.to_thread(
+                admin_auth.register_step_up_issue,
+                token=session_token,
+                request=_conversation_archive_control_evidence(request),
+            )
+            runtime.enqueue_step_up_otp(
+                preview_id=preview_id,
+                session_token=session_token,
+            )
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "step_up_otp_delivery_pending",
+                "previewToken": preview_id,
+                "versionId": version_id,
+                "guidance": "",
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_feedback_revoke_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"previewToken", "code"}
+        )
+        preview_id = _conversation_archive_identifier(
+            payload["previewToken"], maximum=128
+        )
+        if not isinstance(payload["code"], str):
+            raise ValueError("archive_otp_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            session_token = await _conversation_archive_require_admin(
+                request, runtime
+            )
+            preview = runtime.feedback_action_previews.get(preview_id)
+            if not isinstance(preview, dict) or preview.get("action") != "revoke":
+                from .feedback_improvement import FeedbackConflictError
+
+                raise FeedbackConflictError("feedback_revocation_preview_invalid")
+            if not runtime.consume_step_up(
+                preview_id=preview_id,
+                session_token=session_token,
+                code=payload["code"],
+            ):
+                from .conversation_archive_admin import AdminSecurityError
+
+                raise AdminSecurityError("admin_otp_invalid")
+            runtime.feedback_action_previews.pop(preview_id, None)
+            controller = _conversation_archive_feedback_controller(runtime)
+            version_ids = await asyncio.to_thread(
+                controller.revoke_version,
+                version_id=preview["versionId"],
+                reason=preview["reason"],
+                binding_digest=preview["bindingDigest"],
+                expected_generation=preview["archiveGeneration"],
+                admin_authorized=True,
+                step_up_consumed=True,
+            )
+            active = await asyncio.to_thread(controller.active_guidance)
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": "revoked",
+                "versionIds": list(version_ids),
+                "activeVersionId": str(active.version_id),
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_admin_logout_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_control_payload(request)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            token = await _conversation_archive_require_admin(request, runtime)
+            _, admin_auth, _ = runtime.require_ready()
+            await asyncio.to_thread(admin_auth.logout, token)
+            session_digest = hmac.new(
+                runtime._admin_key,
+                token.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            for preview_id, state in tuple(runtime.step_up.items()):
+                if hmac.compare_digest(state["sessionDigest"], session_digest):
+                    runtime.step_up.pop(preview_id, None)
+                    runtime.otp_deliveries.pop(state["deliveryId"], None)
+                    runtime.feedback_action_previews.pop(preview_id, None)
+            runtime.admin_metadata_handles = {
+                digest: claim
+                for digest, claim in runtime.admin_metadata_handles.items()
+                if not hmac.compare_digest(
+                    str(claim.get("sessionDigest")), session_digest
+                )
+            }
+        response = _conversation_archive_json(
+            {"ok": True, "state": "logged_out"}
+        )
+        response.del_cookie(
+            CONVERSATION_ARCHIVE_ADMIN_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return response
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_otp_poll_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="otp-delivery"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            runtime._purge_otp()
+            deliveries = [
+                {
+                    "deliveryId": delivery_id,
+                    "discordUserId": str(delivery["discordUserId"]),
+                    "code": str(delivery["code"]),
+                    "expiresAt": int(delivery["expiresAt"]),
+                }
+                for delivery_id, delivery in sorted(
+                    runtime.otp_deliveries.items()
+                )
+            ]
+        return _conversation_archive_json(
+            {"ok": True, "deliveries": deliveries}
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_otp_ack_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="otp-delivery"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        _conversation_archive_exact_fields(
+            payload, required={"deliveryId", "delivered"}
+        )
+        delivery_id = _conversation_archive_opaque_token(
+            payload["deliveryId"], maximum=128
+        )
+        if type(payload["delivered"]) is not bool:
+            raise ValueError("archive_delivery_ack_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            runtime._purge_otp()
+            delivery = runtime.otp_deliveries.pop(delivery_id, None)
+            if delivery is None:
+                raise _ConversationArchiveTransportError(
+                    "archive_delivery_missing", status=409
+                )
+            if payload["delivered"] is not True:
+                if delivery["kind"] == "login":
+                    assert runtime.admin_auth is not None
+                    await asyncio.to_thread(
+                        runtime.admin_auth.discard_challenge,
+                        delivery["bindingId"],
+                    )
+                else:
+                    runtime.step_up.pop(delivery["bindingId"], None)
+        return _conversation_archive_json(
+            {"ok": True, "state": "acknowledged"}
+        )
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_purge_owner_poll_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="purge-owner"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        from .conversation_archive_purge import deletion_purge_scope_digest
+
+        _conversation_archive_exact_fields(payload, required=set())
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await runtime.reconcile_remote_purge_receipts()
+            archive, _, _ = runtime.require_ready()
+            scan_remaining = _CONVERSATION_ARCHIVE_REMOTE_PURGE_SCAN_LIMIT
+            cursor = runtime.remote_purge_poll_cursor
+            wrapped = False
+            scanned_request_ids: set[str] = set()
+            work_orders = []
+            while (
+                scan_remaining > 0
+                and len(work_orders)
+                < _CONVERSATION_ARCHIVE_REMOTE_PURGE_POLL_LIMIT
+            ):
+                query_cursor = cursor
+                page_limit = scan_remaining
+                pending = await asyncio.to_thread(
+                    archive.pending_purge_work_orders,
+                    limit=page_limit,
+                    after=query_cursor,
+                )
+                if not pending:
+                    if query_cursor is not None and not wrapped:
+                        cursor = None
+                        wrapped = True
+                        continue
+                    cursor = None
+                    break
+                stopped_at_result_limit = False
+                for work_order in pending:
+                    scan_remaining -= 1
+                    request_id = str(work_order.request_id)
+                    cursor = (work_order.requested_at, request_id)
+                    if request_id in scanned_request_ids:
+                        continue
+                    scanned_request_ids.add(request_id)
+                    remaining_sinks = (
+                        runtime.unconfirmed_remote_purge_sinks(work_order)
+                    )
+                    if not remaining_sinks:
+                        continue
+                    work_orders.append(
+                        {
+                            "requestId": request_id,
+                            "deletionGeneration": int(
+                                work_order.deletion_generation
+                            ),
+                            "scopeDigest": deletion_purge_scope_digest(
+                                work_order
+                            ),
+                            "reason": str(work_order.reason),
+                            "requestedAt": work_order.requested_at.astimezone(
+                                timezone.utc
+                            ).isoformat(),
+                            "scopeAll": bool(work_order.scope_all),
+                            "guildId": work_order.guild_id,
+                            "startedAt": (
+                                None
+                                if work_order.started_at is None
+                                else work_order.started_at.astimezone(
+                                    timezone.utc
+                                ).isoformat()
+                            ),
+                            "endedAt": (
+                                None
+                                if work_order.ended_at is None
+                                else work_order.ended_at.astimezone(
+                                    timezone.utc
+                                ).isoformat()
+                            ),
+                            "lineageHandles": [
+                                {"kind": kind, "digest": digest}
+                                for kind, digest in work_order.lineage_handles
+                            ],
+                            "lineageComplete": bool(
+                                work_order.lineage_complete
+                            ),
+                            "remainingSinks": list(remaining_sinks),
+                            "contentFree": True,
+                        }
+                    )
+                    if (
+                        len(work_orders)
+                        >= _CONVERSATION_ARCHIVE_REMOTE_PURGE_POLL_LIMIT
+                    ):
+                        stopped_at_result_limit = True
+                        break
+                if stopped_at_result_limit:
+                    break
+                if len(pending) < page_limit:
+                    if query_cursor is not None and not wrapped:
+                        cursor = None
+                        wrapped = True
+                        continue
+                    cursor = None
+                    break
+            runtime.remote_purge_poll_cursor = cursor
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "workOrders": work_orders,
+                "contentFree": True,
+            }
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
+async def conversation_archive_purge_owner_ack_handler(
+    request: web.Request,
+) -> web.Response:
+    payload, error = await _conversation_archive_signed_json(
+        request, purpose="purge-owner"
+    )
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        from .conversation_archive_purge import deletion_purge_scope_digest
+
+        _conversation_archive_exact_fields(
+            payload,
+            required={
+                "requestId",
+                "deletionGeneration",
+                "scopeDigest",
+                "sink",
+                "contentFree",
+                "complete",
+                "remainingCopies",
+                "manualReviewCount",
+            },
+        )
+        request_id = _conversation_archive_identifier(
+            payload["requestId"], maximum=64
+        )
+        generation = payload["deletionGeneration"]
+        scope_digest = payload["scopeDigest"]
+        sink = payload["sink"]
+        if (
+            type(generation) is not int
+            or generation < 1
+            or not isinstance(scope_digest, str)
+            or _CONVERSATION_ARCHIVE_SIGNATURE_RE.fullmatch(scope_digest)
+            is None
+            or not isinstance(sink, str)
+            or sink not in _CONVERSATION_ARCHIVE_REMOTE_PURGE_SINKS
+            or payload["contentFree"] is not True
+            or payload["complete"] is not True
+            or type(payload["remainingCopies"]) is not int
+            or payload["remainingCopies"] != 0
+            or type(payload["manualReviewCount"]) is not int
+            or payload["manualReviewCount"] != 0
+        ):
+            raise ValueError("archive_purge_receipt_invalid")
+        runtime = _conversation_archive_runtime(request)
+        async with runtime.lock:
+            await runtime.reconcile_remote_purge_receipts()
+            archive, _, _ = runtime.require_ready()
+            work_order = await asyncio.to_thread(
+                archive.deletion_purge_work_order,
+                request_id=request_id,
+            )
+            if (
+                work_order is None
+                or int(work_order.deletion_generation) != generation
+                or sink not in work_order.required_sinks
+                or not hmac.compare_digest(
+                    deletion_purge_scope_digest(work_order), scope_digest
+                )
+            ):
+                raise _ConversationArchiveTransportError(
+                    "archive_purge_receipt_stale", status=409
+                )
+            if work_order.lineage_complete is not True:
+                raise _ConversationArchiveTransportError(
+                    "archive_purge_lineage_incomplete", status=409
+                )
+            receipt = (request_id, generation, scope_digest, sink)
+            if receipt in runtime.remote_purge_receipts:
+                raise _ConversationArchiveTransportError(
+                    "archive_purge_receipt_replayed", status=409
+                )
+            runtime.remote_purge_receipts.add(receipt)
+            purge_run = await runtime.purge_deletion(request_id)
+            if purge_run is None:
+                raise RuntimeError("archive_purge_coordinator_unavailable")
+        return _conversation_archive_json(
+            {
+                "ok": True,
+                "state": str(purge_run.state),
+                "archiveCompleted": bool(purge_run.archive_completed),
+                "contentFree": True,
+            }
+        )
+    except _ConversationArchiveTransportError as exc:
+        return _conversation_archive_json(
+            {"ok": False, "error": exc.code}, status=exc.status
+        )
+    except Exception as exc:
+        return _conversation_archive_exception_response(exc)
+
+
 def create_app(
     *,
     enable_minecraft_world_lease_owner: bool | None = None,
+    conversation_archive_enabled: bool | None = None,
+    conversation_archive_options: Mapping[str, Any] | None = None,
 ) -> web.Application:
     register_builtin_background_action_handlers()
     recover_fast_control_actions_after_restart()
@@ -11830,6 +17761,20 @@ def create_app(
     app.cleanup_ctx.append(fast_main_llm_http_session_context)
     app.cleanup_ctx.append(fast_main_control_http_session_context)
     app.cleanup_ctx.append(fast_main_llm_warmup_context)
+    archive_enabled = (
+        CONVERSATION_ARCHIVE_ENABLED
+        if conversation_archive_enabled is None
+        else bool(conversation_archive_enabled)
+    )
+    if archive_enabled:
+        app[CONVERSATION_ARCHIVE_RUNTIME_KEY] = (
+            _ConversationArchiveApiRuntime(
+                _conversation_archive_env_options(
+                    conversation_archive_options
+                )
+            )
+        )
+        app.cleanup_ctx.append(conversation_archive_context)
     owner_enabled = (
         MINECRAFT_WORLD_LEASE_OWNER_ENABLED
         if enable_minecraft_world_lease_owner is None
@@ -11877,6 +17822,179 @@ def create_app(
         "/internal/task-approval/cancel-complete",
         task_approval_internal_cancel_complete_handler,
     )
+    if archive_enabled:
+        app.router.add_get(
+            "/internal/conversation-archive/status",
+            conversation_archive_status_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/generation",
+            conversation_archive_generation_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/record",
+            conversation_archive_record_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/shared-session/open",
+            conversation_archive_shared_session_open_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/shared-session/close",
+            conversation_archive_shared_session_close_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/feedback/capture",
+            conversation_archive_discord_feedback_capture_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/task-guidance",
+            conversation_archive_task_guidance_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/voice-state",
+            conversation_archive_voice_state_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/voice-admission",
+            conversation_archive_voice_admission_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/self/authorize",
+            conversation_archive_self_authorize_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/self/records",
+            conversation_archive_self_records_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/self/delete/preview",
+            conversation_archive_self_delete_preview_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/self/delete/apply",
+            conversation_archive_self_delete_apply_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/consent",
+            conversation_archive_consent_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/challenge",
+            conversation_archive_admin_challenge_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/login",
+            conversation_archive_admin_login_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/records",
+            conversation_archive_admin_records_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/participation",
+            conversation_archive_admin_participation_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/voice-state-transitions",
+            conversation_archive_admin_voice_state_transitions_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/legal-minimal",
+            conversation_archive_admin_legal_minimal_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/delete/preview",
+            conversation_archive_admin_delete_preview_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/delete/apply",
+            conversation_archive_admin_delete_apply_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/workflows",
+            conversation_archive_admin_feedback_workflows_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/capture",
+            conversation_archive_admin_feedback_capture_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/generalize",
+            conversation_archive_admin_feedback_generalize_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/evaluate",
+            conversation_archive_admin_feedback_evaluate_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/approval/preview",
+            conversation_archive_admin_feedback_approval_preview_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/approval/apply",
+            conversation_archive_admin_feedback_approval_apply_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/canary",
+            conversation_archive_admin_feedback_canary_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/activate",
+            conversation_archive_admin_feedback_activate_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/failure",
+            conversation_archive_admin_feedback_failure_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/rollback/preview",
+            conversation_archive_admin_feedback_rollback_preview_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/rollback/apply",
+            conversation_archive_admin_feedback_rollback_apply_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/revoke/preview",
+            conversation_archive_admin_feedback_revoke_preview_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/feedback/revoke/apply",
+            conversation_archive_admin_feedback_revoke_apply_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/logout",
+            conversation_archive_admin_logout_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/otp-delivery/poll",
+            conversation_archive_otp_poll_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/admin/otp-delivery/ack",
+            conversation_archive_otp_ack_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/purge-owner/poll",
+            conversation_archive_purge_owner_poll_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/purge-owner/ack",
+            conversation_archive_purge_owner_ack_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/minecraft/generation",
+            conversation_archive_minecraft_generation_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/minecraft/ready",
+            conversation_archive_minecraft_ready_handler,
+        )
+        app.router.add_post(
+            "/internal/conversation-archive/minecraft/record",
+            conversation_archive_minecraft_record_handler,
+        )
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_post(
         "/api/local-voice/admission",
@@ -11916,7 +18034,99 @@ def create_app(
     return app
 
 
+def _restore_conversation_archive(
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Restore only the exact attested, anchor-current D: replica."""
+
+    from .conversation_archive import (
+        ARCHIVE_REQUIRED_PURGE_SINKS,
+        ConversationArchive,
+    )
+
+    options = _conversation_archive_env_options(overrides)
+    if (
+        not options["expected_admin_sid"]
+        or not options["expected_admin_account"]
+        or not options["registered_discord_user_id"].isdecimal()
+    ):
+        raise RuntimeError("archive_admin_identity_unconfigured")
+    auth_master = _conversation_archive_read_file(
+        options["auth_key_path"],
+        maximum_bytes=4096,
+        error="archive_auth_key_invalid",
+    )
+    ingest_master = _conversation_archive_read_file(
+        options["ingest_key_path"],
+        maximum_bytes=4096,
+        error="archive_ingest_key_invalid",
+    )
+    if (
+        len(auth_master) < 32
+        or len(ingest_master) < 32
+        or hmac.compare_digest(auth_master, ingest_master)
+    ):
+        raise RuntimeError("archive_key_invalid")
+    integrity_key = _conversation_archive_subkey(
+        auth_master,
+        _CONVERSATION_ARCHIVE_INTEGRITY_KEY_DOMAIN,
+    )
+    purge_lineage_key = _conversation_archive_subkey(
+        ingest_master,
+        _CONVERSATION_ARCHIVE_PURGE_LINEAGE_KEY_DOMAIN,
+    )
+    replay_key = _conversation_archive_subkey(
+        auth_master,
+        _CONVERSATION_ARCHIVE_STARTUP_REPLAY_KEY_DOMAIN,
+    )
+    verifier = _ConversationArchiveApiRuntime(options)
+    verifier._attestation_key = auth_master
+    verified = verifier._load_and_verify_attestation()
+    _conversation_archive_consume_startup_attestation(
+        path=options["startup_replay_path"],
+        attestation=verified,
+        key=replay_key,
+        now=int(options["clock"]()),
+    )
+    archive = ConversationArchive(
+        primary_path=options["primary_path"],
+        replica_path=options["replica_path"],
+        anchor_path=options["anchor_path"],
+        integrity_key=integrity_key,
+        lineage_key=purge_lineage_key,
+        required_purge_sinks=ARCHIVE_REQUIRED_PURGE_SINKS,
+    )
+    try:
+        generation, _ = archive.restore_from_replica()
+        health = archive.health()
+        if health.status not in {"healthy", "local_cleanup_pending"}:
+            raise RuntimeError("archive_restore_verification_failed")
+        return {
+            "schema": "conversation_archive.restore-result.v1",
+            "ok": True,
+            "state": "restored",
+            "generation": int(generation),
+            "contentFree": True,
+        }
+    finally:
+        archive.close()
+
+
 def main() -> None:
+    arguments = sys.argv[1:]
+    if arguments:
+        if arguments != ["--restore-conversation-archive"]:
+            raise SystemExit("unsupported_argument")
+        if not CONVERSATION_ARCHIVE_ENABLED:
+            raise SystemExit("conversation_archive_disabled")
+        print(
+            json.dumps(
+                _restore_conversation_archive(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return
     web.run_app(create_app(), host=HOST, port=PORT)
 
 

@@ -28,6 +28,7 @@ from evelyn_core.fast_action_runtime import (  # noqa: E402
 from evelyn_core.conversation_memory_receipt import (  # noqa: E402
     not_used_memory_receipt_ref,
 )
+from evelyn_core.task_loop_runtime import TaskLoopResult  # noqa: E402
 
 
 class FastActionRuntimeTests(unittest.TestCase):
@@ -231,6 +232,34 @@ class FastActionRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["activeCount"], 0)
         self.assertEqual([event["type"] for event in snapshot["events"]], ["started", "completed"])
         self.assertEqual(coordinator.events_after(1)[0]["reply"], "작업을 마쳤어.")
+
+    def test_task_record_is_detached_process_local_and_terminal_only(self) -> None:
+        coordinator = FastActionCoordinator(time_fn=lambda: 100.0)
+        task = coordinator.start(
+            kind="iterative_task",
+            source="control_page",
+            user_text="PRIVATE GOAL",
+            start_reply="started",
+        )
+        record = TaskLoopResult(
+            task_id=task.task_id,
+            status="failed",
+            code="task_tool_failed",
+            summary="PRIVATE SUMMARY",
+            step_count=0,
+            model_call_count=1,
+        ).public_task_record()
+
+        coordinator.attach_task_record(task.task_id, record)
+        record["code"] = "caller_mutated"
+
+        self.assertNotIn("taskRecord", coordinator.snapshot()["tasks"][0])
+        coordinator.fail(task.task_id, "task_tool_failed", reply="failed")
+        public = coordinator.snapshot()["tasks"][0]["taskRecord"]
+        self.assertEqual(public["code"], "task_tool_failed")
+        self.assertNotIn("PRIVATE", str(public))
+        coordinator.clear()
+        self.assertEqual(coordinator.snapshot()["tasks"], [])
 
     def test_history_cap_never_evicts_a_running_task_before_terminal_result(self) -> None:
         coordinator = FastActionCoordinator(history_limit=4, time_fn=lambda: 100.0)

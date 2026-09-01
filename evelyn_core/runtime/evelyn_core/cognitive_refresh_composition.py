@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, MutableMapping
 
 from .cognitive_state_runtime import update_cognitive_state_from_runtime
 
@@ -18,6 +18,10 @@ class CognitiveRefreshCompositionDeps:
     current_task: Callable[[], Any]
     log_turn_event: Callable[..., Any]
     log: Callable[..., Any]
+    archive_target_is_current: Callable[..., bool] | None = None
+    archive_task_targets: MutableMapping[
+        asyncio.Task, dict[str, Any]
+    ] | None = None
 
 
 class CognitiveRefreshComposition:
@@ -25,6 +29,48 @@ class CognitiveRefreshComposition:
 
     def __init__(self, deps: CognitiveRefreshCompositionDeps) -> None:
         self.deps = deps
+
+    @staticmethod
+    def _archive_target(
+        *,
+        guild_id: int,
+        turn_scope: Any,
+        session_key: str | None,
+        session_memory_key: str | None,
+        person_key: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "guild_id": int(guild_id),
+            "turn_id": getattr(turn_scope, "turn_id", None),
+            "session_key": session_key,
+            "session_memory_key": session_memory_key,
+            "person_key": person_key,
+        }
+
+    def _archive_target_current(self, target: dict[str, Any]) -> bool:
+        callback = getattr(self.deps, "archive_target_is_current", None)
+        if callback is None:
+            return True
+        try:
+            return callback(**target) is True
+        except Exception:
+            return False
+
+    def _track_archive_task(
+        self,
+        task: asyncio.Task,
+        target: dict[str, Any],
+    ) -> None:
+        registry = getattr(self.deps, "archive_task_targets", None)
+        if registry is None:
+            return
+        registry[task] = dict(target)
+
+        def release(completed: asyncio.Task) -> None:
+            if registry.get(completed) == target:
+                registry.pop(completed, None)
+
+        task.add_done_callback(release)
 
     async def update_cognitive_state(
         self,
@@ -64,9 +110,18 @@ class CognitiveRefreshComposition:
         turn_scope: Any | None = None,
     ) -> None:
         deps = self.deps
+        archive_target = self._archive_target(
+            guild_id=guild_id,
+            turn_scope=turn_scope,
+            session_key=session_key,
+            session_memory_key=session_memory_key,
+            person_key=person_key,
+        )
         task_key = session_memory_key or deps.runtime_session_key(guild_id=guild_id)
         started_at = deps.monotonic()
         try:
+            if not self._archive_target_current(archive_target):
+                return
             await self.update_cognitive_state(
                 guild_id,
                 user_text,
@@ -114,10 +169,19 @@ class CognitiveRefreshComposition:
         task_key = session_memory_key or deps.runtime_session_key(guild_id=guild_id)
         if task_key is None:
             return
+        archive_target = self._archive_target(
+            guild_id=guild_id,
+            turn_scope=turn_scope,
+            session_key=session_key,
+            session_memory_key=session_memory_key,
+            person_key=person_key,
+        )
+        if not self._archive_target_current(archive_target):
+            return
         existing = deps.background_tasks.get(task_key)
         if existing is not None and not existing.done():
             existing.cancel()
-        deps.background_tasks[task_key] = deps.create_scoped_task(
+        task = deps.create_scoped_task(
             self.refresh_cognitive_state_in_background(
                 guild_id,
                 user_text,
@@ -131,3 +195,5 @@ class CognitiveRefreshComposition:
             ),
             turn_scope=turn_scope,
         )
+        deps.background_tasks[task_key] = task
+        self._track_archive_task(task, archive_target)

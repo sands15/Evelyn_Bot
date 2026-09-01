@@ -18,8 +18,11 @@ class TaskApprovalUiContractTests(unittest.TestCase):
     def test_panel_consumes_the_existing_state_poll_projection(self) -> None:
         index = INDEX.read_text(encoding="utf-8")
         self.assertIn('id="taskApprovalMount"', index)
+        self.assertIn('id="taskRecordMount"', index)
         self.assertIn('new CustomEvent("evelyn:task-approval-state"', index)
+        self.assertIn('new CustomEvent("evelyn:task-record-state"', index)
         self.assertIn("state.actions.approval", index)
+        self.assertIn("state.actions.tasks", index)
         self.assertIn("evelyn-task-approval.js", index)
         self.assertIn("evelyn-task-approval.css", index)
 
@@ -93,6 +96,30 @@ class TaskApprovalUiContractTests(unittest.TestCase):
         self.assertIn("max-height: 360px", style)
         self.assertIn("overflow: auto", style)
         self.assertEqual(style.count("unicode-bidi: plaintext"), 2)
+
+    def test_recent_task_records_are_exact_bounded_and_content_free(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        record_section = source[
+            source.index("function validTaskRecord(") :
+            source.index("function setState(")
+        ]
+        self.assertIn('value.schema !== "evelyn.task-public-record.v1"', record_section)
+        self.assertIn('value.processLocal !== true || value.durable !== false', record_section)
+        self.assertIn(
+            '(guidanceVersion === "base") !== (guidanceDigest === BASE_GUIDANCE_DIGEST)',
+            record_section,
+        )
+        self.assertIn(".slice(-4)", record_section)
+        self.assertIn("hasExactKeys(value, TASK_RECORD_FIELDS)", record_section)
+        for private_field in (
+            "summary",
+            "evidence",
+            "principal",
+            "modulePath",
+            "finalReply",
+            "userText",
+        ):
+            self.assertNotIn(private_field, record_section)
 
 
 if __name__ == "__main__":

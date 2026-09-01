@@ -1077,6 +1077,67 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         process.wait_forever.assert_awaited_once_with()
         process.log.assert_any_call("[LOCAL MODE] ready url=http://127.0.0.1:8799")
 
+    async def test_local_only_archive_starts_generation_then_purge_and_stops_worker(
+        self,
+    ) -> None:
+        events: list[str] = []
+        worker_started = asyncio.Event()
+
+        async def begin_generation() -> str:
+            events.append("generation")
+            return "archive-generation-1"
+
+        async def purge_worker() -> None:
+            events.append("purge-started")
+            worker_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append("purge-stopped")
+
+        async def wait_forever() -> None:
+            await worker_started.wait()
+            events.append("wait")
+
+        process = self.build_process_deps(
+            begin_conversation_archive_generation=begin_generation,
+            run_conversation_archive_purge_worker=purge_worker,
+            wait_forever=wait_forever,
+        )
+        composition = self.build_composition(process=process)
+        composition.ensure_startup_components_ready = AsyncMock()
+
+        await composition.run_local_only_mode()
+
+        self.assertLess(events.index("generation"), events.index("purge-started"))
+        self.assertLess(events.index("purge-started"), events.index("wait"))
+        self.assertEqual(events[-1], "purge-stopped")
+
+    async def test_local_only_archive_invalid_generation_fails_closed(
+        self,
+    ) -> None:
+        begin_generation = AsyncMock(return_value="")
+        purge_worker = AsyncMock()
+        process = self.build_process_deps(
+            begin_conversation_archive_generation=begin_generation,
+            run_conversation_archive_purge_worker=purge_worker,
+        )
+        composition = self.build_composition(process=process)
+        composition.ensure_startup_components_ready = AsyncMock()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_archive_startup_failed$",
+        ):
+            await composition.run_local_only_mode()
+
+        begin_generation.assert_awaited_once_with()
+        purge_worker.assert_not_called()
+        process.wait_forever.assert_not_awaited()
+        process.log.assert_any_call(
+            "[STARTUP] conversation_archive_fail errorType=RuntimeError"
+        )
+
     async def test_local_only_control_page_failure_is_marked_and_raised(self) -> None:
         private_error = "PRIVATE_CONTROL_PAGE_START C:\\private\\token"
         process = self.build_process_deps(
@@ -1311,6 +1372,14 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs)",
+            source,
+        )
+        self.assertIn(
+            "lambda: conversation_archive_gate.begin_generation()",
+            source,
+        )
+        self.assertIn(
+            "lambda: conversation_archive.run_purge_owner_loop()",
             source,
         )
         self.assertNotIn("globals()", runtime_source)

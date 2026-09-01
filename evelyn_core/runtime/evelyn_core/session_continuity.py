@@ -73,8 +73,28 @@ DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES = 20
 DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT = 256
 DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC = 5.0
 SESSION_CONTINUITY_CHAIN_GENESIS = "0" * 64
+SESSION_CONTINUITY_WRITER_FENCE_REJECTED = (
+    "conversation_continuity_deletion_fence_rejected"
+)
 _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_SPEAKERS = frozenset({"user", "assistant"})
+_SESSION_STORE_MAPPING_NAMES = (
+    "histories",
+    "followup_targets",
+    "active_until",
+    "active_user_ids",
+    "last_active_at",
+    "awaiting_user_reply",
+    "last_speaker",
+    "topic_ids",
+    "turn_ids",
+    "segment_counters",
+    "last_turn_accepted_at",
+    "last_stt_text",
+    "partial_stt_text",
+    "committed_stt_text",
+    "bad_audio_counts",
+)
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -181,6 +201,44 @@ def _canonical_json(payload: dict[str, Any]) -> str:
     )
 
 
+def _strict_json_loads(raw_text: str) -> Any:
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("continuity_duplicate_json_key")
+            result[key] = value
+        return result
+
+    return json.loads(raw_text, object_pairs_hook=reject_duplicate_keys)
+
+
+def _exact_lineage_counts(
+    *,
+    removed: int = 0,
+    remaining: int = 0,
+    manual: int = 0,
+) -> dict[str, Any]:
+    return {
+        "removedCount": max(0, int(removed)),
+        "remainingCopies": max(0, int(remaining)),
+        "manualReviewCount": max(0, int(manual)),
+        "contentFree": True,
+    }
+
+
+def _exact_selector_matches(
+    selector: Callable[[str], bool],
+    value: str,
+) -> bool:
+    matched = selector(value)
+    if type(matched) is not bool:
+        raise TypeError("continuity_lineage_selector_invalid")
+    return matched
+
+
 def _checkpoint_hash(payload: dict[str, Any]) -> str:
     unsigned = {
         key: value
@@ -266,8 +324,16 @@ class SessionContinuityCheckpoint:
         commit_artifact_deadline_sec: float = (
             DEFAULT_COMMIT_ARTIFACT_DEADLINE_SEC
         ),
+        writer_fence_current: (
+            Callable[[str, str], bool] | None
+        ) = None,
         log: Callable[[str], Any] | None = None,
     ) -> None:
+        if (
+            writer_fence_current is not None
+            and not callable(writer_fence_current)
+        ):
+            raise TypeError("continuity_writer_fence_invalid")
         self.store = store
         self.checkpoint_path = Path(checkpoint_path)
         self.status_path = Path(status_path)
@@ -316,6 +382,7 @@ class SessionContinuityCheckpoint:
             0.1,
             float(commit_artifact_deadline_sec),
         )
+        self.writer_fence_current = writer_fence_current
         self.log = log
         self.runtime_errors = RuntimeErrorCounter(now=wall_time)
         self._lock = threading.RLock()
@@ -369,6 +436,74 @@ class SessionContinuityCheckpoint:
     def _emit(self, message: str) -> None:
         if self.log is not None:
             self.log(message)
+
+    def _writer_fence_rejected_status(self) -> dict[str, Any]:
+        return {
+            **self.status(),
+            "state": "error",
+            "lastErrorCode": SESSION_CONTINUITY_WRITER_FENCE_REJECTED,
+        }
+
+    def _require_current_writer_fence(
+        self,
+        material: dict[str, Any],
+    ) -> None:
+        fence = self.writer_fence_current
+        if fence is None:
+            return
+        sessions = material.get("sessions")
+        if not isinstance(sessions, list):
+            raise RuntimeError(SESSION_CONTINUITY_WRITER_FENCE_REJECTED)
+        for row in sessions:
+            if not isinstance(row, dict):
+                raise RuntimeError(
+                    SESSION_CONTINUITY_WRITER_FENCE_REJECTED
+                )
+            session_key = _valid_session_key(row.get("sessionKey"))
+            saved_turn_id = _valid_turn_id(row.get("turnId"))
+            current_raw = self.store.turn_ids.get(session_key)
+            current_turn_id = _valid_turn_id(current_raw)
+            if (
+                not session_key
+                or session_key != row.get("sessionKey")
+                or not saved_turn_id
+                or saved_turn_id != row.get("turnId")
+                or not current_turn_id
+                or current_turn_id != current_raw
+                or current_turn_id != saved_turn_id
+            ):
+                raise RuntimeError(
+                    SESSION_CONTINUITY_WRITER_FENCE_REJECTED
+                )
+            try:
+                current = fence(session_key, current_turn_id)
+            except Exception:
+                raise RuntimeError(
+                    SESSION_CONTINUITY_WRITER_FENCE_REJECTED
+                ) from None
+            if current is not True:
+                raise RuntimeError(
+                    SESSION_CONTINUITY_WRITER_FENCE_REJECTED
+                )
+
+    def _preflight_named_commit_writer_fence(
+        self,
+        session_key: str,
+        turn_id: str,
+    ) -> None:
+        if self.writer_fence_current is None:
+            return
+        with self._lock:
+            try:
+                material = self._material(
+                    required_session_key=session_key,
+                    required_turn_id=turn_id,
+                )
+                self._require_current_writer_fence(material)
+            except Exception:
+                raise RuntimeError(
+                    "conversation_continuity_commit_failed"
+                ) from None
 
     def _guild_revocations_anchor_configured(self) -> bool:
         return bool(
@@ -1120,6 +1255,556 @@ class SessionContinuityCheckpoint:
             "resetBoundaryAt": reset_boundary_at,
             "guildResetBoundaries": guild_reset_boundaries,
         }
+
+    def _strict_exact_lineage_sessions(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        allow_legacy_session: bool,
+    ) -> dict[str, dict[str, Any]]:
+        """Validate a fresh checkpoint without repairing its head or anchor."""
+
+        raw_head = read_bounded_text(
+            self.head_path,
+            maximum_bytes=128 * 1024,
+            missing_ok=True,
+        )
+        if raw_head is not None:
+            _strict_json_loads(raw_head)
+        payload = snapshot.get("payload")
+        if payload is None:
+            if (
+                snapshot.get("rawText")
+                or snapshot.get("discardCheckpoint") is True
+                or snapshot.get("headState") not in {"empty", "missing"}
+                or (
+                    self._checkpoint_generation > 0
+                    and int(snapshot["generation"])
+                    != self._checkpoint_generation
+                )
+            ):
+                raise ValueError(
+                    "continuity_exact_lineage_state_mismatch"
+                )
+            self.authenticity.verify_external_anchor(
+                self.authenticity.checkpoint_anchor_slot(
+                    self.authenticity_scope
+                ),
+                generation=int(snapshot["generation"]),
+                artifact_hash=str(snapshot["checkpointHash"]),
+            )
+            return {}
+        schema = snapshot.get("schema")
+        if (
+            schema not in {
+                SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+                *(
+                    {SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA}
+                    if allow_legacy_session
+                    else set()
+                ),
+            }
+            or snapshot.get("headState") != "current"
+            or (
+                self._checkpoint_generation > 0
+                and int(snapshot["generation"])
+                != self._checkpoint_generation
+            )
+            or (
+                self.authenticity.configured
+                and snapshot.get("headAuthenticity") != "verified"
+            )
+        ):
+            raise ValueError("continuity_exact_lineage_state_mismatch")
+        strict_payload = _strict_json_loads(
+            str(snapshot.get("rawText") or "")
+        )
+        if strict_payload != payload:
+            raise ValueError("continuity_exact_lineage_state_mismatch")
+        required_payload_keys = {
+            "schema",
+            "savedAt",
+            "expiresAt",
+            "policy",
+            "sessions",
+        }
+        if schema == SESSION_CONTINUITY_CHECKPOINT_SCHEMA:
+            required_payload_keys.update(
+                {"generation", "previousHash", "checkpointHash"}
+            )
+        payload_keys = frozenset(payload)
+        if (
+            not required_payload_keys.issubset(payload_keys)
+            or not payload_keys.issubset(
+                {
+                    *required_payload_keys,
+                    "resetBoundaryAt",
+                    "guildResetBoundaries",
+                }
+            )
+        ):
+            raise ValueError("continuity_checkpoint_schema_invalid")
+        self.authenticity.verify_external_anchor(
+            self.authenticity.checkpoint_anchor_slot(
+                self.authenticity_scope
+            ),
+            generation=int(snapshot["generation"]),
+            artifact_hash=str(snapshot["checkpointHash"]),
+        )
+        policy = payload.get("policy")
+        if policy != {
+            "maxAgeSec": self.max_age_sec,
+            "maxSessions": self.max_sessions,
+            "maxHistoryItems": self.max_history_items,
+            "maxContentChars": self.max_content_chars,
+            "completedTurnText": True,
+            "rawAudio": False,
+            "partialTranscript": False,
+            "systemPrompt": False,
+        }:
+            raise ValueError("continuity_checkpoint_policy_invalid")
+        saved_at = _finite_float(payload.get("savedAt"), default=-1.0)
+        expires_at = _finite_float(
+            payload.get("expiresAt"),
+            default=-1.0,
+        )
+        if (
+            isinstance(payload.get("savedAt"), bool)
+            or isinstance(payload.get("expiresAt"), bool)
+            or saved_at < 0.0
+            or expires_at <= saved_at
+            or expires_at > saved_at + self.max_age_sec + 0.001
+        ):
+            raise ValueError("continuity_checkpoint_time_invalid")
+        raw_sessions = payload.get("sessions")
+        if (
+            not isinstance(raw_sessions, list)
+            or len(raw_sessions) > self.max_sessions
+        ):
+            raise ValueError("continuity_checkpoint_sessions_invalid")
+        sessions: dict[str, dict[str, Any]] = {}
+        state_keys = {
+            "activeRemainingSec",
+            "lastActiveAgoSec",
+            "awaitingUserReply",
+            "userId",
+            "lastSpeaker",
+            "topicId",
+            "turnId",
+            "followupTarget",
+        }
+        for row in raw_sessions:
+            if (
+                not isinstance(row, dict)
+                or frozenset(row) != {"sessionKey", "history", "state"}
+            ):
+                raise ValueError("continuity_checkpoint_session_invalid")
+            session_key = _valid_session_key(row.get("sessionKey"))
+            if (
+                not session_key
+                or session_key != row.get("sessionKey")
+                or session_key in sessions
+            ):
+                raise ValueError("continuity_checkpoint_session_invalid")
+            history = row.get("history")
+            if (
+                not isinstance(history, list)
+                or len(history) > self.max_history_items
+                or _safe_history(
+                    history,
+                    max_items=self.max_history_items,
+                    max_chars=self.max_content_chars,
+                )
+                != history
+            ):
+                raise ValueError("continuity_checkpoint_history_invalid")
+            state = row.get("state")
+            actual_state_keys = (
+                frozenset(state)
+                if isinstance(state, dict)
+                else frozenset()
+            )
+            if (
+                not isinstance(state, dict)
+                or (
+                    actual_state_keys != state_keys
+                    and not (
+                        schema
+                        == SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA
+                        and actual_state_keys
+                        == state_keys - {"lastActiveAgoSec"}
+                    )
+                )
+            ):
+                raise ValueError("continuity_checkpoint_state_invalid")
+            remaining_sec = _finite_float(
+                state.get("activeRemainingSec"),
+                default=-1.0,
+            )
+            last_active_ago = _finite_float(
+                state.get("lastActiveAgoSec"),
+                default=-1.0,
+            )
+            user_id = state.get("userId")
+            speaker = state.get("lastSpeaker")
+            topic_id = state.get("topicId")
+            turn_id = state.get("turnId")
+            followup = state.get("followupTarget")
+            if (
+                isinstance(state.get("activeRemainingSec"), bool)
+                or remaining_sec < 0.0
+                or remaining_sec > self.max_age_sec + 0.001
+                or (
+                    (
+                        "lastActiveAgoSec" in state
+                        or schema
+                        != SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA
+                    )
+                    and (
+                        isinstance(
+                            state.get("lastActiveAgoSec"),
+                            bool,
+                        )
+                        or last_active_ago < 0.0
+                    )
+                )
+                or type(state.get("awaitingUserReply")) is not bool
+                or (
+                    user_id is not None
+                    and (
+                        type(user_id) is not int
+                        or user_id < 0
+                    )
+                )
+                or not isinstance(speaker, str)
+                or speaker not in {*_ALLOWED_SPEAKERS, ""}
+                or not isinstance(topic_id, str)
+                or len(topic_id) > 80
+                or not isinstance(turn_id, str)
+                or len(turn_id) > 80
+                or (turn_id and _valid_turn_id(turn_id) != turn_id)
+                or not isinstance(followup, dict)
+                or not frozenset(followup).issubset(
+                    {"channelId", "messageId"}
+                )
+                or any(
+                    type(value) is not int or value < 0
+                    for value in followup.values()
+                )
+            ):
+                raise ValueError("continuity_checkpoint_state_invalid")
+            sessions[session_key] = row
+        return sessions
+
+    def _live_exact_lineage_turns(self) -> dict[str, str]:
+        session_keys: set[Any] = set()
+        for name in _SESSION_STORE_MAPPING_NAMES:
+            session_keys.update(
+                self._mapping_keys(getattr(self.store, name))
+            )
+        turns: dict[str, str] = {}
+        for raw_session_key in session_keys:
+            session_key = _valid_session_key(raw_session_key)
+            if not session_key or session_key != raw_session_key:
+                raise ValueError("continuity_live_session_invalid")
+            raw_turn = self.store.turn_ids.get(session_key, "")
+            if raw_turn is None:
+                raw_turn = ""
+            if (
+                not isinstance(raw_turn, str)
+                or len(raw_turn) > 80
+                or (raw_turn and _valid_turn_id(raw_turn) != raw_turn)
+            ):
+                raise ValueError("continuity_live_turn_invalid")
+            turns[session_key] = raw_turn
+        return turns
+
+    @staticmethod
+    def _exact_lineage_session_targets(
+        disk_sessions: dict[str, dict[str, Any]],
+        live_turns: dict[str, str],
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> tuple[set[str], int]:
+        targets: set[str] = set()
+        incomplete = 0
+        for session_key in set(disk_sessions).union(live_turns):
+            if full_user_delete:
+                if _exact_selector_matches(
+                    match_session,
+                    session_key,
+                ):
+                    targets.add(session_key)
+                continue
+            occurrences: list[str] = []
+            disk_row = disk_sessions.get(session_key)
+            if disk_row is not None:
+                occurrences.append(str(disk_row["state"]["turnId"]))
+            if session_key in live_turns:
+                occurrences.append(live_turns[session_key])
+            matches = [
+                bool(turn_id)
+                and _exact_selector_matches(match_turn, turn_id)
+                for turn_id in occurrences
+            ]
+            if any(matches):
+                if any(
+                    not turn_id or not matched
+                    for turn_id, matched in zip(occurrences, matches)
+                ):
+                    incomplete += 1
+                else:
+                    targets.add(session_key)
+            elif (
+                any(not turn_id for turn_id in occurrences)
+                and _exact_selector_matches(
+                    match_session,
+                    session_key,
+                )
+            ):
+                incomplete += 1
+        return targets, incomplete
+
+    def _rewrite_exact_lineage_checkpoint(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        target_sessions: set[str],
+    ) -> None:
+        payload = snapshot.get("payload")
+        if not isinstance(payload, dict):
+            return
+        raw_sessions = payload["sessions"]
+        survivors = [
+            row
+            for row in raw_sessions
+            if row["sessionKey"] not in target_sessions
+        ]
+        if len(survivors) == len(raw_sessions):
+            return
+        previous_generation = int(snapshot["generation"])
+        previous_hash = str(snapshot["checkpointHash"])
+        generation = previous_generation + 1
+        anchor_slot = self.authenticity.checkpoint_anchor_slot(
+            self.authenticity_scope
+        )
+        if not survivors:
+            updated_at = self._write_checkpoint_head(
+                state="empty",
+                generation=generation,
+                checkpoint_hash=SESSION_CONTINUITY_CHAIN_GENESIS,
+            )
+            self.authenticity.commit_external_anchor(
+                anchor_slot,
+                previous_generation=previous_generation,
+                previous_hash=previous_hash,
+                generation=generation,
+                artifact_hash=SESSION_CONTINUITY_CHAIN_GENESIS,
+                updated_at=updated_at,
+            )
+            self._discard_checkpoint()
+            if read_bounded_text(
+                self.checkpoint_path,
+                maximum_bytes=self.max_file_bytes,
+                missing_ok=True,
+            ) is not None:
+                raise OSError("continuity_checkpoint_remove_failed")
+            checkpoint_hash = SESSION_CONTINUITY_CHAIN_GENESIS
+            head_state = "empty"
+            integrity = "empty"
+        else:
+            normalized_survivors: list[dict[str, Any]] = []
+            for row in survivors:
+                normalized = {
+                    **row,
+                    "state": dict(row["state"]),
+                }
+                normalized["state"].setdefault(
+                    "lastActiveAgoSec",
+                    self.max_age_sec + 1.0,
+                )
+                normalized_survivors.append(normalized)
+            rewritten = {
+                **payload,
+                "schema": SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+                "generation": generation,
+                "previousHash": previous_hash,
+                "sessions": normalized_survivors,
+                "checkpointHash": "",
+            }
+            rewritten["checkpointHash"] = _checkpoint_hash(rewritten)
+            encoded = _canonical_json(rewritten).encode("utf-8")
+            if len(encoded) > self.max_file_bytes:
+                raise ValueError("checkpoint_too_large")
+            atomic_json_write(
+                self.checkpoint_path,
+                rewritten,
+                durable=True,
+            )
+            checkpoint_hash = str(rewritten["checkpointHash"])
+            updated_at = self._write_checkpoint_head(
+                state="active",
+                generation=generation,
+                checkpoint_hash=checkpoint_hash,
+            )
+            self.authenticity.commit_external_anchor(
+                anchor_slot,
+                previous_generation=previous_generation,
+                previous_hash=previous_hash,
+                generation=generation,
+                artifact_hash=checkpoint_hash,
+                updated_at=updated_at,
+            )
+            head_state = "current"
+            integrity = "verified"
+        self._checkpoint_generation = generation
+        self._checkpoint_integrity = integrity
+        self._checkpoint_head_state = head_state
+        self._checkpoint_anchor_state = (
+            "verified"
+            if self.authenticity.external_anchor_configured
+            else "unconfigured"
+        )
+        self._persisted_session_count = len(survivors)
+        self._last_persisted_at = self.wall_time()
+        self._checkpoint_revoked_at = None
+        self._state = "ready" if survivors else "empty"
+        self._last_signature = ""
+        self._write_status()
+
+    def negative_recall_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Freshly inspect disk and live mappings for exact target lineage."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError("continuity_lineage_selector_invalid")
+        with self._artifact_scope():
+            with self._lock:
+                try:
+                    snapshot = self._checkpoint_snapshot()
+                    disk_sessions = self._strict_exact_lineage_sessions(
+                        snapshot,
+                        allow_legacy_session=full_user_delete,
+                    )
+                    live_turns = self._live_exact_lineage_turns()
+                    targets, incomplete = (
+                        self._exact_lineage_session_targets(
+                            disk_sessions,
+                            live_turns,
+                            match_turn=match_turn,
+                            match_session=match_session,
+                            full_user_delete=full_user_delete,
+                        )
+                    )
+                except Exception:
+                    return _exact_lineage_counts(manual=1)
+                return _exact_lineage_counts(
+                    remaining=len(targets) + incomplete,
+                    manual=1 if incomplete else 0,
+                )
+
+    def purge_exact_lineage(
+        self,
+        *,
+        match_turn: Callable[[str], bool],
+        match_session: Callable[[str], bool],
+        full_user_delete: bool,
+    ) -> dict[str, Any]:
+        """Remove exact checkpoint rows and every matching live mapping."""
+
+        if (
+            not callable(match_turn)
+            or not callable(match_session)
+            or type(full_user_delete) is not bool
+        ):
+            raise TypeError("continuity_lineage_selector_invalid")
+        with self._artifact_scope():
+            with self._lock:
+                try:
+                    snapshot = self._checkpoint_snapshot()
+                    disk_sessions = self._strict_exact_lineage_sessions(
+                        snapshot,
+                        allow_legacy_session=full_user_delete,
+                    )
+                    live_turns = self._live_exact_lineage_turns()
+                    targets, incomplete = (
+                        self._exact_lineage_session_targets(
+                            disk_sessions,
+                            live_turns,
+                            match_turn=match_turn,
+                            match_session=match_session,
+                            full_user_delete=full_user_delete,
+                        )
+                    )
+                except Exception:
+                    return _exact_lineage_counts(manual=1)
+                if incomplete:
+                    return _exact_lineage_counts(
+                        remaining=len(targets) + incomplete,
+                        manual=1,
+                    )
+                if not targets:
+                    return _exact_lineage_counts()
+                before: dict[str, dict[str, Any]] = {}
+                for name in _SESSION_STORE_MAPPING_NAMES:
+                    mapping = getattr(self.store, name)
+                    before[name] = {
+                        key: mapping[key]
+                        for key in targets
+                        if key in mapping
+                    }
+                    for key in targets:
+                        mapping.pop(key, None)
+                before_epochs = {
+                    key: self._commit_success_epochs[key]
+                    for key in targets
+                    if key in self._commit_success_epochs
+                }
+                for key in targets:
+                    self._commit_success_epochs.pop(key, None)
+                try:
+                    self._rewrite_exact_lineage_checkpoint(
+                        snapshot,
+                        target_sessions=targets,
+                    )
+                    fresh_snapshot = self._checkpoint_snapshot()
+                    fresh_disk = self._strict_exact_lineage_sessions(
+                        fresh_snapshot,
+                        allow_legacy_session=full_user_delete,
+                    )
+                    fresh_live = self._live_exact_lineage_turns()
+                    remaining, incomplete = (
+                        self._exact_lineage_session_targets(
+                            fresh_disk,
+                            fresh_live,
+                            match_turn=match_turn,
+                            match_session=match_session,
+                            full_user_delete=full_user_delete,
+                        )
+                    )
+                except Exception:
+                    for name, values in before.items():
+                        mapping = getattr(self.store, name)
+                        for key, value in values.items():
+                            mapping.setdefault(key, value)
+                    self._commit_success_epochs.update(before_epochs)
+                    return _exact_lineage_counts(manual=1)
+                return _exact_lineage_counts(
+                    removed=len(targets),
+                    remaining=len(remaining) + incomplete,
+                    manual=1 if incomplete else 0,
+                )
 
     def _anchor_checkpoint_snapshot(
         self,
@@ -2001,6 +2686,21 @@ class SessionContinuityCheckpoint:
     ) -> dict[str, Any]:
         with self._lock:
             try:
+                material = self._material(
+                    required_session_key=required_session_key,
+                    required_turn_id=required_turn_id,
+                )
+                signature = self._signature(material)
+            except Exception as exc:
+                return self._record_error(
+                    "conversation_continuity_flush_failed",
+                    exc,
+                )
+            try:
+                self._require_current_writer_fence(material)
+            except Exception:
+                return self._writer_fence_rejected_status()
+            try:
                 snapshot = self._checkpoint_snapshot()
             except ContinuityAuthenticityError as exc:
                 return self._record_authenticity_error(exc)
@@ -2059,17 +2759,6 @@ class SessionContinuityCheckpoint:
                         "conversation_continuity_checkpoint_rejected",
                         exc,
                     )
-            try:
-                material = self._material(
-                    required_session_key=required_session_key,
-                    required_turn_id=required_turn_id,
-                )
-                signature = self._signature(material)
-            except Exception as exc:
-                return self._record_error(
-                    "conversation_continuity_flush_failed",
-                    exc,
-                )
             if not force and signature == self._last_signature:
                 if (
                     snapshot["payload"] is not None
@@ -2289,6 +2978,10 @@ class SessionContinuityCheckpoint:
         before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         """Durably anchor the named completed turn before returning."""
+        self._preflight_named_commit_writer_fence(
+            session_key,
+            turn_id,
+        )
         return self._commit_completed_turn_attempt(
             session_key,
             turn_id,
@@ -2450,6 +3143,10 @@ class SessionContinuityCheckpoint:
         *,
         before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
+        self._preflight_named_commit_writer_fence(
+            session_key,
+            turn_id,
+        )
         attempt_epoch = self._reserve_commit_epoch()
         return await asyncio.to_thread(
             self._commit_completed_turn_attempt,
@@ -2462,8 +3159,12 @@ class SessionContinuityCheckpoint:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.flush_interval_sec)
-            await asyncio.to_thread(self.flush)
-            await asyncio.to_thread(self._write_status)
+            result = await asyncio.to_thread(self.flush)
+            if (
+                result.get("lastErrorCode")
+                != SESSION_CONTINUITY_WRITER_FENCE_REJECTED
+            ):
+                await asyncio.to_thread(self._write_status)
 
     def ensure_started(self) -> asyncio.Task[None]:
         task = self._task
@@ -2493,5 +3194,6 @@ __all__ = [
     "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",
     "SESSION_CONTINUITY_STATUS_SCHEMA",
+    "SESSION_CONTINUITY_WRITER_FENCE_REJECTED",
     "SessionContinuityCheckpoint",
 ]

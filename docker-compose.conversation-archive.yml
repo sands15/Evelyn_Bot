@@ -1,0 +1,74 @@
+services:
+  bot_api:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"
+      EVELYN_CONVERSATION_ARCHIVE_PRIMARY_DB: "/run/evelyn-private-audit/primary/conversation.sqlite3"
+      EVELYN_CONVERSATION_ARCHIVE_REPLICA_DB: "/run/evelyn-private-audit/backup/conversation.sqlite3"
+      EVELYN_CONVERSATION_ARCHIVE_ANCHOR_DIR: "/run/evelyn-private-audit/anchor"
+      EVELYN_CONVERSATION_ARCHIVE_AUTH_KEY_FILE: "/run/secrets/evelyn-conversation-archive/auth.key"
+      EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE: "/run/secrets/evelyn-conversation-archive/ingest.key"
+      EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE: "/run/secrets/evelyn-conversation-archive/user-view.key"
+      EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE: "/run/secrets/evelyn-conversation-archive/proxy.key"
+      EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE: "/run/secrets/evelyn-conversation-archive/minecraft.key"
+      EVELYN_CONVERSATION_ARCHIVE_HOST_ATTESTATION_FILE: "/run/secrets/evelyn-conversation-archive/host-attestation.json"
+      EVELYN_CONVERSATION_ARCHIVE_HOST_SESSION_FILE: "/run/secrets/evelyn-conversation-archive/host-session.json"
+      EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN: "https://127.0.0.1:8800"
+      EVELYN_CONVERSATION_ARCHIVE_ADMIN_SID: "${EVELYN_CONVERSATION_ARCHIVE_ADMIN_SID:?Set the pre-registered Windows administrator SID}"
+      EVELYN_CONVERSATION_ARCHIVE_ADMIN_ACCOUNT: "${EVELYN_CONVERSATION_ARCHIVE_ADMIN_ACCOUNT:?Set the pre-registered Windows administrator account}"
+      EVELYN_CONVERSATION_ARCHIVE_ADMIN_DISCORD_USER_ID: "${EVELYN_CONVERSATION_ARCHIVE_ADMIN_DISCORD_USER_ID:?Set the pre-registered Discord user ID}"
+      EVELYN_CONVERSATION_ARCHIVE_HOST_ID: "${EVELYN_CONVERSATION_ARCHIVE_HOST_ID:-}"
+    volumes:
+      - ${EVELYN_CONVERSATION_ARCHIVE_PRIMARY_DIR:-C:/ProgramData/Evelyn/private-audit}:/run/evelyn-private-audit/primary
+      - ${EVELYN_CONVERSATION_ARCHIVE_REPLICA_DIR:-D:/EvelynBackup/private-audit}:/run/evelyn-private-audit/backup
+      - ${EVELYN_CONVERSATION_ARCHIVE_ANCHOR_HOST_DIR:-C:/ProgramData/Evelyn/private-audit-anchor}:/run/evelyn-private-audit/anchor
+      - ${EVELYN_CONVERSATION_ARCHIVE_AUTH_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/auth.key}:/run/secrets/evelyn-conversation-archive/auth.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/ingest.key}:/run/secrets/evelyn-conversation-archive/ingest.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/user-view.key}:/run/secrets/evelyn-conversation-archive/user-view.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/proxy.key}:/run/secrets/evelyn-conversation-archive/proxy.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/minecraft.key}:/run/secrets/evelyn-conversation-archive/minecraft.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_HOST_ATTESTATION_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/host-attestation.json}:/run/secrets/evelyn-conversation-archive/host-attestation.json:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_HOST_SESSION_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/host-session.json}:/run/secrets/evelyn-conversation-archive/host-session.json:ro
+
+  discord_bot:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"
+      EVELYN_CONVERSATION_ARCHIVE_BOT_API_URL: "http://bot_api:8798"
+      EVELYN_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID: "${EVELYN_CONVERSATION_ARCHIVE_COMMAND_GUILD_ID:?Set the approved Discord guild ID}"
+      EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE: "/run/secrets/evelyn-conversation-archive/ingest.key"
+      EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE: "/run/secrets/evelyn-conversation-archive/user-view.key"
+    volumes:
+      - ${EVELYN_CONVERSATION_ARCHIVE_INGEST_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/ingest.key}:/run/secrets/evelyn-conversation-archive/ingest.key:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_USER_VIEW_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/user-view.key}:/run/secrets/evelyn-conversation-archive/user-view.key:ro
+
+  control_page:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"
+      EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN: "https://127.0.0.1:8800"
+      CONTROL_PAGE_TLS_CERT_FILE: "/run/secrets/evelyn-conversation-archive/control-page-cert.pem"
+      CONTROL_PAGE_TLS_KEY_FILE: "/run/secrets/evelyn-conversation-archive/control-page-key.pem"
+      EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE: "/run/secrets/evelyn-conversation-archive/proxy.key"
+    volumes:
+      - ${EVELYN_CONVERSATION_ARCHIVE_TLS_CERT_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/control-page-cert.pem}:/run/secrets/evelyn-conversation-archive/control-page-cert.pem:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_TLS_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/control-page-key.pem}:/run/secrets/evelyn-conversation-archive/control-page-key.pem:ro
+      - ${EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/proxy.key}:/run/secrets/evelyn-conversation-archive/proxy.key:ro
+    ports:
+      - "127.0.0.1:8800:8799"
+    healthcheck:
+      test: >-
+        python -c "from urllib.request import urlopen; import json,ssl,sys; context = ssl.create_default_context(cafile='/run/secrets/evelyn-conversation-archive/control-page-cert.pem'); resp = urlopen('https://127.0.0.1:8799/health', timeout=3, context=context); payload = json.loads(resp.read() or b'{}'); sys.exit(0 if resp.getcode() == 200 and payload.get('ok') is True else 1)"
+
+  voyager:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"
+      EVELYN_CONVERSATION_ARCHIVE_BOT_API_URL: "http://bot_api:8798"
+      EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE: "/run/secrets/evelyn-conversation-archive/minecraft.key"
+    volumes:
+      - ${EVELYN_CONVERSATION_ARCHIVE_MINECRAFT_KEY_FILE:-C:/ProgramData/Evelyn/private-audit-secrets/minecraft.key}:/run/secrets/evelyn-conversation-archive/minecraft.key:ro
+
+  main_llm:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"
+
+  minecraft_llm:
+    environment:
+      EVELYN_CONVERSATION_ARCHIVE_ENABLED: "true"

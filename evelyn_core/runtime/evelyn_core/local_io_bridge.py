@@ -130,6 +130,10 @@ LOCAL_BRIDGE_STATUS_AUTH_TOKEN = os.getenv(
     "LOCAL_BRIDGE_STATUS_AUTH_TOKEN",
     "",
 ).strip()
+CONVERSATION_ARCHIVE_ENABLED = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 VOICE_CAPTURE_HOST_AUTH_TOKEN = resolve_voice_capture_auth_token()
 _CREDENTIAL_ENV_PATTERN = re.compile(
     r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
@@ -1267,6 +1271,10 @@ class LocalIoBridge:
             self.mic_control_error = ""
             try:
                 if enabled:
+                    if CONVERSATION_ARCHIVE_ENABLED:
+                        raise RuntimeError(
+                            "conversation_archive_local_owner_unverified"
+                        )
                     if self.restart_started or self.shutdown_started:
                         raise RuntimeError("local_bridge_lifecycle_stopping")
                     lease = await asyncio.to_thread(
@@ -1331,21 +1339,27 @@ class LocalIoBridge:
                     self.last_error = "mic_control_cancelled"
                 raise
             except Exception as exc:
+                public_error = (
+                    "conversation_archive_local_owner_unverified"
+                    if str(exc)
+                    == "conversation_archive_local_owner_unverified"
+                    else "mic_control_failed"
+                )
                 try:
                     if enabled:
                         await self._rollback_failed_mic_enable()
                 finally:
                     self.mic_control_state = "failed"
                     self.mic_control_desired_enabled = enabled
-                    self.mic_control_error = "mic_control_failed"
+                    self.mic_control_error = public_error
                     self.ready = False
-                    self.runtime_errors.record("mic_control_failed", exc)
+                    self.runtime_errors.record(public_error, exc)
                     if not enabled:
                         self.mic_capture_stopped = bool(
                             self.service is None
                             or self.service.capture_stopped
                         )
-                    self.last_error = "mic_control_failed"
+                    self.last_error = public_error
             finally:
                 self.mic_control_request_revision = revision
                 self.mic_control_action_id = action_id
@@ -2598,6 +2612,11 @@ class LocalIoBridge:
         return discarded
 
     async def _handle_segment(self, pcm_bytes: bytes, meta: dict[str, Any]) -> None:
+        if CONVERSATION_ARCHIVE_ENABLED:
+            self._abandon_local_asr_meta(meta)
+            self.discarded_pending_mic_segment_count += 1
+            self.last_error = "conversation_archive_local_owner_unverified"
+            return
         turn_admission_epoch = meta.get(
             "_admissionEpoch",
             self.admission_epoch,

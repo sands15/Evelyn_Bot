@@ -176,6 +176,36 @@ class CognitiveStateMemoryDeletionBoundaryTests(
         self.assertEqual(self.writes, [])
         self.assertEqual(len(self.detached), 1)
 
+    async def test_retired_archive_target_after_router_blocks_json_write(self) -> None:
+        current = True
+        asked: list[bool] = []
+
+        async def ask(_messages, **_kwargs):
+            nonlocal current
+            asked.append(True)
+            current = False
+            return {"action": "answer", "confidence": 0.9}
+
+        deps = replace(
+            self.build_deps(ask),
+            archive_target_is_current=lambda **_target: current,
+        )
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(
+                deletion_journal.MemoryDeletionJournalIntegrityError
+            ):
+                await update_cognitive_state_from_runtime(
+                    7,
+                    "continue",
+                    deps=deps,
+                    session_key="session-1",
+                    memory_index_dir=Path(tmp) / "memory_index",
+                )
+
+        self.assertEqual(self.writes, [])
+        self.assertEqual(asked, [True])
+        self.assertEqual(len(self.detached), 1)
+
     async def test_delete_after_failed_response_blocks_fallback_write(self) -> None:
         with TemporaryDirectory() as tmp:
             index_dir = Path(tmp) / "memory_index"

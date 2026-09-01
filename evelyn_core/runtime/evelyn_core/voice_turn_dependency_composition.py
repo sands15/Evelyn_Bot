@@ -72,6 +72,8 @@ class VoiceTurnDependencyCompositionDeps:
     monotonic: Callable[[], float]
     log: Callable[..., Any]
     admit_search_followup_recovery: Callable[..., Any] | None = None
+    voice_ingress_process_tasks: MutableMapping[Any, dict[str, Any]] | None = None
+    voice_ingress_target_is_current: Callable[[dict[str, Any]], bool] | None = None
 
 
 class VoiceTurnDependencyComposition:
@@ -155,6 +157,8 @@ class VoiceTurnDependencyComposition:
             create_task=deps.create_task,
             log=deps.log,
             monotonic=deps.monotonic,
+            voice_ingress_process_tasks=deps.voice_ingress_process_tasks,
+            voice_ingress_target_is_current=deps.voice_ingress_target_is_current,
         )
 
     def build_voice_ingress_entrypoint_deps(self) -> VoiceIngressEntrypointDeps:

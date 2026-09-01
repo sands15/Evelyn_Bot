@@ -1914,3 +1914,80 @@ normal Compose의 STT GPU0 배치를 바꾸지 않는다.
 Local first-partial/EOS-final과 Discord endpoint-to-batch-final p50/p95, paired Korean corpus를
 먼저 측정한다. 그 뒤에만 Discord incremental decode와 KWS/AEC를 shadow로 추가한다. 현재 rollback은 Local
 `LOCAL_BRIDGE_STT_STREAMING_ENABLED=false`, Discord `STT_STREAMING_ENABLED=false`다.
+
+## P1 — private archive production 삭제 완료와 live 운영 증거 부족
+
+P1-4의 기준 DB, self-scope, local admin OTP/session, 참여 interval, 30일 retention, C:/D: redaction,
+Minecraft lineage와 purge coordinator는 source/offline 회귀를 통과했다. 17개 필수 purge sink의 logical
+owner route, process-local prompt/tool cache callback과 memory/cognitive/ingress/search/STT/TTS writer·task
+fence도 연결됐다. remote sink는 content-free work/receipt만 교환하고 동일 request/generation/scope의 receipt
+전부와 fresh negative recall이 확인되기 전에는 완료하지 않는다. 시작 시 모든 pending fence를 1,000개
+keyset page로 끝까지 복원하고, poll도 bounded round-robin cursor로 1,000개 뒤 요청을 굶기지 않는다.
+
+따라서 현재 production 기본은 여전히 삭제 가능한 로컬 후보를 추측해서 완료 처리하지 않는다. owner·lineage·
+정상 파일 형식·fresh negative recall 중 하나라도 증명되지 않거나 attribution 없는 legacy/global cache,
+등록되지 않은 export/backup이면 `manual_review/local_cleanup_pending`을 유지한다. 이 상태는 개인정보 사본이
+남을 수 있다는 정직한 장애 표시이며 사용자에게 `완전 삭제`로 보여서는 안 된다. local-private microphone은
+archive ON에서 owner proof가 없어 닫힌 availability 제한이지만 Discord mode의 완료 조건은 아니다. Discord
+mode는 local mic을 정지하고 exact gateway SSRC→user ID만 화자 권한 근거로 사용한다. nickname은 표시용이며,
+mapping이 없는 음성을 lone-member/current-speaker로 추정하지 않고 STT 전에 폐기한다.
+
+또한 실제 Discord gateway/ephemeral 삭제, Windows UAC·잠금/logout, BitLocker/DACL/reparse, C:/D: 분리
+volume 장애·10분 grace/reconcile, exact Discord speaker mapping, Minecraft world effect와 Docker mount는 live로
+검증하지 않았다. source tests는 live 운영 증거가 아니다.
+
+법적·운영상 최소정보는 사용자가 지정한 이름+실제 UTC 발생시각만 admin-only table에 두며 원래 사건+30일에
+durable audit, primary compaction과 D: 복제로 삭제하는 source 회귀를 갖는다. 이는 특정 법률을 주장하는
+근거가 아니며, 다른 법적 항목·기간은 별도 결정 전까지 추가하지 않는다. 실제 분리 volume의 물리 운영
+검증은 위 live 공백에 포함된다.
+
+다음 조치: 별도 승인된 test principal/guild와 disposable world에서 exact Discord speaker mapping,
+ephemeral, 장애 주입·negative recall·restart/rollback을 검증한다. 그 전에는 archive를 production ON으로
+전환하거나 P1-4를 완료로 표시하지 않는다. local-private microphone archive가 필요할 때만 owner-proof를
+별도 결정한다. P1-5도 같은 archive 기본 OFF와 live 승인 경계를 따른다.
+
+## P1 — P1-3/P1-5 실제 모델 평가·Discord feedback·카나리 운영 증거 부족
+
+P1-3의 TaskWorkContract, process-local inspection, grounded draft와 고정 24-row evaluator, P1-5의
+correction→independent guidance→eval→OTP approval→10건 canary→activation/rollback/revoke는 source와 전체
+회귀에서 구현·검증됐다. 그러나 evaluator test는 synthetic runner와 broker adapter의 계약 검증이며 실제
+Qwen model에 baseline/candidate 48회를 보낸 품질 report가 아니다. 실제 inference latency, 120초 row deadline,
+GPU hard stall 뒤 physical request drain과 다음 row 차단도 live service에서 확인하지 않았다.
+
+카나리 예약과 terminal receipt는 의도적으로 process-local이고 durable running record만 archive에 남는다.
+재시작하면 startup raw abort가 running candidate를 실패·revoke하고 기존 active를 유지하지만, 실제 재시작과
+exact 10건 실행, activation CAS, current evaluator rollback을 운영 archive에서 수행하지 않았다. 따라서 새
+guidance의 production 품질과 rollback 체감은 아직 증명되지 않았다.
+
+Discord `/피드백제출`은 same user ID/current shared session/delivered latest reply와 lease generation을 같은
+bot_api lock에서 재검증하고, text send 성공 또는 voice playback 완료 뒤에만 target을 확정한다. 세션 종료와
+사용자 삭제는 pending/confirmed mapping을 모두 지운다. 이 경쟁은 deterministic source test를 통과했지만 실제
+Gateway interaction, channel move, Discord ephemeral/DM과 TTS playback timing에서 live 검증하지 않았다.
+
+2026-08-28의 초기 live 사전검증에서 확인한 command publisher 부재는 해결됐다. 현재 source는 지정 guild에만
+archive slash command 5개를 임시 게시하고 Discord가 반환한 exact ID/shape ownership으로만 회수하며, global
+sync·bulk overwrite·이름 삭제를 사용하지 않는다. 사용자 확인 이름은 strict UTF-8 stdin과 full membership
+ordinal exact-unique로 해석하고, 게시 직전 같은 API session에서 same numeric target을 재확인한다. 실제 live
+run은 대상/global/다른 guild `0/51/0 → 5/51/0 → 0/51/0`과 보호 run directory 0을 통과했다. 따라서 기존
+global 51개나 다른 guild를 훼손하는 command-registry 위험은 현재 검증 범위에서 닫혔다.
+
+2026-09-01 source/offline checkpoint에서 test archive key/TLS/ACL provisioner, exact current-source snapshot/image
+provenance와 fresh physical mic-OFF ACK 뒤 consent inactive reconcile 경로를 구현·검증했다. provisioner는
+identity/UAC, fixed root, 분리 volume·BitLocker, private ACL, stopped-service와 idempotent reuse/rollback을
+fail-close한다. live launcher는 dirty checkout을 commit/stash하지 않고 race-free snapshot digest에 결박한 새
+image만 사용하고 project runtime write를 격리한다. 직접 소유 focused는 `205 passed, 44 subtests`, 전체
+canonical은 `5153 passed, 18 skipped, 1584 subtests`, 실패 0건이다. 외부 서비스는 기동하지 않았다.
+
+따라서 source 부재 위험은 닫혔지만 실제 C:/D: test 재료·attestation은 아직 provision하지 않았고 Docker/Evelyn
+service, fresh physical mic, Gateway interaction도 실행하지 않았다. source test를 host/live 통과로 해석하지 않는다.
+
+현재 checkpoint의 전체 canonical은 `5153 passed, 18 skipped`, 실패 0건으로 통과했다. 전체 회귀에서 발견한
+gateway·Qwen 테스트 2건의 짧은 localhost wall-clock flake는 제품 코드나 제한시간을 바꾸지 않고 실제 lane
+재획득 event와 controlled clock 검증으로 교정했다. 남은 warning은 Python 3.13에서 제거 예정인 기존 `audioop`
+1건이며 이번 구현의 기능 실패는 아니지만 Python 3.13 전환 전에 대체가 필요하다.
+
+다음 조치: 별도 live 승인 뒤 test archive를 실제 provision하고 current-source image·fresh local-mic OFF
+preflight를 통과시킨다. 그 뒤 별도 test principal로 same-user/stale-session/delivery 경쟁을 content-free
+workflow delta와 ephemeral 결과로 확인한다. 실제 Qwen
+고정 24-row와 local grounded read-only 10건 canary/restart/failure/rollback은 그 다음 별도 live gate다.
+모두 통과하기 전에는 P1-3/P1-5를 `[x]` 또는 production ON으로 표시하지 않는다.

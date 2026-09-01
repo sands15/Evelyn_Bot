@@ -30,6 +30,17 @@ MINDCRAFT_WORLD_EFFECT_TELEMETRY_SCHEMA = (
 MINDCRAFT_WORLD_EFFECT_OBSERVATION_SCHEMA = (
     "mindcraft_world_effect.observation.v1"
 )
+MINDCRAFT_WORLD_EFFECT_ARCHIVE_EVENT_SCHEMA = (
+    "conversation.archive.minecraft-result.v1"
+)
+MINDCRAFT_LIFECYCLE_ARCHIVE_EVENT_SCHEMA = (
+    "conversation.archive.minecraft-lifecycle-result.v1"
+)
+_LIFECYCLE_OUTCOMES = {
+    "connect": "minecraft_connected",
+    "goal": "minecraft_goal_confirmed",
+    "disconnect": "minecraft_stopped",
+}
 
 DEFAULT_TELEMETRY_MAX_AGE_SEC = 5.0
 DEFAULT_STATUS_MAX_AGE_SEC = 15.0
@@ -148,6 +159,8 @@ _SAFE_SENSITIVE_KEYS = frozenset(
 )
 
 GuardCheck = Callable[[dict[str, Any]], tuple[bool, str]]
+ArchiveSink = Callable[[dict[str, Any]], tuple[bool, str]]
+ArchiveReadiness = Callable[[], tuple[bool, str]]
 
 
 def _normalized_key(value: Any) -> str:
@@ -336,6 +349,104 @@ def _validate_candidate(
     if freshness:
         raise ValueError(freshness)
     return candidate
+
+
+def _archive_event(
+    *,
+    binding: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    context: Any,
+) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        raise ValueError("mindcraft_world_effect_archive_context_invalid")
+    guild_id = context.get("guildId")
+    if isinstance(guild_id, bool) or not isinstance(guild_id, int) or guild_id <= 0:
+        raise ValueError("mindcraft_world_effect_archive_context_invalid")
+    for key in _IDENTITY_KEYS[:-1]:
+        if key not in context or not hmac.compare_digest(
+            str(context[key]), str(binding[key])
+        ):
+            raise ValueError("mindcraft_world_effect_archive_context_invalid")
+    authorization_grant_id = str(context.get("authorizationGrantId") or "")
+    if not _ID_PATTERN.fullmatch(authorization_grant_id):
+        raise ValueError("mindcraft_world_effect_archive_context_invalid")
+    action_run_id = str(binding["actionRunId"])
+    execution_sequence = int(candidate["executionSequence"])
+    parents = [authorization_grant_id]
+    command_parents = context.get("parentRecordIds")
+    if command_parents is not None:
+        if not isinstance(command_parents, list) or len(command_parents) != 1:
+            raise ValueError("mindcraft_world_effect_archive_context_invalid")
+        command_parent = str(command_parents[0] or "")
+        if not _ID_PATTERN.fullmatch(command_parent):
+            raise ValueError("mindcraft_world_effect_archive_context_invalid")
+        if command_parent not in parents:
+            parents.append(command_parent)
+    return {
+        "schema": MINDCRAFT_WORLD_EFFECT_ARCHIVE_EVENT_SCHEMA,
+        "eventType": "minecraft_result",
+        "mode": "discord_shared",
+        "surface": "minecraft",
+        "recordType": "minecraft_result",
+        "guildId": str(guild_id),
+        "parentRecordIds": parents,
+        "goalRunId": str(binding["goalRunId"]),
+        "actionRunId": action_run_id,
+        "actionKey": str(binding["actionKey"]),
+        "contractCode": str(binding["contractCode"]),
+        "candidateSequence": int(candidate["candidateSequence"]),
+        "executionSequence": execution_sequence,
+        "observedAt": float(candidate["observedAt"]),
+        "evidenceCode": str(candidate["evidenceCode"]),
+        "postconditionCode": str(candidate["postconditionCode"]),
+        "verified": True,
+        "succeeded": True,
+        "worldChanged": True,
+        "goalProgress": True,
+        "idempotencyKey": (
+            f"minecraft-result:{action_run_id}:{execution_sequence}"
+        ),
+        "contentFree": True,
+    }
+
+
+def _lifecycle_archive_event(
+    *,
+    guild_id: int,
+    parent_record_ids: tuple[str, ...],
+    operation: str,
+    outcome_code: str,
+    observed_at: float,
+) -> dict[str, Any]:
+    if isinstance(guild_id, bool) or not isinstance(guild_id, int) or guild_id <= 0:
+        raise ValueError("mindcraft_lifecycle_archive_context_invalid")
+    if (
+        len(parent_record_ids) != 1
+        or not _ID_PATTERN.fullmatch(parent_record_ids[0])
+        or _LIFECYCLE_OUTCOMES.get(operation) != outcome_code
+        or not math.isfinite(observed_at)
+        or observed_at < 0
+    ):
+        raise ValueError("mindcraft_lifecycle_archive_context_invalid")
+    parent = parent_record_ids[0]
+    return {
+        "schema": MINDCRAFT_LIFECYCLE_ARCHIVE_EVENT_SCHEMA,
+        "eventType": "minecraft_result",
+        "mode": "discord_shared",
+        "surface": "minecraft",
+        "recordType": "minecraft_result",
+        "guildId": str(guild_id),
+        "parentRecordIds": [parent],
+        "operation": operation,
+        "outcomeCode": outcome_code,
+        "observedAt": observed_at,
+        "verified": True,
+        "succeeded": True,
+        "idempotencyKey": (
+            f"minecraft-lifecycle:{operation}:{parent}:{int(observed_at * 1_000_000)}"
+        ),
+        "contentFree": True,
+    }
 
 
 def _policy(*, telemetry_max_age_sec: float) -> dict[str, Any]:
@@ -530,6 +641,9 @@ class MindcraftWorldEffectProjector:
         now: Callable[[], float] = time.time,
         telemetry_max_age_sec: float = DEFAULT_TELEMETRY_MAX_AGE_SEC,
         clock_skew_sec: float = DEFAULT_CLOCK_SKEW_SEC,
+        archive_verified_effect: ArchiveSink | None = None,
+        validate_archive_ready: ArchiveReadiness | None = None,
+        archive_required: bool = False,
     ) -> None:
         self.status_path = Path(status_path)
         self.events_dir = Path(events_dir)
@@ -538,6 +652,17 @@ class MindcraftWorldEffectProjector:
         self.now = now
         self.telemetry_max_age_sec = max(0.1, float(telemetry_max_age_sec))
         self.clock_skew_sec = max(0.0, float(clock_skew_sec))
+        if archive_verified_effect is not None and not callable(
+            archive_verified_effect
+        ):
+            raise TypeError("archive_verified_effect must be callable")
+        self.archive_verified_effect = archive_verified_effect
+        if validate_archive_ready is not None and not callable(
+            validate_archive_ready
+        ):
+            raise TypeError("validate_archive_ready must be callable")
+        self.validate_archive_ready = validate_archive_ready
+        self.archive_required = bool(archive_required)
         self.process_nonce = secrets.token_hex(16)
         self._lock = threading.RLock()
         self._state = "initializing"
@@ -547,8 +672,91 @@ class MindcraftWorldEffectProjector:
         self._evidence = _empty_evidence()
         self._last_sequence: int | None = None
         self._last_error_code = ""
+        self._archive_faulted = False
         self._seen_bindings: set[tuple[str, ...]] = set()
         self.initialize()
+
+    def configure_archive(
+        self,
+        callback: ArchiveSink | None,
+        *,
+        validate_ready: ArchiveReadiness | None = None,
+        required: bool,
+    ) -> None:
+        """Configure the sole archive projection before admitting an action."""
+
+        if callback is not None and not callable(callback):
+            raise TypeError("archive callback must be callable")
+        if validate_ready is not None and not callable(validate_ready):
+            raise TypeError("archive readiness callback must be callable")
+        with self._lock:
+            if self._binding is not None:
+                raise RuntimeError(
+                    "mindcraft_world_effect_archive_config_busy"
+                )
+            self.archive_verified_effect = callback
+            self.validate_archive_ready = validate_ready
+            self.archive_required = bool(required)
+
+    def archive_ready(self) -> bool:
+        with self._lock:
+            if self._archive_faulted:
+                return False
+            if not self.archive_required:
+                return True
+            if (
+                self.archive_verified_effect is None
+                or self.validate_archive_ready is None
+            ):
+                return False
+            try:
+                response = self.validate_archive_ready()
+            except Exception:
+                return False
+            return bool(
+                isinstance(response, tuple)
+                and len(response) == 2
+                and type(response[0]) is bool
+                and isinstance(response[1], str)
+                and response[0]
+            )
+
+    def archive_verified_lifecycle(
+        self,
+        *,
+        guild_id: int,
+        parent_record_ids: tuple[str, ...],
+        operation: str,
+        outcome_code: str,
+    ) -> tuple[bool, str]:
+        with self._lock:
+            callback = self.archive_verified_effect
+            if callback is None or not self.archive_ready():
+                return False, "mindcraft_world_effect_archive_unavailable"
+            try:
+                event = _lifecycle_archive_event(
+                    guild_id=guild_id,
+                    parent_record_ids=parent_record_ids,
+                    operation=operation,
+                    outcome_code=outcome_code,
+                    observed_at=self.now(),
+                )
+                response = callback(deepcopy(event))
+            except Exception:
+                response = None
+            if (
+                isinstance(response, tuple)
+                and len(response) == 2
+                and response[0] is True
+                and isinstance(response[1], str)
+            ):
+                return True, ""
+            self._archive_faulted = True
+            self._last_error_code = (
+                "mindcraft_world_effect_archive_unavailable"
+            )
+            self._write_status()
+            return False, self._last_error_code
 
     def _binding_projection(self) -> dict[str, Any]:
         if self._binding is None:
@@ -680,6 +888,7 @@ class MindcraftWorldEffectProjector:
             self._evidence = _empty_evidence()
             self._last_sequence = None
             self._last_error_code = ""
+            self._archive_faulted = False
             self._seen_bindings.clear()
             # The first durable write fences any armed state from a prior
             # process before this process publishes an audit event.
@@ -752,6 +961,11 @@ class MindcraftWorldEffectProjector:
                 return self._operation(
                     False,
                     "mindcraft_world_effect_observer_unavailable",
+                )
+            if not self.archive_ready():
+                return self._operation(
+                    False,
+                    "mindcraft_world_effect_archive_unavailable",
                 )
             if self._binding is not None or self._state in {
                 "armed",
@@ -857,7 +1071,82 @@ class MindcraftWorldEffectProjector:
             )
         return self._operation(False, self._last_error_code)
 
-    def observe(self, candidate: Any) -> dict[str, Any]:
+    def _project_verified_effect(
+        self,
+        *,
+        binding: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        archive_context: Any,
+    ) -> str:
+        callback = self.archive_verified_effect
+        if callback is None:
+            return (
+                "mindcraft_world_effect_archive_unavailable"
+                if self.archive_required
+                else ""
+            )
+        try:
+            event = _archive_event(
+                binding=binding,
+                candidate=candidate,
+                context=archive_context,
+            )
+            response = callback(deepcopy(event))
+        except Exception:
+            return "mindcraft_world_effect_archive_unavailable"
+        if (
+            not isinstance(response, tuple)
+            or len(response) != 2
+            or type(response[0]) is not bool
+            or not isinstance(response[1], str)
+        ):
+            return "mindcraft_world_effect_archive_unavailable"
+        if response[0]:
+            return ""
+        return _error_code(
+            response[1],
+            "mindcraft_world_effect_archive_unavailable",
+        )
+
+    def _archive_failure(
+        self,
+        code: str,
+        *,
+        binding: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self._archive_faulted = True
+        self._last_error_code = _error_code(
+            code,
+            "mindcraft_world_effect_archive_unavailable",
+        )
+        if not self._append_event(
+            "audit_failed",
+            binding=binding,
+            candidate_sequence=int(candidate["candidateSequence"]),
+            execution_sequence=int(candidate["executionSequence"]),
+            error_code=self._last_error_code,
+        ):
+            self._write_status()
+            return self._operation(
+                False,
+                "mindcraft_world_effect_audit_unavailable",
+            )
+        self._binding = None
+        self._state = "manual_intervention_required"
+        if not self._write_status():
+            return self._operation(
+                False,
+                "mindcraft_world_effect_status_write_failed",
+            )
+        return self._operation(False, self._last_error_code)
+
+    def observe(
+        self,
+        candidate: Any,
+        *,
+        archive_context: Any = None,
+    ) -> dict[str, Any]:
         with self._lock:
             if self._binding is None or self._state != "armed":
                 return self._operation(
@@ -937,6 +1226,17 @@ class MindcraftWorldEffectProjector:
                 return self._operation(
                     False,
                     "mindcraft_world_effect_status_write_failed",
+                )
+            archive_error = self._project_verified_effect(
+                binding=self._binding,
+                candidate=validated,
+                archive_context=archive_context,
+            )
+            if archive_error:
+                return self._archive_failure(
+                    archive_error,
+                    binding=self._binding,
+                    candidate=validated,
                 )
             if not self._append_event(
                 "effect_verified",
@@ -1031,10 +1331,13 @@ __all__ = [
     "DEFAULT_STATUS_MAX_AGE_SEC",
     "DEFAULT_TELEMETRY_MAX_AGE_SEC",
     "MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA",
+    "MINDCRAFT_WORLD_EFFECT_ARCHIVE_EVENT_SCHEMA",
     "MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA",
     "MINDCRAFT_WORLD_EFFECT_OBSERVATION_SCHEMA",
     "MINDCRAFT_WORLD_EFFECT_STATUS_SCHEMA",
     "MINDCRAFT_WORLD_EFFECT_TELEMETRY_SCHEMA",
+    "ArchiveReadiness",
+    "ArchiveSink",
     "MindcraftWorldEffectProjector",
     "load_mindcraft_world_effect_status",
     "validate_mindcraft_world_effect_status",

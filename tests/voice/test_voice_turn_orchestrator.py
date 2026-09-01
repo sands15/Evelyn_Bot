@@ -21,6 +21,11 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.main_llm_runtime import (  # noqa: E402
     TASK_LOOP_VERIFIED_MUTATION_OUTCOME,
 )
+from evelyn_core.task_grounded_draft_runtime import (  # noqa: E402
+    GROUNDED_DRAFT_SCHEMA,
+    GROUNDED_DRAFT_TTS_TEXT,
+    grounded_evidence_fragments,
+)
 from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestrator,
     VoiceTurnOrchestratorDeps,
@@ -1149,6 +1154,99 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("작업 결과", spoken_chunks[0])
         self.assertNotIn(private_evidence, result.answer_text)
         self.assertNotIn(private_evidence, spoken_chunks[0])
+
+    async def test_grounded_task_displays_opt_in_link_but_speaks_no_source_data(
+        self,
+    ) -> None:
+        events: list[Any] = []
+        spoken_chunks: list[str] = []
+        source_body = "PRIVATE_VOICE_GROUNDED_SOURCE_BODY_SENTINEL"
+        source_url = "https://example.com/source"
+        task_id = "task-voice-grounded"
+        observation = {
+            "step": 1,
+            "tool": "web_search",
+            "verified": True,
+            "outcome": "success",
+            "code": "web_search_completed",
+            "summary": "verified web result",
+            "evidence": json.dumps(
+                {
+                    "query": "public test query",
+                    "results": [
+                        {
+                            "title": "Public source title",
+                            "snippet": source_body,
+                            "url": source_url,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        fragment = grounded_evidence_fragments(task_id, [observation])[0]
+        claim = "현재 실행의 검색 결과에 연결된 검토 대상 주장이다."
+        skill_answer = json.dumps(
+            {
+                "schema": "evelyn.task-loop.v1",
+                "taskId": task_id,
+                "status": "grounded_draft_ready",
+                "code": "grounded_draft_ready",
+                "summary": "reviewable draft",
+                "stepCount": 1,
+                "modelCallCount": 2,
+                "approvalTool": "",
+                "observations": [observation],
+                "groundedDraft": {
+                    "schema": GROUNDED_DRAFT_SCHEMA,
+                    "taskId": task_id,
+                    "kind": "summarize",
+                    "sections": [
+                        {
+                            "title": "핵심",
+                            "claims": [
+                                {
+                                    "text": claim,
+                                    "stepId": fragment.step_id,
+                                    "evidenceRef": fragment.evidence_ref,
+                                }
+                            ],
+                        }
+                    ],
+                    "semanticVerified": False,
+                    "humanReviewRequired": True,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        async def on_sentence(chunk: str) -> None:
+            spoken_chunks.append(chunk)
+
+        orchestrator = self.make_orchestrator(
+            skill_route_answer=skill_answer,
+            route_decision_kwargs={"route": "task_executor"},
+            events=events,
+        )
+        result = await orchestrator.execute(
+            VoiceTurnRequest(
+                user_text="/작업 출처 링크를 포함해서 웹 결과를 요약해줘",
+                on_sentence=on_sentence,
+            )
+        )
+
+        self.assertEqual(result.handled_by, "task_loop_outcome")
+        self.assertIn(claim, result.answer_text)
+        self.assertIn(source_url, result.answer_text)
+        self.assertNotIn(source_body, result.answer_text)
+        self.assertEqual(spoken_chunks, [GROUNDED_DRAFT_TTS_TEXT])
+        self.assertNotIn(claim, spoken_chunks[0])
+        self.assertNotIn(source_url, spoken_chunks[0])
+        self.assertNotIn(source_body, spoken_chunks[0])
+        self.assertEqual([event[0] for event in events].count("main_llm"), 0)
+        self.assertEqual([event[0] for event in events].count("delivery"), 1)
 
     async def test_task_executor_malformed_result_is_typed_failure_without_main(self) -> None:
         events: list[Any] = []

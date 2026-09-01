@@ -4,9 +4,10 @@ import asyncio
 import sys
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +16,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.discord_command_handlers import (  # noqa: E402
+    RecordDeletionConfirmationGuard,
     handle_control_command_error,
     handle_discord_command_error,
     handle_autonomy_start_command,
@@ -22,6 +24,7 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_autonomy_stop_command,
     handle_channel_setting_command,
     handle_evelyn_page_command,
+    handle_feedback_application_command,
     handle_join_voice_command,
     handle_leave_voice_command,
     handle_minecraft_connect_command,
@@ -30,6 +33,9 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_minecraft_status_command,
     handle_prefix_command,
     handle_rejoin_voice_command,
+    handle_record_consent_application_command,
+    handle_record_delete_application_command,
+    handle_record_view_application_command,
     handle_reset_guild_memory_command,
     handle_restart_bot_command,
     make_control_command_authorized_checker,
@@ -83,7 +89,555 @@ class FakeVoiceClient:
         self.disconnected.append(force)
 
 
+class FakeInteraction:
+    def __init__(
+        self,
+        *,
+        guild_id=7,
+        user_id=3,
+        channel_id=8,
+        voice_channel_id=9,
+        interaction_id=1001,
+    ) -> None:
+        voice = None
+        if voice_channel_id is not None:
+            voice = SimpleNamespace(
+                channel=SimpleNamespace(id=voice_channel_id),
+                self_mute=False,
+                mute=False,
+                suppress=False,
+                self_deaf=False,
+                deaf=False,
+            )
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.channel = SimpleNamespace(id=channel_id)
+        self.id = interaction_id
+        self.guild = None if guild_id is None else SimpleNamespace(id=guild_id)
+        self.user = SimpleNamespace(id=user_id, voice=voice)
+        self.response = SimpleNamespace(
+            defer=AsyncMock(),
+            send_message=AsyncMock(),
+        )
+        self.edit_original_response = AsyncMock()
+        self.delete_original_response = AsyncMock()
+
+
 class DiscordCommandHandlerTests(unittest.TestCase):
+    def test_autonomy_grant_is_archived_as_minecraft_lineage_root_before_start(self) -> None:
+        events: list[str] = []
+        archive = AsyncMock(side_effect=lambda **_kwargs: events.append("archive"))
+
+        class Engine:
+            async def stop(self) -> None:
+                events.append("stop")
+
+            async def start(self) -> None:
+                events.append("start")
+
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=7),
+            author=SimpleNamespace(id=3, display_name="정훈"),
+            channel=SimpleNamespace(id=5),
+            message=SimpleNamespace(
+                id=11,
+                content="!자율시작",
+                created_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            ),
+            send=AsyncMock(),
+        )
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=True,
+                get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=lambda _guild_id: asyncio.sleep(
+                    0, result=True
+                ),
+                grant_autonomy_authorization=lambda *_args, **_kwargs: {
+                    "ok": True,
+                    "grant": {"grantId": "grant-1"},
+                },
+                revoke_autonomy_authorization=Mock(),
+                guild_only_message=lambda: "guild only",
+                archive_autonomy_grant=archive,
+            )
+        )
+
+        self.assertLess(events.index("archive"), events.index("start"))
+        archive.assert_awaited_once_with(
+            guild_id=7,
+            channel_id=5,
+            user_id=3,
+            owner_name="정훈",
+            message_id=11,
+            grant_id="grant-1",
+            authored_at=datetime(2026, 8, 28, tzinfo=timezone.utc).timestamp(),
+            text="!자율시작",
+        )
+
+    def test_record_view_is_deferred_ephemeral_exact_self_scope_and_deleted_after_180(self) -> None:
+        interaction = FakeInteraction(guild_id=7, user_id=3)
+        read_self = AsyncMock(
+            return_value=SimpleNamespace(
+                records=(
+                    SimpleNamespace(
+                        started_at=None,
+                        record_type="user_text",
+                        body="내 기록",
+                    ),
+                ),
+                next_page_handle=None,
+            )
+        )
+        sleeps: list[float] = []
+        tasks: list[object] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        async def scenario() -> None:
+            await handle_record_view_application_command(
+                interaction,
+                feature_enabled=True,
+                read_self=read_self,
+                create_task=tasks.append,
+                sleep_fn=fake_sleep,
+                started_at="2026-08-01T00:00+09:00",
+                ended_at="2026-08-02T00:00+09:00",
+            )
+            await tasks.pop()
+
+        asyncio.run(scenario())
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        read_self.assert_awaited_once()
+        kwargs = read_self.await_args.kwargs
+        self.assertEqual(kwargs["actor_external_id"], "3")
+        self.assertEqual(kwargs["guild_id"], "7")
+        self.assertEqual(kwargs["interaction_id"], "1001")
+        self.assertIsNone(kwargs["page_handle"])
+        self.assertNotIn("authorized", kwargs)
+        self.assertNotIn("admin", kwargs)
+        self.assertIn("내 기록", interaction.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual(sleeps, [180.0])
+        interaction.delete_original_response.assert_awaited_once_with()
+
+    def test_record_next_page_rebinds_current_interaction_and_invoker(self) -> None:
+        first = FakeInteraction(interaction_id=1201)
+        read_self = AsyncMock(
+            side_effect=(
+                SimpleNamespace(
+                    records=(
+                        SimpleNamespace(
+                            started_at=None,
+                            record_type="user_text",
+                            body="첫 페이지",
+                        ),
+                    ),
+                    next_page_handle="opaque-next-page",
+                ),
+                SimpleNamespace(
+                    records=(
+                        SimpleNamespace(
+                            started_at=None,
+                            record_type="evelyn_reply",
+                            body="둘째 페이지",
+                        ),
+                    ),
+                    next_page_handle=None,
+                ),
+            )
+        )
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        wrong_user = FakeInteraction(user_id=4, interaction_id=1202)
+        next_click = FakeInteraction(interaction_id=1203)
+
+        async def scenario() -> None:
+            await handle_record_view_application_command(
+                first,
+                feature_enabled=True,
+                read_self=read_self,
+                create_task=close_task,
+            )
+            view = first.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(view.children[0].label, "다음 페이지")
+            self.assertEqual(
+                view.children[0].custom_id,
+                "evelyn-archive-page:opaque-next-page",
+            )
+            await view.children[0].callback(wrong_user)
+            await view.children[0].callback(next_click)
+
+        asyncio.run(scenario())
+
+        wrong_user.response.send_message.assert_awaited_once()
+        wrong_user.response.defer.assert_not_awaited()
+        next_click.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        self.assertEqual(read_self.await_count, 2)
+        next_kwargs = read_self.await_args.kwargs
+        self.assertEqual(next_kwargs["actor_external_id"], "3")
+        self.assertEqual(next_kwargs["guild_id"], "7")
+        self.assertEqual(next_kwargs["interaction_id"], "1203")
+        self.assertEqual(next_kwargs["page_handle"], "opaque-next-page")
+        self.assertIn(
+            "둘째 페이지",
+            next_click.edit_original_response.await_args.kwargs["content"],
+        )
+        self.assertIsNone(
+            next_click.edit_original_response.await_args.kwargs["view"]
+        )
+
+    def test_record_page_uses_ephemeral_memory_attachment_without_skipping_rows(
+        self,
+    ) -> None:
+        interaction = FakeInteraction(interaction_id=1301)
+        read_self = AsyncMock(
+            return_value=SimpleNamespace(
+                records=(
+                    SimpleNamespace(
+                        started_at=None,
+                        record_type="user_text",
+                        body="A" * 1800,
+                    ),
+                    SimpleNamespace(
+                        started_at=None,
+                        record_type="evelyn_reply",
+                        body="TAIL-MUST-NOT-BE-SKIPPED",
+                    ),
+                ),
+                next_page_handle=None,
+            )
+        )
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        asyncio.run(
+            handle_record_view_application_command(
+                interaction,
+                feature_enabled=True,
+                read_self=read_self,
+                create_task=close_task,
+            )
+        )
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertIn("임시 첨부 파일", kwargs["content"])
+        self.assertEqual(len(kwargs["attachments"]), 1)
+        attachment = kwargs["attachments"][0]
+        attachment.fp.seek(0)
+        attached_text = attachment.fp.read().decode("utf-8")
+        self.assertIn("TAIL-MUST-NOT-BE-SKIPPED", attached_text)
+
+    def test_record_commands_reject_dm_and_mock_feature_flag_without_backend_calls(self) -> None:
+        for interaction, enabled in (
+            (FakeInteraction(guild_id=None, user_id=3), True),
+            (FakeInteraction(guild_id=7, user_id=3), Mock(name="truthy_feature_flag")),
+        ):
+            with self.subTest(guild_id=interaction.guild_id, enabled=enabled):
+                read_self = AsyncMock()
+                asyncio.run(
+                    handle_record_view_application_command(
+                        interaction,
+                        feature_enabled=enabled,
+                        read_self=read_self,
+                    )
+                )
+                interaction.response.defer.assert_not_awaited()
+                interaction.response.send_message.assert_awaited_once()
+                self.assertTrue(
+                    interaction.response.send_message.await_args.kwargs["ephemeral"]
+                )
+                read_self.assert_not_awaited()
+
+    def test_delete_preview_is_60_second_one_use_and_bound_to_exact_guild_caller(self) -> None:
+        clock = [100.0]
+        guard = RecordDeletionConfirmationGuard(monotonic=lambda: clock[0])
+        preview = SimpleNamespace(
+            preview_id="opaque-preview",
+            counts_by_guild={"7": 2},
+            dependent_record_count=1,
+            interval_count=1,
+            all_guilds=True,
+        )
+        preview_delete = AsyncMock(return_value=preview)
+        apply_delete = AsyncMock(
+            return_value=SimpleNamespace(
+                status="local_fully_purged",
+                affected_records=2,
+                dependent_records=1,
+                affected_intervals=1,
+            )
+        )
+
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        preview_interaction = FakeInteraction(
+            guild_id=7, user_id=3, interaction_id=1101
+        )
+        wrong_guild = FakeInteraction(
+            guild_id=8, user_id=3, interaction_id=1102
+        )
+        right_guild = FakeInteraction(
+            guild_id=7, user_id=3, interaction_id=1103
+        )
+
+        async def scenario() -> None:
+            await handle_record_delete_application_command(
+                preview_interaction,
+                feature_enabled=True,
+                preview_delete=preview_delete,
+                apply_delete=apply_delete,
+                confirmation_guard=guard,
+                create_task=close_task,
+                sleep_fn=no_sleep,
+            )
+            view = preview_interaction.edit_original_response.await_args.kwargs["view"]
+            self.assertEqual(len(view.children), 1)
+            self.assertEqual(view.children[0].label, "삭제 확인")
+            self.assertEqual(
+                view.children[0].custom_id,
+                "evelyn-archive-delete:opaque-preview",
+            )
+            await view.children[0].callback(wrong_guild)
+            await view.children[0].callback(right_guild)
+
+        asyncio.run(scenario())
+
+        content = preview_interaction.edit_original_response.await_args.kwargs["content"]
+        self.assertIn("삭제 확인 버튼", content)
+        self.assertNotIn("opaque-preview", content)
+        preview_delete.assert_awaited_once_with(
+            actor_external_id="3",
+            request_guild_id="7",
+            interaction_id="1101",
+            started_at=None,
+            ended_at=None,
+        )
+
+        wrong_guild.response.send_message.assert_awaited_once()
+        wrong_guild.response.defer.assert_not_awaited()
+        right_guild.response.defer.assert_awaited_once_with()
+        apply_delete.assert_awaited_once_with(
+            preview_id="opaque-preview",
+            actor_external_id="3",
+            request_guild_id="7",
+            interaction_id="1103",
+        )
+
+        guard.remember("fresh", guild_id=7, user_id=3)
+        clock[0] += 60.0
+        self.assertFalse(guard.consume("fresh", guild_id=7, user_id=3))
+
+    def test_delete_confirmation_applies_once_for_exact_bound_caller(self) -> None:
+        guard = RecordDeletionConfirmationGuard(monotonic=lambda: 10.0)
+        preview_delete = AsyncMock(
+            return_value=SimpleNamespace(
+                preview_id="preview",
+                counts_by_guild={"7": 1},
+                dependent_record_count=0,
+                interval_count=0,
+                all_guilds=True,
+            )
+        )
+        apply_delete = AsyncMock(
+            return_value=SimpleNamespace(
+                status="local_cleanup_pending",
+                affected_records=1,
+                dependent_records=0,
+                affected_intervals=0,
+            )
+        )
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        preview_interaction = FakeInteraction(guild_id=7, user_id=3)
+
+        async def scenario() -> None:
+            await handle_record_delete_application_command(
+                preview_interaction,
+                feature_enabled=True,
+                preview_delete=preview_delete,
+                apply_delete=apply_delete,
+                confirmation_guard=guard,
+                create_task=close_task,
+            )
+            view = preview_interaction.edit_original_response.await_args.kwargs["view"]
+            for _index in range(2):
+                await view.children[0].callback(
+                    FakeInteraction(guild_id=7, user_id=3)
+                )
+
+        asyncio.run(scenario())
+
+        apply_delete.assert_awaited_once_with(
+            preview_id="preview",
+            actor_external_id="3",
+            request_guild_id="7",
+            interaction_id="1001",
+        )
+
+    def test_record_consent_uses_exact_invoker_guild_and_current_voice_flags(self) -> None:
+        interaction = FakeInteraction(guild_id=7, user_id=3, voice_channel_id=9)
+        interaction.user.voice.self_mute = True
+        set_consent = AsyncMock()
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        asyncio.run(
+            handle_record_consent_application_command(
+                interaction,
+                feature_enabled=True,
+                set_consent=set_consent,
+                consented=True,
+                create_task=close_task,
+            )
+        )
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        set_consent.assert_awaited_once_with(
+            guild_id="7",
+            actor_external_id="3",
+            owner_name="3",
+            channel_id="9",
+            consented=True,
+            self_mute=True,
+            server_mute=False,
+            stage_suppress=False,
+            self_deaf=False,
+            server_deaf=False,
+        )
+
+    def test_record_consent_requires_voice_but_withdrawal_is_allowed_after_leave(self) -> None:
+        set_consent = AsyncMock()
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        consent_interaction = FakeInteraction(
+            guild_id=7,
+            user_id=3,
+            voice_channel_id=None,
+        )
+        asyncio.run(
+            handle_record_consent_application_command(
+                consent_interaction,
+                feature_enabled=True,
+                set_consent=set_consent,
+                consented=True,
+                create_task=close_task,
+            )
+        )
+        set_consent.assert_not_awaited()
+
+        withdraw_interaction = FakeInteraction(
+            guild_id=7,
+            user_id=3,
+            voice_channel_id=None,
+        )
+        asyncio.run(
+            handle_record_consent_application_command(
+                withdraw_interaction,
+                feature_enabled=True,
+                set_consent=set_consent,
+                consented=False,
+                create_task=close_task,
+            )
+        )
+
+        set_consent.assert_awaited_once_with(
+            guild_id="7",
+            actor_external_id="3",
+            owner_name="3",
+            channel_id=None,
+            consented=False,
+            self_mute=False,
+            server_mute=False,
+            stage_suppress=False,
+            self_deaf=False,
+            server_deaf=False,
+        )
+
+    def test_feedback_command_is_ephemeral_and_cannot_request_promotion(self) -> None:
+        interaction = FakeInteraction(
+            guild_id=7,
+            user_id=3,
+            channel_id=8,
+            interaction_id=1401,
+        )
+        capture = AsyncMock(
+            return_value=SimpleNamespace(
+                route="human_engineering_required",
+                actionable=False,
+            )
+        )
+
+        def close_task(coroutine) -> None:
+            coroutine.close()
+
+        asyncio.run(
+            handle_feedback_application_command(
+                interaction,
+                feature_enabled=True,
+                capture_feedback=capture,
+                source_surface="voice",
+                category="tool_failure",
+                correction="도구 구성을 바꿔야 해",
+                requested_change_scope="tool",
+                create_task=close_task,
+            )
+        )
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        capture.assert_awaited_once_with(
+            guild_id=7,
+            channel_id=8,
+            user_id=3,
+            owner_name="3",
+            source_surface="voice",
+            category="tool_failure",
+            correction="도구 구성을 바꿔야 해",
+            requested_change_scope="tool",
+            feedback_nonce="1401",
+        )
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        self.assertIn("사람의 설계·보안 검토", content)
+        self.assertIn("자동으로 바꾸지 않아", content)
+        self.assertNotIn("도구 구성을 바꿔야 해", content)
+        submitted = capture.await_args.kwargs
+        for forbidden in (
+            "generalize",
+            "evaluate",
+            "approve",
+            "activate",
+            "promotion",
+        ):
+            self.assertNotIn(forbidden, submitted)
+
     def test_control_command_authorized_checker_accepts_allowlisted_or_admin_users(self) -> None:
         checker = make_control_command_authorized_checker(allowed_user_ids={7})
         allowed_ctx = FakeContext()
@@ -243,6 +797,92 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(ctx.typing_entries, 1)
         self.assertEqual(route_enabled, [1])
 
+    def test_minecraft_connect_archives_exact_root_before_any_effect(self) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7), content="!마크접속")
+        ctx.channel = SimpleNamespace(id=8)
+        ctx.author.display_name = "정훈"
+        ctx.message.id = 10
+        ctx.message.created_at = datetime(2026, 8, 28, tzinfo=timezone.utc)
+        events: list[str] = []
+        effect_payloads: list[dict] = []
+
+        async def archive(**_kwargs):
+            events.append("archive")
+            return {"recordId": "minecraft-command-1"}
+
+        async def enable(*_args, **kwargs):
+            events.append("effect")
+            effect_payloads.append(kwargs)
+            return {
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
+
+        asyncio.run(
+            handle_minecraft_connect_command(
+                ctx,
+                enable_minecraft_mode=enable,
+                enable_minecraft_autonomy_route=AsyncMock(return_value=True),
+                build_reply=lambda _observed: "connected",
+                guild_only_message=lambda: "guild only",
+                archive_minecraft_command=archive,
+                archive_required=True,
+            )
+        )
+
+        self.assertEqual(events, ["archive", "effect"])
+        self.assertEqual(
+            effect_payloads[0]["parent_record_ids"],
+            ("minecraft-command-1",),
+        )
+        self.assertEqual(ctx.sent, ["connected"])
+
+    def test_minecraft_commands_fail_closed_before_effect_when_root_is_unavailable(self) -> None:
+        async def reject_archive(**_kwargs):
+            raise RuntimeError("archive down")
+
+        connect = AsyncMock()
+        connect_ctx = FakeContext(guild=SimpleNamespace(id=7), content="!마크접속")
+        connect_ctx.channel = SimpleNamespace(id=8)
+        connect_ctx.message.id = 10
+        goal = AsyncMock()
+        goal_ctx = FakeContext(
+            guild=SimpleNamespace(id=7),
+            content="!마크목표 다이아몬드 찾기",
+        )
+        goal_ctx.channel = SimpleNamespace(id=8)
+        goal_ctx.message.id = 11
+
+        asyncio.run(
+            handle_minecraft_connect_command(
+                connect_ctx,
+                enable_minecraft_mode=connect,
+                enable_minecraft_autonomy_route=AsyncMock(),
+                build_reply=lambda _observed: "connected",
+                guild_only_message=lambda: "guild only",
+                archive_minecraft_command=reject_archive,
+                archive_required=True,
+            )
+        )
+        asyncio.run(
+            handle_minecraft_goal_command(
+                goal_ctx,
+                goal="다이아몬드 찾기",
+                set_minecraft_goal=goal,
+                build_missing_reply=lambda _prefix: "missing",
+                build_updated_reply=lambda *_args: "updated",
+                guild_only_message=lambda: "guild only",
+                archive_minecraft_command=reject_archive,
+                archive_required=True,
+            )
+        )
+
+        connect.assert_not_awaited()
+        goal.assert_not_awaited()
+        self.assertIn("실행하지 않았어", connect_ctx.sent[0])
+        self.assertIn("바꾸지 않았어", goal_ctx.sent[0])
+
     def test_minecraft_connect_ignores_typing_indicator_failure(self) -> None:
         ctx = FakeContext(guild=SimpleNamespace(id=1))
         ctx.typing = lambda: object()
@@ -306,6 +946,54 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 "확인해줘. (minecraft_disconnect_failed)"
             ],
         )
+
+    def test_minecraft_disconnect_archives_root_before_route_and_verified_stop(
+        self,
+    ) -> None:
+        ctx = FakeContext(
+            guild=SimpleNamespace(id=7),
+            content="!마크종료",
+        )
+        ctx.channel = SimpleNamespace(id=8)
+        ctx.message.id = 13
+        events: list[str] = []
+        stop_parents: list[tuple[str, ...]] = []
+
+        async def archive(**_payload):
+            events.append("archive")
+            return {"recordId": "minecraft-command-3"}
+
+        async def disable_route(_guild_id: int):
+            events.append("route")
+
+        async def disable_mode(
+            _guild_id: int,
+            *,
+            parent_record_ids: tuple[str, ...],
+        ):
+            events.append("stop")
+            stop_parents.append(parent_record_ids)
+            return {
+                "running": False,
+                "connected": False,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_stopped",
+            }
+
+        asyncio.run(
+            handle_minecraft_disconnect_command(
+                ctx,
+                disable_minecraft_mode=disable_mode,
+                disable_minecraft_autonomy_route=disable_route,
+                guild_only_message=lambda: "guild only",
+                archive_minecraft_command=archive,
+                archive_required=True,
+            )
+        )
+
+        self.assertEqual(events, ["archive", "route", "stop"])
+        self.assertEqual(stop_parents, [("minecraft-command-3",)])
+        self.assertIn("중지했어", ctx.sent[0])
 
     def test_minecraft_connect_does_not_enable_route_from_unverified_echo(
         self,
@@ -383,6 +1071,67 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(missing_ctx.sent, ["missing goal:!"])
         self.assertEqual(goal_ctx.sent, ["goal:diamond:diamond"])
+
+    def test_minecraft_goal_archives_authored_command_before_goal_effect(self) -> None:
+        ctx = FakeContext(
+            guild=SimpleNamespace(id=7),
+            content="!마크목표 다이아몬드 찾기",
+        )
+        ctx.channel = SimpleNamespace(id=8)
+        ctx.author.display_name = "정훈"
+        ctx.message.id = 12
+        ctx.message.created_at = datetime(2026, 8, 28, tzinfo=timezone.utc)
+        events: list[str] = []
+        archived: list[dict] = []
+
+        async def archive(**payload):
+            events.append("archive")
+            archived.append(payload)
+            return {"recordId": "minecraft-command-2"}
+
+        goal_parents: list[tuple[str, ...]] = []
+
+        async def set_goal(
+            _guild_id: int,
+            _goal: str,
+            *,
+            parent_record_ids: tuple[str, ...],
+        ):
+            events.append("effect")
+            goal_parents.append(parent_record_ids)
+            return {"stage": "ready"}
+
+        asyncio.run(
+            handle_minecraft_goal_command(
+                ctx,
+                goal=" 다이아몬드 찾기 ",
+                set_minecraft_goal=set_goal,
+                build_missing_reply=lambda _prefix: "missing",
+                build_updated_reply=lambda *_args: "updated",
+                guild_only_message=lambda: "guild only",
+                archive_minecraft_command=archive,
+                archive_required=True,
+            )
+        )
+
+        self.assertEqual(events, ["archive", "effect"])
+        self.assertEqual(goal_parents, [("minecraft-command-2",)])
+        self.assertEqual(
+            archived,
+            [
+                {
+                    "guild_id": 7,
+                    "channel_id": 8,
+                    "user_id": 3,
+                    "owner_name": "정훈",
+                    "message_id": 12,
+                    "authored_at": datetime(
+                        2026, 8, 28, tzinfo=timezone.utc
+                    ).timestamp(),
+                    "text": "!마크목표 다이아몬드 찾기",
+                }
+            ],
+        )
 
     def test_prefix_command_reads_resets_and_saves_prefix(self) -> None:
         guild = SimpleNamespace(id=1)

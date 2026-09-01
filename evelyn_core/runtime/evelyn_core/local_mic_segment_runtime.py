@@ -17,6 +17,7 @@ class LocalMicSegmentRuntimeDeps:
     local_only_mode: bool
     local_control_voice_member: Callable[[], Any]
     process_member_audio: Callable[[Any, bytes, dict[str, Any]], Awaitable[Any]]
+    conversation_archive_enabled: bool = False
     log: Callable[..., Any] = print
     time: Callable[[], float] = time.time
 
@@ -57,6 +58,7 @@ class LocalMicServiceRuntimeDeps:
     vad_filter_enabled: bool
     env_noise_filter_enabled: bool
     waveform_filter_enabled: bool
+    conversation_archive_enabled: bool = False
     log: Callable[..., Any] = print
 
 
@@ -91,14 +93,24 @@ async def ensure_local_mic_service_started_from_runtime(
     current_service: Any,
     deps: LocalMicServiceRuntimeDeps,
 ) -> Any:
-    if not deps.local_mic_enabled:
+    if not deps.local_only_mode:
+        current_service = stop_local_mic_service_from_runtime(
+            current_service=current_service,
+            local_mic_runtime_state=deps.local_mic_runtime_state,
+        )
+        deps.local_mic_runtime_state["enabled"] = False
+        deps.local_mic_runtime_state["input_mode"] = "discord"
+        deps.local_mic_runtime_state["discord_suppression_active"] = False
+        deps.local_mic_runtime_state["last_error"] = None
+        return current_service
+    if not deps.local_mic_enabled or deps.conversation_archive_enabled:
         deps.local_mic_runtime_state["capture_ready"] = False
+        if deps.conversation_archive_enabled:
+            deps.local_mic_runtime_state["last_error"] = (
+                "conversation_archive_local_owner_unverified"
+            )
         return current_service
     user_ids = deps.discord_user_ids()
-    if not deps.local_only_mode and not user_ids:
-        deps.local_mic_runtime_state["capture_ready"] = False
-        deps.local_mic_runtime_state["last_error"] = "no_local_mic_user_ids"
-        return current_service
     if current_service is not None and getattr(current_service, "capture_ready", False):
         deps.local_mic_runtime_state["capture_ready"] = True
         return current_service
@@ -176,6 +188,17 @@ async def handle_local_mic_segment_from_runtime(
     deps: LocalMicSegmentRuntimeDeps,
 ) -> None:
     if not pcm_bytes:
+        return
+    if not deps.local_only_mode:
+        deps.local_mic_runtime_state["enabled"] = False
+        deps.local_mic_runtime_state["input_mode"] = "discord"
+        deps.local_mic_runtime_state["discord_suppression_active"] = False
+        deps.local_mic_runtime_state["last_error"] = None
+        return
+    if deps.conversation_archive_enabled:
+        deps.local_mic_runtime_state["last_error"] = (
+            "conversation_archive_local_owner_unverified"
+        )
         return
     if deps.normalize_voice_input_mode(str(deps.local_mic_runtime_state.get("input_mode") or "auto")) == "discord":
         return

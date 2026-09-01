@@ -1348,6 +1348,96 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
                         entered = True
                 self.assertFalse(entered)
 
+    def test_purge_receipt_is_content_free_and_bound_to_current_generation(
+        self,
+    ) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                journal.append_memory_deletion_tombstone(
+                    index_dir,
+                    self.tombstone("PRIVATE purge receipt source"),
+                )
+                receipt = journal.build_memory_deletion_purge_receipt(
+                    index_dir,
+                    deletion_generation=17,
+                    purged_count=2,
+                )
+
+                self.assertEqual(
+                    receipt["schema"],
+                    journal.MEMORY_DELETION_PURGE_RECEIPT_SCHEMA,
+                )
+                self.assertEqual(receipt["journalGeneration"], 1)
+                self.assertEqual(
+                    journal.memory_deletion_journal_position(
+                        index_dir
+                    ).deletion_generation,
+                    1,
+                )
+                self.assertTrue(receipt["complete"])
+                self.assertNotIn(
+                    "PRIVATE purge receipt source",
+                    json.dumps(receipt, ensure_ascii=False),
+                )
+                self.assertEqual(
+                    journal.validate_memory_deletion_purge_receipt(
+                        index_dir,
+                        receipt,
+                        expected_deletion_generation=17,
+                    ),
+                    receipt,
+                )
+
+                journal.append_memory_deletion_tombstone(
+                    index_dir,
+                    self.tombstone("concept-receipt-stale"),
+                )
+                self.assert_integrity_failure(
+                    lambda: journal.validate_memory_deletion_purge_receipt(
+                        index_dir,
+                        receipt,
+                        expected_deletion_generation=17,
+                    )
+                )
+
+    def test_incomplete_or_tampered_purge_receipt_fails_closed(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                receipt = journal.build_memory_deletion_purge_receipt(
+                    index_dir,
+                    deletion_generation=4,
+                    purged_count=1,
+                    pending_count=1,
+                )
+
+                self.assertFalse(receipt["complete"])
+                self.assertEqual(receipt["status"], "cleanup_pending")
+                self.assert_integrity_failure(
+                    lambda: journal.validate_memory_deletion_purge_receipt(
+                        index_dir,
+                        receipt,
+                    )
+                )
+                self.assertEqual(
+                    journal.validate_memory_deletion_purge_receipt(
+                        index_dir,
+                        receipt,
+                        require_complete=False,
+                    ),
+                    receipt,
+                )
+                tampered = dict(receipt)
+                tampered["purgedCount"] = 2
+                self.assert_integrity_failure(
+                    lambda: journal.validate_memory_deletion_purge_receipt(
+                        index_dir,
+                        tampered,
+                        require_complete=False,
+                    )
+                )
+
     def test_position_rejects_wrong_root_and_malformed_expected(self) -> None:
         with self.unconfigured_authenticity():
             with tempfile.TemporaryDirectory() as first_tmp:
@@ -1504,6 +1594,32 @@ class MemoryDeletionJournalIntegrityTests(unittest.TestCase):
                         index_dir
                     ):
                         pass
+
+    def test_guard_body_oserror_is_not_rewritten_by_lock_layer(self) -> None:
+        with self.unconfigured_authenticity():
+            with tempfile.TemporaryDirectory() as tmp:
+                index_dir = Path(tmp) / "memory_index"
+                guards = (
+                    journal.memory_deletion_journal_guard,
+                    journal.memory_deletion_journal_read_guard,
+                )
+                for guard in guards:
+                    for reentrant in (False, True):
+                        with self.subTest(
+                            guard=guard.__name__,
+                            reentrant=reentrant,
+                        ):
+                            sentinel = OSError("caller_body_failure")
+                            try:
+                                with guard(index_dir):
+                                    if reentrant:
+                                        with guard(index_dir):
+                                            raise sentinel
+                                    raise sentinel
+                            except OSError as exc:
+                                self.assertIs(exc, sentinel)
+                            else:
+                                self.fail("caller body OSError was swallowed")
 
     def test_busy_exception_never_echoes_details(self) -> None:
         exception = journal.MemoryDeletionJournalBusyError(

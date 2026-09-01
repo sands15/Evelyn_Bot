@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evelyn 대화 기록 관리자</title>
+  <link rel="stylesheet" href="/assets/evelyn-conversation-archive-admin.css?v=20260828-p1-5-feedback">
+</head>
+<body>
+  <main>
+    <section
+      class="conversation-archive-admin-panel"
+      id="conversationArchiveAdminPanel"
+      aria-label="로컬 대화 기록 관리자"
+      hidden
+    >
+      <div class="conversation-archive-admin-head">
+        <div>
+          <strong>대화 기록 관리자</strong>
+          <span>로컬 Windows 관리자 증명 + Discord 1:1 OTP</span>
+        </div>
+        <button id="conversationArchiveLogoutButton" type="button" hidden>로그아웃</button>
+      </div>
+      <p class="conversation-archive-admin-status" id="conversationArchiveStatus" aria-live="polite">
+        관리자 권한을 확인하는 중입니다.
+      </p>
+      <div id="conversationArchiveLogin">
+        <button id="conversationArchiveChallengeButton" type="button" disabled>OTP 보내기</button>
+        <form class="conversation-archive-admin-form" id="conversationArchiveLoginForm" hidden>
+          <label for="conversationArchiveLoginCode">Discord DM으로 받은 4자리 코드</label>
+          <input
+            id="conversationArchiveLoginCode"
+            type="text"
+            pattern="[A-Za-z0-9]{4}"
+            maxlength="4"
+            autocomplete="one-time-code"
+            autocapitalize="off"
+            spellcheck="false"
+            required
+          >
+          <button type="submit">관리자 확인</button>
+        </form>
+      </div>
+      <div id="conversationArchiveRecordsPanel" hidden>
+        <div class="conversation-archive-admin-actions">
+          <strong>전체 기록</strong>
+          <button id="conversationArchiveRefreshButton" type="button">새로고침</button>
+          <button id="conversationArchiveNextButton" type="button" hidden>다음</button>
+        </div>
+        <div class="conversation-archive-admin-records" id="conversationArchiveRecords" aria-live="polite"></div>
+        <div class="conversation-archive-admin-delete">
+          <button id="conversationArchivePreviewDeleteButton" type="button" disabled>선택 기록 삭제 미리보기</button>
+          <span class="conversation-archive-admin-status" id="conversationArchiveDeleteStatus"></span>
+          <form class="conversation-archive-admin-form" id="conversationArchiveApplyDeleteForm" hidden>
+            <label for="conversationArchiveDeleteCode">새 삭제 확인 OTP</label>
+            <input
+              id="conversationArchiveDeleteCode"
+              type="text"
+              pattern="[A-Za-z0-9]{4}"
+              maxlength="4"
+              autocomplete="one-time-code"
+              autocapitalize="off"
+              spellcheck="false"
+              required
+            >
+            <button type="submit">정확한 미리보기 대상 삭제</button>
+          </form>
+        </div>
+        <section class="conversation-archive-admin-section" aria-labelledby="conversationArchiveParticipationTitle">
+          <div class="conversation-archive-admin-actions">
+            <strong id="conversationArchiveParticipationTitle">음성 참여·기록 가능 구간</strong>
+            <button id="conversationArchiveParticipationRefreshButton" type="button">새로고침</button>
+            <button id="conversationArchiveParticipationNextButton" type="button" hidden>다음</button>
+          </div>
+          <div class="conversation-archive-admin-records" id="conversationArchiveParticipation" aria-live="polite"></div>
+        </section>
+        <section class="conversation-archive-admin-section" aria-labelledby="conversationArchiveVoiceTransitionsTitle">
+          <div class="conversation-archive-admin-actions">
+            <strong id="conversationArchiveVoiceTransitionsTitle">음성 상태 전이</strong>
+            <button id="conversationArchiveVoiceTransitionsRefreshButton" type="button">새로고침</button>
+            <button id="conversationArchiveVoiceTransitionsNextButton" type="button" hidden>다음</button>
+          </div>
+          <p class="conversation-archive-admin-status">참여 판정에 사용된 동의·음소거·듣기 차단·게이트웨이 상태를 시간순으로 표시합니다.</p>
+          <div class="conversation-archive-admin-records" id="conversationArchiveVoiceTransitions" aria-live="polite"></div>
+        </section>
+        <section class="conversation-archive-admin-section" aria-labelledby="conversationArchiveLegalTitle">
+          <div class="conversation-archive-admin-actions">
+            <strong id="conversationArchiveLegalTitle">삭제 후 법적 최소 보존</strong>
+            <button id="conversationArchiveLegalRefreshButton" type="button">새로고침</button>
+            <button id="conversationArchiveLegalNextButton" type="button" hidden>다음</button>
+          </div>
+          <p class="conversation-archive-admin-status">이름과 날짜·시간만 표시하며 삭제된 원문과 식별자는 보존하지 않습니다.</p>
+          <div class="conversation-archive-admin-records" id="conversationArchiveLegalEvents" aria-live="polite"></div>
+        </section>
+        <section class="conversation-archive-admin-section" aria-labelledby="conversationArchiveFeedbackTitle">
+          <div class="conversation-archive-admin-actions">
+            <strong id="conversationArchiveFeedbackTitle">피드백 기반 개선</strong>
+            <button id="conversationArchiveFeedbackRefreshButton" type="button">새로고침</button>
+          </div>
+          <p class="conversation-archive-admin-status">
+            교정 원문은 30일·직접 삭제 계보를 따릅니다. 일반화·개인정보 검토·고정 평가·OTP 승인·10/10 카나리를 모두 통과한 독립 규칙만 활성화됩니다.
+          </p>
+          <span class="conversation-archive-admin-status" id="conversationArchiveFeedbackStatus" aria-live="polite"></span>
+          <div class="conversation-archive-admin-records" id="conversationArchiveFeedbackWorkflows" aria-live="polite"></div>
+
+          <details>
+            <summary>1. 정확한 교정 등록</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackCaptureForm">
+              <label>현재 작업 ID<input name="taskId" required maxlength="128"></label>
+              <label>아카이브 결과 기록 ID<input name="sourceRecordId" required maxlength="64"></label>
+              <label>분류
+                <select name="category" required>
+                  <option value="answer_quality">답변 품질</option>
+                  <option value="context_selection">맥락 선택</option>
+                  <option value="task_routing">작업 라우팅</option>
+                  <option value="tone_identity">말투·정체성 검토</option>
+                  <option value="tool_failure">도구 실패</option>
+                  <option value="permission_safety">권한·안전(엔지니어링 필요)</option>
+                </select>
+              </label>
+              <label>사람이 직접 쓴 교정<textarea name="correction" required maxlength="4000"></textarea></label>
+              <button type="submit">원문 결합 후보로 등록</button>
+            </form>
+          </details>
+
+          <details>
+            <summary>2. 독립 규칙 일반화·개인정보 검토</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackGeneralizeForm">
+              <label>워크플로 ID<input name="workflowId" required maxlength="128"></label>
+              <label>사용자 특이 내용을 제거해 사람이 새로 쓴 일반 규칙<textarea name="guidance" required maxlength="8000"></textarea></label>
+              <label class="conversation-archive-admin-check"><input name="privacyReviewed" type="checkbox" required> 이름·ID·인용·고유 문구·의미적 바꿔쓰기·말투 지문·희귀 사실·추론 가능성을 검토했고 개인정보 합성 fixture도 통과했습니다.</label>
+              <button type="submit">독립 후보 만들기</button>
+            </form>
+          </details>
+
+          <details>
+            <summary>3. 고정 24행 평가 기록</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackEvaluateForm">
+              <label>버전 ID<input name="versionId" required maxlength="128"></label>
+              <label>평가 실행 ID(32자리 소문자 16진수)<input name="evalRunId" required pattern="[0-9a-f]{32}" maxlength="32"></label>
+              <label>기준 계약 digest<input name="baselineContractDigest" required pattern="[0-9a-f]{64}" maxlength="64"></label>
+              <label>후보 계약 digest<input name="candidateContractDigest" required pattern="[0-9a-f]{64}" maxlength="64"></label>
+              <label>content-free 평가 report JSON<textarea name="report" required></textarea></label>
+              <button type="submit">평가 게이트 확인</button>
+            </form>
+          </details>
+
+          <details>
+            <summary>4. OTP 승인</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackApprovalPreviewForm">
+              <label>버전 ID<input name="versionId" required maxlength="128"></label>
+              <button type="submit">승인 미리보기·OTP 요청</button>
+            </form>
+            <pre id="conversationArchiveFeedbackApprovalGuidance" hidden></pre>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackApprovalApplyForm" hidden>
+              <label>승인 OTP<input name="code" required pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code"></label>
+              <button type="submit">이 버전을 1회 승인</button>
+            </form>
+          </details>
+
+          <details>
+            <summary>5. 격리 카나리 10건·활성화</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackCanaryForm">
+              <label>버전 ID<input name="versionId" required maxlength="128"></label>
+              <label>카나리 실행 ID<input name="canaryRunId" required maxlength="128"></label>
+              <p>시작 후 서버가 이 실행 ID에 결박된 실제 읽기 전용 grounded task 10건을 직접 집계하고 자동으로 종료합니다.</p>
+              <button type="submit">카나리 단계 적용</button>
+            </form>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackActivateForm">
+              <label>버전 ID<input name="versionId" required maxlength="128"></label>
+              <button type="submit">통과 버전 활성화(CAS)</button>
+            </form>
+          </details>
+
+          <details>
+            <summary>6. 고정 실패·롤백·계보 격리</summary>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackFailureForm">
+              <label>활성 버전 ID<input name="versionId" required maxlength="128"></label>
+              <label>실패 ID<input name="failureId" required maxlength="128"></label>
+              <label>작업 ID<input name="taskId" required maxlength="128"></label>
+              <label>계약 버전<input name="contractVersion" value="evelyn.task-work-contract.v1" required maxlength="80"></label>
+              <label>평가자 버전<input name="evaluatorVersion" value="evelyn.task-agent-eval-suite.v1" required maxlength="80"></label>
+              <label>고정 실패 코드<select name="failureCode"><option value="grounding_regression">근거 회귀</option><option value="schema_regression">스키마 회귀</option><option value="permission_regression">권한 회귀</option><option value="privacy_regression">개인정보 회귀</option><option value="verified_behavior_regression">검증 행동 회귀</option></select></label>
+              <button type="submit">실패 영수증 기록</button>
+            </form>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackRollbackPreviewForm">
+              <label>활성 버전 ID<input name="versionId" required maxlength="128"></label>
+              <label>계약 버전<input name="contractVersion" value="evelyn.task-work-contract.v1" required maxlength="80"></label>
+              <label>평가자 버전<input name="evaluatorVersion" value="evelyn.task-agent-eval-suite.v1" required maxlength="80"></label>
+              <button type="submit">롤백 미리보기·OTP 요청</button>
+            </form>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackRollbackApplyForm" hidden>
+              <label>롤백 OTP<input name="code" required pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code"></label>
+              <button type="submit">검증된 최신 버전으로 1회 롤백</button>
+            </form>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackRevokePreviewForm">
+              <label>격리할 버전 ID<input name="versionId" required maxlength="128"></label>
+              <label>사유<select name="reason"><option value="source_dependency_detected">원문 의존 발견</option><option value="privacy_independence_invalid">개인정보 독립성 무효</option><option value="operator_revoked">관리자 취소</option></select></label>
+              <button type="submit">격리 대상 고정·OTP 요청</button>
+            </form>
+            <form class="conversation-archive-admin-form" id="conversationArchiveFeedbackRevokeApplyForm" hidden>
+              <label>격리 OTP<input name="code" required pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code"></label>
+              <button type="submit">해당 버전과 후손 격리</button>
+            </form>
+          </details>
+        </section>
+      </div>
+    </section>
+  </main>
+  <script src="/assets/evelyn-conversation-archive-admin.js?v=20260828-p1-5-feedback"></script>
+</body>
+</html>

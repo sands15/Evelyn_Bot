@@ -224,6 +224,123 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         self.assertFalse(any(name == "remember" for name, _ in calls))
         self.assertEqual(calls[-1], ("process_commands", "!status"))
 
+    def test_archive_persists_exact_user_text_then_reply_with_direct_parent(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def archive_user_text(**kwargs):
+            calls.append(("archive_user", kwargs))
+            return {"recordId": "record-user"}
+
+        async def archive_assistant_text(**kwargs):
+            calls.append(("archive_assistant", kwargs))
+            return {"recordId": "record-reply"}
+
+        async def confirm_archive_assistant_delivery(**kwargs):
+            calls.append(("archive_delivery_confirmed", kwargs))
+
+        deps = make_deps(
+            calls,
+            archive_user_text=archive_user_text,
+            archive_assistant_text=archive_assistant_text,
+            confirm_archive_assistant_delivery=(
+                confirm_archive_assistant_delivery
+            ),
+        )
+        message = make_message(
+            content="Evelyn exact authored text  ",
+            guild=SimpleNamespace(id=1, name="Guild"),
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        names = [name for name, _payload in calls]
+        self.assertLess(names.index("archive_user"), names.index("stream"))
+        self.assertLess(
+            names.index("archive_assistant"),
+            names.index("ingress_response_ready"),
+        )
+        self.assertLess(
+            names.index("ingress_delivery_succeeded"),
+            names.index("archive_delivery_confirmed"),
+        )
+        user_payload = next(payload for name, payload in calls if name == "archive_user")
+        reply_payload = next(payload for name, payload in calls if name == "archive_assistant")
+        self.assertEqual(user_payload["text"], "Evelyn exact authored text  ")
+        self.assertEqual(user_payload["owner_name"], "정훈")
+        self.assertEqual(reply_payload["text"], "answer")
+        self.assertEqual(reply_payload["user_id"], 3)
+        self.assertEqual(reply_payload["parent_record_id"], "record-user")
+        confirmation = next(
+            payload
+            for name, payload in calls
+            if name == "archive_delivery_confirmed"
+        )
+        self.assertEqual(
+            confirmation,
+            {
+                "guild_id": 1,
+                "channel_id": 2,
+                "user_id": 3,
+                "turn_id": "turn:guild:1:text:2:user:3",
+            },
+        )
+
+    def test_archived_reply_is_not_confirmed_when_discord_delivery_fails(
+        self,
+    ) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def archive_user_text(**_kwargs):
+            return {"recordId": "record-user"}
+
+        async def archive_assistant_text(**_kwargs):
+            calls.append(("archive_assistant", None))
+            return {"recordId": "record-reply"}
+
+        async def confirm_archive_assistant_delivery(**_kwargs):
+            calls.append(("archive_delivery_confirmed", None))
+
+        async def fail_after_archive(*_args, **kwargs):
+            await kwargs["before_text_delivery"](
+                answer_text="answer",
+                final_text="answer",
+                metrics={"meta": {}},
+            )
+            raise OSError("discord delivery failed")
+
+        deps = make_deps(
+            calls,
+            stream_text_reply=fail_after_archive,
+            archive_user_text=archive_user_text,
+            archive_assistant_text=archive_assistant_text,
+            confirm_archive_assistant_delivery=(
+                confirm_archive_assistant_delivery
+            ),
+        )
+        message = make_message(guild=SimpleNamespace(id=1, name="Guild"))
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertIn(("archive_assistant", None), calls)
+        self.assertNotIn(("archive_delivery_confirmed", None), calls)
+
+    def test_archive_user_write_failure_blocks_llm_and_delivery(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def fail_archive(**_kwargs):
+            raise OSError("primary unavailable")
+
+        deps = make_deps(calls, archive_user_text=fail_archive)
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild"),
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        names = [name for name, _payload in calls]
+        self.assertNotIn("stream", names)
+        self.assertNotIn("ingress_response_ready", names)
+
     def test_prefixed_command_waits_for_exact_session_state(self) -> None:
         calls: list[tuple[str, object]] = []
 

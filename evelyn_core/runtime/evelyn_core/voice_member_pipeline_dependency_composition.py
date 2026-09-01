@@ -71,6 +71,10 @@ class VoiceMemberPipelineDependencyCompositionDeps:
     transcribe_completed_audio: Callable[..., Any] | None = None
     reserve_main_foreground: Callable[..., Any] | None = None
     cancel_main_foreground: Callable[..., Any] | None = None
+    authorize_archive_capture: Callable[..., Any] | None = None
+    archive_final_transcript: Callable[..., Any] | None = None
+    archive_assistant_text: Callable[..., Any] | None = None
+    confirm_archive_assistant_delivery: Callable[..., Any] | None = None
     log: Callable[..., Any] = print
 
 
@@ -148,6 +152,10 @@ class VoiceMemberPipelineDependencyComposition:
             get_room_turn_scope=deps.get_room_turn_scope,
             detach_task=deps.detach_task,
             clear_room_turn_scope=deps.clear_room_turn_scope,
+            archive_assistant_text=deps.archive_assistant_text,
+            confirm_archive_assistant_delivery=(
+                deps.confirm_archive_assistant_delivery
+            ),
         )
 
     def build_voice_member_audio_pipeline_deps(self) -> VoiceMemberAudioPipelineDeps:
@@ -172,6 +180,8 @@ class VoiceMemberPipelineDependencyComposition:
             transcribe_completed_audio=deps.transcribe_completed_audio,
             reserve_main_foreground=deps.reserve_main_foreground,
             cancel_main_foreground=deps.cancel_main_foreground,
+            authorize_archive_capture=deps.authorize_archive_capture,
+            archive_final_transcript=deps.archive_final_transcript,
         )
 
 __all__ = [

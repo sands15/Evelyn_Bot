@@ -58,6 +58,9 @@ class DiscordAppDependencyCompositionDeps:
     normal_ttl_sec: float
     question_ttl_sec: float
     log: Callable[..., Any]
+    archive_user_text: Callable[..., Any] | None = None
+    archive_assistant_text: Callable[..., Any] | None = None
+    confirm_archive_assistant_delivery: Callable[..., Any] | None = None
 
 
 class DiscordAppDependencyComposition:
@@ -142,6 +145,11 @@ class DiscordAppDependencyComposition:
             record_runtime_error=deps.record_runtime_error,
             format_display_text=deps.format_display_text,
             log=deps.log,
+            archive_user_text=deps.archive_user_text,
+            archive_assistant_text=deps.archive_assistant_text,
+            confirm_archive_assistant_delivery=(
+                deps.confirm_archive_assistant_delivery
+            ),
         )
 
     def build_discord_command_session_runtime_deps(

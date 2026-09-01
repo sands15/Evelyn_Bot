@@ -66,6 +66,31 @@ def _ttl_sec(value: Any) -> float | None:
     return ttl
 
 
+def _parent_record_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    value = payload.get("parentRecordIds")
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) != 1:
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    parent = value[0]
+    allowed = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789_.:-"
+    )
+    if (
+        not isinstance(parent, str)
+        or not parent
+        or parent != parent.strip()
+        or len(parent) > 64
+        or not parent[0].isalnum()
+        or not parent[0].isascii()
+        or any(character not in allowed for character in parent)
+    ):
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    return (parent,)
+
+
 async def execute_minecraft_world_lease_delegation(
     owner: Any,
     *,
@@ -77,6 +102,7 @@ async def execute_minecraft_world_lease_delegation(
     normalized_action = str(action or "").strip().lower()
     guild_id = _guild_id(payload.get("guildId"))
     if normalized_action == "connect":
+        parent_record_ids = _parent_record_ids(payload)
         result = await owner.connect(
             guild_id,
             issuer_ref=str(payload.get("issuerRef") or ""),
@@ -87,6 +113,11 @@ async def execute_minecraft_world_lease_delegation(
                 else None
             ),
             ttl_sec=_ttl_sec(payload.get("ttlSec")),
+            **(
+                {"parent_record_ids": parent_record_ids}
+                if parent_record_ids
+                else {}
+            ),
         )
     elif normalized_action == "disconnect":
         lease_id = payload.get("leaseId")
@@ -98,14 +129,13 @@ async def execute_minecraft_world_lease_delegation(
             raise RuntimeError(
                 "minecraft_world_disconnect_lease_invalid"
             )
-        result = await owner.disconnect(
-            guild_id,
-            **(
-                {"expected_lease_id": lease_id}
-                if lease_id is not None
-                else {}
-            ),
-        )
+        parent_record_ids = _parent_record_ids(payload)
+        disconnect_options: dict[str, Any] = {}
+        if lease_id is not None:
+            disconnect_options["expected_lease_id"] = lease_id
+        if parent_record_ids:
+            disconnect_options["parent_record_ids"] = parent_record_ids
+        result = await owner.disconnect(guild_id, **disconnect_options)
     elif normalized_action == "goal":
         goal = str(payload.get("goal") or "").strip()
         if not goal:
@@ -119,11 +149,11 @@ async def execute_minecraft_world_lease_delegation(
             raise RuntimeError(
                 "minecraft_world_goal_lease_invalid"
             )
-        result = await owner.set_goal(
-            guild_id,
-            goal,
-            expected_lease_id=lease_id,
-        )
+        parent_record_ids = _parent_record_ids(payload)
+        goal_options: dict[str, Any] = {"expected_lease_id": lease_id}
+        if parent_record_ids:
+            goal_options["parent_record_ids"] = parent_record_ids
+        result = await owner.set_goal(guild_id, goal, **goal_options)
     elif normalized_action == "action":
         if set(payload) != {"guildId", "leaseId", "request"}:
             raise RuntimeError(

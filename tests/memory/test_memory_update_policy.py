@@ -431,6 +431,131 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
 
 
 class MemoryUpdateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def writer_fence_deps(
+        self,
+        *,
+        currentness,
+        raw_calls: list,
+        vault_calls: list,
+        late_writes: list,
+        tasks: list[asyncio.Task],
+        background_memory_tasks: dict,
+        archive_task_targets: dict,
+    ) -> SimpleNamespace:
+        def create_task(coro, **_kwargs):
+            task = asyncio.create_task(coro)
+            tasks.append(task)
+            return task
+
+        async def late_write(name, *_args, **_kwargs):
+            late_writes.append(name)
+
+        return SimpleNamespace(
+            write_memory_turn_records=write_memory_turn_records,
+            vision_memory_write_enabled=False,
+            record_self_identity_turn=lambda *_args, **_kwargs: {},
+            append_raw_transcript_rows=lambda *args, **kwargs: raw_calls.append((args, kwargs)),
+            append_turn_rows_to_memory_vault=lambda *args, **kwargs: vault_calls.append((args, kwargs)),
+            schedule_memory_vault_maintenance=lambda *_args, **_kwargs: None,
+            memory_refresh_inputs_for_turn=lambda **_kwargs: SimpleNamespace(),
+            get_conversation_history=lambda **_kwargs: [],
+            session_last_active_at={},
+            needs_search_or_deep_routing=lambda *_args, **_kwargs: False,
+            build_memory_writer_decision_for_turn=lambda **_kwargs: SimpleNamespace(),
+            build_memory_writer_decision=lambda *_args, **_kwargs: None,
+            build_memory_writer_decision_payload=lambda *_args, **_kwargs: {},
+            plan_memory_writebehind_schedule=lambda *_args, **_kwargs: SimpleNamespace(
+                action="normal",
+                status="queued",
+                writebehind_mode="normal",
+            ),
+            runtime_session_key=lambda **_kwargs: "session",
+            memory_writebehind_task_key=lambda *_args, **_kwargs: "session",
+            should_replace_existing_memory_task=lambda *_args, **_kwargs: False,
+            mark_memory_writer_status=lambda *_args, **_kwargs: None,
+            memory_writebehind_status_log=None,
+            background_memory_tasks=background_memory_tasks,
+            create_turn_scoped_task=create_task,
+            run_memory_writebehind_steps=run_memory_writebehind_steps,
+            update_long_term_memory=lambda *args, **kwargs: late_write("vault", *args, **kwargs),
+            update_cognitive_state=lambda *args, **kwargs: late_write("cognitive", *args, **kwargs),
+            archive_target_is_current=currentness,
+            archive_task_targets=archive_task_targets,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+    async def test_retired_target_admission_writes_nothing_and_starts_no_task(self) -> None:
+        raw_calls: list = []
+        vault_calls: list = []
+        late_writes: list = []
+        tasks: list[asyncio.Task] = []
+        background_memory_tasks: dict = {}
+        archive_task_targets: dict = {}
+        deps = self.writer_fence_deps(
+            currentness=lambda **_target: False,
+            raw_calls=raw_calls,
+            vault_calls=vault_calls,
+            late_writes=late_writes,
+            tasks=tasks,
+            background_memory_tasks=background_memory_tasks,
+            archive_task_targets=archive_task_targets,
+        )
+
+        result = schedule_memory_update_from_runtime(
+            123,
+            "private user",
+            "private answer",
+            deps=deps,
+            session_key="session",
+        )
+
+        self.assertEqual(result["reason"], "archive_target_retired")
+        self.assertEqual(raw_calls, [])
+        self.assertEqual(vault_calls, [])
+        self.assertEqual(late_writes, [])
+        self.assertEqual(tasks, [])
+        self.assertEqual(background_memory_tasks, {})
+        self.assertEqual(archive_task_targets, {})
+
+    async def test_target_retired_before_task_runs_blocks_late_writes_and_releases_registries(self) -> None:
+        current = True
+        raw_calls: list = []
+        vault_calls: list = []
+        late_writes: list = []
+        tasks: list[asyncio.Task] = []
+        background_memory_tasks: dict = {}
+        archive_task_targets: dict = {}
+        deps = self.writer_fence_deps(
+            currentness=lambda **_target: current,
+            raw_calls=raw_calls,
+            vault_calls=vault_calls,
+            late_writes=late_writes,
+            tasks=tasks,
+            background_memory_tasks=background_memory_tasks,
+            archive_task_targets=archive_task_targets,
+        )
+
+        schedule_memory_update_from_runtime(
+            123,
+            "private user",
+            "private answer",
+            deps=deps,
+            session_key="session",
+        )
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(background_memory_tasks), 1)
+        self.assertEqual(len(archive_task_targets), 1)
+        current = False
+
+        await tasks[0]
+        await asyncio.sleep(0)
+
+        self.assertGreater(len(raw_calls), 0)
+        self.assertEqual(len(vault_calls), 1)
+        self.assertEqual(late_writes, [])
+        self.assertEqual(background_memory_tasks, {})
+        self.assertEqual(archive_task_targets, {})
+
     async def test_batch_replacement_keeps_cancelled_predecessor_visible_to_reset(self) -> None:
         task_key = "guild:123:memory-writebehind:batch:session"
         predecessor_started = asyncio.Event()

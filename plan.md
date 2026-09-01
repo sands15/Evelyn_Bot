@@ -931,11 +931,12 @@ Minecraft/Voyager 운영 bot이 의도한 OFF 상태다.
 
 ### P1-3. 검증 가능한 지식 작업의 실행·평가 기반
 
-상태: **[R] 설계 동결·승인 대기**. P0-4/P0-5와 P1-1/P1-2의 선행 순서를
-우회하지 않는다. 구현은 아래 `P1-3A → P1-3B`를 각각 별도 ID로 승인받아 한 단계씩
-수행한다. 이 항목은 영상의 selective context, eval, inspectable custom-agent contract를
-최소 범위로 옮긴다. principal·삭제 계보·durable promotion이 필요한 feedback/self-healing은
-P1-4 뒤의 P1-5가 별도로 소유한다. 영상 근거는
+상태: **[~] 승인된 source/offline 구현·검증 완료, live gate 대기**. 2026-08-28 사용자가
+전체 구현을 명시 승인해 `P1-3A → P1-3B`를 구현했다. exact TaskWorkContract와 process-local
+inspection, source-grounded draft, 고정 24-row evaluator와 source-owned Qwen broker runner가
+전체 회귀를 통과했다. 실제 Qwen 24-row 실행과 production 승격은 live 승인 전이므로 `[x]`가
+아니다. 이 항목은 영상의 selective context, eval, inspectable custom-agent contract를 최소
+범위로 옮긴다. principal·삭제 계보·durable promotion은 P1-4 뒤의 P1-5가 소유한다. 영상 근거는
 [feedback router/fixer 06:53](https://youtu.be/3flfON7F8hU?t=413),
 [사람 수정 기반 self-healing 08:23](https://youtu.be/3flfON7F8hU?t=503),
 [context와 row별 eval 13:00](https://youtu.be/3flfON7F8hU?t=780),
@@ -974,7 +975,9 @@ P1-4 뒤의 P1-5가 별도로 소유한다. 영상 근거는
 - 포함: 모든 text/voice/Control Page `task_executor` terminal의 content-free 계약 projection,
   source-grounded review/summarize/explain/compare draft와 fixed synthetic eval이다. text/voice는 현재
   turn envelope에만 record를 반환하고, 최근 history panel은 기존 FastAction owner가 있는 Fast Control에만
-  제공한다. cross-surface store나 durable run history를 뜻하지 않는다.
+  제공한다. 여기서 만들지 않는 것은 **공개 task contract의** cross-surface store와 durable run history다.
+  사용자가 요청한 대화문·최종 음성 전사·Minecraft 공동 기록은 public task record와 섞지 않고,
+  P1-4의 별도 private archive가 principal·참여 시간·삭제 계보를 갖춰 소유한다.
 - 비범위: 새 daemon·범용 agent framework·자유형 shell·임의 MCP 연결, long-context 전체 dump,
   production source code 자동 수정, active tool allowlist/permission/approval/evaluator 변경,
   자동 external send/deploy/delete, manager·사용자 음성/문체 복제나 impersonation이다.
@@ -1097,28 +1100,447 @@ exact evidence 연결, 잘못된 ref 거부, 링크 opt-in, TTS raw body 비노�
 - trigger, 실제 consumed context, authority projection, output schema, eval corpus/gate, timeout·취소,
   live 비범위와 단계별 파일 범위를 위에서 고정했다. **미해결 설계 질문은 0개다.**
 
-### P1-4. 운영 보안·내구성 마감
+### P1-4. 운영 보안·30일 private archive·삭제/백업 내구성
 
-- [ ] continuity와 memory deletion의 HMAC key/external anchor를 repository 밖에 배치하고
-  Windows DACL/owner 및 Docker read-only mount를 실제로 검증한다.
-- [ ] P1-5 전역 guidance 승격용 privileged local Control Page principal/issuer proof와 private
-  feedback correction·deletion-current cascade를 기존 continuity/memory authority에 결박한다.
-- [ ] Codex action route는 tool registry와 secret-canary 비노출이 실제 image에서
-  증명되기 전까지 비활성으로 유지한다.
-- [ ] Qwen-ASR/Transformers와 Mineflayer 계열 보안 릴리스를 추적하되, 호환 smoke 없이
-  강제 upgrade나 `npm audit fix --force`를 실행하지 않는다.
-- [ ] Runtime Health가 Discord/Minecraft를 실제 기동한 상태에서도 원문·경로·credential을
-  노출하지 않고 정확한 desired/off/degraded 상태를 보이는지 확인한다.
+상태: **[~] 승인된 구현·검증 진행**. 2026-08-28 사용자가 P1-4 구현을 명시적으로 승인했다.
+이번 승인은 source/offline 구현·검증만 열며, 이 항목은 P1-3의 content-free task contract를 대신하거나
+P0-4/P0-5, P1-1/P1-2의 선행 순서를 우회하지 않는다. 아래에서 `private archive`는 Git·`docs/`·
+일반 runtime log가 아니라, 접근권한과 삭제 계보를 가진 **비공개 기준 기록 저장소**를 뜻한다.
+Discord 열람은 server slash command의 invoker-only ephemeral 응답과 180초 삭제 시도로 확정했다.
+deaf 상태는 참여 불가, D: 단독 장애는 10분 유예 뒤 새 기록 차단으로 확정했으며 미해결 설계 질문은 0개다.
+선행 항목과 별도 live 승인 전에는 Discord/microphone/Minecraft/Docker 운영 runtime을 기동하거나
+private archive를 production ON으로 바꾸지 않는다.
 
-완료 조건: restart/rollback 공격과 권한 경계의 live 증거가 남고, 미검증 action route는
-계속 fail-closed하며, privileged principal과 deletion-current가 forged/stale feedback을 거부하고,
-public health privacy 검사가 통과한다.
+#### 문제·현행 근거·선택한 최소 구조
+
+- 현재 `FastActionCoordinator` 기록은 process-local이고, memory DB는 사람별 참여 구간과
+  message/reply lineage를 소유하지 않는다. `RoomSpeakerActivityStore`도 약 2.5초의 최근 화자 선택용
+  임시 상태이므로 30일 열람권의 근거가 될 수 없다.
+- 현재 Discord voice-state handler는 Evelyn 본인 외 구성원의 join/leave/mute 변화를 무시한다.
+  따라서 “사용자가 실제 참여한 시간”을 사후 추측하지 않고 별도 interval event로 수집해야 한다.
+- 현재 compose는 `bot_api`, Control Page, Discord가 같은 `runtime_artifacts`를 쓰기 가능하게 mount한다.
+  이 상태에서 어느 process가 최종 writer인지 증명할 수 없으므로 private archive는 별도 root로 격리한다.
+- 선택: 기존 `bot_api`를 archive·보존기간 정리·D: 백업·삭제·복구의 **유일 writer**로 둔다.
+  `유일 writer`는 파일을 실제로 변경할 수 있는 process가 하나뿐이라는 뜻이다. 새 daemon이나 DB server,
+  queue, dependency는 만들지 않고 Python 표준 `sqlite3`와 기존 API lifespan을 사용한다.
+- Discord process는 파일을 직접 열지 않고 별도 목적 제한 HMAC 인증의 ingest API로 typed event만 보낸다.
+  여기서 HMAC은 비밀키로 “허가된 발신자가 보낸 내용이며 중간에 바뀌지 않았다”를 확인하는 코드다.
+  광범위한 internal-control token을 재사용하지 않는다. Control Page도 read/delete API만 호출한다.
+- `bot_api` 시작 시 OS writer lease를 한 번 얻고, boot generation·단조 event sequence·idempotency key로
+  중복/늦은 callback을 거부한다. `lease`는 다른 process가 동시에 writer가 되지 못하게 잡는 운영체제
+  잠금이고, `generation`은 재시작 전후의 낡은 요청을 구분하는 세대 번호다.
+
+#### 확정된 제품 정책과 기록 범위
+
+- 기본은 `local_private`다. 로컬 소유자 한 명만 사용하고 제3자 Discord 전송·공동 기록은 없다.
+  Discord mode를 명시적으로 켠 세션만 `discord_shared`가 되며, 다른 사용자에게 제공하는 범위는
+  **대화와 Minecraft**뿐이다. mode는 capture 시점에 고정하며, 켰다고 과거 local 기록을 올리거나
+  껐다고 이미 생긴 Discord 기록을 local-only로 재분류하지 않는다.
+- `local_private`는 소유자 이외 사람의 음성을 “저장만 안 하는” 모드가 아니다. 제3자 화자로 판정된
+  segment는 STT/LLM/memory 전에 버리고 raw buffer도 지운다. 화자를 소유자로 확인할 수 없는 공동 환경은
+  local 입력 admission을 닫으며, “로컬 공동 모드”나 speaker-biometric을 이번 범위에 추가하지 않는다.
+- Discord mode는 새 전역 toggle을 만들지 않고 기존 Discord ingress와 current voice-capture consent를
+  `(local operator, guild, text/voice channel, boot generation, TTL)`에 결박한 `discord_shared` session으로
+  해석한다. bot leave/restart/명시 OFF/TTL 만료 시 닫히며 stale session은 자동 복원하지 않는다.
+- `discord_shared`에서는 로컬 마이크를 입력·참여·완료 조건에서 완전히 제외하고 Discord voice만 듣는다.
+  실행 중이던 로컬 캡처도 정지한다. 음성 packet의 화자는 Discord gateway의 정확한 SSRC→user ID mapping으로
+  확정하고, 그 member의 현재 `display_name`을 기록·화면의 화자명 snapshot으로 쓴다. user ID mapping이 아직
+  없으면 잠깐 대기한 뒤 STT 전에 폐기하며, 최근 발화자나 채널의 유일한 사람으로 추정하지 않는다.
+- Discord mode를 켤 때와 bot이 voice channel에 들어갈 때 보존 범위, 30일, raw audio 비저장,
+  사용자별 열람 범위, `/기록열람`·`/기록삭제` 방법을 channel에 명시한다. 사용자는 1회용
+  동의 action으로 참여를 시작하고 언제든 철회할 수 있다. 안내·동의를 확인할 수 없으면 그 사용자의
+  audio를 STT하지 않고 전사·열람 interval도 만들지 않는다. 녹음/전사 중이라는 운영 상태도 계속 보인다.
+- 저장하는 기준 기록은 다음뿐이다.
+  1. Discord/local에서 확정된 사용자 text와 Evelyn의 text 답변.
+  2. Discord voice에서 bot의 녹음 안내가 활성인 동안 확정된 화자별 final STT와 Evelyn 답변 text.
+     Evelyn이 답하지 않은 final STT도 대화 기록에는 포함하되 partial STT와 원음은 포함하지 않는다.
+  3. 정확한 voice 참여 가능 구간, mute/deaf 전이, guild/channel과 record/turn/reply 연결.
+  4. Discord mode에서 요청된 Minecraft 명령, 허가·실행·검증 결과와 세계에 남은 effect receipt.
+  5. feedback 원본, candidate/version의 상태와 P1-5의 비식별 독립 여부를 판정하는 lineage.
+- 저장하지 않는 것은 raw PCM/Opus/audio, partial STT, TTS audio, 내부 prompt/추론, credential,
+  tool의 private argument·파일 원문, 임의 debug dump다. `final STT`는 음성을 문자로 바꾸는 과정이
+  끝나 더 이상 수정하지 않는 최종 전사이고, `lineage`는 어느 원본에서 어떤 파생물이 나왔는지를
+  잇는 출처 관계다.
+- 각 record는 무작위 record ID, mode/surface/type, UTC 시작·종료, opaque principal, guild/channel,
+  parent/reply/task/action ID, private body, schema/generation을 가진다. body의 저장 중 암호화는 아래의
+  검증된 C:/D: volume encryption 경계가 담당하고 화면 시간만 KST로 변환한다.
+  Discord 표시 이름은 사람이 읽는 화자명일 뿐 권한 근거가 아니며, 내부 권한·소유권·삭제 대상은 안정적인
+  Discord user ID와 별도 opaque mapping으로 판정한다.
+
+#### 참여 시간과 사용자별 열람권
+
+- 물리적으로 channel에 있었던 `presence interval`과 실제 열람권을 만드는 `eligible interval`을 따로
+  기록한다. 둘 다 `(guild, voice channel, Discord user, [join, leave))`의 반열린 구간이며,
+  `[join, leave)`는 들어온 시각은 포함하고 나간 시각은 포함하지 않는다는 뜻이다. presence는 진단용이고
+  권한은 `presence ∧ 안내 동의 current ∧ mute 아님`인 eligible interval만 사용한다.
+- 사용자 요구대로 `self_mute`, server `mute`, Stage `suppress`가 켜지는 순간 eligible interval을 닫고
+  해제되는 순간 새 구간을 연다. 음소거 중 듣기가 가능해도 이 정책상 voice 참여자로 인정하지 않는다.
+  channel presence는 별도로 남아 “나갔다”고 잘못 기록하지 않는다. gateway disconnect/restart처럼 상태를
+  모르는 틈은 `unknown`으로 두고 열람권을 주지 않으며, 재접속 뒤 실제 channel state부터 새 구간을 연다.
+- `self_deaf` 또는 server `deaf`도 참여 불가로 확정한다. 켜지는 순간 eligible interval을 닫고 해제 뒤
+  안내 동의와 channel state가 current일 때만 새 구간을 연다.
+- 음소거 중 본인이 text chat을 보내면 **그 chat record와 직접 연결된 Evelyn 답변·task·Minecraft
+  결과만** 본인 기록으로 인정한다. 그 한 메시지가 음소거 전체 시간이나 같은 시각의 무관한 다른 사람
+  voice 기록 열람권을 만들지는 않는다.
+- 최신 사용자 결정에 따라 eligible interval은 열람의 필요조건일 뿐, 그 시간대 전체 기록 열람권이 아니다.
+  일반 사용자는 **본인이 작성한 text·본인 final STT와 그 발화에 직접 연결된 Evelyn 답변·task·Minecraft
+  결과만** 볼 수 있다. 같은 시간에 있던 타인의 발화·전사·답변, 참여 전·퇴장 후 기록, 타인의 DM/개인
+  memory, 내부 prompt·tool secret·관리 기록은 볼 수 없다.
+- Discord role, 닉네임, 서버 `Administrator` 권한은 기록 소유권이 아니다. 모든 요청은 실제
+  interaction author의 Discord user ID로 다시 계산한다. gateway snapshot이나 최근 화자 cache에서
+  참여 시간을 추정하지 않는다.
+- 일반 사용자의 Discord 열람 명령은 `admin.control` 세션을 만들거나 열지 않는다. 호출마다 exact caller와
+  본인 발화/reply linkage를 다시 계산하는 짧은 read handle만 쓰고, 지속 관리자 권한은 발급하지 않는다.
+- 앞서 확정한 “로컬 관리자만 전체 기록 열람”은 아래의 별도 local Control Page `admin.control` 경로에만
+  남는다. 관리자 본인이 Discord에서 `/기록열람`을 실행해도 일반 사용자 범위만 적용되며 전체 열람권으로
+  승격하지 않는다.
+
+#### 일반 사용자 열람·삭제 명령
+
+- `/기록열람 [시작] [끝]`과 `/기록삭제 [시작] [끝]`은 global application command로 두되 `GUILD` context만
+  등록·허용한다. `BOT_DM`과 다른 사람/GDM인 `PRIVATE_CHANNEL`은 등록과 handler 양쪽에서 거부한다.
+  3초 안에 content-free
+  ACK/defer하고 Discord interaction token의 15분 수명을 Evelyn 권한 session으로 재사용하지 않는다.
+- 열람은 command를 실행한 현재 guild의 본인 발화·직접 연결 결과로 고정한다. 삭제는 기간을 생략하면
+  사용자 요구대로 그 Discord user에게 귀속된 모든 guild·전체 기간을 뜻하며, apply 전 guild별 대상 수를
+  ephemeral preview로 보여 주고 같은 caller의 1회용 확인을 받는다.
+- 열람/삭제 command 원문, OTP, 열람 결과 message body는 다시 대화·memory·feedback archive에 넣지
+  않는다. 삭제 요청 자체는 아래의 content-free tombstone만 남기므로 “전체 삭제” 직후 새 개인정보
+  record가 생기는 순환을 만들지 않는다.
+- 일반 사용자에게 OTP를 다시 보내는 것은 같은 Discord 계정을 두 번 확인할 뿐 별도 인증이 되지
+  않으므로 사용하지 않는다. 현재 Gateway session에서 받은 exact interaction `user.id`를 owner로 고정하고
+  설치 owner나 role을 caller로 대신 쓰지 않는다. 삭제는 대상 수·기간·파생 범위를 먼저 보여 준 뒤
+  같은 caller와 preview generation/affected-set fingerprint에 묶인 60초짜리 1회용 확인을 한 번 더 받는다.
+  대상이 바뀌면 409로 preview부터 다시 시작한다.
+- 한 번에 한 page만 보내며 모든 page/component에서 caller ID, `GUILD` context, exact guild,
+  query/snapshot generation을 다시 검증한다. component에는 짧은 opaque handle만 넣고 내용·권한 claim을
+  넣지 않는다. invoker-only ephemeral flag로 응답하고 180초 뒤 유효한 interaction token으로 삭제하되,
+  token은 장기 session/기록으로 보존하지 않아 restart 뒤 exact 180초 삭제를 보장하지 않는다. 결과를
+  `removed|token_expired|not_found|not_controllable`로 구분한다. 사용자가 직접 닫거나 client가 restart되면
+  180초보다 먼저 사라질 수 있으며, 복사·스크린숏·클라이언트 탈취와 Discord 사업자 내부 보존까지
+  막았다고 주장하지 않는다.
+- Discord의 **ephemeral**은 server interaction을 호출한 사람에게만 보이는 응답 형식이다. 명령은 server
+  channel에서 실행하지만 응답 본문은 호출자 이외의 channel 사용자에게 표시하지 않고 일반 DM도 만들지 않는다.
+- 이 명령은 Evelyn이 소유한 local/D: 기록을 지우는 기능이다. 사용자가 Discord에 직접 작성한 원본
+  guild/DM message, 이미 다른 사람에게 재생된 음성, Discord 사업자의 내부 사본까지 삭제한다고 주장하지
+  않는다. Evelyn이 작성한 DM/ephemeral 응답의 surface deletion 결과도 local purge와 별도 상태로 보고한다.
+
+#### 삭제 계약과 30일 보존
+
+- 정상 보존 상한은 각 record의 `endedAt`부터 30×24시간이다. 열람했다고 기간을 연장하지 않는다.
+  새 scheduler는 만들지 않고 `bot_api` startup 및 매시간 bounded batch에서 만료된 가장 오래된 record부터
+  순차 삭제한다. TTL 만료도 사용자 요청과 **같은** freeze→direct/derived→D:→검증 상태 machine을 쓰고
+  tombstone reason만 `retention_expired`로 다르다. 장시간 꺼져 있었다면 startup catch-up을 끝내기 전 새
+  archive read/write를 열지 않는다.
+- 사용자 직접 삭제가 30일 정리보다 우선한다. 요청을 받은 즉시 해당 principal/generation을 freeze하고
+  진행 중 STT/LLM/summary/memory/index/backup/outbound worker를 cancel 또는 drain한다. 모든 late commit은
+  삭제 generation/currentness를 다시 검사해 stale이면 버린다. `freeze`는 삭제 중인 원본을 새 작업의
+  입력으로 쓰지 못하게 닫는 상태이고, `drain`은 이미 시작한 작업이 안전하게 끝나거나 취소됐음을 확인하는
+  절차다.
+- 공동 기록에서 한 사용자가 삭제하면 다른 참여자의 독립 발언은 유지한다. 요청자 발언·text·final STT의
+  body, 대상 기간의 참여/mute event와 신원 연결을 지우고 canonical row type 자체를 새 tombstone으로
+  바꾼다. 최종 placeholder allowlist는 새 무작위 placeholder ID, minute-rounded UTC 시각, 대화 내 상대 순서,
+  삭제 reason뿐이며 과거 parent/reply/task/action/principal ID는 제거한다. UI는 그 자리를 정확히
+  **`사용자의 요청으로 삭제됨`**으로 렌더링한다. 일부 기간 삭제면 남은 기간에 필요한 principal mapping만
+  유지하고, 기간 없는 전체 삭제면 그 사용자에게 귀속된 마지막 mapping도 제거한다.
+  placeholder 자체에는 이름, Discord ID/message ID, 원문 hash를 넣지 않는다.
+- 요청자의 내용을 인용·요약해 드러내는 Evelyn 답변/다른 row는 proven independent fragment만 남기고
+  삭제 source를 다시 입력하지 않은 surviving-source rebuild만 허용한다. 나머지는
+  `삭제된 사용자 기록에 의존하여 숨김`으로 격리/삭제한다. 독립임을 증명할 fragment lineage가 없으면
+  유지 쪽으로 추정하지 않는다. 다른 사용자가 별도로 쓴 독립 원문은 유지하되 그 안의 요청자 직접 인용은
+  exact span을 증명할 때만 지우며, 분리 불가능하면 해당 row를 격리하고 local purge 완료를 보류한다.
+- index/search cache/embedding/summary/memory/TTS cache와 private feedback처럼 복원·추론 가능한 파생물을
+  모두 제거하거나 삭제된 source 없이 재구축한다. `embedding`은 문장을 숫자 벡터로 바꾼 검색용 파생물,
+  `cache`는 빠른 재사용을 위한 임시 사본, `derived`는 원본에서 계산·요약된 파생물이다.
+- Minecraft의 이미 일어난 세계 변화는 기록 삭제로 되돌리지 않는다. 세계 안전에 필요한 최소 action/result
+  receipt는 남길 수 있지만 요청자의 이름·ID·자연어 명령은 지우고 content-free event로 바꾼다.
+- 기존 내용 HMAC/hash와 원본을 가리키는 무결성 row도 함께 제거한다. cleanup 중 tombstone에는 D:나 늦은
+  callback에 삭제를 재적용할 최소 opaque record/dependent ID set, 삭제 generation/head도 임시로 둔다.
+  모든 sink가 닫히면 그 target set을 제거하고 무작위 삭제 요청 ID, 접수/완료 시각, 삭제 범주,
+  primary/D: 처리 상태만 가진 최종 content-free tombstone으로 compact하며 UI에는
+  “사용자의 삭제 요청에 따라 삭제됨”으로 표시한다. `tombstone`은 원문 없이 삭제 사실과 재등장 금지만
+  남기는 묘표다. 일반 삭제 증명에 이름·Discord ID를 보존하지 않으며, 특정 법률이 exact 항목의 별도
+  보존을 요구할 때만 그 법적 근거·기간·격리 위치를 별도 결정한다.
+- 이 프로젝트에서 사용자가 지정한 **법적·운영상 최소정보 정책**은 특정 법률의 존재를 새로 주장하는
+  예외가 아니라 위 별도 결정 자체다. user/admin 삭제 시 30일이 지나지 않은 사건의 `owner name + 실제
+  UTC 발생시각`만 admin-only `legal_minimal_events` table에 자동 투영하고 body·principal/Discord ID·
+  record/event ID의 외부 projection·삭제 reason·hash는 넣지 않는다. 보존 종료는 원래 발생시각+30일이며
+  같은 oldest-first durable audit→primary compaction→D: replica 검증으로 제거한다. retention 삭제와 이미
+  30일이 지난 직접 삭제는 최소정보를 새로 만들지 않는다. 향후 특정 법률이 다른 항목·기간을 요구하면
+  별도 사용자 결정과 migration 없이는 이 범위를 넓히지 않는다.
+- 삭제는 `logical_deleted → local_cleanup_pending → local_fully_purged`로 진행한다. 첫 상태부터 모든
+  query에서 즉시 숨기되, primary·D:·아래 열거 sink의 application-recoverable direct/derived copy가 0이고
+  수동 검토/격리 row도 0일 때만 local 완료라고 알린다. Discord surface는 별도
+  `removed|permission_denied|token_expired|not_controllable` receipt로 보고하며 local 완료와 합치지 않는다.
+  `logical_deleted`는 우선 차단됨, `local_fully_purged`는 Evelyn이 소유·열거한 local 사본에서 재생 불가가
+  검증됨이라는 뜻이다. 사용자 screenshot, Discord 내부 사본, 알 수 없는 외부 복사본까지 지웠다는 뜻은 아니다.
+- 삭제 sink allowlist는 archive DB/WAL/SHM/temp/staging, `bot_memory` hot/daily/vault 원문,
+  memory deletion journal·continuity/checkpoint/ingress journal, search/prompt/tool cache와 embedding,
+  persona/cognitive/autonomy/open-question/feedback state, outbound retry payload, STT/TTS 작업 buffer·debug audio,
+  D: replica·등록 export다. 각 owner가 동일 deletion generation의 purge receipt를 반환해야 하며 하나라도
+  미완료면 `local_cleanup_pending`이다. archive enable 동안 `VOICE_DEBUG_SAVE_AUDIO=false`를 admission에서
+  강제하고 기존 debug audio가 있으면 같은 삭제 대상에 넣는다.
+
+#### 저장 위치·D: 백업·무결성
+
+- 기준 원본 SQLite는 `C:\ProgramData\Evelyn\private-audit\conversation.sqlite3`, 백업은
+  `D:\EvelynBackup\private-audit\conversation.sqlite3`로 고정한다. `docs/`, Git, 일반 log,
+  `runtime_artifacts`에는 private body를 쓰지 않는다.
+- Linux container인 `bot_api`가 Windows SID/volume/reparse/DACL/BitLocker를 직접 확인했다고 주장하지 않는다.
+  UAC로 상승한 one-shot Windows host launcher가 drive letter가 아닌 volume identity, reparse 부재,
+  NTFS owner/DACL, C:/D: BitLocker를 검사해 boot/paths/volume IDs에 묶인 짧은 HMAC attestation을 발급하고,
+  `bot_api`는 exact mount source와 그 증거가 일치할 때만 archive를 연다. 현재 확인된 것은 C:와 D:가 서로
+  다른 물리 disk라는 점뿐이며 encryption은 권한 부족으로 미검증이므로 preflight 실패 시 기능을 켜지 않는다.
+- P1-4 production backup topology는 위 D:의 **최신 검증 replica 한 개**로 고정한다. SQLite online-backup
+  API로 일관된 staging DB를 만들고 generation/hash를 검증한 뒤 교체한다. 서로 다른 disk의 두 파일을
+  한 번에 atomic commit할 수 없으므로 primary commit → D: copy → verify 상태를 명시한다.
+- 삭제 때 SQLite `secure_delete`, WAL checkpoint/truncate만 믿지 않는다. 살아 있는 row만 새 DB에 쓰고
+  fsync→atomic replace한 뒤 이전 DB/WAL/SHM/temp/staging과 D: 이전 replica를 제거하며, 모든 열거 파일의
+  raw-byte canary scan과 새 DB query negative recall을 통과시킨다. SSD wear-leveling까지 물리 법과학적
+  소거를 보장하지 않으므로 BitLocker volume encryption과 application-recoverable 범위로 완료 의미를 제한한다.
+- 백업 복원은 protected anchor의 `minimumRestorableGeneration`보다 오래된 DB를 무조건 거부하고 최신
+  tombstone·삭제 cutover witness·generation을 먼저 대조한다. test에서는 의도적으로 만든 pre-delete fixture를
+  restore하려 해 거부되는지 확인하며 production에 오래된 snapshot을 남겨 두지 않는다.
+- Windows Volume Shadow Copy, 다른 backup agent,
+  cloud sync, 수동 export가 private archive root를 추가 복제한다면 그 사본을 같은 삭제/reconcile 계약에
+  등록하기 전 기능을 켜지 않는다. 등록되지 않은 숨은 backup이 있으면서 “모든 backup 삭제”를 주장하지 않는다.
+- HMAC key는 repository와 DB/D: backup 밖의 OS-protected secret으로 두고 domain을 conversation,
+  deletion, feedback-version으로 분리한다. 최신 generation/digest를 별도 protected anchor에 기록한다.
+  `anchor`는 DB와 백업을 함께 과거판으로 되돌리는 공격을 알아내기 위해 저장 묶음 밖에 둔 최신 머리표다.
+  삭제 시 이전 원문 hash와 연결된 head를 버리기 전에 content-free cutover witness와 최소 복원 generation을
+  새 anchor에 확정하고, 그 뒤 tombstone chain/checkpoint로 전환한다.
+- 이번 local anchor는 stale/accidental restore와 key 없는 외부 변조를 탐지하지만, DB·backup·anchor 쓰기와
+  key까지 탈취한 악성 `bot_api`/host administrator를 막는 WORM은 아니다. 그 위협까지 막으려면 별도 credential의
+  append-only remote/WORM anchor가 필요하며 개인용 local-first 범위에는 추가하지 않는다.
+
+#### “기록 저장소 고장”의 정확한 뜻과 동작
+
+`기록 저장소 고장`은 단순히 LLM·Discord·네트워크가 느린 경우가 아니라 아래 중 하나를 뜻한다.
+
+| 상태 | 실제 예 | Evelyn의 동작 |
+|---|---|---|
+| `primary_write_rejected` | commit 전 C: 없음/가득 참/read-only, DACL 거부, SQLite begin 실패 | 검증된 snapshot read만 허용하고 새 text/voice/Minecraft처럼 기록을 만들어야 하는 기능은 차단한다. 기록 없는 우회 실행은 하지 않는다. |
+| `commit_unknown` | SQLite commit/WAL 결과 불명, process crash/timeout 중 응답 유실 | 본문 read와 mutation을 모두 닫고 transaction ID/head/idempotency를 reconcile하기 전 성공·실패 어느 쪽도 단정하지 않는다. |
+| `primary_unreadable` | SQLite corruption, schema/generation 불일치, 파일 I/O 오류 | 본문 read/write/delete/restore를 모두 fail-closed하고 content-free health만 보인다. |
+| `writer_lease_lost` | 두 번째 writer 발견 또는 OS lock 상실 | unlocked read/write fallback을 금지하고 새 verified reader snapshot/lease를 얻기 전 본문을 닫는다. mutation은 503/retryable이다. |
+| `anchor_unavailable` | protected anchor path/서비스 일시 접근 불가 또는 stale | 새 read/write를 닫고 local chain이 검증될 때 삭제 tombstone만 `pending_anchor`로 받을 수 있으나 완료라고 말하지 않는다. |
+| `integrity_blocked` | HMAC key 없음, row/head/anchor mismatch, 과거 backup replay 의심 | unsigned fallback·자동 재서명·자동 backup 덮어쓰기를 금지하고 수동 복구 전 본문을 노출하지 않는다. |
+| `authorization_key_failed` | admin-session/user-view-handle signing key 없음·손상 | 해당 관리자 session·개인 handle 발급과 기존 token 수용을 모두 중단한다. archive key 장애와 섞지 않는다. |
+| `backup_pending` | D: 분리/가득 참/read-only 또는 copy I/O 실패 | 검증된 primary read와 최대 10분의 primary-only 기록을 degraded 표시로 허용한다. 시작시각을 영속화해 restart로 초기화하지 않고 10분 뒤 새 기록을 차단한다. |
+| `backup_integrity_blocked` | D: snapshot hash/generation/volume identity 불일치 | grace를 주지 않고 D:를 격리하며 restore/export를 금지한다. primary가 독립 검증될 때 read만 허용한다. |
+| `local_cleanup_pending` | exact 삭제 scope의 D: 또는 derived purge/검증 미완료 | 해당 범위는 어디서도 보여 주지 않고 “삭제 접수, 정리 대기”로 알리며 local 완료라고 말하지 않는다. |
+| `derived_only_failed` | search index/cache만 손상 | stale 결과를 격리하고 검증된 기준 원본+tombstone에서 재구축한다. 기준 원본을 index로 덮지 않는다. |
+
+`fail-closed`는 안전 조건을 증명하지 못하면 기능을 허용하지 않는 방식, `degraded`는 일부 안전한 기능만
+명시적으로 남긴 저하 상태, `WAL`은 SQLite가 commit 전에 변경을 적는 write-ahead log다. 본문 노출은
+`사용자 scope 유효 ∧ primary 무결성 정상 ∧ 삭제 chain 최신 ∧ tombstone filter 최신 ∧ reader lease 유효`일
+때만 허용한다. `reader lease`는 sole writer가 확정한 exact immutable snapshot/generation을 읽는 동안만
+유효한 단기 읽기 권리다. 여러 장애가 겹치면 integrity/unknown-commit/lease fault가 backup grace보다 항상
+우선한다. 장애 복구는 의도적으로 만든 pre-delete fixture의 restore가 거부되고 현재 D: replica에서 삭제
+문장·고유 구절·principal이 재등장하지 않는 negative-recall 검사를 포함한다.
+
+#### 로컬 관리자 OTP와 “관리자 세션”
+
+- `127.0.0.1` 접속 자체는 관리자 증명이 아니다. 전체 기록 진입은 UAC로 상승한 one-shot Windows host
+  launcher가 현재 token의 SID와 Administrators/elevated 상태를 검사하고, DACL-protected host secret으로
+  `(SID, host, boot, browser bootstrap nonce, expiry)`를 서명해 Control Page/`bot_api`에 넘긴 경우만 시작한다.
+  Linux container는 SID를 직접 판정하지 않고 attestation의 purpose/TTL/replay와 exact mount를 검증한다.
+- Discord out-of-band confirmation secret은 그 Windows 관리자 증명을 대체하지 않고, 미리 등록한 Discord
+  계정도 현재 소유하고 있다는 두 번째 확인으로만 쓴다. code는 bot→등록된 1:1 DM으로 보내고 사용자는
+  **로컬 Control Page에만** 입력한다. 같은 PC의 Discord client를 쓰면 독립 장치 MFA나 NIST AAL2를
+  달성했다고 주장하지 않는다.
+- OTP 표시 코드는 ASCII 영문 대문자 26자+소문자 26자+숫자 10자에서 뽑은 정확히 4자다.
+  대소문자를 그대로 비교하고 공백·Unicode 유사문자·자동 대문자화는 허용하지 않는다.
+  `secrets.choice`처럼 암호학적으로 안전하고 균등한 난수원으로 각 자리를 뽑는다. 가능한 값은
+  `62^4 = 14,776,336`개뿐이므로 단독 password로는 쓰지 않는다.
+- 내부 challenge ID/nonce는 128-bit 이상 무작위 값이고 Windows SID, host/boot generation,
+  등록 Discord user ID, 요청 capability에 묶는다. 화면 코드는 60초, 최대 3회, 한 session에 1개,
+  새 발급 시 이전 코드 폐기, 발급 3회/10분·10회/24시간 제한, one-use, restart/잠금/logout 시 challenge
+  폐기다. 실패 횟수/rate-limit은 `(등록 Discord ID, Windows SID, host)`와 global scope로 무결성 보호해
+  영속화하며 새 code나 process restart로 초기화하지 않는다. 원문 코드는 저장·log하지 않고 secret-keyed
+  digest만 constant-time으로 비교한다. DM 실패 시 공개 channel fallback 없이 challenge를 폐기한다.
+- 등록 Discord ID의 최초 등록·변경·복구는 UAC-elevated host launcher와 새 confirmation을 모두 요구하고,
+  변경 즉시 기존 challenge/admin session을 전부 폐기한다. Discord role·nickname이나 server admin을
+  등록 증거로 사용하지 않는다.
+- **관리자 세션**은 OTP 성공 뒤 `bot_api`가 “이 로컬 browser는 잠시 admin.control 작업을 해도 된다”고
+  기억하는 server-side 임시 권한이다. password나 기록 사본이 아니며 절대 5분/idle 2분, process restart,
+  Windows lock/logout, 명시 logout 중 먼저 온 시점에 끝난다. host launcher가 고정·신뢰한 loopback HTTPS만
+  쓰고 browser에는 로그인 직후 교체한 128-bit 이상 `__Host-` opaque cookie를 `Secure; HttpOnly;
+  SameSite=Strict; Path=/`로 준다. CSRF·host/origin을 검증하고 server에는 keyed digest만 둔다. 다른 사용자
+  기록 삭제·P1-5 promotion은 같은 session이어도 exact 대상 preview와 새 one-use step-up 확인을 요구한다.
+- `admin.control` session과 일반 사용자의 per-command `memory.user_view` handle은 signing domain, token schema,
+  verifier, endpoint를 분리해 상호 수용하지 않는다. 개인 view handle은 정확한 Discord user/guild/본인
+  발화·직접 reply/query generation에만 결박되고 절대로 전체 기록을 볼 수 없다. 같은 사람이 local admin이면서
+  record owner여도 두 권한은 합치지 않는다.
+
+#### 단계별 구현 범위·검증·rollback
+
+1. `conversation_archive.py` 하나에 schema/store/retention/access/redaction/reconcile을 먼저 모으고,
+   `fast_control_api.py` lifespan에 sole-owner/lock/API를 배선한다. 실제 요구가 생기기 전 파일을 더 쪼개지 않는다.
+2. `discord_app_composition_runtime.py`에서 member voice-state transition,
+   `discord_text_turn.py`에서 확정 text/reply,
+   `voice_member_audio_pipeline_runtime.py`에서 final STT만 typed event로 만든다. 현재 transient speaker
+   activity를 권한 DB로 재사용하지 않는다.
+3. `discord_command_handlers.py`에 admin predicate와 분리된 exact-self global application command를 추가하고,
+   `GUILD+ephemeral`만 register/sync/handler에서 허용하며 `BOT_DM|PRIVATE_CHANNEL`을 거부한다.
+   `discord_runtime_status.py`의 shared status file에는 participant ID를 쓰지 않고, private participant
+   transition/heartbeat는 목적 제한 HMAC API로 `bot_api`에 직접 보낸다.
+4. Minecraft는 command 접수만 기록하지 않고 `mindcraft_service.py`의 verified world-effect projector가
+   최종 action/result typed event를 `bot_api`에 보낸다. `memory.py`, `memory_deletion_journal.py`,
+   `memory_deletion_outbound.py`, `cross_surface_continuity.py`, `cognitive_state_runtime.py`,
+   `voice_debug_audio.py`에는 deletion generation/purge receipt와 late-commit fence만 추가하고 별도 archive를
+   만들지 않는다.
+5. 새 one-shot `tools/evelyn_private_archive_host.ps1`가 UAC/SID, volume/reparse/DACL/BitLocker preflight,
+   host attestation과 admin browser bootstrap을 소유한다. `control_page_http.py`, `control_page_server.py`,
+   `docs/index.html`과 최소 archive UI asset은 loopback HTTPS, admin session, read/delete preview만 배선한다.
+   UI source는 `docs/`에 있을 수 있지만 private body/session/log는 절대 파일로 쓰지 않는다.
+6. `docker-compose.fast-control.yml`에서 host source C:/D:/anchor를 각각
+   `/run/evelyn-private-audit/primary|backup|anchor`로, key/host-attestation은 별도 `/run/secrets/...`로 mount한다.
+   private primary/D:/anchor RW는 `bot_api`에만 주고 Control Page/Discord에는 주지 않는다. 기존 unrelated
+   `runtime_artifacts` mount를 이 작업에서 정리하지 않는다.
+7. focused tests는 archive schema/access/30일 prune, mute/deaf/chat/gateway gap,
+   selected Discord surface exact-owner/preview/replay,
+   shared partial deletion·인용 redaction·derived cascade, D: outage/reconcile/restore, OTP brute-force/rate-limit/
+   audience confusion, lease/crash/anchor rollback을 먼저 실패시킨다. 새
+   `tests/runtime/test_conversation_archive.py`와 기존
+   `tests/discord_io/test_discord_app_composition_runtime.py`,
+   `tests/discord_io/test_discord_text_turn.py`,
+   `tests/discord_io/test_discord_command_handlers.py`,
+   `tests/voice/test_voice_member_audio_pipeline_runtime.py`,
+   `tests/runtime/test_discord_runtime_status.py`, `tests/runtime/test_docker_compose_contract.py`,
+   `tests/runtime/test_memory_deletion_api.py`,
+   `tests/core/test_control_page_http.py`를 확장하고 새 host-launcher contract test를 둔다.
+   broad는 canonical pytest 기능 실패 0개다.
+8. 별도 승인된 test guild/fake transcript와 disposable Minecraft world에서만 live 검증한다. 실제 private
+   원문을 test report/docs/Git에 남기지 않고, Discord surface 삭제 성공과 로컬/D: 완전 삭제를 서로 다른
+   결과로 보고한다.
+- rollout은 기본 OFF → local test principal → Discord test guild 순서다. rollback은 새 capture/admission을
+  닫고 기존 기능으로 돌아가되 이미 수집한 private DB를 임의 삭제하지 않고 read/delete 전용으로 격리한다.
+  schema/data cleanup은 별도 사용자 승인과 verified backup deletion을 요구한다.
+- 기존 continuity/memory deletion HMAC key/external anchor의 repository 밖 배치, Codex action route의
+  tool-registry/secret-canary gate, Qwen-ASR/Transformers/Mineflayer 보안 release 호환 smoke, Discord/Minecraft
+  live Runtime Health privacy 검사는 이 단계에서도 유지한다. 강제 dependency upgrade는 하지 않는다.
+
+완료 조건: sole writer/mount가 증명되고, 30일 oldest-first prune과 기간 없는 전체 삭제, 참여 interval·
+capture 동의·mute/deaf/chat 예외, Discord self-scope, local admin OTP, raw-audio OFF, shared partial deletion,
+primary+D: local negative recall,
+restart/rollback/forged/replay 거부가 source/offline tests와 별도 승인 live test에서 통과해야 한다.
+public health에는 원문·경로·credential이 0이고, 미검증 action route와 integrity fault는 계속 fail-closed다.
+
+#### 동결된 Discord 열람 surface
+
+- `server slash command + invoker-only ephemeral + 180초 삭제 시도` 하나만 구현 대상으로 둔다.
+- 일반 DM 열람·DM 자동삭제 fallback은 만들지 않는다. guild/public 응답이나 다른 사람/GDM도 허용하지 않는다.
+- `self_deaf`/server `deaf` 참여 불가와 D: 장애 10분 유예 후 새 기록 차단도 사용자 결정으로 동결했다.
+- trigger/context, 본인 발화 scope, 180초·restart 한계, 삭제·백업·OTP·failure·rollback·검증 범위를 모두
+  위에서 고정했으며 **미해결 설계 질문은 0개다.**
+
+#### 2026-08-28 source/offline 구현 체크포인트
+
+- 기본 OFF인 P1-4 source 기반을 구현했다. `bot_api` 단독 SQLite writer, C: 기준 원본·D: 검증 replica·
+  외부 anchor, schema/generation/HMAC/OS lease, 30일 oldest-first retention, 사용자·관리자 삭제 preview와
+  content-free tombstone, Discord self-only ephemeral 열람·삭제, 별도 8800 loopback HTTPS 관리자 화면,
+  UAC host attestation·Discord DM OTP·짧은 관리자 session을 배선했다.
+- Discord text/final STT/Evelyn reply와 voice presence·eligible·mute/deaf/unknown transition, local text·답변,
+  Minecraft command→grant→verified effect/result에 typed lineage를 연결했다. 일반 사용자는 자기 발화와 직접
+  파생 결과만 보고, 관리자는 전용 local session에서만 전체 record·참여·voice transition·법정 최소 정보를
+  bounded keyset page로 읽는다. 브라우저 cursor는 관리자 session·종류·archive generation·180초 TTL에
+  결박된 64자 opaque handle이며 DB cursor와 내부 event ID를 노출하지 않는다.
+- 삭제 완료는 17개 필수 sink 전부의 실제 purge와 fresh negative recall이 증명될 때만 승격한다. 17개
+  logical owner route, process-local prompt/tool cache의 exact target metadata, memory/cognitive/ingress/search/
+  STT/TTS writer·task fence를 연결했다. `bot_api`와 Discord/local-only process는 content-free work/receipt만
+  교환하고, 동일 request/generation/scope의 remote receipt가 모두 확인되기 전 memory bundle writer fence와
+  `local_cleanup_pending`을 풀지 않는다. attribution이 없는 legacy/global cache나 불완전 lineage는 삭제 성공을
+  추측하지 않고 `manual_review`에 남긴다. 완료된 exact process lineage는 process 종료까지 retired 상태다.
+- 수정 후 변경 영향 전체는 `1061 passed, 1 skipped, 203 subtests passed`였다. canonical 1차 실행은
+  `4969 passed, 23 skipped, 1502 subtests passed, 8 failed`에서 구조·호환 회귀 8개를 찾았고, 수정 뒤 그 실패와
+  인접 경로 재검증 `58 passed, 6 subtests passed`가 통과했다. 변경·신규 Python 전체 compile, JavaScript·
+  PowerShell 구문, Compose config, diff check도 통과했다. 같은 5분짜리 canonical clean run은 반복하지 않았고
+  Discord gateway, microphone, Minecraft, Docker service와 실제 C:/D: 운영 volume은 시작하지 않았다.
+- 따라서 상태는 `[~]`를 유지한다. Discord mode는 로컬 마이크를 물리·논리 입력에서 제외하고 gateway가
+  정확히 연결한 Discord user ID만 화자 권한 근거로 쓰며, 현재 `display_name`은 표시용 snapshot으로 쓴다.
+  mapping이 없는 single-member/current-speaker 추정 경로도 제거했다. local-private microphone은 archive ON에서
+  계속 fail-closed하지만 Discord mode의 완료 gate가 아니다. 남은 완료 gate는 별도 승인 live test guild에서
+  gateway mapping·ephemeral과 장치/복제 장애를 검증하는 것이다. 이 P1-4 checkpoint 뒤 사용자가 P1-5 전체
+  구현을 승인해 source/offline 구현·검증은 아래 P1-5 상태로 이어졌다.
+
+#### 이 설계에서 쓰는 용어
+
+| 용어 | 이 계획에서의 정확한 뜻 |
+|---|---|
+| 기준 원본(canonical/primary) | 충돌할 때 최종 판단 기준이 되는 C:의 단 하나의 원본 DB. |
+| replica/snapshot/backup | 원본을 복구하기 위한 D: 검증 사본. production에는 최신 replica 한 개만 둔다. |
+| record/archive | 한 대화·전사·참여 구간·Minecraft 결과 단위와 그 비공개 모음. 일반 log와 다르다. |
+| principal/opaque ID | 권한 판정 대상 계정과, 이름 대신 내부에서 쓰는 의미 없는 무작위 식별자. |
+| scope/audience/capability | 각각 허용 범위, token을 받아야 할 기능, 그 안에서 가능한 exact 동작. |
+| presence/eligible interval | voice channel에 있었던 시간과, 동의·비음소거 조건까지 충족해 열람권이 생긴 시간. |
+| final/partial STT | 확정된 음성 전사와 아직 바뀔 수 있는 중간 전사. 전자만 저장한다. |
+| lineage/derived | 원본→답변·요약·memory의 출처 연결과, 원본에서 생긴 파생물. |
+| hash/digest/HMAC | 내용의 짧은 지문과, 비밀키까지 사용해 발신·변조 여부를 확인하는 지문. |
+| anchor/cutover witness | DB 밖의 최신 머리표와, 삭제 전 chain에서 삭제 후 chain으로 정당하게 넘어갔다는 내용 없는 증거. |
+| tombstone | 원문 대신 삭제 사실·재등장 금지만 남긴 묘표. |
+| generation/currentness | 재시작·수정 세대 번호와 요청이 아직 최신 세대를 대상으로 하는지의 판정. |
+| lease | 동시에 다른 writer/reader가 잘못된 세대를 쓰거나 읽지 못하게 하는 단기 잠금/권리. |
+| idempotency/reconcile | 같은 요청 재전송이 한 번만 반영되게 하는 성질과, crash 뒤 실제 반영 여부를 대조하는 절차. |
+| TTL | 생성 뒤 유효한 최대 시간. 만료되면 다시 사용할 수 없다. |
+| redact/quarantine/revoke/purge | 부분 가림, 격리, 권한·후보 취소, 원본과 파생 사본의 검증된 제거. |
+| fail-closed/degraded | 안전을 증명하지 못하면 닫는 상태와, 안전한 일부 기능만 남긴 저하 상태. |
+| OTP/OOB/challenge/nonce/admin session | 1회 코드, 별도 전달 경로, 인증 과제, 재사용 방지 난수, local admin 확인 뒤의 짧은 임시 권한. 일반 사용자 열람에는 admin session을 만들지 않는다. |
+| user-view handle | Discord 명령 한 번과 해당 page에만 유효하며 본인 발화·직접 답변 범위만 읽는 짧은 권한표. |
+| interaction/Gateway/ACK/defer | Discord 명령 event, bot의 실시간 연결, 3초 내 접수 응답/처리 연기 응답. |
+| ephemeral/자동삭제 DM | 전자는 guild interaction에서 호출자만 보는 선택된 Discord 형식, 후자는 이번 설계에서 버린 평범한 DM의 best-effort 삭제 방식. |
+| DACL/BitLocker/reparse point | Windows 파일 접근 목록, volume 전체 암호화, 다른 경로로 우회 연결되는 filesystem 지점. |
+| negative recall | 삭제한 문장·ID·고유 구절을 모든 열거 저장소에서 다시 검색해 0건임을 확인하는 검사. |
+| promotion/canary/CAS/rollback | 개선 후보 승격, 제한 시험, 예상 version일 때만 교체, 검증된 이전 version으로 복귀. |
 
 ### P1-5. 사람 교정 기반 feedback candidate와 안전한 version promotion
 
-상태: **[D] 설계 중·구현 미승인**. P1-3의 fixed eval/TaskWorkContract와 P1-4의
-principal/key/external-anchor/deletion-current 경계가 먼저 완료돼야 한다. 아래 불변 경계는
-고정했지만 durable owner 세부가 P1-4에서 확정되지 않았으므로 `[R]`로 올리지 않는다.
+상태: **[~] 승인된 source/offline 구현·검증 완료, live gate 대기**. P1-3의 fixed
+eval/TaskWorkContract와 P1-4의 principal/key/external-anchor/deletion-current 경계를 재사용해
+`bot_api` sole writer, local Control Page `admin.control`, 동일 C:/D: 삭제 계약으로 구현했다. exact
+correction→독립 guidance→fixed eval→action-bound OTP approval→서버 소유 10건 canary→CAS activation과
+failure/rollback/revoke가 전체 회귀를 통과했다. 실제 Discord feedback, real-Qwen eval과 local canary는
+live 미검증이므로 `[x]`가 아니다.
+
+#### 2026-08-28 Discord feedback live 사전검증
+
+- 승인 범위에서 기존 DPAPI credential을 메모리에서만 사용해 Discord REST를 read-only로 확인했다. bot 인증과
+  guild members/message content/presence intent는 유효했다. bot이 참여한 2개 guild와 global registry 모두에서
+  `기록열람|기록삭제|기록동의|기록철회|피드백제출`은 0개였다.
+- source는 다섯 command를 `bot.tree.add_command()`로 process-local 등록하지만 Discord API publisher/sync가 없다.
+  global registry에는 다른 기존 command 51개가 있으므로 단순 global `tree.sync()`는 삭제 위험이 있어 금지한다.
+  exact test guild에만 다섯 command를 게시하고 exact scope만 회수하며 기존 global/guild command가 그대로인지
+  전후 대조하는 sync/clear 진입점을 먼저 구현·검증해야 한다.
+- Docker engine과 Evelyn listener는 OFF였고 archive directory/key/TLS/host attestation은 준비되지 않았다.
+  기존 host launcher는 preflight/attestation만 하며 provisioner가 아니다. 기본 container launcher는 현재
+  142개 dirty source entry를 revision gate로 거부하므로 current-source snapshot/image provenance 절차도 필요하다.
+- local bridge process는 없고 마지막 content-free snapshot은 mic disabled/capture stopped였지만 오래됐으며,
+  durable capture consent는 `revoking`이고 owner heartbeat도 stale이었다. Discord-only input gate는 새 runtime의
+  exact mic-OFF ACK와 consent inactive reconcile을 요구한다. 오래된 OFF snapshot만으로 통과시키지 않는다.
+- 따라서 same-user success, wrong user/channel, stale session과 delivery failure의 실제 ephemeral interaction은
+  시작하지 않았다. Discord command/permission과 archive data는 변경하지 않았으며 live 상태는 `[~]`를 유지한다.
+  다음 시도는 위 prerequisite를 source/offline 검증한 뒤 content-free workflow count delta와 ephemeral outcome만
+  증거로 남긴다. transcript, correction, guild/user ID, credential과 screenshot은 문서에 남기지 않는다.
+
+#### 2026-08-28 exact guild command publish/restore 구현·live 체크포인트
+
+- 위 사전검증의 publisher 부재는 해결했다. 지정 guild에만 다섯 command를 임시 게시하고 exact returned
+  command ID/shape를 private v2 ownership ledger로 소유해 production clear·fallback·restart recovery가 자기
+  명령만 회수한다. global sync, bulk overwrite, 이름 기반 삭제는 사용하지 않으며 global과 모든 other guild
+  registry를 전후 canonical 비교한다.
+- 대상 서버 이름은 bounded strict UTF-8 stdin으로만 받고 full membership을 ordinal exact-unique로 해석한다.
+  stale ledger target 불일치에서는 mutation 전에 중단하며 validate child가 publish 직전 same API session에서
+  exact name과 numeric target의 동일성을 다시 확인한다. 이름·ID·credential·command body는 공개 출력과 문서에
+  남기지 않는다.
+- 승인된 live run은 대상/global/다른 guild `0/51/0`에서 대상 command 5개 게시를 확인한 뒤 exact-ID로 모두
+  회수했다. 결과는 published/restored verified, recovery 불필요였고 독립 사후 read도 대상 managed/전체 `0/0`,
+  global `51`, 다른 guild `0`, 보호 run directory `0`이었다.
+- 최종 canonical은 `5153 passed, 18 skipped`, 실패 0건이다. 기존 gateway·Qwen 테스트의 50~100ms localhost
+  wall-clock flake 2건은 제품 timeout을 바꾸지 않고 lane 재획득 event와 controlled clock 검증으로 분리했다.
+- command registry gate만 live 통과했다. 2026-09-01 archive test provisioner, exact current-source image provenance와
+  fresh local-mic OFF reconcile은 source/offline focused·canonical을 통과했다. 실제 host provision/build/mic ACK와
+  Gateway same-user/wrong-user/stale-session/delivery-failure/ephemeral 180초 interaction은 여전히 남아 있으므로
+  P1-4/P1-5 상태는 `[~]`다.
 
 #### 적용할 개념과 고정 경계
 
@@ -1139,52 +1561,87 @@ principal/key/external-anchor/deletion-current 경계가 먼저 완료돼야 한
   재작성하거나 source patch를 만들지 않는다. guidance는
   `build_task_worker_payload`의 safety/system·TaskGrant·tool/approval/output verifier 뒤에 놓이는
   비권위 planner input이다.
+- feedback에서 바로 만든 것은 `source_bound candidate`다. 이는 특정 사용자의 원문·교정과 연결된
+  임시 개선 후보라는 뜻이며 active version이 될 수 없다. local operator가 source-specific 사실·이름·
+  인용·말투·Discord/task ID·원문/embedding/hash를 모두 제거해 일반 규칙으로 다시 작성한 뒤에만
+  `independent guidance` 심사를 시작한다. 모델이 혼자 “익명화됨”을 선언하거나 자동 분리하지 않는다.
 - baseline/candidate eval은 source/model/evaluator/corpus/tool grant/input case가 같고 guidance
   version/digest만 달라야 한다. P1-3의 24-row gate를 전부 통과하지 못하면 approval preview를
   만들지 않는다.
 
-#### 예정 상태·privacy·canary·rollback
+#### 구현 상태·privacy·canary·rollback
 
-- 예정 상태는 `captured → owner_verified → routed → candidate_ready → eval_passed →
-  awaiting_approval → approval_granted → canary_running → canary_passed → active`다. active parent는
+- 예정 정상 상태는 `captured → owner_verified → routed → source_bound_candidate → generalized →
+  privacy_reviewed → independent_candidate → eval_passed → awaiting_approval → approval_granted →
+  canary_running → canary_passed → active`다. `generalized`는 local operator가 사용자 특이 내용을 제거해
+  새 일반 규칙을 쓴 상태, `privacy_reviewed`는 이름/ID/인용뿐 아니라 의미적 바꿔쓰기·희귀 사실·말투·
+  추론 가능성까지 사람이 검토하고 privacy fixture를 통과한 상태다. active parent는
   canary 동안 그대로 유지하고, exact local-operator read-only/grounded task 10건만 candidate pointer로
   실행한다. 그래서 canary 실패는 active rollback이 아니라 candidate 폐기이며 자동 retry하지 않는다.
+- 원본 삭제나 30일 만료는 어느 pre-active 상태에서도 `source_deleted → purge_pending → revoked` terminal
+  branch로 간다. 모든 eval/approval/canary callback은 deletion generation을 재확인하고 이 branch를 다시
+  정상 상태로 전진시키지 못한다. 이미 독립 active가 된 version은 source 삭제 branch와 분리한다.
 - activation은 candidate/eval/owner/parent generation에 묶인 one-use approval 뒤 canary 10/10,
   unauthorized effect/privacy/structural failure 0, ledger integrity current일 때만 atomic CAS로 수행한다.
-  immutable base version과 이전 두 verified active version, 각 version의 transitive feedback dependency를
-  보존한다. activation 뒤 새 고정 실패는 `activeVersionId`, guidance digest, task ID, contract/evaluator
+  promotion 가능한 version은 반드시 위의 independent guidance이며, immutable base와 이전 두 verified
+  independent active version을 보존한다. `promotion`은 검증된 후보를 실제 기본 규칙으로 승격하는 것,
+  `canary`는 전체 적용 전에 제한된 10건에서 시험하는 것, `CAS`는 예상한 이전 version이 그대로일 때만
+  pointer를 한 번 바꾸는 원자적 비교-교환이다. activation 뒤 새 고정 실패는 `activeVersionId`, guidance digest,
+  task ID, contract/evaluator
   version, fixed failure code, current principal과 ledger integrity에 결박된 exact failure receipt가 있을
   때만 rollback을 한 번 허용한다. generic tool/network failure는 rollback 근거가 아니다.
-- rollback target은 exact parent로 고정하지 않는다. transitive feedback dependency가 모두
-  deletion-current이고 evaluator/authority contract도 current인 generation 중 가장 최신 verified
-  version을 atomic CAS로 고른다. 그런 version이 없으면 immutable base로 돌아가며, base도 current
-  contract를 만족하지 못하면 candidate admission과 promoted guidance 적용을 모두 fail-closed한다.
+- rollback target은 exact parent로 고정하지 않는다. evaluator/authority contract가 current이고
+  privacy-independent proof가 current인 generation 중 가장 최신 verified version을 atomic CAS로 고른다.
+  그런 version이 없으면 immutable base로 돌아가며, base도 current contract를 만족하지 못하면 candidate
+  admission과 promoted guidance 적용을 모두 fail-closed한다.
   rollback 뒤 자동 재승격·재시도는 없다.
+- 이전 version이 뒤늦게 source-dependent로 판정되면 그 version을 parent/입력으로 삼은 모든 descendant와
+  rollback 후보를 primary와 D: ancestry 전체에서 연쇄 quarantine한다. 살아 있는 independent ancestor를
+  다시 24-row eval한 뒤에만 rollback 대상으로 복귀시킨다.
 - durable store는 P1-4에서 정한 repository 밖 key와 domain-separated external anchor를 사용한다.
   single writer, OS lock, boot generation, monotonic event sequence, CAS head, prune checkpoint와 late
   callback fence를 모두 요구한다. `atomic_json_write`만으로 concurrent append 성공을 주장하지 않는다.
-- private feedback에는 raw original task/reply/transcript를 복제하지 않는다. `feedbackId`, opaque
-  principal, source task ID, correction revision, candidate lineage와 deletion-current generation만 가진다.
-  correction/삭제가 current가 아니면 eval·approval·canary를 거부한다. feedback 삭제·정정은 파생
-  candidate를 revoke하고, 이미 active라면 위 dependency-current 규칙으로 newest unaffected generation을
-  선택하는 rollback과 public content-free receipt를 요구한다.
+- private feedback은 raw original task/reply/transcript를 복제하지 않지만 사용자가 실제 입력한 bounded
+  correction body와 `feedbackId`, opaque principal, source task ID, correction revision, candidate lineage,
+  deletion-current generation을 private archive에 가진다. correction/삭제가 current가 아니면 source-bound
+  eval·일반화 심사·approval을 거부한다.
+- 사용자가 원본 feedback 삭제를 요청하면 원본 correction, principal/source mapping, source-bound candidate,
+  eval input, private lineage, C:와 D: 사본을 삭제하고 P1-4의 tombstone만 남긴다. 아직 source-bound인 후보는
+  revoke한다. 반면 삭제 전에 local operator가 독립 규칙으로 다시 작성하고 별도 24-row eval·approval·canary를
+  통과한 active version은 취소하거나 rollback하지 않는다. 그 version은 사용자 원본의 파생 사본이 아니라
+  독립된 operator-authored rule과 자체 eval/approval receipt만 가진다.
+- active version 안에 사용자 이름·ID·인용·전사·source hash/embedding·사용자 특이 사실이 남았거나
+  독립성을 증명하는 심사 receipt가 없으면 “개선 버전 유지” 예외를 적용하지 않는다. 즉 원본 삭제 후에도
+  남는 것은 일반화된 규칙뿐이며, 삭제된 사용자 내용을 복원하거나 추론할 수 있는 version은 rollback/revoke한다.
+- independent proof는 source ID/hash를 보존하지 않는 content-free operator attestation, privacy-eval version/
+  결과와 guidance digest만 가진다. feedback 삭제 cascade는 source-bound eval output/judge rationale,
+  approval preview/browser cache, canary trace, version diff/package, failure/rollback receipt와 pending queue도
+  검사해 사용자 원문·고유 특징이 있으면 지운다. independent version의 자체 synthetic eval/approval/canary
+  receipt만 source-free임을 다시 검증한 뒤 유지한다.
 - public UI는 principal, correction/guidance 원문, path/origin, context byte count를 노출하지 않는다.
   full candidate guidance는 authenticated local approval preview에서만 transient하게 보여 준다.
 
-#### `[R]` 전환 전 남은 설계 질문
+#### owner·삭제·검증 gate
 
-1. P1-4가 확정할 privileged local operator의 durable identity와 issuer proof를 어느 existing
-   Control Page session contract에서 발급할지.
-2. feedback correction/delete가 memory deletion-current와 같은 principal lineage로 전파되는 exact
-   API·journal owner와 retention/explicit-delete 계약.
-3. candidate/profile journal의 domain, external anchor slot, DACL/mount와 restart reconciliation을
-   어느 process가 single-writer로 소유할지.
+- issuer proof는 P1-4의 Windows-authenticated local Control Page `admin.control` session과 action-bound
+  one-use step-up이며 Discord OTP나 Discord administrator role만으로는 발급하지 않는다.
+- correction/delete/version journal과 primary/D: reconcile은 P1-4의 `bot_api`가 single-writer로 소유하고
+  conversation/deletion/feedback-version HMAC domain을 서로 분리한다. feedback retention은 source record와
+  같은 30일 상한·기간 없는 전체 삭제를 따르며 TTL도 같은 deletion branch/cascade를 탄다. independent
+  version에는 새 30일짜리 사용자 원본 링크를 복제하지 않는다.
+- 구현 범위는 P1-4의 `conversation_archive.py`/`fast_control_api.py`/Control Page approval UI,
+  `self_model.py`, `identity_review.py`, `task_loop_runtime.py`의 guidance payload와 별도 feedback/version focused
+  tests다. Discord/voice는 review-only capture까지만 배선하고 promotion endpoint를 갖지 않는다.
+- 먼저 실패할 회귀는 source-bound candidate activation, 삭제 뒤 feedback/source hash 재등장,
+  independent version의 사용자 식별·인용, Discord OTP의 promotion 권한 승격, stale eval/approval replay다.
+  privacy fixture는 exact name/ID/quote/unique phrase/embedding negative recall을 primary, D:, cache, restored
+  snapshot에서 검사한다.
 
-이 세 항목을 code path·schema·tests까지 고정하기 전에는 feedback 원문 저장, candidate 생성,
-canary 또는 active pointer 변경을 구현·실행하지 않는다. 완료 조건은 P1-3 eval 전건, same-principal/
-local-operator authority, deletion cascade, canary 10/10, forged/stale/replay 거부, version-bound failure
-receipt와 newest-unaffected rollback 선택이 source/offline 및 별도 승인된 read-only live session에서 모두
-통과하는 것이다.
+P1-4의 archive/access/deletion 경계를 구현·검증하기 전에는 feedback 원문 저장, candidate 생성, canary 또는
+active pointer 변경을 구현·실행하지 않는다. 완료 조건은 P1-3 eval 전건, same-principal/
+local-operator authority, source-bound 삭제 cascade와 independent-version 존속, canary 10/10,
+forged/stale/replay 거부, version-bound failure receipt와 newest verified rollback 선택이 source/offline 및
+별도 승인된 read-only live session에서 모두 통과하는 것이다.
 
 ## P2 — P0/P1 이후에만 수행
 
@@ -1217,3 +1674,8 @@ receipt와 newest-unaffected rollback 선택이 source/offline 및 별도 승인
 - `docs/KOREAN_ASR_TARGET_ARCHITECTURE.md`
 - `docs/CONVERSATION_CONTINUITY_CONTRACT.md`
 - `docs/MINECRAFT_AUTONOMY_READINESS_CONTRACT.md`
+- [Discord Interactions — context, caller, ephemeral, 3초/15분 계약](https://docs.discord.com/developers/interactions/receiving-and-responding)
+- [Discord user-installable app — BOT_DM과 guild ephemeral 차이](https://docs.discord.com/developers/tutorials/developing-a-user-installable-app)
+- [NIST SP 800-63B — out-of-band secret, rate limit, session](https://pages.nist.gov/800-63-4/sp800-63b.html)
+- [개인정보 보호법 제21조 — 불필요 개인정보 파기·복구 방지·법정 보존 분리](https://www.law.go.kr/lsLinkCommonInfo.do?lsJoLnkSeq=1027063705)
+- [개인정보 보호법 제36조 — 정보주체 정정·삭제 요구](https://www.law.go.kr/LSW/lsLinkCommonInfo.do?chrClsCd=010202&lsJoLnkSeq=1029335317)

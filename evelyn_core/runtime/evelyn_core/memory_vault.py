@@ -1005,6 +1005,47 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
         return version
 
 
+@_memory_deletion_linearized
+def rebuild_memory_vault_derived_state(
+    *,
+    root: Path | None = None,
+) -> dict[str, int]:
+    """Invalidate prompt/search caches and fully rebuild the note/vector index."""
+
+    memory_root = Path(root or MEMORY_ROOT)
+    if memory_root.is_symlink():
+        raise OSError("unsafe_memory_runtime_artifact_path")
+    memory_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = memory_root.resolve()
+    index_dir = memory_index_dir(memory_root)
+    index_dir.mkdir(parents=True, exist_ok=True)
+    if index_dir.is_symlink() or not index_dir.resolve().is_relative_to(
+        resolved_root
+    ):
+        raise OSError("unsafe_memory_runtime_artifact_path")
+    targets = (
+        memory_index_db_path(memory_root),
+        Path(str(memory_index_db_path(memory_root)) + "-wal"),
+        Path(str(memory_index_db_path(memory_root)) + "-shm"),
+        index_dir / "hot_context.json",
+        index_dir / "prompt_blocks" / "core_prompt.txt",
+    )
+    removed = 0
+    with _memory_edit_lock:
+        for target in targets:
+            if target.is_symlink() or not target.resolve().is_relative_to(
+                resolved_root
+            ):
+                raise OSError("unsafe_memory_runtime_artifact_path")
+            try:
+                target.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+        version = sync_memory_vault_index(root=memory_root)
+    return {"removedDerivedFiles": removed, "memoryVersion": version}
+
+
 def _safe_json_list(value: str) -> list[str]:
     try:
         parsed = json.loads(value)
@@ -2709,6 +2750,8 @@ def append_turn_rows_to_memory_vault(
     reset_scope = _automatic_memory_reset_scope(normalized_guild_id)
     normalized: list[str] = []
     meaningful_user_seen = False
+    source_turn_ids: set[str] = set()
+    lineage_complete = True
     for row in rows:
         text = clean_text(str(row.get("text") or ""))
         if not text:
@@ -2719,6 +2762,18 @@ def append_turn_rows_to_memory_vault(
         label = _daily_display_label(role)
         if role.lower() == "user" and _is_meaningful_daily_user_text(text):
             meaningful_user_seen = True
+        source_turn_id = clean_text(str(row.get("source_turn_id") or ""))
+        evidence_id = clean_text(str(row.get("evidence_id") or ""))
+        if (
+            role.lower() in {"user", "assistant"}
+            and re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", source_turn_id)
+            and evidence_id == f"turn:{source_turn_id}:{role.lower()}"
+            and clean_text(str(row.get("evidence_kind") or ""))
+            == "conversation_turn"
+        ):
+            source_turn_ids.add(source_turn_id)
+        else:
+            lineage_complete = False
         normalized.append(f"- {label}: {text}")
     if not normalized or not meaningful_user_seen:
         return None
@@ -2757,14 +2812,26 @@ def append_turn_rows_to_memory_vault(
             f"-continuation-{generation}"
         )
         initialize_note = True
-    block = "\n".join(
-        [
-            ">",
-            f"> ### {time.strftime('%H:%M:%S')}",
-            *(f"> {line}" for line in normalized),
-            ">",
-        ]
+    lineage_turn_id = (
+        next(iter(source_turn_ids))
+        if lineage_complete and len(source_turn_ids) == 1
+        else ""
     )
+    block_lines = [
+        ">",
+        f"> ### {time.strftime('%H:%M:%S')}",
+    ]
+    if lineage_turn_id:
+        block_lines.append(
+            f"> <!-- evelyn-turn-lineage:{lineage_turn_id}:begin -->"
+        )
+    block_lines.extend(f"> {line}" for line in normalized)
+    if lineage_turn_id:
+        block_lines.append(
+            f"> <!-- evelyn-turn-lineage:{lineage_turn_id}:end -->"
+        )
+    block_lines.append(">")
+    block = "\n".join(block_lines)
     with _memory_edit_lock:
         should_initialize = initialize_note
         if should_initialize and path.exists():
@@ -10352,6 +10419,7 @@ __all__ = [
     "preview_memory_provenance_backfill_application",
     "recall_memory_vault",
     "read_memory_hot_context",
+    "rebuild_memory_vault_derived_state",
     "request_sub_llm_json",
     "refresh_legacy_memory_mirror",
     "refresh_legacy_memory_node_notes",

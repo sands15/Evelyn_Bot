@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,6 +85,9 @@ class DiscordTextMessageHandlerDeps:
     record_runtime_error: Any
     format_display_text: Any
     log: Any
+    archive_user_text: Any = None
+    archive_assistant_text: Any = None
+    confirm_archive_assistant_delivery: Any = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,7 @@ class _PreparedDiscordTextTurn:
     proactive_resolution: dict[str, Any] | None
     turn_scope: TurnScope
     turn_task: Any
+    archive_record_id: str | None = None
 
 
 class _PreAcquiredReplyLock:
@@ -259,6 +264,46 @@ async def _prepare_claimed_text_turn(
             user_id=message.author.id,
         )
         return None
+    archive_record_id: str | None = None
+    authored_text = str(getattr(message, "content", "") or "")
+    if authored_text.strip() and deps.archive_user_text is not None:
+        try:
+            archive_receipt = await deps.archive_user_text(
+                guild_id=int(message.guild.id),
+                channel_id=int(message.channel.id),
+                user_id=int(message.author.id),
+                owner_name=str(
+                    getattr(message.author, "display_name", None)
+                    or getattr(message.author, "global_name", None)
+                    or getattr(message.author, "name", None)
+                    or message.author.id
+                ),
+                message_id=int(message.id),
+                turn_id=turn_id,
+                authored_at=float(
+                    getattr(message, "created_at", None).timestamp()
+                    if getattr(message, "created_at", None) is not None
+                    else time.time()
+                ),
+                text=authored_text,
+            )
+        except Exception as exc:
+            deps.log(
+                "[TEXT TURN] conversation_archive_user_write_failed errorType=",
+                type(exc).__name__,
+            )
+            return None
+        if isinstance(archive_receipt, dict):
+            archive_record_id = str(
+                archive_receipt.get("recordId") or ""
+            ).strip() or None
+        elif archive_receipt is not None:
+            archive_record_id = str(archive_receipt).strip() or None
+        if archive_record_id is None:
+            deps.log(
+                "[TEXT TURN] conversation_archive_user_receipt_invalid"
+            )
+            return None
     try:
         recovery_context = await asyncio.to_thread(
             deps.conversation_ingress_recovery_context,
@@ -317,6 +362,7 @@ async def _prepare_claimed_text_turn(
             proactive_resolution=proactive_resolution,
             turn_scope=turn_scope,
             turn_task=turn_task,
+            archive_record_id=archive_record_id,
         )
 
     try:
@@ -416,6 +462,7 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     topic_id = prepared_turn.topic_id
     ingress_recovery_context = prepared_turn.recovery_context
     proactive_resolution = prepared_turn.proactive_resolution
+    archive_record_id = prepared_turn.archive_record_id
 
     turn_scope = prepared_turn.turn_scope
     turn_task = prepared_turn.turn_task
@@ -461,6 +508,18 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             if response_memory_ref is not None
             else memory_receipt_ref_from_metrics(metrics)
         )
+        if (
+            archive_record_id is not None
+            and deps.archive_assistant_text is not None
+        ):
+            await deps.archive_assistant_text(
+                guild_id=int(message.guild.id),
+                channel_id=int(message.channel.id),
+                user_id=int(message.author.id),
+                turn_id=turn_id,
+                parent_record_id=archive_record_id,
+                text=delivered_answer,
+            )
         await asyncio.to_thread(
             deps.mark_ingress_response_ready,
             ingress_entry_id,
@@ -491,6 +550,22 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
             delivery_ref=ingress_delivery_ref,
         )
         ingress_delivery_succeeded = True
+        if deps.confirm_archive_assistant_delivery is not None:
+            try:
+                await deps.confirm_archive_assistant_delivery(
+                    guild_id=int(message.guild.id),
+                    channel_id=int(message.channel.id),
+                    user_id=int(message.author.id),
+                    turn_id=turn_id,
+                )
+            except Exception as exc:
+                try:
+                    deps.record_runtime_error(
+                        "discord_feedback_delivery_confirm_failed",
+                        exc,
+                    )
+                except Exception:
+                    pass
 
     async def mark_ingress_delivery_ambiguous_if_needed() -> None:
         if not ingress_delivery_inflight or ingress_delivery_succeeded:

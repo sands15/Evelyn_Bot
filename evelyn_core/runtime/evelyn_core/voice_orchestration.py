@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
@@ -42,8 +43,10 @@ from .main_llm_runtime import (
     append_registered_route_evidence,
     route_decision_evidence_route,
     task_loop_completed_evidence,
+    task_loop_grounded_draft_evidence,
     task_loop_terminal_outcome,
 )
+from .task_grounded_draft_runtime import GROUNDED_DRAFT_TTS_TEXT
 from .task_loop_runtime import parse_task_request
 from .voice_reply_side_effects import bind_voice_reply_memory_boundary
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
@@ -240,6 +243,25 @@ class VoiceTranscriptReplyDeps:
     clear_room_turn_scope: Callable[[str | None, Any], None]
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None
     record_runtime_error: Callable[..., Any] | None = None
+    archive_assistant_text: Callable[..., Awaitable[Any]] | None = None
+    confirm_archive_assistant_delivery: (
+        Callable[..., Awaitable[Any]] | None
+    ) = None
+
+
+@dataclass(frozen=True)
+class _VoiceArchiveAnswerContext:
+    callback: Callable[..., Awaitable[Any]]
+    confirm_callback: Callable[..., Awaitable[Any]] | None
+    guild_id: int
+    channel_id: int
+    user_id: int
+    source_turn_id: str
+
+
+_voice_archive_answer_context: ContextVar[
+    _VoiceArchiveAnswerContext | None
+] = ContextVar("voice_archive_answer_context", default=None)
 
 
 @dataclass(frozen=True)
@@ -389,6 +411,13 @@ class VoiceTurnOrchestrator:
             if task_route
             else None
         )
+        grounded_task_outcome = bool(
+            task_route
+            and task_loop_grounded_draft_evidence(
+                skill_route_answer or "",
+                goal=task_goal,
+            )
+        )
         if task_route and task_outcome is None:
             if not task_loop_completed_evidence(
                 skill_route_answer or "",
@@ -415,7 +444,11 @@ class VoiceTurnOrchestrator:
                         self._deps.build_delivery_plan(
                             self._deps.build_answer_payload_from_text(
                                 task_outcome,
-                                spoken_text="검증된 작업 결과를 화면에 정리했어.",
+                                spoken_text=(
+                                    GROUNDED_DRAFT_TTS_TEXT
+                                    if grounded_task_outcome
+                                    else "검증된 작업 결과를 화면에 정리했어."
+                                ),
                             ),
                             include_voice=(
                                 request.on_sentence is not None
@@ -998,6 +1031,15 @@ def prepare_voice_reply_delivery_runtime(
     metrics: Mapping[str, Any] | None = None,
 ) -> VoiceReplyDeliveryRuntime:
     async def on_final_answer(answer_text: str) -> None:
+        archive_context = _voice_archive_answer_context.get()
+        if archive_context is not None:
+            await archive_context.callback(
+                guild_id=archive_context.guild_id,
+                channel_id=archive_context.channel_id,
+                user_id=archive_context.user_id,
+                turn_id=archive_context.source_turn_id,
+                text=answer_text,
+            )
         visible_answer = visible_text(answer_text)
         print_fn(f"💬 [Evelyn] chars={len(visible_answer)}")
 
@@ -1252,6 +1294,30 @@ async def run_locked_voice_reply_delivery(
                 failure_code=failure_code,
             )
             return None
+
+        archive_context = _voice_archive_answer_context.get()
+        if (
+            archive_context is not None
+            and archive_context.confirm_callback is not None
+        ):
+            try:
+                await archive_context.confirm_callback(
+                    guild_id=archive_context.guild_id,
+                    channel_id=archive_context.channel_id,
+                    user_id=archive_context.user_id,
+                    turn_id=archive_context.source_turn_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if record_runtime_error is not None:
+                    try:
+                        record_runtime_error(
+                            "discord_feedback_delivery_confirm_failed",
+                            exc,
+                        )
+                    except Exception:
+                        pass
 
         delivery_exposure_position = finalize_delivered_voice_reply(
             guild_id=guild_id,
@@ -1798,76 +1864,100 @@ async def process_voice_reply_from_transcript_context(
     context: VoiceTranscriptReplyContext,
     deps: VoiceTranscriptReplyDeps,
 ) -> VoiceReplyDeliveryResult | None:
-    return await process_voice_reply_from_transcript(
-        guild_id=context.guild_id,
-        transcript=context.transcript,
-        transcript_final_text=context.transcript.final_text,
-        voice_segment=context.voice_segment,
-        session_key=context.session_key,
-        room_session_key=context.room_session_key,
-        owner_user_id=context.owner_user_id,
-        speaker_user_id=int(context.member.id),
-        speaker_display_name=str(context.member.display_name),
-        source_turn_id=context.source_turn_id,
-        segment_id=context.segment_id,
-        reply_in_progress=context.reply_in_progress,
-        voiced_ms=context.voiced_ms,
-        raw_seconds=context.raw_seconds,
-        rms=context.rms,
-        wake_detected=context.wake_detected,
-        metrics=context.metrics,
-        session_topic_seed=context.session_topic_seed,
-        now_monotonic=context.now_monotonic,
-        should_reply_to_voice=deps.should_reply_to_voice,
-        register_drop_reason=deps.register_drop_reason,
-        log_voice_stage=deps.log_voice_stage,
-        log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,
-        reset_session_bad_audio=deps.reset_session_bad_audio,
-        build_voice_reply_request=deps.build_voice_reply_request,
-        build_topic_id=deps.build_topic_id,
-        session_last_stt_text=deps.session_last_stt_text,
-        room_last_voice_reply_at=deps.room_last_voice_reply_at,
-        update_room_speaker_activity=deps.update_room_speaker_activity,
-        pick_active_speaker=deps.pick_active_speaker,
-        ingress_source=context.ingress_source,
-        queue_wait_ms=context.queue_wait_ms,
-        active_conversation_awaiting_reply_sec=context.active_conversation_awaiting_reply_sec,
-        active_conversation_voice_sec=context.active_conversation_voice_sec,
-        start_new_turn=deps.start_new_turn,
-        update_session_state=deps.update_session_state,
-        checkpoint_accepted_voice_turn=(
-            deps.checkpoint_accepted_voice_turn
-        ),
-        set_room_owner=deps.set_room_owner,
-        session_partial_stt_text=deps.session_partial_stt_text,
-        session_committed_stt_text=deps.session_committed_stt_text,
-        partial_stt_cache=deps.partial_stt_cache,
-        make_turn_scope=deps.make_turn_scope,
-        replace_room_turn_scope=deps.replace_room_turn_scope,
-        attach_current_task=deps.attach_current_task,
-        set_room_reply_in_progress=deps.set_room_reply_in_progress,
-        session_locks=deps.session_locks,
-        visible_text=deps.visible_text,
-        print_fn=deps.print_fn,
-        get_voice_client=deps.get_voice_client,
-        member=context.member,
-        canned_wake_reply=context.canned_wake_reply,
-        room_key=context.room_key,
-        person_key=context.person_key,
-        session_memory_key=context.session_memory_key,
-        speak_answer=deps.speak_answer,
-        ask_llm_and_speak_streaming=deps.ask_llm_and_speak_streaming,
-        record_voice_pipeline_failure=deps.record_voice_pipeline_failure,
-        finalize_voice_reply_side_effects=deps.finalize_voice_reply_side_effects,
-        strip_omnivoice_tags=deps.strip_omnivoice_tags,
-        room_last_voice_utterance_for_merge=deps.room_last_voice_utterance_for_merge,
-        get_room_turn_scope=deps.get_room_turn_scope,
-        detach_task=deps.detach_task,
-        clear_room_turn_scope=deps.clear_room_turn_scope,
-        voice_ingress_is_current=context.voice_ingress_is_current,
-        record_runtime_error=deps.record_runtime_error,
-        release_ingress_worker=context.release_ingress_worker,
-    )
+    archive_token = None
+    if deps.archive_assistant_text is not None:
+        channel = getattr(getattr(context.member, "voice", None), "channel", None)
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None:
+            raise RuntimeError("conversation_archive_voice_channel_unavailable")
+        archive_token = _voice_archive_answer_context.set(
+            _VoiceArchiveAnswerContext(
+                callback=deps.archive_assistant_text,
+                confirm_callback=getattr(
+                    deps,
+                    "confirm_archive_assistant_delivery",
+                    None,
+                ),
+                guild_id=int(context.guild_id),
+                channel_id=int(channel_id),
+                user_id=int(context.member.id),
+                source_turn_id=str(context.source_turn_id),
+            )
+        )
+    try:
+        return await process_voice_reply_from_transcript(
+            guild_id=context.guild_id,
+            transcript=context.transcript,
+            transcript_final_text=context.transcript.final_text,
+            voice_segment=context.voice_segment,
+            session_key=context.session_key,
+            room_session_key=context.room_session_key,
+            owner_user_id=context.owner_user_id,
+            speaker_user_id=int(context.member.id),
+            speaker_display_name=str(context.member.display_name),
+            source_turn_id=context.source_turn_id,
+            segment_id=context.segment_id,
+            reply_in_progress=context.reply_in_progress,
+            voiced_ms=context.voiced_ms,
+            raw_seconds=context.raw_seconds,
+            rms=context.rms,
+            wake_detected=context.wake_detected,
+            metrics=context.metrics,
+            session_topic_seed=context.session_topic_seed,
+            now_monotonic=context.now_monotonic,
+            should_reply_to_voice=deps.should_reply_to_voice,
+            register_drop_reason=deps.register_drop_reason,
+            log_voice_stage=deps.log_voice_stage,
+            log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,
+            reset_session_bad_audio=deps.reset_session_bad_audio,
+            build_voice_reply_request=deps.build_voice_reply_request,
+            build_topic_id=deps.build_topic_id,
+            session_last_stt_text=deps.session_last_stt_text,
+            room_last_voice_reply_at=deps.room_last_voice_reply_at,
+            update_room_speaker_activity=deps.update_room_speaker_activity,
+            pick_active_speaker=deps.pick_active_speaker,
+            ingress_source=context.ingress_source,
+            queue_wait_ms=context.queue_wait_ms,
+            active_conversation_awaiting_reply_sec=context.active_conversation_awaiting_reply_sec,
+            active_conversation_voice_sec=context.active_conversation_voice_sec,
+            start_new_turn=deps.start_new_turn,
+            update_session_state=deps.update_session_state,
+            checkpoint_accepted_voice_turn=(
+                deps.checkpoint_accepted_voice_turn
+            ),
+            set_room_owner=deps.set_room_owner,
+            session_partial_stt_text=deps.session_partial_stt_text,
+            session_committed_stt_text=deps.session_committed_stt_text,
+            partial_stt_cache=deps.partial_stt_cache,
+            make_turn_scope=deps.make_turn_scope,
+            replace_room_turn_scope=deps.replace_room_turn_scope,
+            attach_current_task=deps.attach_current_task,
+            set_room_reply_in_progress=deps.set_room_reply_in_progress,
+            session_locks=deps.session_locks,
+            visible_text=deps.visible_text,
+            print_fn=deps.print_fn,
+            get_voice_client=deps.get_voice_client,
+            member=context.member,
+            canned_wake_reply=context.canned_wake_reply,
+            room_key=context.room_key,
+            person_key=context.person_key,
+            session_memory_key=context.session_memory_key,
+            speak_answer=deps.speak_answer,
+            ask_llm_and_speak_streaming=deps.ask_llm_and_speak_streaming,
+            record_voice_pipeline_failure=deps.record_voice_pipeline_failure,
+            finalize_voice_reply_side_effects=deps.finalize_voice_reply_side_effects,
+            strip_omnivoice_tags=deps.strip_omnivoice_tags,
+            room_last_voice_utterance_for_merge=deps.room_last_voice_utterance_for_merge,
+            get_room_turn_scope=deps.get_room_turn_scope,
+            detach_task=deps.detach_task,
+            clear_room_turn_scope=deps.clear_room_turn_scope,
+            voice_ingress_is_current=context.voice_ingress_is_current,
+            record_runtime_error=deps.record_runtime_error,
+            release_ingress_worker=context.release_ingress_worker,
+        )
+    finally:
+        if archive_token is not None:
+            _voice_archive_answer_context.reset(archive_token)
 
 
 async def deliver_voice_reply(

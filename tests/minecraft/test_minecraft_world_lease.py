@@ -107,8 +107,20 @@ class FakeMinecraftRuntime:
             result.setdefault("goal", goal)
         return result
 
-    async def disable(self, guild_id: int) -> dict:
-        self.calls.append(("disable", guild_id))
+    async def disable(
+        self,
+        guild_id: int,
+        *,
+        parent_record_ids: tuple[str, ...] = (),
+    ) -> dict:
+        self.calls.append(
+            (
+                "disable",
+                (guild_id, parent_record_ids)
+                if parent_record_ids
+                else guild_id,
+            )
+        )
         if isinstance(self.disable_result, BaseException):
             raise self.disable_result
         return dict(self.disable_result)
@@ -248,6 +260,55 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             self.owner._lease.expires_monotonic,
         )
 
+    async def test_command_root_follows_connect_goal_action_proof_and_stop(
+        self,
+    ) -> None:
+        connected = await self.owner.connect(
+            7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            parent_record_ids=("minecraft-command-connect",),
+        )
+        self.assertEqual(
+            connected["worldLease"]["parentRecordIds"],
+            ["minecraft-command-connect"],
+        )
+        enable = next(
+            call for call in self.runtime.calls if call[0] == "enable"
+        )
+        self.assertEqual(
+            enable[1][2]["parentRecordIds"],
+            ["minecraft-command-connect"],
+        )
+
+        await self.owner.set_goal(
+            7,
+            "diamond",
+            parent_record_ids=("minecraft-command-goal",),
+        )
+        goal = [
+            call for call in self.runtime.calls if call[0] == "goal"
+        ][-1]
+        self.assertEqual(
+            goal[1][1]["parentRecordIds"],
+            ["minecraft-command-goal"],
+        )
+        self.assertEqual(
+            self.owner.status()["lease"]["parentRecordIds"],
+            ["minecraft-command-goal"],
+        )
+
+        await self.owner.disconnect(
+            7,
+            parent_record_ids=("minecraft-command-disconnect",),
+        )
+        self.assertIn(
+            (
+                "disable",
+                (7, ("minecraft-command-disconnect",)),
+            ),
+            self.runtime.calls,
+        )
     def test_event_append_flushes_and_fsyncs_before_success(self) -> None:
         with patch(
             "evelyn_core.minecraft_world_lease.os.fsync"

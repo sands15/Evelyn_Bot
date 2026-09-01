@@ -39,13 +39,18 @@ def _evidence_id(value: object, *, max_chars: int = 120) -> str:
     return cleaned if _EVIDENCE_ID_RE.fullmatch(cleaned) else ""
 
 
-def _evidence_ids(value: object, *, max_items: int = 64) -> list[str]:
+def _evidence_ids(
+    value: object,
+    *,
+    max_items: int | None = 64,
+) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
+    items = value if max_items is None else value[:max_items]
     return list(
         dict.fromkeys(
             cleaned
-            for item in value[:max_items]
+            for item in items
             if (cleaned := _evidence_id(item))
         )
     )
@@ -80,7 +85,10 @@ def _memory_input_evidence(
         if not isinstance(provenance, dict):
             continue
         evidence_id = _evidence_id(provenance.get("evidence_id"))
-        source_ids = _evidence_ids(provenance.get("source_evidence_ids"))
+        source_ids = _evidence_ids(
+            provenance.get("source_evidence_ids"),
+            max_items=None,
+        )
         if (
             clean_text(str(provenance.get("evidence_kind") or ""))
             != "derived_summary"
@@ -90,7 +98,7 @@ def _memory_input_evidence(
             continue
         evidence_ids.append(evidence_id)
         source_turn_ids.extend(
-            _evidence_ids(provenance.get("source_turn_ids"), max_items=32)
+            _evidence_ids(provenance.get("source_turn_ids"), max_items=None)
         )
     if include_recent:
         for expected_kind, rows in (
@@ -117,12 +125,15 @@ def _memory_input_evidence(
                     evidence_ids.append(evidence_id)
                     source_turn_ids.append(source_turn_id_value)
                     continue
-                source_ids = _evidence_ids(row.get("source_evidence_ids"))
+                source_ids = _evidence_ids(
+                    row.get("source_evidence_ids"),
+                    max_items=None,
+                )
                 if not evidence_id or not source_ids:
                     continue
                 evidence_ids.append(evidence_id)
                 source_turn_ids.extend(
-                    _evidence_ids(row.get("source_turn_ids"), max_items=32)
+                    _evidence_ids(row.get("source_turn_ids"), max_items=None)
                 )
     if normalized_turn_id:
         if clean_text(user_text):
@@ -132,8 +143,8 @@ def _memory_input_evidence(
         if clean_text(user_text) or clean_text(answer):
             source_turn_ids.append(normalized_turn_id)
     return (
-        list(dict.fromkeys(evidence_ids))[:64],
-        list(dict.fromkeys(source_turn_ids))[:32],
+        list(dict.fromkeys(evidence_ids)),
+        list(dict.fromkeys(source_turn_ids)),
     )
 
 
@@ -170,8 +181,11 @@ def apply_long_term_memory_result(
     source_turn_ids: list[str] | tuple[str, ...] = (),
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    normalized_source_evidence_ids = _evidence_ids(source_evidence_ids)
-    normalized_source_turn_ids = _evidence_ids(source_turn_ids, max_items=32)
+    normalized_source_evidence_ids = _evidence_ids(
+        source_evidence_ids,
+        max_items=None,
+    )
+    normalized_source_turn_ids = _evidence_ids(source_turn_ids, max_items=None)
     scope_targets = memory_scope_targets(
         room_key=room_key,
         person_key=person_key,

@@ -124,6 +124,43 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
             )
         return rows
 
+    def test_cleanup_exact_issuer_keeps_unattributed_legacy_manual(self) -> None:
+        granted = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:target",
+            source="discord_command",
+            scopes=ASSISTANT_AUTONOMY_ACTIONS,
+        )
+        self.assertTrue(granted["ok"])
+        event_path = next((self.root / "events").glob("*.jsonl"))
+        with event_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"guildId": 7, "at": 1000.0}) + "\n")
+
+        def target(row: dict) -> bool | None:
+            if row.get("guildId") != 7:
+                return False
+            issuer = row.get("issuerRef")
+            if not issuer:
+                return None
+            return issuer == "discord_user:target"
+
+        result = self.manager.cleanup_exact_targets(target)
+
+        self.assertEqual(result, (2, 0, 1))
+        self.assertEqual(self.manager.authorized_actions(7), [])
+        fresh = event_path.read_text(encoding="utf-8")
+        self.assertNotIn("discord_user:target", fresh)
+        self.assertIn('"guildId": 7', fresh)
+
+    def test_cleanup_fails_closed_on_malformed_event(self) -> None:
+        event_path = next((self.root / "events").glob("*.jsonl"))
+        event_path.write_text("{malformed\n", encoding="utf-8")
+
+        result = self.manager.cleanup_exact_targets(lambda _row: True)
+
+        self.assertEqual(result, (0, 1, 1))
+        self.assertEqual(event_path.read_text(encoding="utf-8"), "{malformed\n")
+
     def test_grant_is_scoped_short_lived_and_public_status_hides_issuer(
         self,
     ) -> None:
@@ -566,6 +603,63 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         await engine._disconnect_executor_once()
         self.assertFalse(engine._executor_connected)
         self.assertEqual(executor.disconnect_count, 2)
+
+    async def test_cleanup_stops_exact_engine_and_freshly_clears_history(self) -> None:
+        path = self.root / "guild-7-autonomy.json"
+        executor = DummyExecutor()
+        engine = AutonomyEngine(guild_id=7, executor=executor)
+        engine.state.enabled = True
+        engine.state.status = "running"
+        engine.state.last_observation = {"private": "PRIVATE_OBSERVATION"}
+        engine.state.current_plan = AutonomyPlan(
+            goal_kind="private",
+            summary="PRIVATE_PLAN",
+        )
+        engine.state.drive_state = {"private": "PRIVATE_DRIVE"}
+        engine._executor_connected = True
+        engine._task = asyncio.create_task(asyncio.sleep(60.0))
+
+        with patch(
+            "evelyn_core.autonomy.cognitive_state_path",
+            return_value=path,
+        ):
+            result = await engine.cleanup_history_state(timeout_sec=1.0)
+
+        self.assertEqual(result, (1, 0, 0))
+        self.assertFalse(engine._executor_connected)
+        self.assertIsNone(engine._task)
+        self.assertEqual(engine.state.last_observation, {})
+        self.assertIsNone(engine.state.current_plan)
+        self.assertNotIn("PRIVATE", path.read_text(encoding="utf-8"))
+
+    async def test_cleanup_timeout_is_retryable_until_disconnect_drains(self) -> None:
+        class BlockingDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.disconnect_started = asyncio.Event()
+                inner_self.disconnect_release = asyncio.Event()
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                inner_self.disconnect_started.set()
+                await inner_self.disconnect_release.wait()
+
+        path = self.root / "guild-7-autonomy.json"
+        executor = BlockingDisconnectExecutor()
+        engine = AutonomyEngine(guild_id=7, executor=executor)
+        engine._executor_connected = True
+        with patch(
+            "evelyn_core.autonomy.cognitive_state_path",
+            return_value=path,
+        ):
+            pending = await engine.cleanup_history_state(timeout_sec=0.01)
+            self.assertEqual(pending, (0, 1, 0))
+            self.assertTrue(engine._executor_connected)
+            executor.disconnect_release.set()
+            completed = await engine.cleanup_history_state(timeout_sec=1.0)
+
+        self.assertEqual(completed, (1, 0, 0))
+        self.assertFalse(engine._executor_connected)
 
     async def test_start_fails_closed_without_current_process_grant(
         self,

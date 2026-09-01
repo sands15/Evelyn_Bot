@@ -48,6 +48,33 @@ def _safe_guild_id(value: Any) -> int | None:
     return guild_id if guild_id >= 0 else None
 
 
+def _parent_record_ids(value: Any) -> tuple[str, ...] | None:
+    if value in (None, (), []):
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) != 1:
+        return None
+    parent = value[0]
+    if (
+        not isinstance(parent, str)
+        or not parent
+        or parent != parent.strip()
+        or len(parent) > 64
+        or not parent[0].isalnum()
+        or not parent[0].isascii()
+        or any(
+            character
+            not in (
+                "abcdefghijklmnopqrstuvwxyz"
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "0123456789_.:-"
+            )
+            for character in parent
+        )
+    ):
+        return None
+    return (parent,)
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -105,7 +132,16 @@ def build_world_lease_proof(
     process_nonce = _canonical_nonce(status.get("processNonce"))
     guild_id = _safe_guild_id(lease.get("guildId"))
     expires_at = _finite_float(lease.get("expiresAt"))
-    if not lease_id or not process_nonce or guild_id is None or expires_at is None:
+    parent_record_ids = _parent_record_ids(
+        lease.get("parentRecordIds")
+    )
+    if (
+        not lease_id
+        or not process_nonce
+        or guild_id is None
+        or expires_at is None
+        or parent_record_ids is None
+    ):
         return {}
     proof = {
         "schema": MINECRAFT_WORLD_LEASE_PROOF_SCHEMA,
@@ -114,6 +150,8 @@ def build_world_lease_proof(
         "processNonce": process_nonce,
         "expiresAt": expires_at,
     }
+    if parent_record_ids:
+        proof["parentRecordIds"] = list(parent_record_ids)
     token = str(authorization_token or "").strip()
     if token:
         proof["authorizationToken"] = token
@@ -298,6 +336,10 @@ def validate_world_lease_request(
     for key in ("leaseId", "guildId", "processNonce", "expiresAt"):
         if presented.get(key) != expected.get(key):
             return False, "minecraft_world_lease_proof_mismatch"
+    if presented.get("parentRecordIds") != expected.get(
+        "parentRecordIds"
+    ):
+        return False, "minecraft_world_lease_proof_mismatch"
     expected_token, token_error = load_world_lease_authorization_token(
         secret_path,
         process_nonce=str(expected.get("processNonce") or ""),

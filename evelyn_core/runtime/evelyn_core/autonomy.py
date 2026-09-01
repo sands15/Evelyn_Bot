@@ -24,7 +24,7 @@ from .autonomy_failure_contract import (
     sanitize_autonomy_step_result,
 )
 from .autonomy_outcome_evidence import autonomy_outcome_verified
-from .memory import cognitive_state_path, read_json_file, write_json_file
+from .memory import cognitive_state_path, read_json_file
 from .memory_deletion_journal import MemoryDeletionJournalIntegrityError
 from .memory_exposure import (
     current_memory_exposure_position,
@@ -33,11 +33,40 @@ from .memory_exposure import (
 )
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
 from .paths import get_repo_root
+from .runtime_artifact_io import atomic_json_write
 from .self_model import update_self_state_from_observation
 from .text import clean_text
 
 
 MC_DEBUG_LOG_PATH = get_repo_root() / "minecraft_debug.log"
+
+
+def _path_is_local_regular(path: Path) -> bool:
+    for candidate in (path, *path.parents):
+        try:
+            junction = getattr(candidate, "is_junction", None)
+            if candidate.exists() and (
+                candidate.is_symlink()
+                or bool(callable(junction) and junction())
+            ):
+                return False
+        except OSError:
+            return False
+    try:
+        return not path.exists() or path.is_file()
+    except OSError:
+        return False
+
+
+def write_json_file(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    durable: bool = False,
+) -> None:
+    """Keep the established patch seam while using atomic artifact writes."""
+
+    atomic_json_write(path, data, durable=durable)
 
 
 def _mc_log(prefix: str, payload: Any) -> None:
@@ -176,6 +205,7 @@ class AutonomyEngine:
         )
         self.state = AutonomyRuntimeState()
         self._task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._executor_connected = False
         self._blocked_counts: dict[str, int] = defaultdict(int)
@@ -253,8 +283,10 @@ class AutonomyEngine:
         )
         self.persist_state()
 
-    def persist_state(self) -> None:
+    def persist_state(self, *, durable: bool = False) -> None:
         path = cognitive_state_path(self.guild_id, scope_type="system", scope_key=self.memory_scope_key)
+        if not _path_is_local_regular(path):
+            raise OSError("autonomy_state_path_unsafe")
         payload = read_json_file(path)
         self.state.last_observation = sanitize_autonomy_observation(
             self.state.last_observation
@@ -285,7 +317,80 @@ class AutonomyEngine:
             "failure_count": self.state.failure_count,
             "updated_at": self.state.updated_at,
         }
-        write_json_file(path, payload)
+        write_json_file(path, payload, durable=durable)
+
+    async def cleanup_history_state(
+        self,
+        *,
+        timeout_sec: float = 2.0,
+    ) -> tuple[int, int, int]:
+        """Boundedly stop this guild engine and erase its history-derived state."""
+
+        try:
+            timeout = float(timeout_sec)
+        except (TypeError, ValueError):
+            return (0, 1, 1)
+        if timeout <= 0.0:
+            return (0, 1, 1)
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self.stop())
+        done, _pending = await asyncio.wait(
+            {self._cleanup_task}, timeout=timeout
+        )
+        if not done:
+            return (0, 1, 0)
+        task = self._cleanup_task
+        self._cleanup_task = None
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            return (0, 1, 1)
+        async with self._lock:
+            self.state.enabled = False
+            self.state.status = "idle"
+            self.state.allowed_actions = []
+            self.state.last_observation = {}
+            self.state.current_goal = None
+            self.state.current_plan = None
+            self.state.last_step_result = {}
+            self.state.last_router_refresh_result = {}
+            self.state.drive_state = {}
+            self.state.last_error = ""
+            self.state.failure_count = 0
+            self.state.updated_at = time.time()
+            self._blocked_counts.clear()
+            self._reset_failure_notification_episode()
+            try:
+                self.persist_state(durable=True)
+                path = cognitive_state_path(
+                    self.guild_id,
+                    scope_type="system",
+                    scope_key=self.memory_scope_key,
+                )
+                if not _path_is_local_regular(path):
+                    raise OSError("autonomy_state_path_unsafe")
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                runtime = raw.get("autonomy_runtime")
+                if not isinstance(runtime, dict) or any(
+                    runtime.get(key) not in ({}, None, "", 0, [], False, "idle")
+                    for key in (
+                        "enabled",
+                        "status",
+                        "allowed_actions",
+                        "last_observation",
+                        "current_goal",
+                        "current_plan",
+                        "last_step_result",
+                        "last_router_refresh_result",
+                        "drive_state",
+                        "last_error",
+                        "failure_count",
+                    )
+                ):
+                    return (0, 1, 1)
+            except Exception:
+                return (0, 1, 1)
+        return (1, 0, 0)
 
     async def start(
         self,

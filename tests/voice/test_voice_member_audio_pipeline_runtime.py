@@ -196,6 +196,94 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ["ingress", "wake", "interrupt", "stt", "finalize", "session", "dispatch"],
         )
 
+    async def test_archive_capture_admission_blocks_pcm_before_stt(self) -> None:
+        async def reject_capture(**kwargs: Any) -> bool:
+            self.events.append(("archive_admission", kwargs))
+            return False
+
+        member = SimpleNamespace(
+            id=7,
+            display_name="정훈",
+            guild=self.guild,
+            voice=SimpleNamespace(channel=SimpleNamespace(id=22)),
+        )
+        await self.run_pipeline(
+            deps=replace(self.deps, authorize_archive_capture=reject_capture),
+            member=member,
+        )
+
+        self.assertEqual(self.stage_names(), ["archive_admission"])
+        self.assertEqual(self.events[0][1]["channel_id"], 22)
+
+    async def test_final_stt_is_archived_before_session_and_reply_dispatch(self) -> None:
+        async def allow_capture(**kwargs: Any) -> bool:
+            self.events.append(("archive_admission", kwargs))
+            return True
+
+        async def archive_final(**kwargs: Any) -> None:
+            self.events.append(("archive_final", kwargs))
+
+        member = SimpleNamespace(
+            id=7,
+            display_name="정훈",
+            guild=self.guild,
+            voice=SimpleNamespace(channel=SimpleNamespace(id=22)),
+        )
+        await self.run_pipeline(
+            deps=replace(
+                self.deps,
+                authorize_archive_capture=allow_capture,
+                archive_final_transcript=archive_final,
+            ),
+            member=member,
+        )
+
+        self.assertEqual(
+            self.stage_names(),
+            [
+                "archive_admission",
+                "ingress",
+                "wake",
+                "interrupt",
+                "stt",
+                "finalize",
+                "archive_final",
+                "session",
+                "dispatch",
+            ],
+        )
+        archived = next(payload for name, payload in self.events if name == "archive_final")
+        self.assertEqual(archived["text"], "오늘 날씨 알려줘")
+        self.assertEqual(archived["user_id"], 7)
+        self.assertEqual(archived["owner_name"], "정훈")
+        self.assertEqual(archived["channel_id"], 22)
+        self.assertGreater(archived["ended_at"], archived["started_at"])
+
+    async def test_archive_failure_stops_downstream_reply(self) -> None:
+        async def allow_capture(**_kwargs: Any) -> bool:
+            return True
+
+        async def fail_archive(**_kwargs: Any) -> None:
+            raise OSError("replica unavailable")
+
+        member = SimpleNamespace(
+            id=7,
+            display_name="정훈",
+            guild=self.guild,
+            voice=SimpleNamespace(channel=SimpleNamespace(id=22)),
+        )
+        await self.run_pipeline(
+            deps=replace(
+                self.deps,
+                authorize_archive_capture=allow_capture,
+                archive_final_transcript=fail_archive,
+            ),
+            member=member,
+        )
+
+        self.assertNotIn("session", self.stage_names())
+        self.assertNotIn("dispatch", self.stage_names())
+
     async def test_completed_batch_runs_once_and_authoritative_final_is_reused(self) -> None:
         calls = 0
 

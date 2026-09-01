@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -12,10 +13,129 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.identity_review import export_identity_review, read_identity_review_rows
+from evelyn_core.identity_review import (
+    cleanup_identity_review_artifacts,
+    export_identity_review,
+    read_identity_review_rows,
+)
 
 
 class IdentityReviewExportTests(unittest.TestCase):
+    def test_cleanup_rebuilds_registered_export_when_queue_is_already_clean(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_path = root / "queue.jsonl"
+            output_dir = root / "exports" / "registered"
+            queue_path.write_text("", encoding="utf-8")
+            output_dir.mkdir(parents=True)
+            stale = "PRIVATE_ALREADY_REMOVED"
+            (output_dir / "evelyn_identity_review.tsv").write_text(
+                stale, encoding="utf-8"
+            )
+            (output_dir / "evelyn_identity_review.md").write_text(
+                stale, encoding="utf-8"
+            )
+            (output_dir / "evelyn_identity_review_summary.json").write_text(
+                json.dumps({"candidate_count": 1}), encoding="utf-8"
+            )
+
+            result = cleanup_identity_review_artifacts(
+                time_predicate=lambda _row: True,
+                lineage_predicate=lambda _lineage: True,
+                queue_path=queue_path,
+                registered_export_dirs=(output_dir,),
+                allowed_export_root=root / "exports",
+            )
+
+            self.assertEqual(result, (0, 0, 0))
+            for artifact in output_dir.iterdir():
+                self.assertNotIn(stale, artifact.read_text(encoding="utf-8-sig"))
+
+    def test_cleanup_removes_exact_lineage_and_reports_legacy_manual(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_path = root / "queue.jsonl"
+            output_dir = root / "exports" / "registered"
+            rows = [
+                {
+                    "recorded_at": 100.0,
+                    "lineage": {"turn": "target"},
+                    "user_text": "PRIVATE_TARGET",
+                    "status": "review_candidate",
+                },
+                {
+                    "recorded_at": 100.0,
+                    "user_text": "PRIVATE_LEGACY",
+                    "status": "review_candidate",
+                },
+                {
+                    "recorded_at": 200.0,
+                    "lineage": {"turn": "survivor"},
+                    "user_text": "SURVIVOR",
+                    "status": "review_candidate",
+                },
+            ]
+            queue_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            export_identity_review(input_path=queue_path, output_dir=output_dir)
+
+            result = cleanup_identity_review_artifacts(
+                time_predicate=lambda row: row.get("recorded_at") == 100.0,
+                lineage_predicate=lambda lineage: lineage.get("turn") == "target",
+                queue_path=queue_path,
+                registered_export_dirs=(output_dir,),
+                allowed_export_root=root / "exports",
+            )
+
+            self.assertEqual(result, (1, 0, 1))
+            fresh = queue_path.read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE_TARGET", fresh)
+            self.assertIn("PRIVATE_LEGACY", fresh)
+            self.assertIn("SURVIVOR", fresh)
+            for artifact in output_dir.iterdir():
+                self.assertNotIn("PRIVATE_TARGET", artifact.read_text(encoding="utf-8-sig"))
+
+    def test_cleanup_fails_closed_for_malformed_queue(self) -> None:
+        with TemporaryDirectory() as tmp:
+            queue_path = Path(tmp) / "queue.jsonl"
+            original = "{malformed\n"
+            queue_path.write_text(original, encoding="utf-8")
+
+            result = cleanup_identity_review_artifacts(
+                time_predicate=lambda _row: True,
+                lineage_predicate=lambda _lineage: True,
+                queue_path=queue_path,
+            )
+
+            self.assertEqual(result, (0, 1, 1))
+            self.assertEqual(queue_path.read_text(encoding="utf-8"), original)
+
+    def test_cleanup_rejects_unregistered_output_outside_allowed_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_path = root / "queue.jsonl"
+            original = json.dumps(
+                {
+                    "recorded_at": 100.0,
+                    "lineage": {"turn": "target"},
+                    "user_text": "PRIVATE_TARGET",
+                }
+            ) + "\n"
+            queue_path.write_text(original, encoding="utf-8")
+
+            result = cleanup_identity_review_artifacts(
+                time_predicate=lambda _row: True,
+                lineage_predicate=lambda _lineage: True,
+                queue_path=queue_path,
+                registered_export_dirs=(root / "outside",),
+                allowed_export_root=root / "allowed",
+            )
+
+            self.assertEqual(result, (0, 1, 1))
+            self.assertEqual(queue_path.read_text(encoding="utf-8"), original)
+
     def test_exports_pending_candidates_to_review_files(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

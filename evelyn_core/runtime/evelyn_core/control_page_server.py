@@ -3,19 +3,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
+import ssl
 import subprocess
 import sys
 import threading
 import time
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
-from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectorError, ClientError, ClientSession, ClientTimeout, web
 
 from .autonomy_validation import (
     SUITE_ID as AUTONOMY_VALIDATION_SUITE_ID,
@@ -29,7 +33,16 @@ from .control_page_memory_http import (
     control_page_memory_guarded_json_response,
     parse_control_page_memory_handoff_headers,
 )
-from .control_page_http import control_page_cors_middleware, control_page_session_handler
+from .control_page_http import (
+    add_control_page_no_store_headers,
+    control_page_cors_middleware,
+    control_page_session_handler,
+    normalize_request_origin,
+    origin_uses_loopback_host,
+    request_control_page_host_is_allowed,
+    request_control_page_origin,
+    request_control_page_self_origin,
+)
 from .control_page_contracts import (
     build_control_page_panel_state_payload,
     build_fast_control_default_commands,
@@ -124,6 +137,45 @@ PORT = int(os.getenv("CONTROL_PAGE_PUBLIC_PORT", os.getenv("CONTROL_PAGE_PORT", 
 BOT_API_HOST = os.getenv("CONTROL_PAGE_BOT_API_HOST", "127.0.0.1")
 BOT_API_PORT = int(os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798"))
 BOT_API_BASE = f"http://{BOT_API_HOST}:{BOT_API_PORT}"
+CONVERSATION_ARCHIVE_ENABLED = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
+CONTROL_PAGE_TLS_CERT_FILE = os.getenv("CONTROL_PAGE_TLS_CERT_FILE", "").strip()
+CONTROL_PAGE_TLS_KEY_FILE = os.getenv("CONTROL_PAGE_TLS_KEY_FILE", "").strip()
+CONVERSATION_ARCHIVE_PROXY_KEY_FILE = os.getenv(
+    "EVELYN_CONVERSATION_ARCHIVE_PROXY_KEY_FILE", ""
+).strip()
+CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN = normalize_request_origin(
+    os.getenv(
+        "EVELYN_CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN",
+        "https://127.0.0.1:8800",
+    )
+)
+CONVERSATION_ARCHIVE_ADMIN_COOKIE = "__Host-evelyn_archive_admin"
+CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX = (
+    "/api/control-page/conversation-archive"
+)
+CONVERSATION_ARCHIVE_ADMIN_UPSTREAM_PREFIX = (
+    "/internal/conversation-archive/admin"
+)
+CONVERSATION_ARCHIVE_ADMIN_MAX_REQUEST_BYTES = 256 * 1024
+CONVERSATION_ARCHIVE_ADMIN_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_CONVERSATION_ARCHIVE_COOKIE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+_CONVERSATION_ARCHIVE_PUBLIC_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_CONVERSATION_ARCHIVE_PROXY_KEY_DOMAIN = (
+    b"evelyn.private-conversation-archive.transport-key.v1\ncontrol-proxy"
+)
+_CONVERSATION_ARCHIVE_PROXY_PURPOSE = "control-proxy"
+_CONVERSATION_ARCHIVE_TIMESTAMP_HEADER = "X-Evelyn-Archive-Timestamp"
+_CONVERSATION_ARCHIVE_NONCE_HEADER = "X-Evelyn-Archive-Nonce"
+_CONVERSATION_ARCHIVE_SIGNATURE_HEADER = "X-Evelyn-Archive-Signature"
+_CONVERSATION_ARCHIVE_CONTROL_SCHEME_HEADER = (
+    "X-Evelyn-Archive-Control-Scheme"
+)
+_CONVERSATION_ARCHIVE_CONTROL_HOST_HEADER = "X-Evelyn-Archive-Control-Host"
+_CONVERSATION_ARCHIVE_CONTROL_ORIGIN_HEADER = (
+    "X-Evelyn-Archive-Control-Origin"
+)
 EVELYN_INTERNAL_CONTROL_HEADER = "X-Evelyn-Internal-Control-Token"
 EVELYN_INTERNAL_CONTROL_TOKEN = os.getenv(
     "EVELYN_INTERNAL_CONTROL_TOKEN",
@@ -457,6 +509,1108 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
             proxy_failure_payload(classify_proxy_exception(exc), url=url),
         )
         return None
+
+
+def _conversation_archive_public_error(
+    error: str,
+    *,
+    status: int,
+) -> web.Response:
+    return add_control_page_no_store_headers(
+        json_response(
+            {"ok": False, "error": error},
+            status=status,
+        )
+    )
+
+
+def _conversation_archive_request_uses_admin_origin(request: Any) -> bool:
+    self_origin = request_control_page_self_origin(request)
+    return bool(
+        CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN
+        and hmac.compare_digest(
+            self_origin,
+            CONVERSATION_ARCHIVE_CONTROL_PAGE_ORIGIN,
+        )
+    )
+
+
+def _conversation_archive_admin_origin_path_allowed(path: str) -> bool:
+    return path in {
+        "/archive/admin",
+        "/api/control-page/session",
+        "/assets/evelyn-conversation-archive-admin.css",
+        "/assets/evelyn-conversation-archive-admin.js",
+    } or path.startswith(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/"
+    )
+
+
+@web.middleware
+async def _conversation_archive_admin_origin_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Any],
+) -> web.StreamResponse:
+    if (
+        _conversation_archive_request_uses_admin_origin(request)
+        and not _conversation_archive_admin_origin_path_allowed(request.path)
+    ):
+        raise web.HTTPNotFound(text="control page resource not found")
+    return await handler(request)
+
+
+def _conversation_archive_request_is_secure(request: Any) -> bool:
+    self_origin = request_control_page_self_origin(request)
+    browser_origin = request_control_page_origin(request)
+    origin_required = str(getattr(request, "method", "GET")).upper() != "GET"
+    return bool(
+        _conversation_archive_request_uses_admin_origin(request)
+        and str(getattr(request, "scheme", "")).lower() == "https"
+        and request_control_page_host_is_allowed(request)
+        and origin_uses_loopback_host(self_origin)
+        and (
+            hmac.compare_digest(browser_origin, self_origin)
+            if browser_origin
+            else not origin_required
+        )
+    )
+
+
+def _conversation_archive_proxy_key() -> bytes:
+    path = Path(CONVERSATION_ARCHIVE_PROXY_KEY_FILE)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError
+        with path.open("rb") as handle:
+            key = handle.read(4097)
+    except OSError:
+        raise ValueError("archive_proxy_key_unavailable") from None
+    if len(key) < 32 or len(key) > 4096:
+        raise ValueError("archive_proxy_key_invalid")
+    return hmac.new(
+        key,
+        _CONVERSATION_ARCHIVE_PROXY_KEY_DOMAIN,
+        hashlib.sha256,
+    ).digest()
+
+
+def _conversation_archive_proxy_headers(
+    request: web.Request,
+    *,
+    method: str,
+    upstream_path: str,
+    body: bytes,
+) -> dict[str, str]:
+    self_origin = request_control_page_self_origin(request)
+    scheme = urlsplit(self_origin).scheme
+    host = urlsplit(self_origin).netloc
+    origin = request_control_page_origin(request) or self_origin
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    canonical = "\n".join(
+        (
+            _CONVERSATION_ARCHIVE_PROXY_PURPOSE,
+            method.upper(),
+            upstream_path,
+            timestamp,
+            nonce,
+            hashlib.sha256(body).hexdigest(),
+            scheme,
+            host,
+            origin,
+        )
+    ).encode("utf-8")
+    return {
+        "Accept": "application/json",
+        "Cache-Control": "no-store",
+        _CONVERSATION_ARCHIVE_TIMESTAMP_HEADER: timestamp,
+        _CONVERSATION_ARCHIVE_NONCE_HEADER: nonce,
+        _CONVERSATION_ARCHIVE_SIGNATURE_HEADER: hmac.new(
+            _conversation_archive_proxy_key(),
+            canonical,
+            hashlib.sha256,
+        ).hexdigest(),
+        _CONVERSATION_ARCHIVE_CONTROL_SCHEME_HEADER: scheme,
+        _CONVERSATION_ARCHIVE_CONTROL_HOST_HEADER: host,
+        _CONVERSATION_ARCHIVE_CONTROL_ORIGIN_HEADER: origin,
+    }
+
+
+def _conversation_archive_request_cookie(request: web.Request) -> str:
+    value = str(request.cookies.get(CONVERSATION_ARCHIVE_ADMIN_COOKIE) or "")
+    return value if _CONVERSATION_ARCHIVE_COOKIE_RE.fullmatch(value) else ""
+
+
+def _conversation_archive_response_cookie(
+    headers: Any,
+) -> tuple[str, bool] | None:
+    matches: list[tuple[str, bool]] = []
+    for raw_header in headers.getall("Set-Cookie", []):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw_header)
+        except Exception as exc:
+            if CONVERSATION_ARCHIVE_ADMIN_COOKIE in raw_header:
+                raise ValueError("archive_admin_cookie_invalid") from exc
+            continue
+        if CONVERSATION_ARCHIVE_ADMIN_COOKIE not in cookie:
+            if CONVERSATION_ARCHIVE_ADMIN_COOKIE in raw_header:
+                raise ValueError("archive_admin_cookie_invalid")
+            continue
+        if set(cookie) != {CONVERSATION_ARCHIVE_ADMIN_COOKIE}:
+            raise ValueError("archive_admin_cookie_invalid")
+        morsel = cookie[CONVERSATION_ARCHIVE_ADMIN_COOKIE]
+        value = morsel.value
+        delete_cookie = morsel["max-age"] == "0" and value == ""
+        if (
+            (not delete_cookie and not _CONVERSATION_ARCHIVE_COOKIE_RE.fullmatch(value))
+            or not morsel["secure"]
+            or not morsel["httponly"]
+            or str(morsel["samesite"]).lower() != "strict"
+            or morsel["path"] != "/"
+            or morsel["domain"]
+            or morsel["max-age"] not in {"", "0"}
+            or (morsel["max-age"] == "0" and not delete_cookie)
+        ):
+            raise ValueError("archive_admin_cookie_invalid")
+        normalized = (
+            f"{CONVERSATION_ARCHIVE_ADMIN_COOKIE}={value}; "
+            "Secure; HttpOnly; SameSite=Strict; Path=/"
+        )
+        if delete_cookie:
+            normalized += "; Max-Age=0"
+        matches.append((normalized, delete_cookie))
+    if len(matches) > 1:
+        raise ValueError("archive_admin_cookie_invalid")
+    return matches[0] if matches else None
+
+
+def _conversation_archive_response_exposes_auth_secret(
+    payload: Any,
+) -> bool:
+    forbidden = {"code", "cookie", "otp", "sessiontoken", "token"}
+    if isinstance(payload, dict):
+        if any(str(key).replace("_", "").lower() in forbidden for key in payload):
+            return True
+        return any(
+            _conversation_archive_response_exposes_auth_secret(value)
+            for value in payload.values()
+        )
+    if isinstance(payload, list):
+        return any(
+            _conversation_archive_response_exposes_auth_secret(value)
+            for value in payload
+        )
+    return False
+
+
+def _conversation_archive_public_upstream_error(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    projected: dict[str, Any] = {"ok": False}
+    for key in ("schema", "error", "state"):
+        value = payload.get(key)
+        if isinstance(value, str) and _CONVERSATION_ARCHIVE_PUBLIC_CODE_RE.fullmatch(
+            value
+        ):
+            projected[key] = value
+    if type(payload.get("retryable")) is bool:
+        projected["retryable"] = payload["retryable"]
+    retry_after = payload.get("retryAfterSec")
+    if type(retry_after) is int and 0 < retry_after <= 86400:
+        projected["retryAfterSec"] = retry_after
+    if len(projected) == 1:
+        projected["error"] = "conversation_archive_request_failed"
+    return projected
+
+
+def _conversation_archive_feedback_workflow(value: Any) -> None:
+    required = {
+        "schema",
+        "workflowId",
+        "state",
+        "category",
+        "route",
+        "actionable",
+        "versionId",
+        "activeVersionId",
+        "deletionStates",
+        "contentFree",
+    }
+    if not isinstance(value, dict) or frozenset(value) not in {
+        frozenset(required),
+        frozenset(required | {"sourceRecordId"}),
+    }:
+        raise ValueError("archive_admin_response_invalid")
+    identifiers = ("workflowId", "activeVersionId")
+    if any(
+        not isinstance(value.get(key), str)
+        or not 1 <= len(value[key]) <= 128
+        or re.fullmatch(r"[A-Za-z0-9_.:-]+", value[key]) is None
+        for key in identifiers
+    ):
+        raise ValueError("archive_admin_response_invalid")
+    for key in ("versionId", "sourceRecordId"):
+        item = value.get(key)
+        if item is not None and (
+            not isinstance(item, str)
+            or not 1 <= len(item) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", item) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    category = value.get("category")
+    if category is not None and category not in {
+        "answer_quality",
+        "context_selection",
+        "task_routing",
+        "tone_identity",
+        "tool_failure",
+        "permission_safety",
+    }:
+        raise ValueError("archive_admin_response_invalid")
+    if (
+        value.get("schema") != "evelyn.feedback-workflow-public.v1"
+        or not isinstance(value.get("state"), str)
+        or _CONVERSATION_ARCHIVE_PUBLIC_CODE_RE.fullmatch(value["state"]) is None
+        or not isinstance(value.get("route"), str)
+        or _CONVERSATION_ARCHIVE_PUBLIC_CODE_RE.fullmatch(value["route"]) is None
+        or type(value.get("actionable")) is not bool
+        or value.get("contentFree") is not True
+        or not isinstance(value.get("deletionStates"), list)
+        or any(
+            not isinstance(item, str)
+            or _CONVERSATION_ARCHIVE_PUBLIC_CODE_RE.fullmatch(item) is None
+            for item in value["deletionStates"]
+        )
+    ):
+        raise ValueError("archive_admin_response_invalid")
+
+
+def _conversation_archive_public_upstream_success(
+    upstream_path: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if payload.get("ok") is not True:
+        raise ValueError("archive_admin_response_invalid")
+    action = upstream_path.removeprefix(
+        f"{CONVERSATION_ARCHIVE_ADMIN_UPSTREAM_PREFIX}/"
+    )
+
+    if action == "challenge":
+        expected = {"ok", "state", "challengeId"}
+    elif action in {"login", "logout"}:
+        expected = {"ok", "state"}
+    elif action == "records":
+        expected = {"ok", "records", "nextCursor"}
+    elif action == "participation":
+        expected = {"ok", "intervals", "nextCursor"}
+    elif action == "voice-state-transitions":
+        expected = {"ok", "transitions", "nextCursor"}
+    elif action == "legal-minimal":
+        expected = {"ok", "events", "nextCursor"}
+    elif action in {"delete/preview", "delete/apply"}:
+        expected = {"ok", "state", "affectedCount"}
+        if action == "delete/preview":
+            expected.add("previewToken")
+        else:
+            expected.add("requestId")
+    elif action == "feedback/workflows":
+        expected = {"ok", "workflows", "activeVersionId"}
+    elif action in {
+        "feedback/capture",
+        "feedback/generalize",
+        "feedback/evaluate",
+        "feedback/approval/apply",
+        "feedback/canary",
+        "feedback/activate",
+    }:
+        expected = {"ok", "workflow"}
+    elif action in {
+        "feedback/approval/preview",
+        "feedback/rollback/preview",
+        "feedback/revoke/preview",
+    }:
+        expected = {"ok", "state", "previewToken", "versionId", "guidance"}
+    elif action == "feedback/rollback/apply":
+        expected = {"ok", "state", "versionId", "activeVersionId"}
+    elif action == "feedback/failure":
+        expected = {"ok", "state", "failureId", "versionId"}
+    elif action == "feedback/revoke/apply":
+        expected = {"ok", "state", "versionIds", "activeVersionId"}
+    else:
+        raise ValueError("archive_admin_response_invalid")
+    if set(payload) != expected:
+        raise ValueError("archive_admin_response_invalid")
+
+    state = payload.get("state")
+    if action not in {
+        "records",
+        "participation",
+        "voice-state-transitions",
+        "legal-minimal",
+        "feedback/workflows",
+        "feedback/capture",
+        "feedback/generalize",
+        "feedback/evaluate",
+        "feedback/approval/apply",
+        "feedback/canary",
+        "feedback/activate",
+    } and (
+        not isinstance(state, str)
+        or _CONVERSATION_ARCHIVE_PUBLIC_CODE_RE.fullmatch(state) is None
+    ):
+        raise ValueError("archive_admin_response_invalid")
+
+    if action == "challenge":
+        challenge_id = payload.get("challengeId")
+        if (
+            not isinstance(challenge_id, str)
+            or not 1 <= len(challenge_id) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_-]+", challenge_id) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    elif action == "records":
+        records = payload.get("records")
+        next_cursor = payload.get("nextCursor")
+        if not isinstance(records, list) or len(records) > 2:
+            raise ValueError("archive_admin_response_invalid")
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or len(next_cursor) > 2048
+            or re.fullmatch(r"[A-Za-z0-9_-]+", next_cursor) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+        record_fields = {"recordId", "createdAt", "kind", "ownerName", "body"}
+        record_ids: set[str] = set()
+        for record in records:
+            if (
+                not isinstance(record, dict)
+                or set(record) != record_fields
+                or any(not isinstance(record[field], str) for field in record_fields)
+                or not record["recordId"]
+                or len(record["recordId"]) > 128
+                or len(record["createdAt"]) > 64
+                or len(record["kind"]) > 128
+                or len(record["ownerName"]) > 512
+                or len(record["body"].encode("utf-8")) > 128 * 1024
+                or record["recordId"] in record_ids
+            ):
+                raise ValueError("archive_admin_response_invalid")
+            record_ids.add(record["recordId"])
+    elif action == "participation":
+        intervals = payload.get("intervals")
+        next_cursor = payload.get("nextCursor")
+        if not isinstance(intervals, list) or len(intervals) > 100:
+            raise ValueError("archive_admin_response_invalid")
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str)
+            or re.fullmatch(r"[0-9a-f]{64}", next_cursor) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+        fields = {
+            "intervalId",
+            "principalId",
+            "ownerName",
+            "guildId",
+            "channelId",
+            "kind",
+            "startedAt",
+            "endedAt",
+        }
+        interval_ids: set[str] = set()
+        for interval in intervals:
+            if (
+                not isinstance(interval, dict)
+                or set(interval) != fields
+                or any(
+                    not isinstance(interval[field], str)
+                    for field in fields - {"endedAt"}
+                )
+                or (
+                    interval["endedAt"] is not None
+                    and not isinstance(interval["endedAt"], str)
+                )
+                or not 1 <= len(interval["intervalId"]) <= 128
+                or not 1 <= len(interval["principalId"]) <= 128
+                or not 1 <= len(interval["ownerName"]) <= 512
+                or not 1 <= len(interval["guildId"]) <= 64
+                or not 1 <= len(interval["channelId"]) <= 64
+                or interval["kind"] not in {"presence", "eligible"}
+                or not 1 <= len(interval["startedAt"]) <= 64
+                or (
+                    isinstance(interval["endedAt"], str)
+                    and not 1 <= len(interval["endedAt"]) <= 64
+                )
+                or interval["intervalId"] in interval_ids
+            ):
+                raise ValueError("archive_admin_response_invalid")
+            interval_ids.add(interval["intervalId"])
+    elif action == "voice-state-transitions":
+        transitions = payload.get("transitions")
+        next_cursor = payload.get("nextCursor")
+        if not isinstance(transitions, list) or len(transitions) > 100:
+            raise ValueError("archive_admin_response_invalid")
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str)
+            or re.fullmatch(r"[0-9a-f]{64}", next_cursor) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+        string_fields = {
+            "transitionId",
+            "principalId",
+            "ownerName",
+            "guildId",
+            "channelId",
+            "eventAt",
+        }
+        boolean_fields = {
+            "present",
+            "consentCurrent",
+            "selfMute",
+            "serverMute",
+            "selfDeaf",
+            "serverDeaf",
+            "suppressed",
+            "gatewayKnown",
+        }
+        transition_ids: set[str] = set()
+        for transition in transitions:
+            if (
+                not isinstance(transition, dict)
+                or set(transition) != string_fields | boolean_fields
+                or any(
+                    not isinstance(transition[field], str)
+                    for field in string_fields
+                )
+                or any(type(transition[field]) is not bool for field in boolean_fields)
+                or not 1 <= len(transition["transitionId"]) <= 128
+                or not 1 <= len(transition["principalId"]) <= 128
+                or not 1 <= len(transition["ownerName"]) <= 512
+                or not 1 <= len(transition["guildId"]) <= 64
+                or not 1 <= len(transition["channelId"]) <= 64
+                or not 1 <= len(transition["eventAt"]) <= 64
+                or transition["transitionId"] in transition_ids
+            ):
+                raise ValueError("archive_admin_response_invalid")
+            transition_ids.add(transition["transitionId"])
+    elif action == "legal-minimal":
+        events = payload.get("events")
+        next_cursor = payload.get("nextCursor")
+        if not isinstance(events, list) or len(events) > 100:
+            raise ValueError("archive_admin_response_invalid")
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str)
+            or re.fullmatch(r"[0-9a-f]{64}", next_cursor) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+        for event in events:
+            if (
+                not isinstance(event, dict)
+                or set(event) != {"ownerName", "occurredAt"}
+                or not isinstance(event["ownerName"], str)
+                or not isinstance(event["occurredAt"], str)
+                or not 1 <= len(event["ownerName"]) <= 512
+                or not 1 <= len(event["occurredAt"]) <= 64
+            ):
+                raise ValueError("archive_admin_response_invalid")
+    elif action in {"delete/preview", "delete/apply"}:
+        affected_count = payload.get("affectedCount")
+        if type(affected_count) is not int or not 0 <= affected_count <= 1_000_000:
+            raise ValueError("archive_admin_response_invalid")
+        if action == "delete/preview":
+            preview_token = payload.get("previewToken")
+            if (
+                not isinstance(preview_token, str)
+                or not 1 <= len(preview_token) <= 128
+                or re.fullmatch(r"[A-Za-z0-9_-]+", preview_token) is None
+            ):
+                raise ValueError("archive_admin_response_invalid")
+        else:
+            request_id = payload.get("requestId")
+            if (
+                not isinstance(request_id, str)
+                or not 1 <= len(request_id) <= 64
+                or re.fullmatch(r"[A-Za-z0-9_-]+", request_id) is None
+            ):
+                raise ValueError("archive_admin_response_invalid")
+            payload = dict(payload)
+            payload.pop("requestId")
+    elif action == "feedback/workflows":
+        workflows = payload.get("workflows")
+        active_version = payload.get("activeVersionId")
+        if (
+            not isinstance(workflows, list)
+            or len(workflows) > 100
+            or not isinstance(active_version, str)
+            or not 1 <= len(active_version) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", active_version) is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+        for workflow in workflows:
+            _conversation_archive_feedback_workflow(workflow)
+    elif action in {
+        "feedback/capture",
+        "feedback/generalize",
+        "feedback/evaluate",
+        "feedback/approval/apply",
+        "feedback/canary",
+        "feedback/activate",
+    }:
+        _conversation_archive_feedback_workflow(payload.get("workflow"))
+    elif action in {
+        "feedback/approval/preview",
+        "feedback/rollback/preview",
+        "feedback/revoke/preview",
+    }:
+        for key in ("previewToken", "versionId"):
+            value = payload.get(key)
+            if (
+                not isinstance(value, str)
+                or not 1 <= len(value) <= 128
+                or re.fullmatch(r"[A-Za-z0-9_.:-]+", value) is None
+            ):
+                raise ValueError("archive_admin_response_invalid")
+        guidance = payload.get("guidance")
+        if (
+            not isinstance(guidance, str)
+            or len(guidance) > 8_000
+            or (action != "feedback/approval/preview" and guidance != "")
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    elif action == "feedback/rollback/apply":
+        if any(
+            not isinstance(payload.get(key), str)
+            or not 1 <= len(payload[key]) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", payload[key]) is None
+            for key in ("versionId", "activeVersionId")
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    elif action == "feedback/failure":
+        if any(
+            not isinstance(payload.get(key), str)
+            or not 1 <= len(payload[key]) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", payload[key]) is None
+            for key in ("failureId", "versionId")
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    elif action == "feedback/revoke/apply":
+        version_ids = payload.get("versionIds")
+        if (
+            not isinstance(version_ids, list)
+            or len(version_ids) > 100
+            or any(
+                not isinstance(value, str) or not 1 <= len(value) <= 128
+                or re.fullmatch(r"[A-Za-z0-9_.:-]+", value) is None
+                for value in version_ids
+            )
+            or not isinstance(payload.get("activeVersionId"), str)
+            or not 1 <= len(payload["activeVersionId"]) <= 128
+            or re.fullmatch(
+                r"[A-Za-z0-9_.:-]+", payload["activeVersionId"]
+            )
+            is None
+        ):
+            raise ValueError("archive_admin_response_invalid")
+    return payload
+
+
+async def _conversation_archive_request_json(
+    request: web.Request,
+) -> dict[str, Any]:
+    encoded = await request.content.read(
+        CONVERSATION_ARCHIVE_ADMIN_MAX_REQUEST_BYTES + 1
+    )
+    if len(encoded) > CONVERSATION_ARCHIVE_ADMIN_MAX_REQUEST_BYTES:
+        raise ValueError("archive_admin_request_too_large")
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        raise ValueError("archive_admin_request_invalid") from None
+    if not isinstance(payload, dict):
+        raise ValueError("archive_admin_request_invalid")
+    return payload
+
+
+async def _proxy_conversation_archive_admin(
+    request: web.Request,
+    *,
+    method: str,
+    upstream_path: str,
+    body: dict[str, Any] | None = None,
+    require_session_cookie: bool = False,
+    require_login_cookie: bool = False,
+) -> web.Response:
+    try:
+        encoded_body = (
+            json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            if method == "POST"
+            else b""
+        )
+    except (TypeError, ValueError):
+        return _conversation_archive_public_error(
+            "conversation_archive_request_invalid",
+            status=400,
+        )
+    try:
+        headers = _conversation_archive_proxy_headers(
+            request,
+            method=method,
+            upstream_path=upstream_path,
+            body=encoded_body,
+        )
+    except (TypeError, ValueError):
+        return _conversation_archive_public_error(
+            "conversation_archive_authorization_unavailable",
+            status=503,
+        )
+    session_cookie = _conversation_archive_request_cookie(request)
+    if require_session_cookie and not session_cookie:
+        return _conversation_archive_public_error(
+            "conversation_archive_admin_authentication_required",
+            status=401,
+        )
+    if require_session_cookie and session_cookie:
+        headers["Cookie"] = (
+            f"{CONVERSATION_ARCHIVE_ADMIN_COOKIE}={session_cookie}"
+        )
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+    timeout = ClientTimeout(total=PROXY_TIMEOUT_SEC)
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            request_context = (
+                session.post(
+                    f"{BOT_API_BASE}{upstream_path}",
+                    data=encoded_body,
+                    headers=headers,
+                    allow_redirects=False,
+                )
+                if method == "POST"
+                else session.get(
+                    f"{BOT_API_BASE}{upstream_path}",
+                    headers=headers,
+                    allow_redirects=False,
+                )
+            )
+            async with request_context as upstream:
+                if (
+                    upstream.content_length is not None
+                    and upstream.content_length
+                    > CONVERSATION_ARCHIVE_ADMIN_MAX_RESPONSE_BYTES
+                ):
+                    raise ValueError("archive_admin_response_too_large")
+                encoded = await upstream.content.read(
+                    CONVERSATION_ARCHIVE_ADMIN_MAX_RESPONSE_BYTES + 1
+                )
+                if len(encoded) > CONVERSATION_ARCHIVE_ADMIN_MAX_RESPONSE_BYTES:
+                    raise ValueError("archive_admin_response_too_large")
+                payload = json.loads(encoded.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("archive_admin_response_invalid")
+                response_cookie = _conversation_archive_response_cookie(
+                    upstream.headers
+                )
+                if (
+                    upstream_path.endswith(("/challenge", "/login"))
+                    and _conversation_archive_response_exposes_auth_secret(payload)
+                ):
+                    raise ValueError("archive_admin_response_invalid")
+                successful = upstream.status == 200
+                response_status = upstream.status
+                cookie_policy = (
+                    "login"
+                    if require_login_cookie
+                    else "logout"
+                    if upstream_path.endswith("/logout")
+                    else "none"
+                )
+                if not successful:
+                    if response_cookie is not None:
+                        raise ValueError("archive_admin_cookie_invalid")
+                    payload = _conversation_archive_public_upstream_error(
+                        payload
+                    )
+                    if response_status < 400:
+                        response_status = 502
+                else:
+                    payload = _conversation_archive_public_upstream_success(
+                        upstream_path,
+                        payload,
+                    )
+                    if cookie_policy == "login" and (
+                        response_cookie is None or response_cookie[1]
+                    ):
+                        raise ValueError("archive_admin_cookie_missing")
+                    if cookie_policy == "logout" and (
+                        response_cookie is not None and not response_cookie[1]
+                    ):
+                        raise ValueError("archive_admin_cookie_invalid")
+                    if cookie_policy == "none" and response_cookie is not None:
+                        raise ValueError("archive_admin_cookie_invalid")
+                response = add_control_page_no_store_headers(
+                    json_response(payload, status=response_status)
+                )
+                if response_cookie is not None:
+                    response.headers["Set-Cookie"] = response_cookie[0]
+                elif (
+                    not successful
+                    and payload.get("state") == "authentication_required"
+                ):
+                    response.headers["Set-Cookie"] = (
+                        f"{CONVERSATION_ARCHIVE_ADMIN_COOKIE}=; "
+                        "Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+                    )
+                return response
+    except (ClientError, asyncio.TimeoutError):
+        return _conversation_archive_public_error(
+            "conversation_archive_unavailable",
+            status=503,
+        )
+    except Exception:
+        return _conversation_archive_public_error(
+            "conversation_archive_proxy_invalid",
+            status=502,
+        )
+
+
+async def _conversation_archive_admin_handler(
+    request: web.Request,
+    *,
+    method: str,
+    action: str,
+    require_session_cookie: bool = False,
+    require_login_cookie: bool = False,
+) -> web.Response:
+    if not CONVERSATION_ARCHIVE_ENABLED:
+        return _conversation_archive_public_error(
+            "conversation_archive_unavailable",
+            status=503,
+        )
+    if not _conversation_archive_request_is_secure(request):
+        return _conversation_archive_public_error(
+            "conversation_archive_local_https_required",
+            status=403,
+        )
+    body = None
+    if method == "POST":
+        try:
+            body = await _conversation_archive_request_json(request)
+        except ValueError:
+            return _conversation_archive_public_error(
+                "conversation_archive_request_invalid",
+                status=400,
+            )
+    return await _proxy_conversation_archive_admin(
+        request,
+        method=method,
+        upstream_path=f"{CONVERSATION_ARCHIVE_ADMIN_UPSTREAM_PREFIX}/{action}",
+        body=body,
+        require_session_cookie=require_session_cookie,
+        require_login_cookie=require_login_cookie,
+    )
+
+
+async def conversation_archive_admin_challenge_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="challenge",
+    )
+
+
+async def conversation_archive_admin_login_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="login",
+        require_login_cookie=True,
+    )
+
+
+async def _conversation_archive_admin_page_handler(
+    request: web.Request,
+    *,
+    action: str,
+    cursor_maximum: int,
+) -> web.Response:
+    if not CONVERSATION_ARCHIVE_ENABLED:
+        return _conversation_archive_public_error(
+            "conversation_archive_unavailable",
+            status=503,
+        )
+    if not _conversation_archive_request_is_secure(request):
+        return _conversation_archive_public_error(
+            "conversation_archive_local_https_required",
+            status=403,
+        )
+    if set(request.query) - {"cursor"}:
+        return _conversation_archive_public_error(
+            "conversation_archive_request_invalid",
+            status=400,
+        )
+    cursor_values = request.query.getall("cursor", [])
+    if len(cursor_values) > 1:
+        return _conversation_archive_public_error(
+            "conversation_archive_request_invalid",
+            status=400,
+        )
+    cursor = str(cursor_values[0]) if cursor_values else ""
+    if (cursor_values and not cursor) or (
+        cursor
+        and (
+            len(cursor) > cursor_maximum
+            or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None
+        )
+    ):
+        return _conversation_archive_public_error(
+            "conversation_archive_request_invalid",
+            status=400,
+        )
+    return await _proxy_conversation_archive_admin(
+        request,
+        method="POST",
+        upstream_path=f"{CONVERSATION_ARCHIVE_ADMIN_UPSTREAM_PREFIX}/{action}",
+        body={"cursor": cursor} if cursor else {},
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_records_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_page_handler(
+        request,
+        action="records",
+        cursor_maximum=2048,
+    )
+
+
+async def conversation_archive_admin_participation_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_page_handler(
+        request,
+        action="participation",
+        cursor_maximum=64,
+    )
+
+
+async def conversation_archive_admin_voice_state_transitions_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_page_handler(
+        request,
+        action="voice-state-transitions",
+        cursor_maximum=64,
+    )
+
+
+async def conversation_archive_admin_legal_minimal_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_page_handler(
+        request,
+        action="legal-minimal",
+        cursor_maximum=64,
+    )
+
+
+async def conversation_archive_admin_delete_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="delete/preview",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_delete_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="delete/apply",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_workflows_handler(
+    request: web.Request,
+) -> web.Response:
+    if request.query_string:
+        return _conversation_archive_public_error(
+            "conversation_archive_request_invalid",
+            status=400,
+        )
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/workflows",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_capture_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/capture",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_generalize_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/generalize",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_evaluate_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/evaluate",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_approval_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/approval/preview",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_approval_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/approval/apply",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_canary_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/canary",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_activate_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/activate",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_rollback_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/rollback/preview",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_rollback_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/rollback/apply",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_failure_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/failure",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_revoke_preview_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/revoke/preview",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_feedback_revoke_apply_handler(
+    request: web.Request,
+) -> web.Response:
+    return await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="feedback/revoke/apply",
+        require_session_cookie=True,
+    )
+
+
+async def conversation_archive_admin_logout_handler(
+    request: web.Request,
+) -> web.Response:
+    response = await _conversation_archive_admin_handler(
+        request,
+        method="POST",
+        action="logout",
+        require_session_cookie=True,
+    )
+    if 200 <= response.status < 300:
+        response.headers["Set-Cookie"] = (
+            f"{CONVERSATION_ARCHIVE_ADMIN_COOKIE}=; "
+            "Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+        )
+    return response
 
 
 async def proxy_raw(request: web.Request, path: str) -> web.Response | None:
@@ -1171,13 +2325,38 @@ def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
         return False, "local_restart_failed"
 
 
-async def index_handler(_: web.Request) -> web.StreamResponse:
-    index_path = DOCS_DIR / "index.html"
+async def index_handler(request: web.Request) -> web.StreamResponse:
+    if (
+        request.path == "/archive/admin"
+        and (
+            not CONVERSATION_ARCHIVE_ENABLED
+            or not _conversation_archive_request_is_secure(request)
+        )
+    ):
+        raise web.HTTPNotFound(text="control page index not found")
+    index_path = DOCS_DIR / (
+        "archive-admin.html"
+        if request.path == "/archive/admin"
+        else "index.html"
+    )
     if not index_path.exists():
         raise web.HTTPNotFound(text="control page index not found")
     response = web.FileResponse(index_path)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Content-Type"] = static_content_type(index_path) or "text/html; charset=utf-8"
+    if request.path == "/archive/admin":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; form-action 'self'; base-uri 'none'; "
+            "frame-ancestors 'none'; object-src 'none'"
+        )
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        )
     return response
 
 
@@ -4364,16 +5543,111 @@ async def icon_handler(request: web.Request) -> web.StreamResponse:
 
 
 def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
-    app = web.Application(middlewares=[control_page_cors_middleware])
+    app = web.Application(
+        middlewares=[
+            _conversation_archive_admin_origin_middleware,
+            control_page_cors_middleware,
+        ]
+    )
     app[VOICE_CAPTURE_CONSENT_LOCK_KEY] = asyncio.Lock()
     if manage_voice_capture_consent:
         app.cleanup_ctx.append(_voice_capture_owner_context)
         app.cleanup_ctx.append(_voice_capture_consent_context)
     app.router.add_get("/", index_handler)
+    app.router.add_get("/archive/admin", index_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/assets/{asset_path:.*}", asset_handler)
+    app.router.add_get("/archive/assets/{asset_path:.*}", asset_handler)
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_get("/api/control-page/session", control_page_session_handler)
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/challenge",
+        conversation_archive_admin_challenge_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/login",
+        conversation_archive_admin_login_handler,
+    )
+    app.router.add_get(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/records",
+        conversation_archive_admin_records_handler,
+    )
+    app.router.add_get(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/participation",
+        conversation_archive_admin_participation_handler,
+    )
+    app.router.add_get(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/voice-state-transitions",
+        conversation_archive_admin_voice_state_transitions_handler,
+    )
+    app.router.add_get(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/legal-minimal",
+        conversation_archive_admin_legal_minimal_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/delete/preview",
+        conversation_archive_admin_delete_preview_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/delete/apply",
+        conversation_archive_admin_delete_apply_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/workflows",
+        conversation_archive_admin_feedback_workflows_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/capture",
+        conversation_archive_admin_feedback_capture_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/generalize",
+        conversation_archive_admin_feedback_generalize_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/evaluate",
+        conversation_archive_admin_feedback_evaluate_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/approval/preview",
+        conversation_archive_admin_feedback_approval_preview_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/approval/apply",
+        conversation_archive_admin_feedback_approval_apply_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/canary",
+        conversation_archive_admin_feedback_canary_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/activate",
+        conversation_archive_admin_feedback_activate_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/rollback/preview",
+        conversation_archive_admin_feedback_rollback_preview_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/rollback/apply",
+        conversation_archive_admin_feedback_rollback_apply_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/failure",
+        conversation_archive_admin_feedback_failure_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/revoke/preview",
+        conversation_archive_admin_feedback_revoke_preview_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/feedback/revoke/apply",
+        conversation_archive_admin_feedback_revoke_apply_handler,
+    )
+    app.router.add_post(
+        f"{CONVERSATION_ARCHIVE_ADMIN_BROWSER_PREFIX}/admin/logout",
+        conversation_archive_admin_logout_handler,
+    )
     app.router.add_get("/api/control-page/runtime-health", runtime_health_handler)
     app.router.add_get("/api/control-page/runtime-errors", runtime_errors_handler)
     app.router.add_post("/api/control-page/runtime-health/override", runtime_health_override_handler)
@@ -4682,8 +5956,45 @@ def create_app(*, manage_voice_capture_consent: bool = True) -> web.Application:
     return app
 
 
+def build_control_page_ssl_context(
+    *,
+    archive_enabled: bool = CONVERSATION_ARCHIVE_ENABLED,
+    cert_file: str = CONTROL_PAGE_TLS_CERT_FILE,
+    key_file: str = CONTROL_PAGE_TLS_KEY_FILE,
+    context_factory: Callable[[], Any] | None = None,
+) -> ssl.SSLContext | None:
+    cert_path = Path(str(cert_file or "")) if cert_file else None
+    key_path = Path(str(key_file or "")) if key_file else None
+    configured = cert_path is not None or key_path is not None
+    if not configured:
+        if archive_enabled:
+            raise RuntimeError("conversation_archive_loopback_https_required")
+        return None
+    if (
+        cert_path is None
+        or key_path is None
+        or not cert_path.is_file()
+        or not key_path.is_file()
+    ):
+        raise RuntimeError("control_page_tls_material_unavailable")
+    context = (
+        context_factory()
+        if context_factory is not None
+        else ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    )
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(cert_path), str(key_path))
+    return context
+
+
 def main() -> None:
-    web.run_app(create_app(), host=HOST, port=PORT, access_log=None)
+    web.run_app(
+        create_app(),
+        host=HOST,
+        port=PORT,
+        access_log=None,
+        ssl_context=build_control_page_ssl_context(),
+    )
 
 
 if __name__ == "__main__":

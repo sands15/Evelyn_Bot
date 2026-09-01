@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import sys
 
-from ...task_loop_runtime import parse_task_request, run_default_task_loop
+from ...task_loop_runtime import (
+    TaskPlannerGuidance,
+    parse_task_request,
+    run_default_task_loop,
+)
 from ..base import SkillContext, SkillResult
 from ..registry import skill_registry
 
@@ -27,12 +31,30 @@ async def execute(context: SkillContext) -> SkillResult:
             answer_text='{"status":"failed","code":"task_goal_empty"}',
             metadata={"status": "failed", "code": "task_goal_empty"},
         )
-    result = await run_default_task_loop(
-        goal,
-        source=context.source,
-        turn_scope=extras.get("turn_scope"),
-    )
+    planner_guidance: TaskPlannerGuidance | None = None
+    guidance_provider = extras.get("task_guidance_provider")
+    if callable(guidance_provider):
+        candidate = await guidance_provider(
+            goal=goal,
+            source=context.source,
+            principal_token=extras.get("principal_token"),
+        )
+        if candidate is not None and not isinstance(
+            candidate, TaskPlannerGuidance
+        ):
+            raise ValueError("task_planner_guidance_invalid")
+        planner_guidance = candidate
+    loop_kwargs = {
+        "source": context.source,
+        "turn_scope": extras.get("turn_scope"),
+        "principal_token": extras.get("principal_token"),
+        "skill_origin_class": extras.get("skill_origin_class", "internal"),
+    }
+    if planner_guidance is not None:
+        loop_kwargs["planner_guidance"] = planner_guidance
+    result = await run_default_task_loop(goal, **loop_kwargs)
     evidence = result.evidence_text()
+    task_record = result.public_task_record()
     return SkillResult(
         skill=name,
         route="task_executor",
@@ -47,6 +69,7 @@ async def execute(context: SkillContext) -> SkillResult:
             "code": result.code,
             "steps": result.step_count,
             "worker_calls": result.model_call_count,
+            "taskRecord": task_record,
         },
     )
 

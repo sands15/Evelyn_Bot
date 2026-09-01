@@ -32,6 +32,7 @@ from .observability_metrics import (
     voice_latency_trace_from_metrics,
 )
 from .skills import SkillContext, SkillResult
+from .task_loop_runtime import validated_public_task_record
 from .search_tools import render_search_results_for_user, structured_search_results
 from .text import ModelStreamPrefixFilter, clean_text, is_user_echo_answer
 from .tts_playback import SpeechCommitGate
@@ -213,6 +214,11 @@ class VoiceRouteExecutionDeps:
     router_route_timeout_sec: float
     cognitive_timeout_sec: float
     router_llm_enabled: bool
+    recent_skill_dispatch_targets: MutableMapping[
+        str, dict[str, Any]
+    ] | None = None
+    archive_target_is_current: Callable[..., bool] | None = None
+    task_guidance_provider: Callable[..., Awaitable[Any]] | None = None
     log: Callable[..., Any] = print
 
 
@@ -409,6 +415,7 @@ def build_skill_context(
     turn_scope: Any | None = None,
     messages: list[dict[str, Any]] | None = None,
     minecraft_state: dict[str, Any] | None = None,
+    skill_origin_class: str = "internal",
 ) -> SkillContext:
     return SkillContext(
         source=source,
@@ -430,6 +437,13 @@ def build_skill_context(
             "should_interrupt_delivery": route_decision.should_interrupt_delivery,
             "cognitive_state": cognitive_state,
             "turn_scope": turn_scope,
+            "principal_token": person_key,
+            "skill_origin_class": skill_origin_class,
+            "task_guidance_provider": getattr(
+                deps,
+                "task_guidance_provider",
+                None,
+            ),
             "messages": list(messages or []),
             "minecraft_state": dict(minecraft_state or {}),
             "model_name": deps.model_name,
@@ -473,22 +487,98 @@ def skill_result_to_text(result: Any) -> str:
     return clean_text(str(result))
 
 
-def make_skill_dispatch_key(*, route_name: str, source: str, session_key: str | None, user_text: str) -> str:
+def skill_origin_class(origin: Any) -> str:
+    value = clean_text(str(origin or "")).lower()
+    if value == "internal" or value.startswith("evelyn_core."):
+        return "internal"
+    if value == "bundled" or value.startswith("bundled:"):
+        return "bundled"
+    return "external"
+
+
+def make_skill_dispatch_key(
+    *,
+    route_name: str,
+    source: str,
+    session_key: str | None,
+    user_text: str,
+    guild_id: int | None = None,
+    person_key: str | None = None,
+) -> str:
     base = clean_text(user_text).lower()
-    return f"{route_name}|{source}|{session_key or '-'}|{base}"
+    scope = session_key or person_key or (
+        f"guild:{guild_id}" if guild_id is not None else "-"
+    )
+    return f"{route_name}|{source}|{scope}|{base}"
 
 
 def cleanup_recent_skill_dispatches(*, deps: VoiceRouteExecutionDeps, now: float | None = None) -> None:
     current = time.monotonic() if now is None else now
     stale_before = current - deps.skill_dispatch_cache_ttl_sec
+    target_metadata = getattr(deps, "recent_skill_dispatch_targets", None)
     stale_keys = [key for key, ts in deps.recent_skill_dispatches.items() if float(ts or 0.0) < stale_before]
     for key in stale_keys:
         deps.recent_skill_dispatches.pop(key, None)
+        if target_metadata is not None:
+            target_metadata.pop(key, None)
     if len(deps.recent_skill_dispatches) <= deps.skill_dispatch_cache_max:
         return
     overflow = len(deps.recent_skill_dispatches) - deps.skill_dispatch_cache_max
     for key, _ts in sorted(deps.recent_skill_dispatches.items(), key=lambda item: item[1])[:overflow]:
         deps.recent_skill_dispatches.pop(key, None)
+        if target_metadata is not None:
+            target_metadata.pop(key, None)
+
+
+def _skill_archive_target(
+    *,
+    guild_id: int | None,
+    session_key: str | None,
+    person_key: str | None,
+    session_memory_key: str | None,
+    turn_scope: Any | None,
+    metrics: dict | None,
+) -> dict[str, Any]:
+    meta = metrics.get("meta") if isinstance(metrics, dict) else None
+    if not isinstance(meta, dict):
+        meta = {}
+    return {
+        "guild_id": guild_id,
+        "turn_id": getattr(turn_scope, "turn_id", None) or meta.get("turn_id"),
+        "session_key": session_key,
+        "session_memory_key": session_memory_key,
+        "person_key": person_key,
+    }
+
+
+def _skill_archive_target_is_current(
+    *,
+    deps: VoiceRouteExecutionDeps,
+    target: dict[str, Any],
+) -> bool:
+    callback = getattr(deps, "archive_target_is_current", None)
+    if callback is None:
+        return True
+    try:
+        return callback(**target) is True
+    except Exception:
+        return False
+
+
+def _remember_skill_dispatch(
+    key: str,
+    timestamp: float,
+    *,
+    deps: VoiceRouteExecutionDeps,
+    target: dict[str, Any],
+) -> bool:
+    if not _skill_archive_target_is_current(deps=deps, target=target):
+        return False
+    deps.recent_skill_dispatches[key] = timestamp
+    target_metadata = getattr(deps, "recent_skill_dispatch_targets", None)
+    if target_metadata is not None:
+        target_metadata[key] = dict(target)
+    return True
 
 
 async def maybe_execute_registered_route(
@@ -509,6 +599,19 @@ async def maybe_execute_registered_route(
     messages: list[dict[str, Any]] | None = None,
     allow_internal_routes: set[str] | None = None,
 ) -> str | None:
+    archive_target = _skill_archive_target(
+        guild_id=guild_id,
+        session_key=session_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        turn_scope=turn_scope,
+        metrics=metrics,
+    )
+    if not _skill_archive_target_is_current(
+        deps=deps,
+        target=archive_target,
+    ):
+        return None
     route_name = clean_text(route_decision.route)
     specialist_name = clean_text(str(getattr(route_decision, "specialist", "") or "")).lower()
     if (
@@ -535,6 +638,11 @@ async def maybe_execute_registered_route(
             deps.log(f"[SPECIALIST] fallback to Main: errorType={type(exc).__name__}")
         else:
             if specialist_evidence:
+                if not _skill_archive_target_is_current(
+                    deps=deps,
+                    target=archive_target,
+                ):
+                    return None
                 return clean_text(specialist_evidence)
 
     if not route_name:
@@ -548,6 +656,8 @@ async def maybe_execute_registered_route(
         source=source,
         session_key=session_key,
         user_text=user_text,
+        guild_id=guild_id,
+        person_key=person_key,
     )
     now = time.monotonic()
     cleanup_recent_skill_dispatches(deps=deps, now=now)
@@ -592,18 +702,48 @@ async def maybe_execute_registered_route(
         turn_scope=turn_scope,
         messages=messages,
         minecraft_state=live_minecraft_state,
+        skill_origin_class=skill_origin_class(skills[0].origin),
     )
     if route_name != "task_executor":
-        deps.recent_skill_dispatches[dispatch_key] = now
+        if not _remember_skill_dispatch(
+            dispatch_key,
+            now,
+            deps=deps,
+            target=archive_target,
+        ):
+            return None
     result = await deps.skill_registry.execute(skills[0].name, context)
+    if not _skill_archive_target_is_current(
+        deps=deps,
+        target=archive_target,
+    ):
+        return None
     if isinstance(result, SkillResult):
         if not result.handled or not result.should_emit:
             return None
+        if route_name == "task_executor":
+            task_record = validated_public_task_record(
+                result.metadata.get("taskRecord")
+            )
+            if task_record is not None and metrics is not None:
+                metrics.setdefault("meta", {})["taskRecord"] = task_record
         if result.dedupe_key:
-            deps.recent_skill_dispatches[result.dedupe_key] = now
+            if not _remember_skill_dispatch(
+                f"{dispatch_key}|dedupe|{result.dedupe_key}",
+                now,
+                deps=deps,
+                target=archive_target,
+            ):
+                return None
         if result.followup_route:
             if result.followup_delay_ms and int(result.followup_delay_ms) > 0:
-                deps.recent_skill_dispatches[dispatch_key] = now + (int(result.followup_delay_ms) / 1000.0)
+                if not _remember_skill_dispatch(
+                    dispatch_key,
+                    now + (int(result.followup_delay_ms) / 1000.0),
+                    deps=deps,
+                    target=archive_target,
+                ):
+                    return None
                 return skill_result_to_text(result)
             followup_context = SkillContext(
                 source=source,
@@ -633,6 +773,11 @@ async def maybe_execute_registered_route(
             followup_skills = deps.skill_registry.find_by_route(result.followup_route, source=source)
             if followup_skills:
                 followup_result = await deps.skill_registry.execute(followup_skills[0].name, followup_context)
+                if not _skill_archive_target_is_current(
+                    deps=deps,
+                    target=archive_target,
+                ):
+                    return None
                 return skill_result_to_text(followup_result)
     return skill_result_to_text(result)
 

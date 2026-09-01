@@ -12,6 +12,20 @@ MINECRAFT_CONNECTED_OUTCOME = "minecraft_connected"
 MINECRAFT_STOPPED_OUTCOME = "minecraft_stopped"
 
 
+def _archive_parent_record_ids(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, dict):
+        return ()
+    parents = value.get("parentRecordIds")
+    if parents is None:
+        return ()
+    if not isinstance(parents, list) or len(parents) != 1:
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    parent = parents[0]
+    if not isinstance(parent, str) or not parent:
+        raise RuntimeError("minecraft_archive_lineage_invalid")
+    return (parent,)
+
+
 def minecraft_connection_confirmed(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -208,10 +222,24 @@ class MinecraftModeComposition:
             raise RuntimeError("minecraft_start_unverified")
         merged["outcome_verified"] = True
         merged["outcome_code"] = MINECRAFT_CONNECTED_OUTCOME
+        parent_record_ids = _archive_parent_record_ids(world_lease)
+        if parent_record_ids:
+            await client.archive_lifecycle_result(
+                guild_id=guild_id,
+                parent_record_ids=parent_record_ids,
+                operation="connect",
+                outcome_code=MINECRAFT_CONNECTED_OUTCOME,
+            )
         return merged
 
-    async def disable_minecraft_mode(self, guild_id: int) -> dict[str, Any]:
-        stopped = await self.deps.get_client().stop()
+    async def disable_minecraft_mode(
+        self,
+        guild_id: int,
+        *,
+        parent_record_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        client = self.deps.get_client()
+        stopped = await client.stop()
         observed = await self.wait_for_minecraft_stopped(
             guild_id,
             initial_status=stopped,
@@ -220,6 +248,13 @@ class MinecraftModeComposition:
             raise RuntimeError("minecraft_stop_unverified")
         observed["outcome_verified"] = True
         observed["outcome_code"] = MINECRAFT_STOPPED_OUTCOME
+        if parent_record_ids:
+            await client.archive_lifecycle_result(
+                guild_id=guild_id,
+                parent_record_ids=parent_record_ids,
+                operation="disconnect",
+                outcome_code=MINECRAFT_STOPPED_OUTCOME,
+            )
         return observed
 
 

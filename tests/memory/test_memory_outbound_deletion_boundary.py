@@ -203,6 +203,41 @@ class MemoryOutboundDeletionBoundaryTests(unittest.TestCase):
         ):
             outbound.capture_memory_deletion_outbound_position("invalid")  # type: ignore[arg-type]
 
+    def test_late_commit_guard_requires_exact_current_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            index_dir = Path(tmp) / "memory_index"
+            with self.unconfigured_authenticity():
+                position = journal.memory_deletion_journal_position(index_dir)
+                outbound.capture_memory_deletion_outbound_position(position)
+
+                with outbound.memory_deletion_late_commit_guard(
+                    expected_deletion_generation=0,
+                    index_dir=index_dir,
+                ) as current:
+                    self.assertEqual(current, position)
+
+                with self.assertRaises(
+                    journal.MemoryDeletionJournalIntegrityError
+                ):
+                    with outbound.memory_deletion_late_commit_guard(
+                        expected_deletion_generation=1,
+                        index_dir=index_dir,
+                    ):
+                        self.fail("stale generation reached late commit")
+
+                journal.append_memory_deletion_tombstone(
+                    index_dir,
+                    self.tombstone("concept-fedcba9876543210", 1),
+                )
+                with self.assertRaises(
+                    journal.MemoryDeletionJournalIntegrityError
+                ):
+                    with outbound.memory_deletion_late_commit_guard(
+                        expected_deletion_generation=0,
+                        index_dir=index_dir,
+                    ):
+                        self.fail("deleted source reached late commit")
+
 
 if __name__ == "__main__":
     unittest.main()

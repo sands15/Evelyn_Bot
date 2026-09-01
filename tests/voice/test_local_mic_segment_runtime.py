@@ -22,10 +22,6 @@ from evelyn_core.local_mic_segment_runtime import (  # noqa: E402
     should_drop_discord_audio_for_local_mic_from_runtime,
     stop_local_mic_service_from_runtime,
 )
-from evelyn_core.voice_ingress_runtime import (  # noqa: E402
-    VoiceIngressEntrypointDeps,
-    process_member_audio_from_runtime,
-)
 
 
 class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -137,7 +133,7 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(created_tasks), 1)
         created_tasks[0].close()
 
-    async def test_ensure_local_mic_service_keeps_current_service_when_disabled_or_missing_user_ids(self) -> None:
+    async def test_ensure_local_mic_service_keeps_current_service_when_disabled(self) -> None:
         current_service = object()
         state: dict[str, Any] = {}
         base = dict(
@@ -172,20 +168,56 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 discord_user_ids=lambda: {42},
             ),
         )
-        missing_ids = await ensure_local_mic_service_started_from_runtime(
-            current_service=current_service,
+
+        self.assertIs(disabled, current_service)
+        self.assertFalse(state["capture_ready"])
+
+    async def test_discord_mode_stops_existing_local_mic_and_never_starts_it(self) -> None:
+        state: dict[str, Any] = {"capture_ready": True, "input_mode": "auto"}
+        calls: list[str] = []
+
+        class FakeService:
+            capture_ready = True
+
+            def stop(self) -> None:
+                calls.append("stop")
+
+        next_service = await ensure_local_mic_service_started_from_runtime(
+            current_service=FakeService(),
             deps=LocalMicServiceRuntimeDeps(
-                **base,
+                local_mic_runtime_state=state,
                 local_mic_enabled=True,
                 local_only_mode=False,
-                discord_user_ids=lambda: set(),
+                discord_user_ids=lambda: {42},
+                service_factory=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+                get_running_loop=lambda: None,
+                create_task=lambda _coro: None,
+                handle_local_mic_segment=lambda _pcm, _meta: (_ for _ in ()).throw(AssertionError("unexpected")),
+                max_silence_ms_provider=lambda: 650,
+                sample_rate=16000,
+                block_ms=30,
+                start_threshold=0.1,
+                continue_threshold=0.05,
+                start_consecutive=2,
+                min_voiced_ms=280,
+                max_silence_ms=650,
+                preroll_ms=180,
+                max_segment_sec=12.0,
+                device=None,
+                queue_max=32,
+                vad_filter_enabled=True,
+                env_noise_filter_enabled=True,
+                waveform_filter_enabled=True,
             ),
         )
 
-        self.assertIs(disabled, current_service)
-        self.assertIs(missing_ids, current_service)
+        self.assertIsNone(next_service)
+        self.assertEqual(calls, ["stop"])
+        self.assertFalse(state["enabled"])
         self.assertFalse(state["capture_ready"])
-        self.assertEqual(state["last_error"], "no_local_mic_user_ids")
+        self.assertEqual(state["input_mode"], "discord")
+        self.assertFalse(state["discord_suppression_active"])
+        self.assertIsNone(state["last_error"])
 
     def test_discord_suppression_updates_state_for_recent_local_mic(self) -> None:
         state: dict[str, Any] = {"input_mode": "auto", "last_segment_at": 95.0}
@@ -262,84 +294,26 @@ class LocalMicSegmentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed[2]["routed_discord_user_id"], 11)
         self.assertEqual(processed[2]["source"], "local_mic")
 
-    async def test_routes_to_discord_target_when_present(self) -> None:
+    async def test_discord_mode_drops_late_local_segment_before_target_resolution(self) -> None:
         state: dict[str, Any] = {"input_mode": "auto"}
-        scheduled: list[dict[str, Any]] = []
-        voice_client = SimpleNamespace(
-            channel=SimpleNamespace(id=9),
-            _listener_generation=3,
-        )
-        listener_binding = (voice_client, 3, 9)
-        voice_client.listener_binding = lambda: listener_binding
-        member = SimpleNamespace(
-            id=42,
-            bot=False,
-            guild=SimpleNamespace(id=7, voice_client=voice_client),
-        )
-        target = SimpleNamespace(member=member)
-
-        async def schedule_voice_utterance_item(item: dict[str, Any]) -> None:
-            scheduled.append(item)
-
-        async def ensure_startup_components_ready() -> None:
-            return None
-
-        ingress_deps = VoiceIngressEntrypointDeps(
-            ensure_startup_components_ready=ensure_startup_components_ready,
-            normalize_voice_debug_meta=lambda meta: dict(meta or {}),
-            voice_ingress_source=lambda meta: str(meta.get("source") or ""),
-            should_drop_discord_audio_for_local_mic=lambda *_args, **_kwargs: False,
-            ensure_voice_worker_started=lambda: None,
-            build_voice_ingress_context=lambda **_kwargs: SimpleNamespace(
-                room_session_key="room-session",
-                session_key="session-1",
-                room_key="room-key",
-                person_key="person-key",
-                session_memory_key="session-memory",
-            ),
-            next_segment_id=lambda _session_key: 1,
-            new_turn_id=lambda: "turn-1",
-            room_state_snapshot=lambda _room_session_key: {},
-            validation_context_provider=lambda **_kwargs: None,
-            capture_voice_ingress_epoch=lambda _guild_id: 0,
-            build_voice_ingress_item=lambda **kwargs: dict(kwargs),
-            voice_ingress_queue_depth=lambda: 0,
-            schedule_voice_utterance_item=schedule_voice_utterance_item,
-            monotonic=lambda: 123.0,
-        )
-
-        async def process_member_audio(
-            target_member: Any,
-            pcm_bytes: bytes,
-            debug_meta: dict[str, Any],
-        ) -> None:
-            await process_member_audio_from_runtime(
-                target_member,
-                pcm_bytes,
-                debug_meta,
-                deps=ingress_deps,
-            )
-
         deps = LocalMicSegmentRuntimeDeps(
             local_mic_runtime_state=state,
             normalize_voice_input_mode=lambda value: str(value),
-            resolve_local_mic_target=lambda **_kwargs: target,
-            guilds=lambda: ["guild"],
+            resolve_local_mic_target=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+            guilds=lambda: [],
             preferred_user_ids=lambda: {42},
             local_only_mode=False,
             local_control_voice_member=lambda: (_ for _ in ()).throw(AssertionError("unexpected")),
-            process_member_audio=process_member_audio,
+            process_member_audio=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
         )
 
         await handle_local_mic_segment_from_runtime(b"pcm", {}, deps=deps)
 
+        self.assertFalse(state["enabled"])
+        self.assertEqual(state["input_mode"], "discord")
+        self.assertFalse(state["discord_suppression_active"])
         self.assertIsNone(state["last_error"])
-        self.assertEqual(len(scheduled), 1)
-        self.assertIs(scheduled[0]["member"], member)
-        self.assertEqual(scheduled[0]["pcm_bytes"], b"pcm")
-        self.assertEqual(scheduled[0]["debug_meta"]["source"], "local_mic")
-        self.assertNotIn("_voice_listener_binding", scheduled[0]["debug_meta"])
-        self.assertIs(scheduled[0]["voice_listener_binding"], listener_binding)
+        self.assertNotIn("segment_count", state)
 
     async def test_discord_input_mode_skips_segment(self) -> None:
         state: dict[str, Any] = {"input_mode": "discord", "segment_count": 0}

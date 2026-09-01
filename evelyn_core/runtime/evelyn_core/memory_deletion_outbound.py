@@ -49,6 +49,7 @@ def current_memory_deletion_outbound_position() -> (
 def memory_deletion_outbound_guard(
     *,
     expected_position: MemoryDeletionPosition | None | object = _UNSET,
+    expected_deletion_generation: int | None = None,
     required: bool | None = None,
     index_dir: Path | None = None,
 ) -> Iterator[MemoryDeletionPosition | None]:
@@ -71,6 +72,17 @@ def memory_deletion_outbound_guard(
         return
     if not isinstance(position, MemoryDeletionPosition):
         raise MemoryDeletionJournalIntegrityError()
+    if (
+        expected_deletion_generation is not None
+        and (
+            isinstance(expected_deletion_generation, bool)
+            or not isinstance(expected_deletion_generation, int)
+            or expected_deletion_generation < 0
+            or position.deletion_generation
+            != expected_deletion_generation
+        )
+    ):
+        raise MemoryDeletionJournalIntegrityError()
     target_index_dir = (
         Path(index_dir)
         if index_dir is not None
@@ -84,11 +96,32 @@ def memory_deletion_outbound_guard(
         yield current_position
 
 
+@contextlib.contextmanager
+def memory_deletion_late_commit_guard(
+    *,
+    expected_position: MemoryDeletionPosition | None | object = _UNSET,
+    expected_deletion_generation: int | None = None,
+    index_dir: Path | None = None,
+) -> Iterator[MemoryDeletionPosition]:
+    """Hold the captured deletion generation stable through a late commit."""
+
+    with memory_deletion_outbound_guard(
+        expected_position=expected_position,
+        expected_deletion_generation=expected_deletion_generation,
+        required=True,
+        index_dir=index_dir,
+    ) as position:
+        if position is None:  # pragma: no cover - required=True rejects it.
+            raise MemoryDeletionJournalIntegrityError()
+        yield position
+
+
 @contextlib.asynccontextmanager
 async def memory_deletion_outbound_request(
     request_factory: Callable[..., Any],
     *args: Any,
     expected_position: MemoryDeletionPosition | None | object = _UNSET,
+    expected_deletion_generation: int | None = None,
     memory_boundary_required: bool | None = None,
     memory_index_dir: Path | None = None,
     **kwargs: Any,
@@ -97,6 +130,7 @@ async def memory_deletion_outbound_request(
 
     with memory_deletion_outbound_guard(
         expected_position=expected_position,
+        expected_deletion_generation=expected_deletion_generation,
         required=memory_boundary_required,
         index_dir=memory_index_dir,
     ):
@@ -107,6 +141,7 @@ async def memory_deletion_outbound_request(
 __all__ = [
     "capture_memory_deletion_outbound_position",
     "current_memory_deletion_outbound_position",
+    "memory_deletion_late_commit_guard",
     "memory_deletion_outbound_guard",
     "memory_deletion_outbound_request",
     "reset_memory_deletion_outbound_position",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from evelyn_core import explicit_memory_confirmation as explicit_memory  # noqa:
 from evelyn_core import memory_deletion_journal as deletion_journal  # noqa: E402
 from evelyn_core import memory_exposure  # noqa: E402
 from evelyn_core import voice_input_lease  # noqa: E402
+from evelyn_core.task_loop_runtime import TaskLoopResult  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -63,6 +65,34 @@ class _JsonRequest:
         if self._json_error is not None:
             raise self._json_error
         return self._raw_body
+
+
+def _terminal_canary_receipts(
+    *,
+    run_id: str,
+    version_id: str,
+    guidance_digest: str,
+) -> dict[str, dict[str, object]]:
+    return {
+        f"fast-action-{index}": {
+            "schema": "evelyn.feedback-canary-task-receipt.v1",
+            "state": "terminal",
+            "taskId": f"fast-action-{index}",
+            "canaryRunId": run_id,
+            "candidateVersionId": version_id,
+            "guidanceDigest": guidance_digest,
+            "contractVersion": "evelyn.task-work-contract.v1",
+            "evaluatorVersion": "evelyn.task-agent-eval-suite.v1",
+            "principalRef": "control-page:local",
+            "archiveGeneration": index,
+            "passed": True,
+            "unauthorizedEffect": False,
+            "privacyLeakage": False,
+            "structuralFailure": False,
+            "taskFailure": False,
+        }
+        for index in range(1, 11)
+    }
 
 
 class FastControlVoiceLeaseWiringTests(unittest.TestCase):
@@ -118,6 +148,8 @@ class FastControlApiToolTests(unittest.TestCase):
         fast_api.FAST_RUNTIME_HEALTH_CACHE.clear()
         fast_api.CHAT_MESSAGES.clear()
         fast_api.ACTION_COORDINATOR.clear()
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS.clear()
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS.clear()
         fast_api.clear_background_action_handlers()
         fast_api.CONTROL_PAGE_UI_COMMANDS.clear()
         fast_api.CONTROL_PAGE_UI_COMMAND_SEQ = 0
@@ -1556,6 +1588,409 @@ class FastControlApiToolTests(unittest.TestCase):
                     "control_page",
                 )
             )
+
+    def test_canary_aggregate_uses_only_exact_process_local_terminal_receipts(self) -> None:
+        runtime = object()
+        run_id = "canary-run-1"
+        version_id = "candidate-v1"
+        digest = "a" * 64
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            version_id,
+            digest,
+        )
+        rows: dict[str, dict[str, object]] = {}
+        for index in range(10):
+            task_id = f"fast-action-{index + 1}"
+            rows[task_id] = {
+                "schema": "evelyn.feedback-canary-task-receipt.v1",
+                "state": "terminal",
+                "taskId": task_id,
+                "canaryRunId": run_id,
+                "candidateVersionId": version_id,
+                "guidanceDigest": digest,
+                "contractVersion": "evelyn.task-work-contract.v1",
+                "evaluatorVersion": "evelyn.task-agent-eval-suite.v1",
+                "principalRef": "control-page:local",
+                "archiveGeneration": 50 + index,
+                "passed": True,
+                "unauthorizedEffect": False,
+                "privacyLeakage": False,
+                "structuralFailure": False,
+                "taskFailure": False,
+            }
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = rows
+
+        aggregate = fast_api._server_canary_aggregate(
+            runtime=runtime,
+            version_id=version_id,
+            canary_run_id=run_id,
+            guidance_digest=digest,
+        )
+
+        self.assertEqual(aggregate["sampleCount"], 10)
+        self.assertEqual(aggregate["passedCount"], 10)
+        self.assertEqual(aggregate["unauthorizedEffectCount"], 0)
+        rows["fast-action-10"] = {
+            "state": "reserved",
+            "archiveGeneration": 60,
+        }
+        with self.assertRaisesRegex(
+            ValueError, "feedback_canary_samples_incomplete"
+        ):
+            fast_api._server_canary_aggregate(
+                runtime=runtime,
+                version_id=version_id,
+                canary_run_id=run_id,
+                guidance_digest=digest,
+            )
+
+    def test_canary_exception_is_a_terminal_failed_sample_not_released(self) -> None:
+        runtime = object()
+        run_id = "canary-exception-run"
+        task_id = "fast-action-exception"
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            "candidate-exception",
+            "b" * 64,
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = {
+            task_id: {"state": "reserved", "archiveGeneration": 71}
+        }
+
+        asyncio.run(fast_api._record_canary_task_exception(task_id))
+
+        receipt = fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id][task_id]
+        self.assertEqual(receipt["state"], "terminal")
+        self.assertFalse(receipt["passed"])
+        self.assertTrue(receipt["structuralFailure"])
+        self.assertTrue(receipt["taskFailure"])
+
+    def test_canary_terminal_rejects_changed_archive_generation(self) -> None:
+        run_id = "canary-generation-run"
+        version_id = "candidate-generation"
+        digest = "9" * 64
+        task_id = "fast-action-generation"
+        pointer = SimpleNamespace(
+            canary_run_id=run_id,
+            version_id=version_id,
+            guidance_digest=digest,
+            archive_generation=82,
+        )
+        controller = SimpleNamespace(
+            running_canary_pointer=Mock(return_value=pointer)
+        )
+        runtime = fast_api._ConversationArchiveApiRuntime.__new__(
+            fast_api._ConversationArchiveApiRuntime
+        )
+        runtime.feedback_guidance_admission_closed = False
+        runtime.lock = asyncio.Lock()
+        runtime.feedback_controller = controller
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            version_id,
+            digest,
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = {
+            task_id: {"state": "reserved", "archiveGeneration": 81}
+        }
+        task_record = TaskLoopResult(
+            task_id=task_id,
+            status="failed",
+            code="task_failed",
+            summary="private",
+            step_count=0,
+            model_call_count=0,
+        ).public_task_record()
+        task_record.update(
+            {
+                "status": "grounded_draft_ready",
+                "code": "task_grounded_draft_ready",
+                "guidanceVersion": version_id,
+                "guidanceDigest": digest,
+                "guidanceMode": "canary",
+                "canaryRunId": run_id,
+            }
+        )
+        contract = SimpleNamespace(
+            canary_run_id=run_id,
+            guidance_mode="canary",
+            guidance_version=version_id,
+            guidance_digest=digest,
+            authority=SimpleNamespace(
+                auto_tools=("workspace_read",),
+                approval_tools=(),
+            ),
+            is_owned_by=Mock(return_value=True),
+        )
+        result = SimpleNamespace(
+            task_id=task_id,
+            status="grounded_draft_ready",
+            contract=contract,
+            public_task_record=Mock(return_value=task_record),
+            evidence_text=Mock(return_value="grounded evidence"),
+        )
+
+        with (
+            patch.object(
+                fast_api,
+                "task_loop_grounded_draft_evidence",
+                return_value=True,
+            ),
+            patch.object(
+                fast_api,
+                "task_loop_terminal_outcome",
+                return_value="reviewable draft",
+            ),
+        ):
+            asyncio.run(
+                fast_api._record_canary_task_terminal(
+                    task_id=task_id,
+                    goal="README.md를 검토해줘",
+                    result=result,
+                )
+            )
+
+        receipt = fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id][task_id]
+        self.assertFalse(receipt["passed"])
+        self.assertTrue(receipt["structuralFailure"])
+        self.assertFalse(receipt["taskFailure"])
+
+    def test_restart_terminalizes_durable_running_canary_fail_closed(self) -> None:
+        pointer = SimpleNamespace(
+            canary_run_id="canary-restart-run",
+            version_id="candidate-restart",
+            guidance_digest="c" * 64,
+        )
+        abort_record = {
+            "schema": "evelyn.feedback-canary-abort-public.v1",
+            "canaryRunId": pointer.canary_run_id,
+            "versionId": pointer.version_id,
+            "state": "canary_failed",
+            "revokedVersionIds": [pointer.version_id],
+            "contentFree": True,
+        }
+        controller = SimpleNamespace(
+            running_canary_pointer=Mock(
+                side_effect=RuntimeError("feedback_source_deleted")
+            ),
+            abort_interrupted_canary=Mock(return_value=abort_record),
+        )
+        runtime = fast_api._ConversationArchiveApiRuntime.__new__(
+            fast_api._ConversationArchiveApiRuntime
+        )
+        runtime.feedback_guidance_admission_closed = False
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[
+            pointer.canary_run_id
+        ] = (runtime, pointer.version_id, pointer.guidance_digest)
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[
+            pointer.canary_run_id
+        ] = {"lost-task": {"state": "reserved"}}
+
+        asyncio.run(runtime._fail_interrupted_canary(controller))
+
+        controller.abort_interrupted_canary.assert_called_once_with(
+            canary_run_id=None,
+            admin_authorized=True,
+        )
+        controller.running_canary_pointer.assert_not_called()
+        self.assertFalse(runtime.feedback_guidance_admission_closed)
+        self.assertNotIn(
+            pointer.canary_run_id,
+            fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS,
+        )
+        self.assertNotIn(
+            pointer.canary_run_id,
+            fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS,
+        )
+
+    def test_source_deleted_canary_aborts_and_keeps_active_guidance_open(self) -> None:
+        run_id = "canary-source-deleted"
+        version_id = "candidate-source-deleted"
+        task_id = "fast-action-after-source-delete"
+        active_digest = hashlib.sha256(b"").hexdigest()
+        controller = SimpleNamespace(
+            active_guidance=Mock(
+                return_value=SimpleNamespace(
+                    version_id="base",
+                    guidance_digest=active_digest,
+                    guidance="",
+                )
+            ),
+            running_canary_pointer=Mock(
+                side_effect=RuntimeError("feedback_source_deleted")
+            ),
+            abort_interrupted_canary=Mock(
+                return_value={
+                    "schema": "evelyn.feedback-canary-abort-public.v1",
+                    "canaryRunId": run_id,
+                    "versionId": version_id,
+                    "state": "canary_failed",
+                    "revokedVersionIds": [version_id],
+                    "contentFree": True,
+                }
+            ),
+        )
+        runtime = fast_api._ConversationArchiveApiRuntime.__new__(
+            fast_api._ConversationArchiveApiRuntime
+        )
+        runtime.lock = asyncio.Lock()
+        runtime.feedback_controller = controller
+        runtime.feedback_guidance_admission_closed = False
+        fast_api.CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS[task_id] = (
+            runtime,
+            "record-source-deleted",
+            "turn-source-deleted",
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            version_id,
+            "7" * 64,
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = {
+            "lost-task": {"state": "reserved"}
+        }
+
+        try:
+            guidance, read_only = asyncio.run(
+                fast_api._fast_control_task_guidance(
+                    task_id=task_id,
+                    goal="README.md를 검토해줘",
+                )
+            )
+        finally:
+            fast_api.CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.pop(
+                task_id, None
+            )
+
+        assert guidance is not None
+        self.assertEqual(guidance.version_id, "base")
+        self.assertEqual(guidance.guidance_digest, active_digest)
+        self.assertFalse(read_only)
+        self.assertFalse(runtime.feedback_guidance_admission_closed)
+        self.assertNotIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS)
+        self.assertNotIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS)
+
+    def test_canary_finalize_error_records_exact_terminal_failure(self) -> None:
+        run_id = "canary-finalize-recovery"
+        version_id = "candidate-finalize-recovery"
+        digest = "d" * 64
+        pointer = SimpleNamespace(
+            canary_run_id=run_id,
+            version_id=version_id,
+            guidance_digest=digest,
+        )
+        controller = SimpleNamespace(
+            running_canary_pointer=Mock(return_value=pointer),
+            record_canary=Mock(
+                side_effect=RuntimeError("first finalize failed")
+            ),
+            abort_interrupted_canary=Mock(
+                return_value={
+                    "schema": "evelyn.feedback-canary-abort-public.v1",
+                    "canaryRunId": run_id,
+                    "versionId": version_id,
+                    "state": "canary_failed",
+                    "revokedVersionIds": [version_id],
+                    "contentFree": True,
+                }
+            ),
+        )
+        runtime = fast_api._ConversationArchiveApiRuntime.__new__(
+            fast_api._ConversationArchiveApiRuntime
+        )
+        runtime.lock = asyncio.Lock()
+        runtime.feedback_controller = controller
+        runtime.feedback_guidance_admission_closed = False
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            version_id,
+            digest,
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = (
+            _terminal_canary_receipts(
+                run_id=run_id,
+                version_id=version_id,
+                guidance_digest=digest,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "first finalize failed"):
+            asyncio.run(fast_api._finalize_canary_if_ready(run_id))
+
+        controller.abort_interrupted_canary.assert_called_once_with(
+            canary_run_id=run_id,
+            admin_authorized=True,
+        )
+        self.assertFalse(runtime.feedback_guidance_admission_closed)
+        self.assertNotIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS)
+        self.assertNotIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS)
+
+    def test_unrecoverable_canary_finalize_closes_guidance_admission(self) -> None:
+        run_id = "canary-finalize-unrecoverable"
+        version_id = "candidate-finalize-unrecoverable"
+        digest = "e" * 64
+        task_id = "fast-action-after-canary-fault"
+        pointer = SimpleNamespace(
+            canary_run_id=run_id,
+            version_id=version_id,
+            guidance_digest=digest,
+        )
+        controller = SimpleNamespace(
+            running_canary_pointer=Mock(return_value=pointer),
+            record_canary=Mock(side_effect=RuntimeError("archive failed")),
+            abort_interrupted_canary=Mock(
+                side_effect=RuntimeError("abort failed")
+            ),
+            active_guidance=Mock(),
+        )
+        runtime = fast_api._ConversationArchiveApiRuntime.__new__(
+            fast_api._ConversationArchiveApiRuntime
+        )
+        runtime.lock = asyncio.Lock()
+        runtime.feedback_controller = controller
+        runtime.feedback_guidance_admission_closed = False
+        fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS[run_id] = (
+            runtime,
+            version_id,
+            digest,
+        )
+        fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS[run_id] = (
+            _terminal_canary_receipts(
+                run_id=run_id,
+                version_id=version_id,
+                guidance_digest=digest,
+            )
+        )
+        fast_api.CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS[task_id] = (
+            runtime,
+            "record-after-canary-fault",
+            "turn-after-canary-fault",
+        )
+
+        async def scenario() -> None:
+            with self.assertRaisesRegex(RuntimeError, "archive failed"):
+                await fast_api._finalize_canary_if_ready(run_id)
+            with self.assertRaisesRegex(
+                fast_api.FastActionExecutionError,
+                "feedback_guidance_admission_closed",
+            ):
+                await fast_api._fast_control_task_guidance(
+                    task_id=task_id,
+                    goal="현재 파일을 읽고 근거가 있는 초안을 작성해",
+                )
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            fast_api.CONVERSATION_ARCHIVE_LOCAL_TASK_BINDINGS.pop(
+                task_id, None
+            )
+
+        self.assertTrue(runtime.feedback_guidance_admission_closed)
+        controller.active_guidance.assert_not_called()
+        self.assertIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_BINDINGS)
+        self.assertIn(run_id, fast_api.CONVERSATION_ARCHIVE_CANARY_RECEIPTS)
 
     def test_fast_control_goal_uses_existing_local_lease(self) -> None:
         set_goal = AsyncMock(

@@ -31,6 +31,7 @@ from evelyn_core.search_followup_runtime import (  # noqa: E402
     recover_search_followups_from_runtime,
     run_search_followup_from_runtime,
     schedule_search_followup_from_runtime,
+    schedule_search_followup_singleflight_from_runtime,
 )
 from evelyn_core.search_followup_recovery import (  # noqa: E402
     SearchFollowupRecoveryJournal,
@@ -2469,6 +2470,119 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             raw = journal.path.read_text(encoding="utf-8")
             self.assertNotIn("검색해줘", raw)
             self.assertNotIn("검색 질의", raw)
+
+    def test_singleflight_registers_exact_archive_target_until_done(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            started = asyncio.Event()
+            release = asyncio.Event()
+            registry: dict[asyncio.Task, dict[str, object]] = {}
+
+            async def search(_query):
+                started.set()
+                await release.wait()
+                return []
+
+            deps = replace(
+                build_deps(),
+                search_duckduckgo=search,
+                create_turn_scoped_task=(
+                    lambda coro, **_kwargs: asyncio.create_task(coro)
+                ),
+                archive_task_targets=registry,
+            )
+            task = schedule_search_followup_singleflight_from_runtime(
+                7,
+                "검색 질의",
+                deps=deps,
+                session_key="guild:7:text:8:user:9",
+                room_key="text:8",
+                person_key="user:9",
+                session_memory_key="guild:7:text:8:user:9",
+                channel_id=8,
+                reply_to_message_id=10,
+                source="search-followup-text",
+                source_turn_id="turn-source-1",
+            )
+            await started.wait()
+
+            self.assertEqual(
+                registry,
+                {
+                    task: {
+                        "guild_id": 7,
+                        "turn_id": "turn-source-1",
+                        "session_key": "guild:7:text:8:user:9",
+                        "session_memory_key": (
+                            "guild:7:text:8:user:9"
+                        ),
+                        "person_key": "user:9",
+                    }
+                },
+            )
+
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            self.assertEqual(registry, {})
+
+        asyncio.run(scenario())
+
+    def test_recovery_owner_registers_exact_archive_target(self) -> None:
+        async def scenario() -> None:
+            registry: dict[asyncio.Task, dict[str, object]] = {}
+            observed: list[dict[str, object] | None] = []
+
+            class Recovery:
+                @staticmethod
+                def pending():
+                    return [
+                        {
+                            "intentId": "intent-one",
+                            "guildId": 7,
+                            "sessionKey": "guild:7:text:8:user:9",
+                            "sessionMemoryKey": "guild:7:text:8:user:9:memory",
+                            "personKey": "user:9",
+                            "turnId": "turn-source-1",
+                            "phase": "running",
+                        }
+                    ]
+
+            def guild_is_open(_guild_id: int) -> bool:
+                task = asyncio.current_task()
+                observed.append(registry.get(task))
+                return False
+
+            deps = replace(
+                build_deps(),
+                search_followup_recovery=Recovery(),
+                continuity_status=lambda: durable_continuity_status(1),
+                guild_is_open=guild_is_open,
+                archive_task_targets=registry,
+            )
+
+            result = await recover_search_followups_from_runtime(deps=deps)
+
+            self.assertEqual(result["pending"], 1)
+            self.assertEqual(
+                observed,
+                [
+                    {
+                        "guild_id": 7,
+                        "turn_id": "turn-source-1",
+                        "session_key": "guild:7:text:8:user:9",
+                        "session_memory_key": (
+                            "guild:7:text:8:user:9:memory"
+                        ),
+                        "person_key": "user:9",
+                    }
+                ],
+            )
+            self.assertEqual(registry, {})
+
+        asyncio.run(scenario())
 
     def test_configured_recovery_admission_failure_does_not_schedule(
         self,

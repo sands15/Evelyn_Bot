@@ -62,6 +62,9 @@ MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR = (
 )
 MEMORY_DELETION_JOURNAL_BUSY_ERROR = "memory_deletion_journal_busy"
 MEMORY_DELETION_POSITION_SCHEMA = "memory.deletion.position.v1"
+MEMORY_DELETION_PURGE_RECEIPT_SCHEMA = (
+    "memory.deletion.purge-receipt.v1"
+)
 MEMORY_DELETE_TOMBSTONE_CHAIN_GENESIS = "0" * 64
 MEMORY_DELETE_TOMBSTONE_AUTH_SCOPE = "memory.deletion-journal"
 MEMORY_DELETE_TOMBSTONE_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
@@ -101,6 +104,7 @@ _EXTERNAL_INITIALIZATION_AUTH_DOMAIN = (
     b"evelyn.memory.deletion.external-initialization.v1\n"
 )
 _OPAQUE_NOTE_ID_DOMAIN = b"evelyn.memory.deletion.note-id.v1\n"
+_PURGE_RECEIPT_DOMAIN = b"evelyn.memory.deletion.purge-receipt.v1\n"
 _NATIVE_NOTE_ID = re.compile(
     r"(?:"
     r"[0-9a-f]{16}"
@@ -241,6 +245,12 @@ class MemoryDeletionPosition:
     root_digest: str
     sequence: int
     position_digest: str
+
+    @property
+    def deletion_generation(self) -> int:
+        """Current deletion generation exposed without changing v1 wire data."""
+
+        return self.sequence
 
 
 @dataclass(frozen=True)
@@ -1475,6 +1485,26 @@ def _lock_contention(error: OSError) -> bool:
 
 
 @contextlib.contextmanager
+def _guard_lock_handle(path: Path):
+    """Own lock-file I/O without rewriting exceptions from the guarded body."""
+
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        raise _integrity_failure(exc) from None
+    try:
+        yield handle
+    except BaseException:
+        with contextlib.suppress(OSError):
+            handle.close()
+        raise
+    try:
+        handle.close()
+    except OSError as exc:
+        raise _integrity_failure(exc) from None
+
+
+@contextlib.contextmanager
 def _writer_guard(index_dir: Path):
     paths = _paths(index_dir)
     root_key = str(paths.index_dir)
@@ -1498,26 +1528,26 @@ def _writer_guard(index_dir: Path):
             paths.index_dir.mkdir(parents=True, exist_ok=True)
             if paths.writer_lock.is_symlink():
                 raise _integrity_failure()
-            with paths.writer_lock.open("a+b") as handle:
-                try:
-                    token = _lock_writer_handle(handle)
-                    locked = True
-                except MemoryDeletionJournalBusyError:
-                    raise
-                except OSError as exc:
-                    if _lock_contention(exc):
-                        raise _busy_failure(exc) from None
-                    raise _integrity_failure(exc) from None
-                try:
-                    yield
-                finally:
-                    if locked:
-                        with contextlib.suppress(OSError):
-                            _unlock_writer_handle(handle, token)
         except MemoryDeletionJournalIntegrityError:
             raise
         except OSError as exc:
             raise _integrity_failure(exc) from None
+        with _guard_lock_handle(paths.writer_lock) as handle:
+            try:
+                token = _lock_writer_handle(handle)
+                locked = True
+            except MemoryDeletionJournalBusyError:
+                raise
+            except OSError as exc:
+                if _lock_contention(exc):
+                    raise _busy_failure(exc) from None
+                raise _integrity_failure(exc) from None
+            try:
+                yield
+            finally:
+                if locked:
+                    with contextlib.suppress(OSError):
+                        _unlock_writer_handle(handle, token)
     finally:
         with _process_lock:
             if _writer_owners.get(root_key) == owner:
@@ -1549,26 +1579,26 @@ def _reader_guard(index_dir: Path):
             paths.index_dir.mkdir(parents=True, exist_ok=True)
             if paths.writer_lock.is_symlink():
                 raise _integrity_failure()
-            with paths.writer_lock.open("a+b") as handle:
-                try:
-                    token = _lock_reader_handle(handle)
-                    locked = True
-                except MemoryDeletionJournalBusyError:
-                    raise
-                except OSError as exc:
-                    if _lock_contention(exc):
-                        raise _busy_failure(exc) from None
-                    raise _integrity_failure(exc) from None
-                try:
-                    yield
-                finally:
-                    if locked:
-                        with contextlib.suppress(OSError):
-                            _unlock_reader_handle(handle, token)
         except MemoryDeletionJournalIntegrityError:
             raise
         except OSError as exc:
             raise _integrity_failure(exc) from None
+        with _guard_lock_handle(paths.writer_lock) as handle:
+            try:
+                token = _lock_reader_handle(handle)
+                locked = True
+            except MemoryDeletionJournalBusyError:
+                raise
+            except OSError as exc:
+                if _lock_contention(exc):
+                    raise _busy_failure(exc) from None
+                raise _integrity_failure(exc) from None
+            try:
+                yield
+            finally:
+                if locked:
+                    with contextlib.suppress(OSError):
+                        _unlock_reader_handle(handle, token)
     finally:
         with _process_lock:
             readers = _reader_owners.get(root_key)
@@ -1765,6 +1795,124 @@ def memory_deletion_journal_position(
     paths = _paths(index_dir)
     with _validated_reader_guard(paths) as snapshot:
         return _public_position(paths, snapshot)
+
+
+def _purge_receipt_digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        _PURGE_RECEIPT_DOMAIN + _canonical_json(payload)
+    ).hexdigest()
+
+
+def _purge_receipt_counter(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _integrity_failure()
+    return value
+
+
+def build_memory_deletion_purge_receipt(
+    index_dir: Path,
+    *,
+    deletion_generation: int,
+    purged_count: int,
+    pending_count: int = 0,
+) -> dict[str, Any]:
+    """Bind a content-free sink receipt to the current deletion ledger."""
+
+    generation = _purge_receipt_counter(deletion_generation)
+    purged = _purge_receipt_counter(purged_count)
+    pending = _purge_receipt_counter(pending_count)
+    complete = pending == 0
+    with memory_deletion_journal_read_guard(index_dir) as position:
+        receipt: dict[str, Any] = {
+            "schema": MEMORY_DELETION_PURGE_RECEIPT_SCHEMA,
+            "sink": "bot_memory",
+            "deletionGeneration": generation,
+            "journalGeneration": position.deletion_generation,
+            "rootDigest": position.root_digest,
+            "positionDigest": position.position_digest,
+            "purgedCount": purged,
+            "pendingCount": pending,
+            "status": "purged" if complete else "cleanup_pending",
+            "complete": complete,
+            "contentFree": True,
+        }
+        receipt["receiptDigest"] = _purge_receipt_digest(receipt)
+        return receipt
+
+
+def validate_memory_deletion_purge_receipt(
+    index_dir: Path,
+    receipt: object,
+    *,
+    expected_deletion_generation: int | None = None,
+    require_complete: bool = True,
+) -> dict[str, Any]:
+    """Reject malformed, stale, or incomplete memory purge receipts."""
+
+    expected_keys = {
+        "schema",
+        "sink",
+        "deletionGeneration",
+        "journalGeneration",
+        "rootDigest",
+        "positionDigest",
+        "purgedCount",
+        "pendingCount",
+        "status",
+        "complete",
+        "contentFree",
+        "receiptDigest",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != expected_keys:
+        raise _integrity_failure()
+    generation = _purge_receipt_counter(receipt.get("deletionGeneration"))
+    journal_generation = _purge_receipt_counter(
+        receipt.get("journalGeneration")
+    )
+    _purge_receipt_counter(receipt.get("purgedCount"))
+    pending = _purge_receipt_counter(receipt.get("pendingCount"))
+    complete = receipt.get("complete")
+    status = receipt.get("status")
+    supplied_digest = receipt.get("receiptDigest")
+    if (
+        receipt.get("schema") != MEMORY_DELETION_PURGE_RECEIPT_SCHEMA
+        or receipt.get("sink") != "bot_memory"
+        or receipt.get("contentFree") is not True
+        or type(complete) is not bool
+        or complete is not (pending == 0)
+        or status != ("purged" if complete else "cleanup_pending")
+        or not _valid_hash(receipt.get("rootDigest"))
+        or not _valid_hash(receipt.get("positionDigest"))
+        or not _valid_hash(supplied_digest)
+    ):
+        raise _integrity_failure()
+    unsigned = dict(receipt)
+    unsigned.pop("receiptDigest")
+    if not secrets.compare_digest(
+        str(supplied_digest),
+        _purge_receipt_digest(unsigned),
+    ):
+        raise _integrity_failure()
+    if (
+        expected_deletion_generation is not None
+        and generation
+        != _purge_receipt_counter(expected_deletion_generation)
+    ):
+        raise _integrity_failure()
+    if require_complete and not complete:
+        raise _integrity_failure()
+    with memory_deletion_journal_read_guard(index_dir) as position:
+        if (
+            journal_generation != position.deletion_generation
+            or not secrets.compare_digest(
+                str(receipt["rootDigest"]), position.root_digest
+            )
+            or not secrets.compare_digest(
+                str(receipt["positionDigest"]), position.position_digest
+            )
+        ):
+            raise _integrity_failure()
+    return dict(receipt)
 
 
 @contextlib.contextmanager
@@ -2017,6 +2165,7 @@ __all__ = [
     "MEMORY_DELETION_JOURNAL_BUSY_ERROR",
     "MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR",
     "MEMORY_DELETION_POSITION_SCHEMA",
+    "MEMORY_DELETION_PURGE_RECEIPT_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_AUTH_SCOPE",
     "MEMORY_DELETE_TOMBSTONE_ALLOWED_NOTE_TYPES",
     "MEMORY_DELETE_TOMBSTONE_ALLOWED_SOURCE_TYPES",
@@ -2039,6 +2188,7 @@ __all__ = [
     "MemoryDeletionJournalIntegrityError",
     "MemoryDeletionPosition",
     "append_memory_deletion_tombstone",
+    "build_memory_deletion_purge_receipt",
     "canonicalize_memory_deletion_tombstone_payload",
     "memory_deletion_journal_position",
     "memory_deletion_journal_read_guard",
@@ -2052,4 +2202,5 @@ __all__ = [
     "normalize_memory_deletion_note_type",
     "normalize_memory_deletion_source_type",
     "read_memory_deletion_tombstones",
+    "validate_memory_deletion_purge_receipt",
 ]

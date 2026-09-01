@@ -2071,8 +2071,377 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertTrue(all(len(item["content"]) == 128 for item in history))
         self.assertNotIn("private", json.dumps(payload))
 
+    def test_writer_fence_receives_exact_current_session_and_turn(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        session_key = "guild:1:text:2:user:3"
+        store.turn_ids[session_key] = "turn-current"
+        calls: list[tuple[str, str]] = []
+        manager = self.manager(
+            store,
+            clock,
+            writer_fence_current=lambda session, turn: (
+                calls.append((session, turn)) or True
+            ),
+        )
+
+        result = manager.flush()
+
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(calls, [(session_key, "turn-current")])
+        self.assertTrue(self.checkpoint_path.is_file())
+
+    def test_writer_fence_false_or_exception_writes_nothing(self) -> None:
+        session_key = "guild:1:text:2:user:3"
+        for failure in (False, RuntimeError("private fence failure")):
+            with self.subTest(failure=type(failure).__name__):
+                store = self.populated_store()
+                store.turn_ids[session_key] = "turn-current"
+                calls: list[tuple[str, str]] = []
+
+                def fence(session: str, turn: str) -> bool:
+                    calls.append((session, turn))
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+
+                manager = self.manager(
+                    store,
+                    FakeClock(wall=1000.0, monotonic=100.0),
+                    writer_fence_current=fence,
+                )
+                before_histories = {
+                    key: list(value)
+                    for key, value in store.histories.items()
+                }
+
+                with patch(
+                    "evelyn_core.session_continuity.atomic_json_write"
+                ) as write:
+                    result = manager.flush(force=True)
+
+                write.assert_not_called()
+                self.assertEqual(
+                    result["lastErrorCode"],
+                    "conversation_continuity_deletion_fence_rejected",
+                )
+                self.assertEqual(manager._state, "not_initialized")
+                self.assertEqual(manager._checkpoint_generation, 0)
+                self.assertEqual(store.histories, before_histories)
+                self.assertEqual(calls, [(session_key, "turn-current")])
+                self.assertFalse(self.checkpoint_path.exists())
+                self.assertFalse(manager.head_path.exists())
+                self.assertFalse(self.status_path.exists())
+
+    def test_writer_fence_rejects_session_without_exact_current_turn(
+        self,
+    ) -> None:
+        store = self.populated_store()
+        session_key = "guild:1:text:2:user:3"
+        store.turn_ids.pop(session_key, None)
+        calls: list[tuple[str, str]] = []
+        manager = self.manager(
+            store,
+            FakeClock(wall=1000.0, monotonic=100.0),
+            writer_fence_current=lambda session, turn: (
+                calls.append((session, turn)) or True
+            ),
+        )
+
+        with patch(
+            "evelyn_core.session_continuity.atomic_json_write"
+        ) as write:
+            result = manager.flush(force=True)
+
+        write.assert_not_called()
+        self.assertEqual(
+            result["lastErrorCode"],
+            "conversation_continuity_deletion_fence_rejected",
+        )
+        self.assertEqual(calls, [])
+        self.assertIn(session_key, store.histories)
+
+    def test_named_commit_fence_rejection_precedes_all_mutation(self) -> None:
+        store = self.populated_store()
+        session_key = "guild:1:text:2:user:3"
+        store.turn_ids[session_key] = "turn-current"
+        before_commit_calls: list[int] = []
+        manager = self.manager(
+            store,
+            FakeClock(wall=1000.0, monotonic=100.0),
+            writer_fence_current=lambda _session, _turn: False,
+        )
+
+        with (
+            patch(
+                "evelyn_core.session_continuity.atomic_json_write"
+            ) as write,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^conversation_continuity_commit_failed$",
+            ),
+        ):
+            manager.commit_completed_turn(
+                session_key,
+                "turn-current",
+                before_commit=before_commit_calls.append,
+            )
+
+        write.assert_not_called()
+        self.assertEqual(before_commit_calls, [])
+        self.assertEqual(manager._commit_next_epoch, 0)
+        self.assertEqual(manager._commit_attempt_count, 0)
+        self.assertFalse(self.checkpoint_path.exists())
+        self.assertFalse(manager.head_path.exists())
+        self.assertFalse(self.status_path.exists())
+
+    def test_exact_lineage_purge_bypasses_writer_fence(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        session_key = "guild:1:text:2:user:3"
+        store.turn_ids[session_key] = "turn-target"
+        self.manager(store, clock).flush()
+        fence_calls: list[tuple[str, str]] = []
+        fenced = self.manager(
+            store,
+            clock,
+            writer_fence_current=lambda session, turn: (
+                fence_calls.append((session, turn)) or False
+            ),
+        )
+
+        result = fenced.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-target",
+            match_session=lambda value: value == session_key,
+            full_user_delete=False,
+        )
+
+        self.assertEqual(result["removedCount"], 1)
+        self.assertEqual(result["manualReviewCount"], 0)
+        self.assertEqual(fence_calls, [])
+        self.assertNotIn(session_key, store.histories)
+
+    def test_exact_lineage_purge_preserves_survivor_and_clears_live_maps(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        target_session = "guild:1:text:2:user:3"
+        survivor_session = self.add_other_guild(store)
+        store.turn_ids[target_session] = "turn-target"
+        store.turn_ids[survivor_session] = "turn-survivor"
+        manager = self.manager(store, clock)
+        manager.flush()
+
+        result = manager.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-target",
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+        recalled = manager.negative_recall_exact_lineage(
+            match_turn=lambda value: value == "turn-target",
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(result["removedCount"], 1)
+        self.assertTrue(result["contentFree"])
+        self.assertEqual(recalled["remainingCopies"], 0)
+        self.assertEqual(
+            [row["sessionKey"] for row in payload["sessions"]],
+            [survivor_session],
+        )
+        for mapping in (
+            store.histories,
+            store.followup_targets,
+            store.active_until,
+            store.active_user_ids,
+            store.last_active_at,
+            store.awaiting_user_reply,
+            store.last_speaker,
+            store.topic_ids,
+            store.turn_ids,
+            store.segment_counters,
+            store.last_turn_accepted_at,
+            store.last_stt_text,
+            store.partial_stt_text,
+            store.committed_stt_text,
+            store.bad_audio_counts,
+        ):
+            self.assertNotIn(target_session, mapping)
+        self.assertIn(survivor_session, store.histories)
+
+        store.turn_ids[target_session] = "turn-target"
+        late_recall = manager.negative_recall_exact_lineage(
+            match_turn=lambda value: value == "turn-target",
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+        self.assertEqual(late_recall["remainingCopies"], 1)
+
+    def test_exact_lineage_session_only_requires_full_user_delete(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        target_session = "guild:1:text:2:user:3"
+        store.turn_ids.pop(target_session, None)
+        manager = self.manager(store, clock)
+        manager.flush()
+        before_checkpoint = self.checkpoint_path.read_bytes()
+        before_head = manager.head_path.read_bytes()
+
+        bounded = manager.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+
+        self.assertEqual(bounded["manualReviewCount"], 1)
+        self.assertEqual(bounded["remainingCopies"], 1)
+        self.assertEqual(self.checkpoint_path.read_bytes(), before_checkpoint)
+        self.assertEqual(manager.head_path.read_bytes(), before_head)
+        self.assertIn(target_session, store.histories)
+
+        full = manager.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value == target_session,
+            full_user_delete=True,
+        )
+        self.assertEqual(full["removedCount"], 1)
+        self.assertFalse(self.checkpoint_path.exists())
+        self.assertNotIn(target_session, store.histories)
+
+    def test_exact_lineage_malformed_checkpoint_fails_without_mutation(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        target_session = "guild:1:text:2:user:3"
+        store.turn_ids[target_session] = "turn-target"
+        manager = self.manager(store, clock)
+        manager.flush()
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        payload["sessions"][0]["history"] = "malformed"
+        payload["checkpointHash"] = _checkpoint_hash(payload)
+        self.checkpoint_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        head = json.loads(manager.head_path.read_text(encoding="utf-8"))
+        head["checkpointHash"] = payload["checkpointHash"]
+        manager.head_path.write_text(
+            json.dumps(head, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        before_checkpoint = self.checkpoint_path.read_bytes()
+        before_head = manager.head_path.read_bytes()
+
+        result = manager.purge_exact_lineage(
+            match_turn=lambda value: value == "turn-target",
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+
+        self.assertEqual(result["manualReviewCount"], 1)
+        self.assertEqual(self.checkpoint_path.read_bytes(), before_checkpoint)
+        self.assertEqual(manager.head_path.read_bytes(), before_head)
+        self.assertIn(target_session, store.histories)
+
+    def test_exact_lineage_legacy_session_is_full_delete_only(self) -> None:
+        source_clock = FakeClock(wall=1000.0, monotonic=100.0)
+        self.manager(self.populated_store(), source_clock).flush()
+        legacy = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        legacy["schema"] = SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA
+        legacy.pop("generation")
+        legacy.pop("previousHash")
+        legacy.pop("checkpointHash")
+        legacy["sessions"][0]["state"].pop("lastActiveAgoSec")
+        self.checkpoint_path.write_text(
+            json.dumps(legacy, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (self.root / "checkpoint_head.json").unlink()
+        target_session = "guild:1:text:2:user:3"
+        manager = self.manager(
+            SessionStateStore.create_empty(),
+            FakeClock(wall=1001.0, monotonic=500.0),
+        )
+        manager.restore()
+        before = self.checkpoint_path.read_bytes()
+
+        bounded = manager.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value == target_session,
+            full_user_delete=False,
+        )
+        after_bounded = self.checkpoint_path.read_bytes()
+        full = manager.purge_exact_lineage(
+            match_turn=lambda _value: False,
+            match_session=lambda value: value == target_session,
+            full_user_delete=True,
+        )
+
+        self.assertEqual(bounded["manualReviewCount"], 1)
+        self.assertEqual(after_bounded, before)
+        self.assertEqual(full["removedCount"], 1)
+        self.assertFalse(self.checkpoint_path.exists())
+
 
 class SessionContinuityAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_periodic_and_async_commit_writer_fence_write_nothing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_key = "guild:1:text:2:user:3"
+            store = SessionStateStore.create_empty()
+            store.histories[session_key] = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "민감한 요청"},
+                {"role": "assistant", "content": "민감한 답변"},
+            ]
+            store.turn_ids[session_key] = "turn-current"
+            store.last_active_at[session_key] = 100.0
+            manager = SessionContinuityCheckpoint(
+                store=store,
+                checkpoint_path=root / "active.json",
+                status_path=root / "status.json",
+                system_prompt="system",
+                flush_interval_sec=0.25,
+                writer_fence_current=(
+                    lambda _session, _turn: False
+                ),
+            )
+
+            with patch(
+                "evelyn_core.session_continuity.atomic_json_write"
+            ) as write:
+                task = manager.ensure_started()
+                await asyncio.sleep(0.35)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^conversation_continuity_commit_failed$",
+                ):
+                    await manager.commit_completed_turn_async(
+                        session_key,
+                        "turn-current",
+                    )
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+            write.assert_not_called()
+            self.assertEqual(manager._commit_next_epoch, 0)
+            self.assertFalse((root / "active.json").exists())
+            self.assertFalse((root / "checkpoint_head.json").exists())
+            self.assertFalse((root / "status.json").exists())
+
     async def test_periodic_writer_is_single_flight_and_detects_direct_mutation(
         self,
     ) -> None:

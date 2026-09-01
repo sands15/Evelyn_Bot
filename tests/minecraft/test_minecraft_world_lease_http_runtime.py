@@ -78,6 +78,49 @@ class MinecraftWorldLeaseHttpRuntimeTests(
         )
         self.assertTrue(goal["outcome_verified"])
 
+    async def test_verified_goal_archives_result_under_exact_command_root(
+        self,
+    ) -> None:
+        calls: list[tuple[str, str, object]] = []
+
+        async def request(method, path, payload):
+            calls.append((method, path, payload))
+            if path == "/goal":
+                return {"goal": "diamond"}, ""
+            return {"archived": True, "contentFree": True}, ""
+
+        runtime = MinecraftWorldLeaseHttpRuntime(
+            request=request,
+            is_offline_error=lambda _error: False,
+        )
+        proof = {
+            "guildId": 7,
+            "parentRecordIds": ["minecraft-command-goal"],
+        }
+
+        await runtime.set_goal("diamond", world_lease=proof)
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "POST",
+                    "/goal",
+                    {"goal": "diamond", "worldLease": proof},
+                ),
+                (
+                    "POST",
+                    "/archive-result",
+                    {
+                        "guildId": 7,
+                        "parentRecordIds": ["minecraft-command-goal"],
+                        "operation": "goal",
+                        "outcomeCode": "minecraft_goal_confirmed",
+                    },
+                ),
+            ],
+        )
+
     async def test_offline_status_and_stop_are_safe_stopped(
         self,
     ) -> None:

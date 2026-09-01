@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,53 @@ from .memory_deletion_journal import (
     MemoryDeletionJournalIntegrityError,
     memory_deletion_journal_guard,
 )
+
+
+_TURN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+
+
+def _cognitive_lineage_turn_ids(*values: Any) -> list[str]:
+    found: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            direct = value.get("source_turn_id")
+            if isinstance(direct, str) and _TURN_ID_RE.fullmatch(direct):
+                found.add(direct)
+            many = value.get("source_turn_ids")
+            if isinstance(many, (list, tuple)):
+                for item in many:
+                    if isinstance(item, str) and _TURN_ID_RE.fullmatch(item):
+                        found.add(item)
+            evidence_id = value.get("evidence_id")
+            if isinstance(evidence_id, str):
+                match = re.fullmatch(
+                    r"turn:([A-Za-z0-9._:-]{1,80}):(user|assistant)",
+                    evidence_id,
+                )
+                if match is not None:
+                    found.add(match.group(1))
+            for child in value.values():
+                if isinstance(child, (dict, list, tuple)):
+                    visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+
+    for value in values:
+        visit(value)
+    return sorted(found)
+
+
+def _with_cognitive_lineage(
+    state: dict[str, Any],
+    *sources: Any,
+) -> dict[str, Any]:
+    result = dict(state)
+    turn_ids = _cognitive_lineage_turn_ids(result, *sources)
+    if turn_ids:
+        result["source_turn_ids"] = turn_ids
+    return result
 
 
 @dataclass(frozen=True)
@@ -41,6 +89,7 @@ class CognitiveStateRuntimeDeps:
     build_cognitive_fallback_state: Callable[..., dict[str, Any]]
     finalize_cognitive_state: Callable[..., dict[str, Any]]
     log: Callable[..., Any] = print
+    archive_target_is_current: Callable[..., bool] | None = None
 
 
 async def update_cognitive_state_from_runtime(
@@ -57,12 +106,36 @@ async def update_cognitive_state_from_runtime(
     memory_index_dir: Path | None = None,
 ) -> dict:
     started_at = time.monotonic()
+    archive_target = {
+        "guild_id": int(guild_id),
+        "turn_id": (
+            getattr(turn_scope, "turn_id", None)
+            or deps.current_turn_id(session_key)
+        ),
+        "session_key": session_key,
+        "session_memory_key": session_memory_key,
+        "person_key": person_key,
+    }
+
+    def raise_if_archive_retired() -> None:
+        callback = getattr(deps, "archive_target_is_current", None)
+        if callback is None:
+            return
+        try:
+            current = callback(**archive_target) is True
+        except Exception:
+            current = False
+        if not current:
+            raise MemoryDeletionJournalIntegrityError()
+
+    raise_if_archive_retired()
     task = deps.attach_current_task(turn_scope)
     lock = deps.cognitive_locks.setdefault(guild_id, asyncio.Lock())
     scope_type = "session" if session_memory_key else "person" if person_key else "room" if room_key else "guild"
     scope_key = session_memory_key if session_memory_key else person_key if person_key else room_key
     try:
         async with lock:
+            raise_if_archive_retired()
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
             deletion_index_dir = (
@@ -81,14 +154,19 @@ async def update_cognitive_state_from_runtime(
                     session_memory_key=session_memory_key,
                 )
                 current_summary = deps.layered_summary_text(layers)
-                current_state = deps.normalize_cognitive_state(
+                current_state_payload = (
                     deps.read_layered_cognitive_state(
                         guild_id,
                         room_key=room_key,
                         person_key=person_key,
                         session_memory_key=session_memory_key,
-                    ) or {}
+                    )
+                    or {}
                 )
+                current_state = deps.normalize_cognitive_state(
+                    current_state_payload
+                )
+                current_source_turn_id = deps.current_turn_id(session_key)
                 speculative = deps.get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
                 fast_policy = (speculative or {}).get("policy") or deps.fast_path_policy(
                     user_text,
@@ -101,11 +179,18 @@ async def update_cognitive_state_from_runtime(
                         expected_position=memory_deletion_position,
                         require_stable=True,
                     ):
+                        raise_if_archive_retired()
                         state = deps.build_fast_cognitive_state(
                             user_text,
                             action=str(fast_policy.get("action", "answer")),
                             current_state=current_state,
                             reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
+                        )
+                        state = _with_cognitive_lineage(
+                            state,
+                            current_state_payload,
+                            layers,
+                            {"source_turn_id": current_source_turn_id},
                         )
                         deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
                     return state
@@ -194,9 +279,16 @@ async def update_cognitive_state_from_runtime(
                         expected_position=memory_deletion_position,
                         require_stable=True,
                     ):
+                        raise_if_archive_retired()
                         fallback = deps.build_cognitive_fallback_state(
                             current_state=current_state,
                             user_text=user_text,
+                        )
+                        fallback = _with_cognitive_lineage(
+                            fallback,
+                            current_state_payload,
+                            layers,
+                            {"source_turn_id": current_source_turn_id},
                         )
                         deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
                     return fallback
@@ -208,10 +300,17 @@ async def update_cognitive_state_from_runtime(
                 expected_position=memory_deletion_position,
                 require_stable=True,
             ):
+                raise_if_archive_retired()
                 state = deps.finalize_cognitive_state(
                     result,
                     current_state=current_state,
                     user_text=user_text,
+                )
+                state = _with_cognitive_lineage(
+                    state,
+                    current_state_payload,
+                    layers,
+                    {"source_turn_id": current_source_turn_id},
                 )
                 deps.write_json_file(deps.cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
             elapsed_ms = (time.monotonic() - started_at) * 1000.0

@@ -782,12 +782,12 @@ class WorkspaceTaskToolsTests(unittest.TestCase):
                 self.assertFalse(result["executed"])
                 self.assertEqual(result["code"], code)
 
-        link = self.project_root / "link.txt"
+        link = self.project_root / "docs" / "link.txt"
         try:
             os.symlink(outside, link)
         except (OSError, NotImplementedError):
             return
-        result = self.execute("read", {"path": "link.txt"})
+        result = self.execute("read", {"path": "docs/link.txt"})
         self.assertFalse(result["executed"])
         self.assertEqual(result["code"], "workspace_symlink_denied")
 

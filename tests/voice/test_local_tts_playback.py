@@ -145,6 +145,42 @@ class FakeSoundDevice:
 
 
 class LocalTtsPlaybackTests(unittest.TestCase):
+    def test_manager_rechecks_target_after_waiting_for_playback_lock(self) -> None:
+        original_sd = local_tts_playback.sd
+        local_tts_playback.sd = FakeSoundDevice()
+
+        async def runner() -> tuple[bool, FakeSource, list[dict]]:
+            decisions = iter((True, False))
+            seen: list[dict] = []
+            manager = LocalTtsPlaybackManager(
+                enabled=True,
+                target_is_current=lambda target: (
+                    seen.append(target) is None and next(decisions)
+                ),
+            )
+            source = FakeSource([b"audio"])
+            await manager._lock.acquire()
+            task = asyncio.create_task(
+                manager.play_source(
+                    source,
+                    turn_id="turn-deleted",
+                    session_key="session-deleted",
+                )
+            )
+            await asyncio.sleep(0)
+            manager._lock.release()
+            return await task, source, seen
+
+        try:
+            played, source, seen = asyncio.run(runner())
+        finally:
+            local_tts_playback.sd = original_sd
+
+        self.assertFalse(played)
+        self.assertTrue(source.cleanup_called)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[-1]["turn_id"], "turn-deleted")
+
     def test_normalize_output_device(self) -> None:
         self.assertIsNone(normalize_output_device(None))
         self.assertIsNone(normalize_output_device("default"))
@@ -168,6 +204,54 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         snapshot = manager.snapshot()
         self.assertEqual(snapshot["playCount"], 1)
         self.assertEqual(snapshot["playedBytes"], 4 + len(local_tts_tail_silence_bytes()))
+
+    def test_cleanup_matching_source_drains_exact_binding_and_zeros_refs(self) -> None:
+        original_sd = local_tts_playback.sd
+        FakeRawOutputStream.writes = []
+        local_tts_playback.sd = FakeSoundDevice()
+
+        async def runner() -> tuple[
+            tuple[int, int], tuple[int, int], object, object, object
+        ]:
+            manager = LocalTtsPlaybackManager(enabled=True)
+            source = BlockingSource()
+            play_task = asyncio.create_task(
+                manager.play_source(
+                    source,
+                    turn_id="turn-a",
+                    target="delete",
+                )
+            )
+            self.assertTrue(
+                await asyncio.to_thread(source.second_read_started.wait, 1.0)
+            )
+            ignored = await manager.cleanup_matching_source(
+                lambda item: item.get("target") == "keep",
+            )
+            removed = await manager.cleanup_matching_source(
+                lambda item: item.get("target") == "delete",
+            )
+            await play_task
+            return (
+                ignored,
+                removed,
+                manager._active_binding,
+                manager._current_source,
+                manager._current_stream,
+            )
+
+        try:
+            ignored, removed, binding, current_source, current_stream = asyncio.run(
+                runner()
+            )
+        finally:
+            local_tts_playback.sd = original_sd
+
+        self.assertEqual(ignored, (0, 0))
+        self.assertEqual(removed, (1, 0))
+        self.assertIsNone(binding)
+        self.assertIsNone(current_source)
+        self.assertIsNone(current_stream)
 
     def test_manager_streams_first_chunk_before_reading_entire_source(self) -> None:
         original_sd = local_tts_playback.sd
