@@ -500,13 +500,25 @@ class MemoryVaultTests(unittest.TestCase):
                     {
                         "role": "user",
                         "text": "오늘 대화를 기록해줘",
+                        "source_turn_id": "private-turn-7",
+                        "evidence_id": "turn:private-turn-7:user",
+                        "evidence_kind": "conversation_turn",
                     },
                     {
                         "role": "assistant",
                         "text": unsafe_answer,
+                        "source_turn_id": "private-turn-7",
+                        "evidence_id": "turn:private-turn-7:assistant",
+                        "evidence_kind": "conversation_turn",
                     },
                 ],
+                scope_labels=["guild", "person:user:44"],
                 root=root,
+            )
+            episode_path = consolidate_daily_memory_once(
+                7,
+                root=root,
+                min_chars=1,
             )
             legacy_path = refresh_legacy_memory_mirror(7, root=root)
             write_memory_vault_note(
@@ -538,6 +550,8 @@ class MemoryVaultTests(unittest.TestCase):
 
             self.assertIsNotNone(daily_path)
             self.assertTrue(daily_path.exists())
+            self.assertIsNotNone(episode_path)
+            self.assertTrue(episode_path.exists())
             self.assertIsNotNone(legacy_path)
             self.assertTrue(legacy_path.exists())
             self.assertNotIn(unsafe_summary, unsafe_context)
@@ -3175,16 +3189,27 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped_sub_llm_unavailable")
         self.assertEqual(result["created_notes"], [])
 
-    def test_semantic_consolidation_creates_notes_from_sub_llm_json(self) -> None:
+    def test_semantic_consolidation_stays_out_of_same_guild_recall_without_owner_receipt(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rows = [
-                {"role": "user", "speaker": "user", "source": "test", "text": f"Evelyn should remember structured memory architecture detail {index}"}
+                {
+                    "role": "user",
+                    "speaker": "user",
+                    "source": "test",
+                    "text": f"Evelyn should remember structured memory architecture detail {index}",
+                    "source_turn_id": "private-semantic-turn",
+                    "evidence_id": "turn:private-semantic-turn:user",
+                    "evidence_kind": "conversation_turn",
+                }
                 for index in range(30)
             ]
             daily_path = append_turn_rows_to_memory_vault(
                 123,
                 rows,
+                scope_labels=["guild", "person:user:44"],
                 root=root,
             )
             assert daily_path is not None
@@ -3214,7 +3239,7 @@ class MemoryVaultTests(unittest.TestCase):
             request = MemoryRecallRequest(
                 turn_id="turn-semantic",
                 session_key=None,
-                guild_id=None,
+                guild_id=123,
                 user_text="structured memory architecture generated indexes",
                 topic_id=None,
                 source="test",

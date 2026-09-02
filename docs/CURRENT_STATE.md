@@ -2166,9 +2166,13 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
   exact user raw도 person-bound 요청의 room/person/session 또는 person key 없는 호환
   경로의 guild/room과 요청된 session layer에서 기존 evidence 검사를 통과해야 한다. 같은 원문을 복제한
   legacy mirror, daily conversation과 semantic derived note도 live recall/hot context에서
-  제외한다. retrieval cache v2와 hot-context recall policy marker가 과거 cache 재사용을
-  막는다. provenance-bearing `open_questions.jsonl` 저장·감사, explicit user/system
-  note와 현재 모델 답변의 명시적 질문은 그대로 유지한다.
+  제외한다. 현재 automatic daily writer는 scope label을 받아도 `daily/guild-<id>/<date>.md` 하나에
+  합치고 owner binding을 durable metadata로 보존하지 않는다. 따라서 같은 guild의 exact path,
+  reset scope, parent와 body hash도 principal 노출 권한을 증명하지 않는다. 2026-09-02 격리 검증은
+  deterministic·semantic child가 실제 생성된 뒤 같은 guild 조회에서도 계속 보류됨을 고정했다.
+  retrieval cache v3와 hot-context recall policy marker가 과거 cache 재사용을 막는다.
+  provenance-bearing `open_questions.jsonl` 저장·감사, explicit user/system note와 현재 모델 답변의
+  명시적 질문은 그대로 유지한다.
 - derivation revocation의 ledger ID 저장 순서와 raw graph ID 비교 순서를 같은 raw-ID
   canonical 순서로 맞췄다. 의미가 같은 반복 sync는 revocation 파일과 `updatedAt`,
   hot-context를 다시 쓰지 않는다. `contentFree` 없는 과거 raw-ID artifact는 첫 read에서

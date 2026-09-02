@@ -319,6 +319,13 @@ evidence shape 검사를 통과해야만 사용할 수 있다. 같은 원문이
 `recall_policy=deletion-current-v1`일 때만 재사용한다. 저장·감사와 사용자 검토는
 유지하며 exact owner가 검증된 explicit user note와 system note recall만 유지한다.
 
+`reset_scope`, guild-prefixed path, source reference와 parent body hash는 guild reset과
+파생 무효화의 근거이지 principal authorization receipt가 아니다. 현재 automatic daily
+writer는 전달받은 room/person/session label을 owner-bound source나 durable metadata로
+분리하지 않고 guild/date 파일에 합친다. 따라서 같은 guild의 automatic child도 회상하지
+않는다. 재활성화는 owner별 source binding, 모든 포함 turn의 exact lineage와 삭제 후
+cache/vector/graph 및 fresh-process 비회상을 한 계약으로 증명할 때만 허용한다.
+
 memory-derived proactive question queue는 deletion-current receipt를 갖추기 전까지
 선택과 mark를 전역 fail-closed한다. `open_questions.jsonl`의 provenance-bearing 원본은
 유지하지만 별도 queue에 raw/ask text를 복제하지 않는다. 현재 모델 답변에 직접 든

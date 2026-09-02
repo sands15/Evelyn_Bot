@@ -37,6 +37,8 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 - 2026-09-02 feedback live launcher는 cleanup 불확실성에서 recovery ledger를 보존하도록 `6df290c`에서 보강했고 회귀 `10 passed`를 통과했다. [[worklog/2026-09-02]]
 - 2026-09-02 명시적 사용자 확인 Markdown 기억은 격리 저장소의 실제 프로세스 재시작 경계에서
   저장→귀속 회상→삭제→비회상을 통과했다. 실제 기억과 외부 서비스는 건드리지 않았다. [[worklog/2026-09-02]]
+- 2026-09-02 자동 일일·의미 파생 Markdown은 같은 길드에서도 계속 회상 차단됨을 확인했다. 현재 일일 파일이
+  room/person/session 소유 경계를 보존하지 않으므로 reset scope·부모 hash만으로는 안전하게 열 수 없다. [[worklog/2026-09-02]]
 - P0-1 Attempt 7, P0-2 queue/timeout, P0-3 recovery checkpoint는 완료 상태다. P0-3 commit/tag와 clean-clone
   근거는 [[CURRENT_STATE]]를 따른다.
 - P0-4 source `d95ea89`의 old/new 2+20은 모두 오류 0으로 통과했다. old report SHA-256
@@ -65,7 +67,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 ## 다음 행동
 
 1. private archive·BitLocker를 다음 작업으로 추정하지 않는다. exact 30일 기록 요구가 명시될 때만 별도 재승인한다.
-2. 명시적 기억 경로는 검증됐다. 자동 파생 Markdown 기억의 deletion-current lineage 복구는 별도 구현 범위로 다룬다.
+2. 명시적 기억 경로는 검증됐다. 자동 파생 기억은 owner별 source 분리와 exact turn 삭제 계보를 함께 설계할 때만 재개한다.
 3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate도 사용자 우선순위를 먼저 확인한다.
 
 ## 작업 원칙

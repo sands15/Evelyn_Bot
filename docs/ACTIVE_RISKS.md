@@ -1405,6 +1405,14 @@ schema v3와 hot-context policy marker가 이전 attributed cache를 무효화�
 때까지 일시적으로 꺼져 있고, exact owner가 검증된 explicit user note와 system note
 recall만 유지된다.
 
+2026-09-02 격리 재검증에서 automatic daily writer가 room/person/session label을 받더라도
+guild/date Markdown 하나로 합치고 owner binding을 남기지 않는 경계를 확인했다. 이 상태에서
+같은 guild라는 이유로 derived note를 열면 person-bound 원문이 guild 공용 회상으로 승격될 수 있다.
+reset scope, canonical path, source ref, parent 존재와 body hash는 삭제 대상 결박에는 유용하지만
+principal authorization을 대신하지 못한다. 두 automatic producer를 실제 생성한 same-guild 비회상
+회귀에서도 자동 파생 본문은 노출되지 않았다. owner별 durable source와 exact turn purge 이후 fresh-process
+negative recall을 함께 증명하기 전에는 전역 차단을 해제하지 않는다.
+
 저장 legacy coverage는 이제 `memory.legacy-context-coverage.v1`로 측정한다.
 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로 재검사하고
 kind/scope/storage별 전체·attributed·확인 전용 수만 감사 API·저장 보고서·UI에
