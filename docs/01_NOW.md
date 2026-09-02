@@ -35,6 +35,8 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
   prerequisite `205/44`(passed/subtests), canonical `5153 passed, 18 skipped, 1584 subtests`가 통과했다.
   외부 서비스는 기동하지 않았으며 registry 외 Gateway/archive E2E 증거는 아니다. [[worklog/2026-09-01]]
 - 2026-09-02 feedback live launcher는 cleanup 불확실성에서 recovery ledger를 보존하도록 `6df290c`에서 보강했고 회귀 `10 passed`를 통과했다. [[worklog/2026-09-02]]
+- 2026-09-02 명시적 사용자 확인 Markdown 기억은 격리 저장소의 실제 프로세스 재시작 경계에서
+  저장→귀속 회상→삭제→비회상을 통과했다. 실제 기억과 외부 서비스는 건드리지 않았다. [[worklog/2026-09-02]]
 - P0-1 Attempt 7, P0-2 queue/timeout, P0-3 recovery checkpoint는 완료 상태다. P0-3 commit/tag와 clean-clone
   근거는 [[CURRENT_STATE]]를 따른다.
 - P0-4 source `d95ea89`의 old/new 2+20은 모두 오류 0으로 통과했다. old report SHA-256
@@ -63,7 +65,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 ## 다음 행동
 
 1. private archive·BitLocker를 다음 작업으로 추정하지 않는다. exact 30일 기록 요구가 명시될 때만 별도 재승인한다.
-2. 기억 작업은 기존 Markdown vault의 deletion-current lineage와 live recall을 별도 지시 뒤 검증한다.
+2. 명시적 기억 경로는 검증됐다. 자동 파생 Markdown 기억의 deletion-current lineage 복구는 별도 구현 범위로 다룬다.
 3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate도 사용자 우선순위를 먼저 확인한다.
 
 ## 작업 원칙

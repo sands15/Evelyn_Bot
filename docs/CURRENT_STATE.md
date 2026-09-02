@@ -957,6 +957,9 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
     context에서 제거되며 Control Page에는 `근거 손상`과 content-free blocker로
     표시된다. 사용자가 편집하면 `user-edit` ref와 새 title/body evidence hash,
     새 확인 시각으로 다시 결합한 뒤에만 회상 가능해진다.
+  - 2026-09-02 격리 저장소에서 명시적 확인 노트를 저장한 뒤 새 프로세스에서 귀속 회상하고,
+    2단계 삭제 뒤 다시 새 프로세스에서 비회상했다. canonical `owner_scope`를 빼면 회상은
+    fail-closed했고, 실제 사용자 기억과 외부 서비스는 사용하지 않았다.
   - Control Page 카드의 일반 `확인`은 이제 사용자가 읽은 정확한 note
     `sourceHash`를 필수로 보내고 서버가 edit lock 안에서 현재 revision을 다시
     대조한다. 성공 sidecar는 확인 시각과 `confirmed_content_hash`를 flush/fsync

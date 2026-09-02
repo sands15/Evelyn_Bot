@@ -1417,8 +1417,9 @@ mirror가 함께 셀 수 있어 고유 턴 수나 실제 prompt 선택 수는 �
 Discord text/voice에 연결됐다. 성공은 저장 후 card의 직접 사용자 source,
 단일 turn ref, 본문 evidence hash, confirmed timestamp와 recall eligibility를
 모두 재검사하며, 손상 provenance는 content-free 실패로 닫힌다. 격리된
-저장→attributed prompt 회수→2단계 삭제→동일 query 비회상 lifecycle도
-통과했지만 실제 사용자 기억에는 쓰기·삭제를 수행하지 않았다.
+저장→attributed prompt 회수→2단계 삭제→동일 query 비회상 lifecycle에 더해
+2026-09-02 실제 별도 프로세스 재시작 전후의 회상 성공·삭제 후 비회상도 통과했다. 정확한
+`owner_scope`가 없으면 차단됐으며 실제 사용자 기억에는 쓰기·삭제를 수행하지 않았다.
 
 2026-08-12에는 attribution만 유효하면 A의 direct-confirm note가 다른 Discord
 guild/user와 Fast local prompt에도 들어가던 principal 격리 누락을 temp vault에서
