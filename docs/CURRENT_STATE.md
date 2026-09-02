@@ -3688,3 +3688,17 @@ Source branch: `codex/omnivoice-tts-cutover`, bounded LLM task-loop increment
   남았다. Discord, Docker, microphone, GPU, Minecraft와 production archive는 기동하거나 변경하지 않았다.
 - 실제 C:/D: test provision, host attestation, current-source image build/load, fresh mic-OFF와 Gateway/ephemeral은
   별도 live 승인 대기다. 이 source/offline 결과는 archive 저장 E2E나 production 운영 증거가 아니다.
+
+## 2026-09-02 Discord feedback host preflight live NO-GO
+
+- 실제 host에서 C:/D:는 fixed NTFS·healthy·서로 다른 disk였지만 둘 다 현재 File Explorer 메뉴가
+  `BitLocker 켜기`였다. provisioner는 요구하는 `On/FullyEncrypted/Unlocked` 증거가 없어 비영 종료했고,
+  test root/owner marker/key·TLS 생성은 모두 0이다.
+- live launcher의 cleanup 실패가 command recovery ledger를 제거할 수 있던 경로는 `6df290c`에서 닫았다.
+  cleanup failure가 하나라도 있으면 exact run root를 보존하고 정상 cleanup에서만 제거한다. launcher 회귀
+  `10 passed`와 side-effect-free dry-run을 통과했다.
+- Discord target/principal은 기존 보호 credential을 메모리에서만 사용한 read-only 검사로 유일 해석했지만,
+  command registry·Gateway·archive data는 변경하지 않았다. Docker/WSL, Evelyn service와 fresh mic supervisor도
+  시작하지 않았으며 production archive는 OFF다.
+- 현재 launcher의 수동 `PASS/FAIL` receipt는 scenario별 workflow delta나 ephemeral 자동삭제 결과를 독립
+  증명하지 않는다. volume gate가 해결돼도 한 번의 operator PASS만으로 P1-4/P1-5를 완료 처리하지 않는다.

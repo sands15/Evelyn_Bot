@@ -1542,6 +1542,15 @@ live 미검증이므로 `[x]`가 아니다.
   Gateway same-user/wrong-user/stale-session/delivery-failure/ephemeral 180초 interaction은 여전히 남아 있으므로
   P1-4/P1-5 상태는 `[~]`다.
 
+#### 2026-09-02 host provision live NO-GO
+
+- 실제 C:/D:는 fixed NTFS·healthy·분리 disk지만 둘 다 BitLocker OFF였다. provisioner는 root/owner marker/
+  key·TLS 생성 0으로 fail-close했고 Docker·Gateway·production archive는 시작하거나 변경하지 않았다.
+- cleanup 불확실성에서 command recovery ledger를 보존하도록 launcher를 `6df290c`에서 수정했고 회귀
+  `10 passed`를 통과했다. volume 암호화·recovery는 별도 사용자 결정이며 자동으로 켜지 않는다.
+- 현재 launcher의 operator PASS는 시나리오별 workflow delta와 ephemeral 삭제 결과를 자동 증명하지 않는다.
+  volume gate 해결 뒤에도 same/wrong/stale/delivery/ephemeral을 각각 확인하기 전 완료 처리하지 않는다.
+
 #### 적용할 개념과 고정 경계
 
 - 영상의 router/fixer와 self-healing은 `사람의 exact correction → scoped guidance candidate →

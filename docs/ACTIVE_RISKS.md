@@ -1981,12 +1981,18 @@ canonical은 `5153 passed, 18 skipped, 1584 subtests`, 실패 0건이다. 외부
 따라서 source 부재 위험은 닫혔지만 실제 C:/D: test 재료·attestation은 아직 provision하지 않았고 Docker/Evelyn
 service, fresh physical mic, Gateway interaction도 실행하지 않았다. source test를 host/live 통과로 해석하지 않는다.
 
+2026-09-02 실제 host preflight에서는 C:/D: 모두 현재 BitLocker OFF여서 provisioner가 root/key/TLS 생성 0으로
+fail-close했다. launcher cleanup 불확실성에서 exact recovery ledger를 지우던 경로는 `6df290c`에서 보존하도록
+수정해 회귀 `10 passed`를 통과했다. 다만 launcher의 operator PASS 한 줄은 wrong-user·stale-session·delivery
+failure·ephemeral 결과를 각각 기계 결박하지 않으므로, volume gate 해결 뒤에도 전체 live 완료 증거는 아니다.
+
 현재 checkpoint의 전체 canonical은 `5153 passed, 18 skipped`, 실패 0건으로 통과했다. 전체 회귀에서 발견한
 gateway·Qwen 테스트 2건의 짧은 localhost wall-clock flake는 제품 코드나 제한시간을 바꾸지 않고 실제 lane
 재획득 event와 controlled clock 검증으로 교정했다. 남은 warning은 Python 3.13에서 제거 예정인 기존 `audioop`
 1건이며 이번 구현의 기능 실패는 아니지만 Python 3.13 전환 전에 대체가 필요하다.
 
-다음 조치: 별도 live 승인 뒤 test archive를 실제 provision하고 current-source image·fresh local-mic OFF
+다음 조치: C:/D: 암호화와 recovery를 별도 사용자 결정으로 다루고, 두 volume이
+`On/FullyEncrypted/Unlocked`일 때만 test archive를 provision해 current-source image·fresh local-mic OFF
 preflight를 통과시킨다. 그 뒤 별도 test principal로 same-user/stale-session/delivery 경쟁을 content-free
 workflow delta와 ephemeral 결과로 확인한다. 실제 Qwen
 고정 24-row와 local grounded read-only 10건 canary/restart/failure/rollback은 그 다음 별도 live gate다.

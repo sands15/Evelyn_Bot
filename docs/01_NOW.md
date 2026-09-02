@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 ---
 
 # Evelyn — Now
@@ -24,10 +24,9 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 - Discord archive command의 exact guild-only publisher/clear/restart recovery는 승인된 live에서
   `0/51/0 → 5/51/0 → 0/51/0`을 통과했다. test key/TLS/ACL provisioner, exact current-source image
   provenance와 fresh mic-OFF reconcile은 source/offline 검증됐고 실제 host/Gateway E2E는 남아 있다.
+- 2026-09-02 host preflight에서 C:/D: 모두 BitLocker OFF였다. provisioner는 생성 전 fail-close했고 Docker·Gateway·production archive는 OFF다.
 - 기존 승인 순서의 P0-1~3은 검증 완료했다. P0-4 revised STT는 제한된 GPU1 2+20을 통과했지만 private
   corpus·cancel/successor·cold restart가 남아 있고 P0-5 Qwen3.8은 시작하지 않았다.
-- Discord guided exact 10개는 수동 선택됐지만 자동 모델 진단은 similarity/order `8/10·9/10`,
-  normalized/entity-action exact `0/10` FAIL이며 production promotion 권한은 없다.
 
 ## 최근 검증
 
@@ -38,6 +37,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 - 2026-09-01 현재 checkpoint 대상 158개 경로는 승인 범위와 일치하고 제외 대상 0개다. P1 직접 소유 `181/72`, live
   prerequisite `205/44`(passed/subtests), canonical `5153 passed, 18 skipped, 1584 subtests`가 통과했다.
   외부 서비스는 기동하지 않았으며 registry 외 Gateway/archive E2E 증거는 아니다. [[worklog/2026-09-01]]
+- 2026-09-02 feedback live launcher는 cleanup 불확실성에서 recovery ledger를 보존하도록 `6df290c`에서 보강했고 회귀 `10 passed`를 통과했다. [[worklog/2026-09-02]]
 - P0-1 Attempt 7, P0-2 queue/timeout, P0-3 recovery checkpoint는 완료 상태다. P0-3 commit/tag와 clean-clone
   근거는 [[CURRENT_STATE]]를 따른다.
 - P0-4 source `d95ea89`의 old/new 2+20은 모두 오류 0으로 통과했다. old report SHA-256
@@ -65,9 +65,9 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 다음 행동
 
-1. 별도 live 승인 뒤 test archive를 실제 provision하고 current-source·fresh mic-OFF preflight를 거쳐 Discord feedback/ephemeral을 검증한다.
-2. 실제 Qwen 고정 24-row→local grounded read-only 10건 canary→restart/rollback 순서로 검증한다.
-3. P0-4의 나머지 positive 30개와 negative 10개를 실제 수집하고 50-item gate를 끝낸 뒤에만 승격한다.
+1. C:/D: BitLocker OFF를 유지할지, recovery 계획을 갖춰 암호화할지 별도로 결정한다. 자동 활성화하지 않는다.
+2. 두 volume이 `On/FullyEncrypted/Unlocked`일 때만 test archive provision→fresh mic-OFF→Discord live를 재개한다.
+3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate는 위 live blocker와 분리해 후속 검증한다.
 
 ## 작업 원칙
 
@@ -77,4 +77,4 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 자세한 근거
 
-- [[CURRENT_STATE]] · [[ACTIVE_RISKS]] · [[02_DECISIONS]] · [[worklog/2026-09-01]] · [[DOCUMENTATION_INDEX]]
+- [[CURRENT_STATE]] · [[ACTIVE_RISKS]] · [[02_DECISIONS]] · [[worklog/2026-09-02]] · [[DOCUMENTATION_INDEX]]
