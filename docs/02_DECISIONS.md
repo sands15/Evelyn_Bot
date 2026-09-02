@@ -1109,3 +1109,16 @@ type: decision-log
   `../plan.md` P1-5, [[worklog/2026-08-28]].
 - 영향: source/offline 전체 회귀는 통과했지만 실제 Discord 전달 경쟁, local admin OTP, real-Qwen eval,
   10건 canary와 production pointer 전환은 live 증거가 아니다. archive 기본 OFF도 유지한다.
+
+## 2026-09-02 — Markdown 장기기억과 선택형 exact archive를 혼동하지 않는다
+
+- 상태: 활성 교정
+- 결정: Obsidian-compatible Markdown vault를 Evelyn 장기기억의 durable source로 유지한다. P1-4의 30일
+  exact private archive는 기억 기능의 선행조건이 아니라 별도 열람·삭제·감사용 선택 기능이다. 사용자가 그
+  목적을 명시적으로 다시 요구하지 않으면 archive·BitLocker·live provision을 재개하지 않는다.
+- 이유: 이미 존재하는 요약형 Markdown vault가 장기기억 저장 목적을 소유하는데, 미완료 plan 항목만 따라
+  별도 원문 저장소와 host 암호화를 필수 다음 단계로 취급해 불필요한 작업을 만들었다.
+- 재발 방지: `진행해`는 현재 합의한 목적 안의 진행만 뜻한다. 선택 기능·보안 설정·외부 효과로 넓히기 전에
+  기존 기능이 목적을 충족하는지 확인하고 필요성을 사용자에게 명시적으로 확인한다.
+- 영향: archive는 기본 OFF이고 실제 root/key/TLS·BitLocker·service 변경은 없었다. 기억 후속은 기존 Markdown
+  vault의 deletion-current lineage와 live recall을 별도 범위로 검증한다.

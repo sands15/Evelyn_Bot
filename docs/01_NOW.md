@@ -18,13 +18,10 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 - P1-3 exact task contract, grounded draft·고정 24-row evaluator와 P1-5 사람 교정 기반 개선 승격의
   source/offline 구현·전체 회귀를 완료했다. 실제 Qwen 평가·Discord feedback·10건 canary는 live 대기다.
-- P1-4 private archive의 기본 OFF 기반과 17개 purge sink, C:/D:·anchor, 30일 보존, Discord self-only
-  ephemeral, local admin OTP/session, exact Discord ID·voice 참여·Minecraft lineage가 연결돼 있다. 불완전
-  lineage·legacy/global cache·미등록 사본은 `manual_review/local_cleanup_pending`이며 운영 완료는 아니다.
-- Discord archive command의 exact guild-only publisher/clear/restart recovery는 승인된 live에서
-  `0/51/0 → 5/51/0 → 0/51/0`을 통과했다. test key/TLS/ACL provisioner, exact current-source image
-  provenance와 fresh mic-OFF reconcile은 source/offline 검증됐고 실제 host/Gateway E2E는 남아 있다.
-- 2026-09-02 host preflight에서 C:/D: 모두 BitLocker OFF였다. provisioner는 생성 전 fail-close했고 Docker·Gateway·production archive는 OFF다.
+- 기존 Obsidian-compatible Markdown vault가 장기기억의 durable source다. P1-4의 30일 exact private archive는
+  별도 선택 기능이며 기본 OFF다. exact 기록·사용자별 열람/삭제 요구가 명시되지 않으면 BitLocker/live를 재개하지 않는다.
+- 2026-09-02 선택 기능을 필수 다음 작업으로 오판해 BitLocker 경로를 진행했다. 상태 확인 외 변경은 없었고
+  archive root·service·암호화 생성은 0이다. 미완료 plan 항목만으로 사용자 우선순위를 추정하지 않는다.
 - 기존 승인 순서의 P0-1~3은 검증 완료했다. P0-4 revised STT는 제한된 GPU1 2+20을 통과했지만 private
   corpus·cancel/successor·cold restart가 남아 있고 P0-5 Qwen3.8은 시작하지 않았다.
 
@@ -65,9 +62,9 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 다음 행동
 
-1. C:/D: BitLocker OFF를 유지할지, recovery 계획을 갖춰 암호화할지 별도로 결정한다. 자동 활성화하지 않는다.
-2. 두 volume이 `On/FullyEncrypted/Unlocked`일 때만 test archive provision→fresh mic-OFF→Discord live를 재개한다.
-3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate는 위 live blocker와 분리해 후속 검증한다.
+1. private archive·BitLocker를 다음 작업으로 추정하지 않는다. exact 30일 기록 요구가 명시될 때만 별도 재승인한다.
+2. 기억 작업은 기존 Markdown vault의 deletion-current lineage와 live recall을 별도 지시 뒤 검증한다.
+3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate도 사용자 우선순위를 먼저 확인한다.
 
 ## 작업 원칙
 

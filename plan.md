@@ -1102,7 +1102,9 @@ exact evidence 연결, 잘못된 ref 거부, 링크 opt-in, TTS raw body 비노�
 
 ### P1-4. 운영 보안·30일 private archive·삭제/백업 내구성
 
-상태: **[~] 승인된 구현·검증 진행**. 2026-08-28 사용자가 P1-4 구현을 명시적으로 승인했다.
+상태: **[~] source/offline 구현 보존·live/production 우선순위 중단**. 2026-08-28 구현 승인은 이력으로
+유효하지만, 2026-09-02 기존 Markdown 장기기억과 별도인 선택 기능을 현재 필수 작업으로 취급한 것은 오판이었다.
+exact 30일 원문 기록·사용자별 열람/삭제가 명시적으로 다시 요구되지 않으면 BitLocker/provision/live를 재개하지 않는다.
 이번 승인은 source/offline 구현·검증만 열며, 이 항목은 P1-3의 content-free task contract를 대신하거나
 P0-4/P0-5, P1-1/P1-2의 선행 순서를 우회하지 않는다. 아래에서 `private archive`는 Git·`docs/`·
 일반 runtime log가 아니라, 접근권한과 삭제 계보를 가진 **비공개 기준 기록 저장소**를 뜻한다.

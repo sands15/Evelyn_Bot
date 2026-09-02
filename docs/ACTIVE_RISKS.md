@@ -1991,9 +1991,8 @@ gateway·Qwen 테스트 2건의 짧은 localhost wall-clock flake는 제품 코�
 재획득 event와 controlled clock 검증으로 교정했다. 남은 warning은 Python 3.13에서 제거 예정인 기존 `audioop`
 1건이며 이번 구현의 기능 실패는 아니지만 Python 3.13 전환 전에 대체가 필요하다.
 
-다음 조치: C:/D: 암호화와 recovery를 별도 사용자 결정으로 다루고, 두 volume이
-`On/FullyEncrypted/Unlocked`일 때만 test archive를 provision해 current-source image·fresh local-mic OFF
-preflight를 통과시킨다. 그 뒤 별도 test principal로 same-user/stale-session/delivery 경쟁을 content-free
-workflow delta와 ephemeral 결과로 확인한다. 실제 Qwen
-고정 24-row와 local grounded read-only 10건 canary/restart/failure/rollback은 그 다음 별도 live gate다.
-모두 통과하기 전에는 P1-3/P1-5를 `[x]` 또는 production ON으로 표시하지 않는다.
+2026-09-02 우선순위 교정: 기존 Markdown vault가 장기기억의 durable source이므로 P1-4 exact private archive와
+BitLocker는 현재 필수 다음 작업이 아니다. exact 30일 원문 기록·사용자별 열람/삭제가 명시적으로 다시 요구될
+때만 별도 재승인하며, 그 전에는 기본 OFF를 유지한다. 기억 관련 후속은 private archive가 아니라 기존 Markdown
+vault의 deletion-current lineage와 live recall로 분리한다. 실제 Qwen 24-row·canary도 사용자 우선순위를 먼저
+확인하며, source/offline 결과만으로 P1-3/P1-5를 `[x]` 또는 production ON으로 표시하지 않는다.
