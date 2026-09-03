@@ -394,6 +394,66 @@ Every callback rechecks its caller-owned binding before using a revision or fina
 discarded even if transcription succeeded. Closing an ASR session never revives an expired Local
 capability, Discord owner, old channel generation, or cancelled TTS generation.
 
+### 10.1 Local soft endpoint and reopen target
+
+This subsection is an approved target, not current runtime behavior. The current personal Local
+Bridge still uses a 500 ms hard endpoint and has no general reopen/merge path. Discord and qualified
+barge-in are unchanged by this design.
+
+`LOCAL_MIC_SOFT_REOPEN_ENABLED=false` is the rollout gate. While it is false, the two new threshold
+settings are ignored and `LOCAL_MIC_MAX_SILENCE_MS=500` remains the sole hard endpoint. Enabling the
+gate also requires `LOCAL_BRIDGE_STT_STREAMING_ENABLED=true`; otherwise status reports
+`soft_reopen_requires_streaming` and the current hard path remains active.
+
+```text
+STREAMING
+  -> SOFT_PENDING     300 ms after the last voiced sample
+SOFT_PENDING
+  -> STREAMING        speech resumes within the additional 500 ms grace
+  -> HARD_COMMIT      grace expires with no resumed speech
+  -> CANCELLED        owner, generation, admission, validation, or process fence changes
+HARD_COMMIT
+  -> PROMOTE          authoritative final and prepared draft bindings match exactly
+  -> ORDINARY_PATH    no draft, mismatch, expiry, or uncertain state
+```
+
+At `SOFT_PENDING`, flush only pending PCM into the existing ASR stream. Keep the capture generation,
+complete PCM, and ASR session alive. A resumed voiced block returns the same generation to
+`STREAMING`; after its next 300 ms pause it creates a successor soft epoch over all PCM received so
+far. Never finish and reopen the ASR session, concatenate transcript strings, or create a second turn.
+With no resume, the configured hard commit is 300 ms + 500 ms, subject only to capture scheduling.
+The utterance cap and an explicit capture stop remain immediate terminal boundaries.
+
+The latency overlap requires one ephemeral `prepare -> promote/abort` transaction per Local capture:
+
+- `prepare` may read an immutable context snapshot, finish a conversational model draft, and stage
+  only the first non-empty TTS PCM chunk, capped at 256 KiB, in process memory. It may not consume
+  admission, claim durable ingress, append
+  history/archive/memory, invoke tools/actions, make external effects, or write to the audio device.
+- The opaque draft is bound to bridge instance, admission epoch, capture generation, soft epoch,
+  validation binding, authoritative input digest, context revision, and model/TTS identity. Ordinary
+  logs expose none of these raw identifiers, text, prompts, or audio.
+- Resume marks the draft stale and aborts it. A late prepare result must be drained and discarded.
+  Repeated pause/resume creates only a successor soft epoch; at most one current draft exists.
+- Hard commit first obtains the authoritative ASR final. Promotion is allowed only when every binding
+  and the normalized input digest match. Promotion atomically performs the existing admission and
+  durable accepted-user ingress claim once, then releases staged playback. The existing Local
+  authenticated playback ACK contract remains authoritative: only a successful exact ACK may append
+  assistant history/continuity and start background work; failed, partial, or cancelled playback
+  preserves the accepted user-only turn. A mismatch, expiry, tool/memory/action route, an oversized
+  first PCM chunk, or uncertain cancellation aborts the draft and uses the ordinary post-endpoint path.
+- Restart, mic OFF, queue drop, validation loss, or admission epoch change discards the in-memory
+  draft and current ASR session. No draft is durable or recoverable.
+
+Any capture whose private context contains `_bargeSource` bypasses this state machine and retains the
+existing qualified barge-in capture, admission, and playback-interruption path.
+
+Content-free metrics add soft endpoint, reopen, hard commit, prepare, abort reason, promotion, and
+last-voice-to-first-verified-PCM durations. They never contain transcript, PCM, prompt, or raw owner
+identifiers. The initial warm target is p95 <= 350 ms to soft endpoint and p95 < 1,000 ms from the last
+voiced sample to verified first PCM, with duplicate admission/history/memory/tool/action/playback at
+zero. These are release gates, not current measurements.
+
 ## 11. Failure policy
 
 | Failure | Required behavior |

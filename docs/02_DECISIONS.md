@@ -23,6 +23,28 @@ type: decision-log
 - 대체한 결정:
 ```
 
+## 2026-09-03 — 개인 Local Voice는 300ms soft endpoint와 추가 500ms reopen으로 처리
+
+- 상태: 승인 — 설계 동결, source 구현·테스트·live 활성화 대기
+- 결정: 개인 Local Voice는 마지막 voiced sample 뒤 300ms를 hard 종료가 아닌 soft endpoint로
+  취급한다. 이 시점에 남은 PCM을 같은 ASR stream으로 보내고 부작용 없는 response draft 준비를
+  시작한다. 이후 추가 500ms 안에 speech가 재개되면 같은 capture generation과 PCM/ASR session을
+  계속 사용하고 기존 draft를 폐기한다. 재개가 없을 때만 약 800ms에 authoritative final을 만든 뒤
+  exact draft를 promote하거나 일반 경로로 fallback한다. 텍스트 조각을 이어 붙이지 않는다.
+- 이유: 현재 ASR `finish`는 session을 제거하고, `/chat-stream`은 model 실행 전에 admission·durable
+  ingress를 소비할 수 있다. 따라서 300ms hard final 뒤 HTTP task만 취소하는 방식은 늦은 음성을
+  안전하게 합치지 못하고 user history·memory·tool/action·TTS를 중복 또는 orphan 상태로 만들 수 있다.
+- 근거: `../plan.md` P1-1A, [[KOREAN_ASR_TARGET_ARCHITECTURE]],
+  `../evelyn_core/runtime/evelyn_core/local_mic.py`,
+  `../evelyn_core/runtime/evelyn_core/local_io_bridge.py`,
+  `../evelyn_core/runtime/evelyn_core/fast_control_api.py`.
+- 영향: soft 단계에서는 admission consume, durable ingress/history/archive/memory write, tool/action,
+  외부 service effect와 audible TTS를 금지한다. currentness나 authoritative transcript가 draft와 다르면
+  promote하지 않는다. Discord와 기존 qualified barge-in은 바꾸지 않으며, 현재 500ms hard endpoint도
+  구현·회귀·별도 live 승인 전까지 그대로다. promotion은 accepted user row까지만 먼저 commit하고,
+  assistant history·continuity·background action은 현행 authenticated playback ACK 뒤에만 확정한다.
+- 대체한 결정: P1-1의 Local endpoint 부분은 P1-1A가 활성화될 때 soft/hard 지표로 분리한다.
+
 ## 2026-08-26 — 구현은 설계 동결과 사용자 명시 승인 뒤에만 수행
 
 - 상태: 승인

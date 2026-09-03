@@ -3,7 +3,7 @@ tags:
   - evelyn
   - working-context
 type: current-context
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-03
 ---
 
 # Evelyn — Now
@@ -16,6 +16,10 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 현재 초점
 
+- 개인 Local Voice의 `300ms soft endpoint + 추가 500ms reopen` 설계는 승인·동결됐다.
+  300ms에는 같은 ASR session을 유지한 채 side-effect-free 준비만 시작하고, grace 안 재입력은
+  같은 PCM/generation으로 합친다. no-reopen hard commit은 마지막 음성 뒤 약 800ms다. 현재 runtime은
+  여전히 500ms hard endpoint이며 source 구현·테스트·live 활성화는 사용자 선택으로 대기한다.
 - P1-3 exact task contract, grounded draft·고정 24-row evaluator와 P1-5 사람 교정 기반 개선 승격의
   source/offline 구현·전체 회귀를 완료했다. 실제 Qwen 평가·Discord feedback·10건 canary는 live 대기다.
 - 기존 Obsidian-compatible Markdown vault가 장기기억의 durable source다. P1-4의 30일 exact private archive는
@@ -66,9 +70,11 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 다음 행동
 
-1. private archive·BitLocker를 다음 작업으로 추정하지 않는다. exact 30일 기록 요구가 명시될 때만 별도 재승인한다.
-2. 명시적 기억 경로는 검증됐다. 자동 파생 기억은 owner별 source 분리와 exact turn 삭제 계보를 함께 설계할 때만 재개한다.
-3. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate도 사용자 우선순위를 먼저 확인한다.
+1. P1-1A는 후속 요청 때 capture/ASR state machine과 side-effect-free prepare/promote/abort를 함께 구현하고,
+   source 회귀 뒤 별도 승인된 실제 microphone에서만 활성화한다.
+2. private archive·BitLocker를 다음 작업으로 추정하지 않는다. exact 30일 기록 요구가 명시될 때만 별도 재승인한다.
+3. 명시적 기억 경로는 검증됐다. 자동 파생 기억은 owner별 source 분리와 exact turn 삭제 계보를 함께 설계할 때만 재개한다.
+4. 실제 Qwen 24-row·grounded canary와 P0-4 50-item gate도 사용자 우선순위를 먼저 확인한다.
 
 ## 작업 원칙
 
@@ -78,4 +84,4 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 자세한 근거
 
-- [[CURRENT_STATE]] · [[ACTIVE_RISKS]] · [[02_DECISIONS]] · [[worklog/2026-09-02]] · [[DOCUMENTATION_INDEX]]
+- [[CURRENT_STATE]] · [[ACTIVE_RISKS]] · [[02_DECISIONS]] · [[worklog/2026-09-03]] · [[DOCUMENTATION_INDEX]]

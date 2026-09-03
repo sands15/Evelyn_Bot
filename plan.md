@@ -1,6 +1,6 @@
 # Evelyn 실행 계획
 
-마지막 검토: 2026-08-28 KST
+마지막 검토: 2026-09-03 KST
 
 ## 이 파일의 역할
 
@@ -914,6 +914,105 @@ Discord 연결과 실제 장치 청취는 별도 구현/live 승인 전 시작�
 완료 조건: 모든 source/offline 수치 gate와 승인된 Local/Discord live gate가 통과하고,
 `말하기 → STT → Main → 첫 PCM → 재생 완료 → continuity commit`이 surface별 한 trace로
 관측되며 final state가 원래 Docker/mic/Discord/image/config로 복구된다.
+
+### P1-1A. 개인 Local Voice 300ms soft endpoint + 추가 500ms reopen
+
+상태: **[!] 2026-09-03 설계 승인·동결; source 구현·테스트·live 활성화는 사용자 선택으로 대기**.
+현재 개인 Local Bridge는 500ms hard endpoint이며 일반 재입력 merge는 없다. 이 항목은 활성화될 때
+P1-1의 Local endpoint 의미만 soft/hard 지표로 분리하고 Discord·barge-in 계약은 바꾸지 않는다.
+
+#### 문제·검증된 root cause·영향
+
+- `local_mic.py`는 silence threshold에서 capture를 끝내고, `stt_service.py`의 stream `finish`는
+  server session을 제거한다. 300ms에 finish한 뒤 500ms 안의 음성을 같은 ASR session으로 reopen할
+  수 없다.
+- `/chat-stream`은 Main 호출 전에 admission과 durable ingress를 소비할 수 있고 이후 history,
+  archive, memory, tool/action과 playback 경로가 이어진다. client task 취소는 이미 생긴 부작용의
+  rollback 계약이 아니다.
+- 따라서 `300ms hard final → request 시작 → 재입력 때 cancel → text concat`은 duplicate/orphan
+  turn과 잘못된 action을 만들 수 있다. 반대로 hard endpoint를 단순히 800ms로 늘리기만 하면 현재
+  500ms보다 느려지므로 ASR/Main/TTS 계산 overlap이 없으면 최적화가 아니다.
+
+#### 목표·범위·비범위
+
+- 마지막 voiced sample 뒤 300ms에 soft checkpoint를 만들고, 추가 500ms 동안 같은
+  capture generation·PCM·ASR session을 유지한다. grace 내 speech는 이전 음성과 하나의 utterance로
+  처리하고, 없을 때만 약 800ms에 hard commit한다.
+- soft 시점부터 side-effect-free ASR/draft 계산을 겹쳐 warm 상태의 last-voice→verified first PCM
+  p95를 1,000ms 미만으로 만든다. hard commit 전 external/durable effect는 0이어야 한다.
+- 포함: 개인 Local capture/ASR state, ephemeral response draft, exact promotion, content-free timing,
+  rollback과 source/live gate다.
+- 비범위: Discord endpoint, qualified barge-in, model/quant, KWS/AEC, text concatenation, 새 dependency,
+  cloud fallback, raw transcript/audio 보존이다.
+
+#### 동결한 state·transaction 계약
+
+1. Local 전용 gate는 `LOCAL_MIC_SOFT_REOPEN_ENABLED=false`, 설정은
+   `LOCAL_MIC_SOFT_ENDPOINT_MS=300`, `LOCAL_MIC_RESUME_MERGE_WINDOW_MS=500`으로 명명한다.
+   gate가 false면 두 새 값은 무시하고 현행 `LOCAL_MIC_MAX_SILENCE_MS=500`만 hard endpoint로 쓴다.
+   gate가 true여도 `LOCAL_BRIDGE_STT_STREAMING_ENABLED=true`가 아니면 soft path를 열지 않고
+   `soft_reopen_requires_streaming` 상태로 현행 hard path를 유지한다.
+2. `STREAMING → SOFT_PENDING`에서 pending PCM만 현행 ASR stream에 drain한다. capture context,
+   full PCM과 generation은 보존하며 `on_speech_end`, segment dispatch, ASR `finish`를 호출하지 않는다.
+3. grace 내 voiced block은 같은 generation을 `STREAMING`으로 되돌리고 현재 draft를 abort한다.
+   다음 300ms pause는 전체 누적 PCM 위의 새 `soft_epoch`다. 문자열을 합치거나 새 turn ID를 만들지 않는다.
+4. resume 없이 500ms가 지나면 기존 final/filter/admission 경로로 hard commit을 정확히 한 번 수행한다.
+   30ms capture block 구현이면 nominal 약 810ms이며 max-utterance, explicit stop과 capture fault는
+   grace를 기다리지 않는 terminal boundary다.
+5. soft checkpoint는 capture당 current draft 하나만 `prepare`할 수 있다. prepare는 immutable context를
+   읽고 conversational Main/TTS 계산을 process memory에 staging할 수 있지만 admission consume,
+   durable ingress/history/archive/memory, tool/action/external effect와 speaker write를 금지한다.
+6. draft token은 bridge instance, admission epoch, capture generation, soft epoch, validation binding,
+   normalized authoritative-input digest, context revision, model/TTS identity에 결박한다. raw token,
+   transcript, prompt, PCM과 owner ID는 log/metric/docs에 남기지 않는다.
+7. hard final과 모든 binding이 exact match할 때만 기존 admission·durable user-turn claim을 한 번
+   atomic promote하고 accepted user row를 commit한 뒤 staged playback을 연다. exact authenticated
+   playback ACK 뒤에만 assistant history·continuity·background action을 현행 계약대로 확정한다.
+   failed/partial/cancelled ACK는 accepted user-only turn을 보존한다. mismatch, expiry,
+   tool/memory/action route, overload, uncertain cancel은 draft를 버리고 ordinary path를 한 번 실행한다.
+8. late prepare 결과는 drain 후 폐기한다. mic OFF/restart, queue drop, filter rejection, validation loss,
+   admission epoch/owner change는 ASR와 draft를 함께 정리하며 restart에서 draft를 복구하지 않는다.
+9. capture context에 private `_bargeSource`가 있으면 soft/reopen/prepare를 모두 우회하고 현행 qualified
+   barge-in capture·admission·playback interrupt 경로를 그대로 사용한다.
+
+#### 구현 순서·rollback
+
+1. `local_mic.py`에 soft/grace 상태와 pending PCM drain을 넣고 `local_io_bridge.py`에서 동일
+   `(admission_epoch, generation, soft_epoch)`을 사용한다. ASR start는 1회, hard finish도 1회다.
+2. `fast_control_api.py`와 Bridge 사이에 side-effect-free prepare/promote/abort 계약을 추가한다.
+   기존 `/chat-stream`을 soft 단계에서 호출하거나 취소 rollback처럼 사용하지 않는다.
+3. conversation-only exact draft만 promotion한다. tool/memory/action 후보는 hard commit 뒤 현행 경로를
+   사용한다. staged audio는 첫 nonempty PCM chunk 하나와 최대 256KiB로 제한하고 초과 시 ordinary
+   path로 fallback한다.
+4. `LOCAL_MIC_SOFT_REOPEN_ENABLED=false`는 현재 500ms hard endpoint와 ordinary chat path의 동작
+   의미를 유지한다.
+   restart도 RAM draft를 버리므로 schema migration과 durable cleanup은 없다.
+5. source 회귀와 privacy screen을 통과한 뒤 shadow metric만 수집하고, 별도 사용자의 live mic 승인이
+   있을 때 실제 장치 gate를 수행한다. gate 실패 시 feature OFF로 즉시 rollback한다.
+
+#### 후속 테스트와 완료 gate
+
+- 사용자 요청에 따라 이번 작업에서는 테스트를 작성하거나 실행하지 않는다. 구현 재개 시 먼저
+  300ms에는 chunk/soft만 있고 end/segment/effect가 0인지, 추가 500ms 내 resume가 동일 generation과
+  ASR start 1회를 유지하는지, no-resume hard finish/segment가 1회인지 고정한다.
+- 반복 pause/resume stale epoch, late prepare receipt, authoritative text/context mismatch, queue drop,
+  filter rejection, OFF/restart, max utterance, admission/validation change와 barge-in 무변경을 회귀한다.
+- focused `test_local_asr_streaming.py`, `test_local_mic_routing.py`,
+  `test_local_voice_admission_bridge.py`, prepare/promote API tests와 canonical suite 실패 0을 요구한다.
+- live gate는 Local last-voice→soft p95 `<=350ms`, warm last-voice→verified first PCM p95 `<1000ms`,
+  reopen utterance의 누락/중복 0, admission/history/memory/tool/action/playback duplicate 0,
+  truncation regression 0이다. transcript/audio를 report에 저장하지 않는다.
+
+#### 예상 diff·미해결 질문
+
+- 예상 production diff는 `.env.example`, `local_mic.py`, `local_io_bridge.py`, `fast_control_api.py`와 기존 contract
+  owner 모듈, 대응 voice/API tests, P1-1 timing schema와 current-state/risk/worklog 문서다. dependency,
+  DB/schema migration, Discord/Minecraft diff는 0이다.
+- 300ms는 soft, 500ms는 그 뒤의 추가 grace, merge 단위는 PCM/same ASR session, effect boundary는
+  exact promote로 모두 고정했다. **미해결 설계 질문은 0개다.**
+
+완료 조건: feature OFF rollback을 보존한 채 source/canonical/live gate가 모두 통과하고, 300ms draft가
+reopen에서는 흔적 없이 폐기되며 no-reopen에서는 한 user turn과 한 verified playback으로만 승격된다.
 
 ### P1-2. 안전한 Minecraft 승인 E2E 닫기
 
