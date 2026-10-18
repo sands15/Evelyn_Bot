@@ -1,6 +1,7 @@
 """Existing unittest entrypoints must retain failures without an opt-in runner."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -82,6 +83,28 @@ class AutomaticCaptureTests(unittest.TestCase):
         self.assertIn("github.run_attempt", upload["with"]["name"])
         self.assertFalse(upload["with"]["overwrite"])
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_security_python_shell_imports_checkout_from_temporary_script(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / ".github/workflows/verify-evelyn.yml").read_text(encoding="utf-8"))
+        step = next(step for job in workflow["jobs"].values() for step in job["steps"]
+                    if step.get("id") == "security_tests")
+        self.assertEqual(step["shell"], "python")
+        code = step["run"]
+        target = next(node for node in ast.parse(code).body if isinstance(node, ast.ImportFrom)
+                      and node.module == "tools.audit_locked_dependencies")
+        prefix = "\n".join(code.splitlines()[:target.end_lineno])
+        script = self.output.parent / "workflow-step.py"
+        script.write_text(prefix + "\nassert callable(verify_installed_patches)\n"
+                          "assert Path(sys.modules['tools.audit_locked_dependencies'].__file__).resolve() == Path.cwd() / 'tools/audit_locked_dependencies.py'\n",
+                          encoding="utf-8")
+        env = {name: value for name, value in os.environ.items()
+               if name.upper() in {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT"}}
+        # No site packages or PYTHONPATH may accidentally supply the checkout.
+        result = subprocess.run([sys.executable, "-S", "-B", "-X", "utf8", str(script)],
+                                cwd=ROOT, env=env, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_existing_named_and_ci_discovery_commands_save_evidence(self):
         for args in (["-m", "unittest", "tests.runtime.test_minecraft_menu_oracle"],

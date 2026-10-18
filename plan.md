@@ -5,7 +5,7 @@
 - 목표/승인: 사용자가 남은 보안 감사14건과 POSIX 미실행1개를 해결해 기존 CI를 완전히 통과시키도록 승인했다. 모델이나 주요 의존성 변경은 먼저 질문한다. 이전 통합 기준은 main `a4082bbd`, 기존92커밋·미커밋 작업·최초 실패 원본은 계속 보존한다.
 - 적용 합의: Developer Vault `Reviews/2026-W41.md`의 첫 실패 보존·원인 구별 후 재개를 아래 실제 감사와 정상 회귀에 적용한다. 감사 예외 추가·대상 패키지 제거·Windows 검사의 skip 숨기기로 성공을 만들지 않는다.
 - [ ] 네트워크4개: 공식 advisory/PyPI를 확인한 최소 수정 버전 aiohttp3.14.3, multidict6.9.1, urllib3 2.8.0, Werkzeug3.1.9로 기존 root/host 잠금과 연결된 aiohttp 설치 경로를 맞춘다. 기존 최소 버전을 거부하는 정책 검사 RED→GREEN, 실제 감사·의존성 호환·관련 통신/종료 회귀를 확인한다. 원래 환경을 업데이트하지 않고 격리 검사 환경을 사용한다.
-- [ ] POSIX: 기존 Windows 전체 회귀는 그대로 두고 동일 revision의 Linux/Python3.11 작업에서 해당 stdlib 검사1개를 실제 fsync와 함께 실행한다. receipt PASS/tests1/skipped0을 확인하고 실행별 별도 artifact를 남긴다. Windows의 skip1/INCOMPLETE를 재작성하지 않는다.
+- [x] POSIX: 후보 `752882c8`의 CI39160690964에서 실제 Linux/Python3.11 fsync 검사1개가 PASS/skip0이다. artifact12147754587과 원본 receipt를 별도 보존했다. Windows의 skip1/INCOMPLETE를 재작성하지 않으며 main 자동 경로 확인은 아래 전체 게이트에 남긴다.
 - [~] 모델 계열3개: 사용자가 모델·가중치 유지, 필요한 라이브러리 변경과 보안 패치, 감사 예외 없이 실제 Linux·전체 CI 검증을 명시 승인했다. Transformers5.17.0은 Qwen-ASR0.0.6의 decorator·RoPE·mask API와 충돌하므로 단순 버전 전환을 중단한다. 기존4.57.6에 공식 보안 수정2개를 이식하고 Accelerate1.12.0의 checkpoint 경계를 수리하는 최소 호환 경로를 검증한다. upstream 원본·패치·결과 해시와 명시적인 로컬 수정 버전으로 설치하며 모델·Qwen 코드/설정은 보존한다.
 - 패치 검증 계약: 기존 requirements 설치에서 수정 wheel이 자동 선택되어야 한다. 원래 버전의 감사 결과를 보존하고, 실제 설치된 수정 파일의 무결성 및 취약 입력 거부·정상 경로 검사가 일치할 때만 해당 항목을 수정 확인으로 분류한다. 미설치·변조·미확인 advisory는 실패하며 새 ignore 추가·버전 위장·감사 대상 제거는 하지 않는다.
 - [ ] 위 인과 수리와 같은 독립 검토 뒤 원격 기존 workflow에서 보안 감사·Windows 전체 회귀·Linux POSIX·보호장치 결과와 첫 실패 artifact 불변성을 확인한다. 해결되지 않은 감사나 미실행 검사가 있으면 완전 통과로 기록하지 않는다.

@@ -142,6 +142,7 @@ jobs:
           import subprocess
           import sys
           from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
           from tools.audit_locked_dependencies import verify_installed_patches
           assert os.name == 'posix'
           manifest = json.loads(Path('tools/security_patches/manifest.json').read_text())
