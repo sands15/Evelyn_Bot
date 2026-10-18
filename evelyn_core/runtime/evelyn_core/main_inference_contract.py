@@ -1185,8 +1185,18 @@ class MainInferenceLane:
             if (
                 reservation is not None
                 and reservation.value.reservation_id == reservation_id
-                and reservation.expires_at <= time.monotonic()
             ):
+                remaining = reservation.expires_at - time.monotonic()
+                if remaining > 0:
+                    # asyncio timers may wake one clock-resolution early. Keep
+                    # the barrier and rearm, with one tick to avoid timer churn.
+                    state.foreground_expiry_handle = asyncio.get_running_loop().call_later(
+                        remaining + time.get_clock_info("monotonic").resolution,
+                        lambda: asyncio.create_task(
+                            self._expire_foreground(state, reservation_id)
+                        ),
+                    )
+                    return
                 self._clear_foreground_locked(state)
                 state.condition.notify_all()
 

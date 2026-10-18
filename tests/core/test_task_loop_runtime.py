@@ -3740,10 +3740,14 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.code, "task_worker_timeout")
 
     async def test_worker_cannot_return_tool_after_swallowing_deadline(self) -> None:
+        monotonic = [0.0]
+
         async def decide_next(_state: dict) -> dict:
             try:
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
+                # asyncio may deliver the timer before the task clock reaches its deadline.
+                monotonic[0] = 0.01
                 return {
                     "type": "tool",
                     "tool": "web_search",
@@ -3758,7 +3762,7 @@ class TaskLoopRuntimeTests(unittest.IsolatedAsyncioTestCase):
             deps=TaskLoopDeps(
                 decide_next=decide_next,
                 execute_tool=execute_tool,
-                monotonic=loop.time,
+                monotonic=lambda: monotonic[0],
                 wall_time=lambda: 20.0,
             ),
             grant=_grant(

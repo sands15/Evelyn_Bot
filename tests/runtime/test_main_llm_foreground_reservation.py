@@ -5,6 +5,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import aiohttp
@@ -39,6 +40,7 @@ from evelyn_core.main_inference_contract import (  # noqa: E402
     reserve_main_foreground,
 )
 from evelyn_core.main_llm_admission_gateway import build_app  # noqa: E402
+from evelyn_core import main_inference_contract as admission_contract  # noqa: E402
 
 
 class MainForegroundReservationTests(unittest.IsolatedAsyncioTestCase):
@@ -761,6 +763,85 @@ class MainForegroundReservationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 400)
                 await response.read()
         self.assertEqual(self.order, [])
+
+
+class MainForegroundExpiryClockTests(unittest.IsolatedAsyncioTestCase):
+    async def test_early_expiry_callback_rearms_and_releases_waiting_background(self) -> None:
+        lane = MainInferenceLane(use_process_lock=False)
+        loop = asyncio.get_running_loop()
+        clock = [100.0]
+        timers = []
+        admitted = asyncio.Event()
+
+        def schedule(delay, callback, *args, context=None):
+            handle = asyncio.TimerHandle(clock[0] + delay, callback, args, loop, context=context)
+            timers.append((clock[0] + delay, callback, args, handle))
+            return handle
+
+        async def background():
+            async with lane.admit(MainRequestKind.BACKGROUND):
+                admitted.set()
+
+        with (
+            patch.object(admission_contract, "time", SimpleNamespace(
+                monotonic=lambda: clock[0],
+                get_clock_info=lambda _name: SimpleNamespace(resolution=0.015625),
+            )),
+            patch.object(loop, "call_later", side_effect=schedule),
+        ):
+            await lane.reserve_foreground(capture_generation=1, backend_epoch="test-epoch")
+            task = asyncio.create_task(background())
+            try:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertFalse(admitted.is_set())
+                _deadline, callback, args, _handle = timers.pop(0)
+                clock[0] = 100.89  # A valid timer wake one clock tick before the 900ms TTL.
+                await callback(*args)
+                self.assertFalse(admitted.is_set(), "reservation must not expire early")
+
+                # Repeated early delivery must still preserve the barrier.
+                next_timer = min(timers, key=lambda timer: timer[0])
+                if next_timer[0] < 101.0:
+                    timers.remove(next_timer)
+                    clock[0] = 100.899
+                    await next_timer[1](*next_timer[2])
+                    self.assertFalse(admitted.is_set())
+                clock[0] = 100.93
+                for deadline, callback, args, handle in list(timers):
+                    if deadline <= clock[0] and not handle.cancelled():
+                        await callback(*args)
+                for _ in range(4):
+                    await asyncio.sleep(0)
+                self.assertTrue(admitted.is_set(), "early timer wake lost the automatic expiry notification")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                for _deadline, _callback, _args, handle in timers:
+                    handle.cancel()
+
+    async def test_cancel_or_redeem_after_early_wake_preserves_replacement(self) -> None:
+        for disposition in ("cancel", "redeem"):
+            with self.subTest(disposition=disposition):
+                lane = MainInferenceLane(use_process_lock=False)
+                old = await lane.reserve_foreground(capture_generation=1, backend_epoch="test-epoch")
+                state = lane._state()
+                await lane._expire_foreground(state, old.reservation_id)
+                if disposition == "cancel":
+                    await lane.cancel_foreground(old)
+                else:
+                    async with lane.admit(MainRequestKind.REALTIME, reservation=old):
+                        pass
+                replacement = await lane.reserve_foreground(capture_generation=2, backend_epoch="test-epoch")
+                try:
+                    # A dispatched old callback must not touch a new reservation,
+                    # even if its clock has advanced past both deadlines.
+                    with patch.object(admission_contract, "time", SimpleNamespace(monotonic=lambda: float("inf"))):
+                        await lane._expire_foreground(state, old.reservation_id)
+                    async with lane.admit(MainRequestKind.REALTIME, reservation=replacement) as lease:
+                        self.assertEqual(lease.kind, MainRequestKind.REALTIME)
+                finally:
+                    lane._clear_foreground_locked(state)
 
 
 if __name__ == "__main__":

@@ -272,6 +272,10 @@ Main request의 단일 논리 owner다. 첫 구현에서는 기존 Bot API 안�
 - voice capture/admission lease가 열리는 순간 STT final 전에도 foreground reservation을
   세워 새 background Main job의 시작을 막는다. 이미 실행 중인 job은 결과 ambiguity를
   만들며 강제 종료하지 않고, background token/deadline을 원래부터 bounded하게 둔다.
+- reservation 만료 callback은 정확한 reservation ID와 monotonic deadline을 다시 확인한다.
+  조기 callback은 barrier를 풀지 않고 재예약하며, 실제 만료는 대기자를 깨운다.
+  취소·사용·교체된 예약의 지연 callback은 새 예약에 영향을 주지 않는다.
+  이 경계의 source/소유 loopback 검증은 [2026-10-19 수리 기록](worklog/2026-10-19.md#공통-수리-후-전체-ci와-남은-시간-경계)에 둔다.
 - request는 exact turn/generation/cancellation owner에 결박한다.
 - slot queue, request write, first header와 raw token을 각각 계측한다.
 - 이미 시작된 외부 effect의 outcome이 ambiguous하면 latency timeout을 이유로 자동
