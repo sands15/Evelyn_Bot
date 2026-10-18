@@ -16,7 +16,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 현재 초점
 
-- 2026-10-19 보호장치 최종 코드 `40b5c92f`: hosted 전체5,146개 실패0·오류0·기존 POSIX skip1, 보호장치35개 PASS다. receipt `INCOMPLETE`와 보안 감사14건 FAIL은 미해결로 유지한다. 앞선 main 차단 뒤 사용자가 이 두 제한을 명시적으로 수용해 이번 수리만 main 병합하고 자동 push CI를 확인하도록 승인했다. 기존92커밋·최초/후속 실패 원본을 보존하며 병합/자동 실행 결과는 다음 checkpoint다. [[worklog/2026-10-19#명시적 예외 수용과 main 자동 경로 확인]]
+- 2026-10-19 이번 수리를 main `f283ba52`에 병합하고 기존 push CI39156368994의 자동 적용까지 확인했다. 전체5,146개 실패0·오류0·기존 POSIX skip1, 보호장치35개 PASS와 자동 결과 보관, 제외92커밋 교집합0·최초 실패3묶음 바이트 보존을 확인했다. 사용자 명시 수용에 따라 receipt `INCOMPLETE`와 보안 감사14건 FAIL은 미해결로 유지하며 workflow 전체는 failure다. 실장치·운영 수용은 NOT_RUN이다. [[worklog/2026-10-19#명시적 예외 수용과 main 자동 경로 확인]]
 - 개인 Local Voice의 `300ms soft endpoint + 추가 500ms reopen` 설계는 승인·동결됐다.
   300ms에는 같은 ASR session을 유지한 채 side-effect-free 준비만 시작하고, grace 안 재입력은
   같은 PCM/generation으로 합친다. no-reopen hard commit은 마지막 음성 뒤 약 800ms다. 현재 runtime은
