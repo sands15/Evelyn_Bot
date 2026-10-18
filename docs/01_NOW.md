@@ -16,6 +16,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 현재 초점
 
+- 2026-10-19 `codex/verification-safeguards` 분리 브랜치: 기존92커밋 없이 검증 기반과 보호장치를 게시했다. 실제 CI 정상35검사와 오답 차단·재실행 후 최초 artifact 바이트 보존을 확인했다. main은 미변경이며 아래 기반 프로젝트 상태를 새로 검증한 것은 아니다. [[worklog/2026-10-19#실제 CI 오답 차단과 최초 근거 보존]]
 - 개인 Local Voice의 `300ms soft endpoint + 추가 500ms reopen` 설계는 승인·동결됐다.
   300ms에는 같은 ASR session을 유지한 채 side-effect-free 준비만 시작하고, grace 안 재입력은
   같은 PCM/generation으로 합친다. no-reopen hard commit은 마지막 음성 뒤 약 800ms다. 현재 runtime은
