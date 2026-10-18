@@ -195,4 +195,8 @@ class ObserverAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__ == '__main__':
+    attempt_spec = importlib.util.spec_from_file_location("_evelyn_test_attempt_capture", ROOT / "tools/run_test_attempt.py")
+    attempt_capture = importlib.util.module_from_spec(attempt_spec)
+    attempt_spec.loader.exec_module(attempt_capture)
+    attempt_capture.install_unittest_capture()
     unittest.main()

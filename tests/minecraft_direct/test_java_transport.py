@@ -17,6 +17,10 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+oracle_spec = importlib.util.spec_from_file_location("menu_property_oracle", Path(__file__).with_name("menu_property_oracle.py"))
+oracle = importlib.util.module_from_spec(oracle_spec)
+oracle_spec.loader.exec_module(oracle)
+check_java_output = oracle.check_java_output
 spec = importlib.util.spec_from_file_location("direct", ROOT / "evelyn_core/runtime/evelyn_core/minecraft_direct_adapter.py")
 direct = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(direct)
@@ -63,6 +67,10 @@ class JavaTransportTests(unittest.IsolatedAsyncioTestCase):
             if checked.returncode:
                 raise AssertionError(checked.stderr.decode("utf-8", errors="replace"))
             output = checked.stdout.decode("utf-8").strip()
+            if case == "MenuPropertiesTest":
+                check_java_output(output, direct._inventory_observation)
+                output = "\n".join(line for line in output.splitlines()
+                                   if not line.startswith("MENU_PROPERTY_OBSERVATIONS "))
             print(output)
 
     async def asyncSetUp(self):
@@ -741,4 +749,8 @@ if __name__ == "__main__":
     parser.add_argument("--java-home", required=True)
     parser.add_argument("--gson", required=True)
     OPTIONS, remaining = parser.parse_known_args()
+    attempt_spec = importlib.util.spec_from_file_location("_evelyn_test_attempt_capture", ROOT / "tools/run_test_attempt.py")
+    attempt_capture = importlib.util.module_from_spec(attempt_spec)
+    attempt_spec.loader.exec_module(attempt_capture)
+    attempt_capture.install_unittest_capture()
     unittest.main(argv=[sys.argv[0], *remaining])

@@ -969,4 +969,9 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    import importlib.util
+    _capture_spec = importlib.util.spec_from_file_location("evelyn_test_attempt", REPO_ROOT / "tools/run_test_attempt.py")
+    _capture_module = importlib.util.module_from_spec(_capture_spec)
+    _capture_spec.loader.exec_module(_capture_module)
+    _capture_module.install_unittest_capture()
     unittest.main()

@@ -1,0 +1,39 @@
+{
+  "minecraft_version": "26.3",
+  "protocol": 777,
+  "provenance": {
+    "official_plain_server_sha1": "cc3964451a3b32a0488110d5e3e6ad8d75fe6a66",
+    "official_client_sha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
+    "registry": {"artifact": ".tmp/minecraft-player-parity-20261016/menu-recipe-research/official-menu-recipe-metadata-v1.json", "sha256": "090eb143f22d8e6dc6941b6ff727892d4d38da56f6bcdb2ee2c24fe6dd98d09f"},
+    "bytecode": {"artifact": ".tmp/minecraft-player-parity-20261016/menu-recipe-research/all-menus.javap.txt", "sha256": "98ad92c8f2a1101b5259829c63fa8164d5e3d2c97fb78e48b1e75e6ed65baf14"},
+    "derivation": "Independent official registry IDs/names and constructor/parent data slots, rechecked 2026-10-18. References below are line spans in the pinned bytecode artifact; no product or test table is the oracle.",
+    "zero_count_basis": "AbstractContainerMenu:61-74 initializes empty dataSlots; RecipeBookMenu, AbstractCraftingMenu:2537-2711 and ItemCombinerMenu:11165-11549 add none. Zero-count concrete classes add none."
+  },
+  "menus": [
+    {"id": 0, "name": "minecraft:generic_9x1", "slot_count": 45, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 1, "name": "minecraft:generic_9x2", "slot_count": 54, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 2, "name": "minecraft:generic_9x3", "slot_count": 63, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 3, "name": "minecraft:generic_9x4", "slot_count": 72, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 4, "name": "minecraft:generic_9x5", "slot_count": 81, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 5, "name": "minecraft:generic_9x6", "slot_count": 90, "property_count": 0, "evidence": "ChestMenu:3361-3653"},
+    {"id": 6, "name": "minecraft:generic_3x3", "slot_count": 45, "property_count": 0, "evidence": "DispenserMenu:3654-3833"},
+    {"id": 7, "name": "minecraft:crafter_3x3", "slot_count": 46, "property_count": 10, "evidence": "CrafterMenu:3869-3873 SimpleContainerData(10),3984 addDataSlots"},
+    {"id": 8, "name": "minecraft:anvil", "slot_count": 39, "property_count": 1, "evidence": "AnvilMenu:4248 addDataSlot; ItemCombinerMenu adds none"},
+    {"id": 9, "name": "minecraft:beacon", "slot_count": 37, "property_count": 3, "evidence": "BeaconMenu:5036 DATA_COUNT=3,5108 addDataSlots"},
+    {"id": 10, "name": "minecraft:blast_furnace", "slot_count": 39, "property_count": 4, "evidence": "BlastFurnaceMenu:5405-5430 inherits AbstractFurnaceMenu:2721 DATA_COUNT=4,2833 addDataSlots"},
+    {"id": 11, "name": "minecraft:brewing_stand", "slot_count": 41, "property_count": 4, "evidence": "BrewingStandMenu:5446 DATA_COUNT=4,5560 addDataSlots"},
+    {"id": 12, "name": "minecraft:crafting", "slot_count": 46, "property_count": 0, "evidence": "CraftingMenu:5782-6168; AbstractCraftingMenu adds none"},
+    {"id": 13, "name": "minecraft:enchantment", "slot_count": 38, "property_count": 10, "evidence": "EnchantmentMenu:6287-6351 ten addDataSlot calls"},
+    {"id": 14, "name": "minecraft:furnace", "slot_count": 39, "property_count": 4, "evidence": "FurnaceMenu:6939-6964 inherits AbstractFurnaceMenu:2721 DATA_COUNT=4,2833 addDataSlots"},
+    {"id": 15, "name": "minecraft:grindstone", "slot_count": 39, "property_count": 0, "evidence": "GrindstoneMenu:6965-7502"},
+    {"id": 16, "name": "minecraft:hopper", "slot_count": 41, "property_count": 0, "evidence": "HopperMenu:7503-7645"},
+    {"id": 17, "name": "minecraft:lectern", "slot_count": 1, "property_count": 1, "evidence": "LecternMenu:7647 DATA_COUNT=1,7709 addDataSlots"},
+    {"id": 18, "name": "minecraft:loom", "slot_count": 40, "property_count": 1, "evidence": "LoomMenu:7969 addDataSlot"},
+    {"id": 19, "name": "minecraft:merchant", "slot_count": 39, "property_count": 0, "evidence": "MerchantMenu:8530-9118"},
+    {"id": 20, "name": "minecraft:shulker_box", "slot_count": 63, "property_count": 0, "evidence": "ShulkerBoxMenu:9119-9280"},
+    {"id": 21, "name": "minecraft:smithing", "slot_count": 40, "property_count": 1, "evidence": "SmithingMenu:9369 hasRecipeError addDataSlot; ItemCombinerMenu adds none"},
+    {"id": 22, "name": "minecraft:smoker", "slot_count": 39, "property_count": 4, "evidence": "SmokerMenu:9702-9727 inherits AbstractFurnaceMenu:2721 DATA_COUNT=4,2833 addDataSlots"},
+    {"id": 23, "name": "minecraft:cartography_table", "slot_count": 39, "property_count": 0, "evidence": "CartographyTableMenu:9728-10168 adds no data slots"},
+    {"id": 24, "name": "minecraft:stonecutter", "slot_count": 38, "property_count": 1, "evidence": "StonecutterMenu:10285 addDataSlot"}
+  ]
+}

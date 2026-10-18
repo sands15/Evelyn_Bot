@@ -16,6 +16,7 @@ tools/probes/.venv*/
 recordings/
 logs/
 tmp/
+.tmp/
 *.log
 
 ref_voice.wav
