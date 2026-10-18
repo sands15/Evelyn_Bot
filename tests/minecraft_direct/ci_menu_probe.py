@@ -32,6 +32,12 @@ class JavaMenuGateTests(unittest.TestCase):
         self.assertEqual(checked.returncode, 0, checked.stderr)
         check_java_output(checked.stdout, direct._inventory_observation)
 
+    def test_all_pinned_resource_loaders_accept_checked_out_bytes(self):
+        for case in ("BlockCatalogTest", "ItemCatalogTest", "ComponentWireCodecTest", "MiningReferenceTest"):
+            with self.subTest(loader=case):
+                checked = self.java(case)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_matching_wrong_product_and_old_expectation_are_rejected(self):
         checked = self.java("PropertyMutationProbe")
         self.assertNotEqual(checked.returncode, 0)
