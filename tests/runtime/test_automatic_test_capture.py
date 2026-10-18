@@ -57,7 +57,8 @@ class AutomaticCaptureTests(unittest.TestCase):
         self.assertIn("python -m unittest discover", run["run"])
         self.assertEqual(run["env"]["EVELYN_TEST_ATTEMPT_ROOT"],
                          "runtime_artifacts/validation/test_attempts")
-        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")
+                      and step.get("with", {}).get("name", "").startswith("test-attempts-"))
         self.assertEqual(upload["if"], "always() && steps.regression_tests.outcome != 'skipped'")
         self.assertIn("github.run_id", upload["with"]["name"])
         self.assertIn("github.run_attempt", upload["with"]["name"])
@@ -66,6 +67,21 @@ class AutomaticCaptureTests(unittest.TestCase):
         self.assertEqual(set(upload["with"]["path"].splitlines()), {
             "runtime_artifacts/validation/test_attempts/*/result.json",
             "runtime_artifacts/validation/test_attempts/*/events.jsonl"})
+
+    def test_posix_runner_temp_uses_an_available_step_context(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / ".github/workflows/verify-evelyn.yml").read_text(encoding="utf-8"))
+        job = workflow["jobs"]["posix"]
+        # GitHub permits runner in step env, but not in job-level env.
+        for value in job["env"].values():
+            self.assertNotRegex(str(value), r"\$\{\{[^}]*\brunner\.")
+        step = next(step for step in job["steps"] if step.get("id") == "posix_test")
+        self.assertEqual(step["env"]["TMPDIR"], "${{ runner.temp }}")
+        upload = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["if"], "always() && steps.posix_test.outcome != 'skipped'")
+        self.assertIn("github.run_attempt", upload["with"]["name"])
+        self.assertFalse(upload["with"]["overwrite"])
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
 
     def test_existing_named_and_ci_discovery_commands_save_evidence(self):
         for args in (["-m", "unittest", "tests.runtime.test_minecraft_menu_oracle"],

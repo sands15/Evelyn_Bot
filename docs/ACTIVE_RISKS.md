@@ -808,6 +808,17 @@ Transformers findings(2026-07-15 확인):
 - `PYSEC-2026-2288`
 - `PYSEC-2026-2289`
 
+2026-10-19 추가 발견된 root CI 감사 14건은 별도 수리 중이다. 네트워크
+의존성 갱신 뒤 3건이 남았으며, Qwen-ASR 모델·가중치와 기존 API를 유지하기 위해
+Transformers `4.57.6+evelyn.1`과 Accelerate `1.12.0+evelyn.1`의 좁은 보안
+백포트를 root 설치 경로에 연결했다. 대상은 `PYSEC-2026-3929`,
+`PYSEC-2026-4174`, `PYSEC-2026-3804`다. 공식 wheel과 변경 파일의 해시,
+패치 출처 표식 및 실제 설치본 회귀를 검증하며 원본 감사 finding은 제거하지 않는다.
+위 기존 네 ID의 유보는 해결로 계산하지 않는다. Windows 설치본 검사 33개는
+실패 0·POSIX FIFO skip 3이며 실제 Linux와 전체 CI 검증은 아직 남아 있다.
+이 변경은 root 환경 범위이고 별도 STT/Vision/TTS 이미지의 모델 런타임 보안이나
+실제 음성 인식 품질을 입증하지 않는다. [[worklog/2026-10-19#남은 보안 감사와 POSIX 수리]]
+
 CUDA 12.8 공식 인덱스는 현재 Torch/Torchaudio 2.11과 Torchvision 0.26까지만
 제공한다. STT/Vision은 그 일치 조합으로 올렸지만 수정 버전 2.13은 사용할 수
 없다. exact-latent/FlashAttention 결합인 VoxCPM은 모델 smoke 없이 2.8에서

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -219,20 +220,26 @@ class RuntimeArtifactIoTests(unittest.TestCase):
     def test_posix_default_durable_write_syncs_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "posix.json"
-            synced_directories: list[Path] = []
+            synced_directories: list[tuple[int, int]] = []
+            native_fsync = os.fsync
 
-            with patch.object(
-                artifact_io,
-                "_sync_parent_directory",
-                side_effect=synced_directories.append,
-            ):
+            def sync(descriptor: int) -> None:
+                metadata = os.fstat(descriptor)
+                native_fsync(descriptor)
+                if stat.S_ISDIR(metadata.st_mode):
+                    synced_directories.append((metadata.st_dev, metadata.st_ino))
+
+            with patch.object(artifact_io.os, "fsync", side_effect=sync):
                 atomic_json_write(
                     target,
                     {"durable": True},
                     durable=True,
                 )
 
-            self.assertEqual(synced_directories, [target.parent])
+            parent = target.parent.stat()
+            self.assertEqual(synced_directories, [(parent.st_dev, parent.st_ino)])
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"durable": True})
+            self.assertEqual(list(target.parent.glob(".*.tmp")), [])
 
     @unittest.skipUnless(os.name == "nt", "Windows write-through contract")
     def test_windows_default_durable_write_uses_write_through_replace(

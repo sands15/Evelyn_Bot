@@ -16,7 +16,7 @@ Codex가 작업 시작 시 읽는 작은 문맥이다. 상세 사실은 링크�
 
 ## 현재 초점
 
-- 2026-10-19 이번 수리를 main `f283ba52`에 병합하고 기존 push CI39156368994의 자동 적용까지 확인했다. 전체5,146개 실패0·오류0·기존 POSIX skip1, 보호장치35개 PASS와 자동 결과 보관, 제외92커밋 교집합0·최초 실패3묶음 바이트 보존을 확인했다. 사용자 명시 수용에 따라 receipt `INCOMPLETE`와 보안 감사14건 FAIL은 미해결로 유지하며 workflow 전체는 failure다. 실장치·운영 수용은 NOT_RUN이다. [[worklog/2026-10-19#명시적 예외 수용과 main 자동 경로 확인]]
+- 2026-10-19 main `f283ba52`의 자동 CI39156368994에서 전체5,146개 실패0·오류0·POSIX skip1과 보안 감사14건 FAIL을 확인한 뒤, 사용자 승인으로 남은 수리를 진행 중이다. 네트워크 갱신으로 14→3건, 모델·가중치를 유지한 보안 백포트 설치본33개 실패0·FIFO skip3, 관련69개 PASS를 확인했다. 실제 Linux·전체 CI·main 반영은 아직 남아 있다. 제외92커밋과 최초 실패3묶음은 보존한다. [[worklog/2026-10-19#남은 보안 감사와 POSIX 수리]]
 - 개인 Local Voice의 `300ms soft endpoint + 추가 500ms reopen` 설계는 승인·동결됐다.
   300ms에는 같은 ASR session을 유지한 채 side-effect-free 준비만 시작하고, grace 안 재입력은
   같은 PCM/generation으로 합친다. no-reopen hard commit은 마지막 음성 뒤 약 800ms다. 현재 runtime은

@@ -1,0 +1,96 @@
+{
+  "packages": [
+    {
+      "name": "accelerate",
+      "version": "1.12.0",
+      "wheel_url": "https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl",
+      "wheel_sha256": "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11",
+      "patch": "accelerate-1.12.0-checkpoint-paths.patch",
+      "files": {
+        "accelerate/utils/modeling.py": {
+          "before": "421a88fba25d6a50791fb54ea52e7eefd3beb678d1a131055176c09a87e820d6",
+          "after": "b3e48c7938300e93cec82a91eeba7821738395c018253a6fcfd6ba77999cd141"
+        },
+        "accelerate/__init__.py": {
+          "before": "0da668fb3b65d0810aa84b418d4cf68cb4fea914025ebeb3f242ce940d6efab3",
+          "after": "dbd7223987a44baf2edfd41d48ed27ea0d012b0a9909c55dafae0c857ef20d15"
+        }
+      },
+      "advisories": [
+        "PYSEC-2026-3804"
+      ],
+      "test_module": "tests.hygiene.test_accelerate_checkpoint_security",
+      "test_ids": [
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_parent_traversal_before_loading",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_dispatch_rejects_the_same_parent_traversal",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_absolute_shard_path",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_windows_traversal_on_every_platform",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_windows_drive_relative_path",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_windows_rooted_path_on_every_platform",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_windows_alternate_stream_syntax",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_windows_device_name_on_every_platform",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_validates_every_shard_before_changing_model",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_non_string_shard_entry",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_empty_shard_entry",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_directory_shard",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_symlink_to_external_file",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_symlinked_directory_escape",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_missing_shard",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_loads_normal_nested_shard_and_duplicate_map_entries",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_loads_unsharded_checkpoint_file",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_dispatch_preserves_normal_cpu_checkpoint",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_preserves_legacy_flat_weight_map",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_loads_internal_symlink",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_preserves_hub_snapshot_blob_symlinks_including_index",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_preserves_safetensors_format_through_hub_symlink",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_hub_layout_does_not_authorize_external_symlink",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_hub_layout_only_allows_content_addressed_blob_names",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_non_hub_directory_does_not_gain_blob_exception",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_hub_blob_directory_symlink_does_not_expand_trust_root",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_fifo_shard_without_blocking",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_fifo_index_selected_from_directory",
+        "tests.hygiene.test_accelerate_checkpoint_security.AccelerateCheckpointSecurityTests.test_rejects_fifo_unsharded_weights_selected_from_directory"
+      ]
+    },
+    {
+      "name": "transformers",
+      "version": "4.57.6",
+      "wheel_url": "https://files.pythonhosted.org/packages/03/b8/e484ef633af3887baeeb4b6ad12743363af7cce68ae51e938e00aaa0529d/transformers-4.57.6-py3-none-any.whl",
+      "wheel_sha256": "4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550",
+      "patch": "transformers-4.57.6-security.patch",
+      "files": {
+        "transformers/__init__.py": {
+          "before": "aa8cb54da488cf43ba37b9955bb6c0d84d2000db0306f6a5f1c20b6842482d04",
+          "after": "780aab81c916376324c5e235e348aadaae95be715ada0b39035b158a685a34f8"
+        },
+        "transformers/generation/utils.py": {
+          "before": "55fd5c50aa785e226afa03e4507b8d27c0328714c0bd048bc60af9e8813a1173",
+          "after": "88ba266475c37719fd0d2f5cda1287b6cede2b5c6c5ae219f7ef0cbe6dd7d1ca"
+        },
+        "transformers/processing_utils.py": {
+          "before": "6c29de5c3fc674cf21ba6377a39cbafb2ba3e4bc2d1202d4b944f8cf840e6f33",
+          "after": "13498fb5d44340ea3cc5bbe552638197b6272c30b1922e75386bb6d1b9518296"
+        },
+        "transformers/tokenization_utils_base.py": {
+          "before": "a2d62f7e5d58f908b3a2d0b24ce6329e1e52c815082cedde29a5c007a23e7e83",
+          "after": "83a91ad445dad8c200aae090dea72e4e586404d3a26254918567b3aabaf36104"
+        }
+      },
+      "advisories": [
+        "PYSEC-2026-3929",
+        "PYSEC-2026-4174"
+      ],
+      "test_module": "tests.hygiene.test_transformers_security",
+      "upstream_fixes": [
+        "https://github.com/huggingface/transformers/commit/eaaaf8494dd5386634ae37d1d122212fdc315be5",
+        "https://github.com/huggingface/transformers/commit/cbc1651a032b923da7f4b44b3d0e6f68e6ba6b55"
+      ],
+      "test_ids": [
+        "tests.hygiene.test_transformers_security.TransformersSecurityTests.test_both_template_writers_reject_escape_without_outside_write",
+        "tests.hygiene.test_transformers_security.TransformersSecurityTests.test_both_template_writers_preserve_normal_templates",
+        "tests.hygiene.test_transformers_security.TransformersSecurityTests.test_declined_remote_code_does_not_create_cache_file",
+        "tests.hygiene.test_transformers_security.TransformersSecurityTests.test_approved_remote_boundary_and_missing_file_keep_contract"
+      ]
+    }
+  ]
+}

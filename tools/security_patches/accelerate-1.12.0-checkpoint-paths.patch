@@ -1,0 +1,94 @@
+--- a/accelerate/utils/modeling.py
++++ b/accelerate/utils/modeling.py
+@@ -23,6 +23,7 @@
+ import tempfile
+ import warnings
+ from collections import OrderedDict, defaultdict
++from pathlib import Path, PureWindowsPath
+ from typing import Optional, Union
+ 
+ import torch
+@@ -1785,6 +1786,35 @@
+     return state_dict
+ 
+ 
++def _validate_checkpoint_file(checkpoint_file, checkpoint_folder):
++    """Reject escapes and special files before reading an untrusted checkpoint."""
++    root = Path(checkpoint_folder).resolve()
++    try:
++        resolved = Path(checkpoint_file).resolve(strict=True)
++        contained = resolved.is_relative_to(root)
++        if not contained:
++            # Hub snapshots link to the same repository's flat blobs directory.
++            for snapshot in (root, *root.parents):
++                if (
++                    snapshot.parent.name == "snapshots"
++                    and snapshot.parent.parent.name.startswith("models--")
++                    and re.fullmatch(r"[0-9a-f]{40}", snapshot.name)
++                ):
++                    blobs = snapshot.parent.parent / "blobs"
++                    contained = (
++                        blobs.resolve() == blobs
++                        and resolved.parent == blobs
++                        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", resolved.name) is not None
++                    )
++                    break
++        if not contained or not resolved.is_file():
++            raise ValueError("Checkpoint files must be regular files inside the checkpoint or its Hub blob store.")
++    except (OSError, RuntimeError) as error:
++        raise ValueError("Checkpoint file cannot be resolved to a regular file.") from error
++    # Keep the logical suffix: load_state_dict selects safetensors by filename.
++    return os.fspath(checkpoint_file)
++
++
+ def load_checkpoint_in_model(
+     model: nn.Module,
+     checkpoint: Union[str, os.PathLike],
+@@ -1906,13 +1936,35 @@
+ 
+     if index_filename is not None:
+         checkpoint_folder = os.path.split(index_filename)[0]
++        _validate_checkpoint_file(index_filename, checkpoint_folder)
+         with open(index_filename) as f:
+             index = json.loads(f.read())
+ 
++        if not isinstance(index, dict):
++            raise ValueError("Checkpoint index must contain a weight map.")
+         if "weight_map" in index:
+             index = index["weight_map"]
++        if not isinstance(index, dict):
++            raise ValueError("Checkpoint index must contain a weight map.")
++        for shard in index.values():
++            if (
++                not isinstance(shard, str)
++                or not shard
++                or "\\" in shard
++                or ":" in shard
++                or "\x00" in shard
++                or Path(shard).is_absolute()
++                or ".." in Path(shard).parts
++                or PureWindowsPath(shard).is_reserved()
++            ):
++                raise ValueError("Checkpoint shard names must be relative paths inside the checkpoint.")
+         checkpoint_files = sorted(list(set(index.values())))
+-        checkpoint_files = [os.path.join(checkpoint_folder, f) for f in checkpoint_files]
++        checkpoint_files = [
++            _validate_checkpoint_file(os.path.join(checkpoint_folder, f), checkpoint_folder)
++            for f in checkpoint_files
++        ]
++    else:
++        checkpoint_files = [_validate_checkpoint_file(f, os.path.dirname(f)) for f in checkpoint_files]
+ 
+     # Logic for missing/unexepected keys goes here.
+ 
+--- a/accelerate/__init__.py
++++ b/accelerate/__init__.py
+@@ -11,7 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+-__version__ = "1.12.0"
++__version__ = "1.12.0+evelyn.1"
+ 
+ from .accelerator import Accelerator
+ from .big_modeling import (

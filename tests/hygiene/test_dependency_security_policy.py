@@ -21,6 +21,41 @@ def locked_version(path: Path, package: str) -> str:
 
 
 class DependencySecurityPolicyTests(unittest.TestCase):
+    def test_network_locks_exclude_known_vulnerable_releases(self) -> None:
+        minimums = {
+            "requirements.lock": {
+                "aiohttp": (3, 14, 3),
+                "multidict": (6, 9, 1),
+                "urllib3": (2, 8, 0),
+                "Werkzeug": (3, 1, 9),
+            },
+            "requirements.host.lock": {
+                "aiohttp": (3, 14, 3),
+                "multidict": (6, 9, 1),
+            },
+        }
+        for filename, packages in minimums.items():
+            for package, minimum in packages.items():
+                with self.subTest(file=filename, package=package):
+                    version = locked_version(REPO_ROOT / filename, package)
+                    self.assertGreaterEqual(tuple(map(int, version.split("."))), minimum)
+
+    def test_aiohttp_install_paths_require_the_security_floor(self) -> None:
+        for filename in (
+            "requirements.txt",
+            "docker/requirements.discord-capture.txt",
+            "docker/requirements.discord-bot.txt",
+            "docker/requirements.bot-api.txt",
+            "docker/requirements.mindcraft.txt",
+            "docker/requirements.voyager.txt",
+            "docker/Dockerfile.control-page",
+        ):
+            with self.subTest(file=filename):
+                contents = (REPO_ROOT / filename).read_text(encoding="utf-8")
+                match = re.search(r"\baiohttp(?:==|>=)([0-9.*]+)(?=\s|$)", contents)
+                self.assertIsNotNone(match)
+                self.assertGreaterEqual(tuple(int(part) if part != "*" else 0 for part in match.group(1).split(".")), (3, 14, 3))
+
     def test_stt_image_context_is_source_only(self) -> None:
         lines = (
             REPO_ROOT / "docker" / "Dockerfile.stt.dockerignore"
@@ -147,7 +182,10 @@ class DependencySecurityPolicyTests(unittest.TestCase):
             REPO_ROOT / "docker" / "requirements.stt.txt"
         ).read_text(encoding="utf-8")
         self.assertIn("qwen-asr==0.0.6", requirements)
-        self.assertIn("transformers==4.57.6", requirements)
+        self.assertIn("transformers==4.57.6+evelyn.1", requirements.splitlines())
+        self.assertIn("accelerate==1.12.0+evelyn.1", requirements.splitlines())
+        for package in ("accelerate", "transformers"):
+            self.assertIn(f"./tools/security_patches/{package}", requirements.splitlines())
         self.assertIn("qwen-asr==0.0.6", stt_requirements)
 
         expected_direct = {

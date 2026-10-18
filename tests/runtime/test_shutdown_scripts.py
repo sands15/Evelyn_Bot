@@ -249,7 +249,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("Python311", bootstrap)
         self.assertIn("import aiohttp, numpy, sounddevice", bootstrap)
         self.assertIn("from PIL import ImageGrab", bootstrap)
-        self.assertIn("aiohttp==3.14.1", lock)
+        self.assertIn("aiohttp==3.14.3", lock)
         self.assertIn("numpy==2.4.6", lock)
         self.assertIn("Pillow==12.3.0", lock)
         self.assertIn("tzdata==2026.3", lock)

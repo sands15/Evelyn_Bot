@@ -1,4 +1,4 @@
-aiohttp==3.13.5
+aiohttp==3.14.3
 requests==2.33.1
 javascript==1!1.2.6
 langchain==0.2.17

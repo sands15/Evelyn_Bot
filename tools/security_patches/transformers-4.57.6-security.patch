@@ -1,0 +1,78 @@
+--- a/transformers/__init__.py
++++ b/transformers/__init__.py
+@@ -18,7 +18,7 @@
+ # to defer the actual importing for when the objects are requested. This way `import transformers` provides the names
+ # in the namespace without actually importing anything (and especially none of the backends).
+ 
+-__version__ = "4.57.6"
++__version__ = "4.57.6+evelyn.1"
+ 
+ from pathlib import Path
+ from typing import TYPE_CHECKING
+--- a/transformers/generation/utils.py
++++ b/transformers/generation/utils.py
+@@ -46,6 +46,7 @@
+ from ..utils import (
+     ModelOutput,
+     TransformersKwargs,
++    has_file,
+     is_accelerate_available,
+     is_hqq_available,
+     is_optimum_quanto_available,
+@@ -413,13 +414,11 @@
+         Returns:
+             A callable that can be used to generate text.
+         """
+-        # Fetches the generate.py file from the model repo. If it doesn't exist, a file in `.no_exist` cache directory
+-        # is created (preventing future hub requests), and an OSError is raised.
+-        try:
+-            module = get_cached_module_file(
+-                pretrained_model_name_or_path, module_file="custom_generate/generate.py", **kwargs
+-            )
+-        except OSError:
++        custom_generate_file = "custom_generate/generate.py"
++        custom_generate_requirements = "custom_generate/requirements.txt"
++
++        # Check existence without downloading untrusted code before consent.
++        if not has_file(pretrained_model_name_or_path, custom_generate_file, **kwargs):
+             raise OSError(
+                 f"`{pretrained_model_name_or_path}` does not contain a `custom_generate` subdirectory with a "
+                 "`generate.py` file, can't load the custom generate function."
+@@ -439,9 +438,11 @@
+             error_message=error_message,
+         )
+ 
++        module = get_cached_module_file(pretrained_model_name_or_path, module_file=custom_generate_file, **kwargs)
++
+         # Load the custom generate function
+         check_python_requirements(
+-            pretrained_model_name_or_path, requirements_file="custom_generate/requirements.txt", **kwargs
++            pretrained_model_name_or_path, requirements_file=custom_generate_requirements, **kwargs
+         )
+         custom_generate_function = get_class_in_module("generate", module)
+         return custom_generate_function
+--- a/transformers/processing_utils.py
++++ b/transformers/processing_utils.py
+@@ -823,6 +823,9 @@
+                     else:
+                         os.makedirs(chat_template_dir, exist_ok=True)
+                         template_filepath = os.path.join(chat_template_dir, f"{template_name}.jinja")
++                        # template_name is an untrusted dict key; reject path traversal (CWE-22).
++                        if Path(template_filepath).resolve().parent != Path(chat_template_dir).resolve():
++                            raise ValueError(f"Invalid chat template name: {template_name!r}")
+                         with open(template_filepath, "w", encoding="utf-8") as f:
+                             f.write(template)
+                         logger.info(f"chat template saved in {template_filepath}")
+--- a/transformers/tokenization_utils_base.py
++++ b/transformers/tokenization_utils_base.py
+@@ -2574,6 +2574,9 @@
+                 else:
+                     Path(chat_template_dir).mkdir(exist_ok=True)
+                     template_filepath = os.path.join(chat_template_dir, f"{template_name}.jinja")
++                    # template_name is an untrusted dict key; reject path traversal (CWE-22).
++                    if Path(template_filepath).resolve().parent != Path(chat_template_dir).resolve():
++                        raise ValueError(f"Invalid chat template name: {template_name!r}")
+                     with open(template_filepath, "w", encoding="utf-8") as f:
+                         f.write(template)
+                     logger.info(f"chat template saved in {template_filepath}")
+
