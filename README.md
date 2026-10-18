@@ -215,6 +215,8 @@ Discord Gateway and microphone capture disabled. Use `start.bat --lightweight`
 to defer Vision OCR loading, and `stop_local.bat` to stop Evelyn-owned local
 resources.
 
+### Startup error codes
+
 The launcher checks the Git source revision, required profiles, service health,
 and Windows bridges. Except for the user-owned `docs/99_PROJECT_INBOX.md`, a
 dirty or untracked source tree fails closed with `EVL-START-2001`.
@@ -227,6 +229,8 @@ The latest content-free failure record is written to
 
 For non-interactive use, set `EVELYN_KEEP_CONSOLE_ON_EXIT=false` to skip the
 failure pause without changing the exit code.
+
+### Rebuilding local images
 
 To rebuild the local application images before starting:
 

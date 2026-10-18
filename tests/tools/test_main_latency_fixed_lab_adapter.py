@@ -1295,15 +1295,29 @@ class FixedMainLatencyLabAdapterTests(unittest.TestCase):
                 self.stdout = stdout
 
         with patch.object(
+            harness.shutil, "which", return_value="/fixture/nvidia-smi"
+        ), patch.object(
             harness.subprocess,
             "run",
             side_effect=(Completed("8000\n"), Completed("123\n")),
         ) as run:
-            harness._gpu_snapshot(b"k" * 32)
+            free_memory, _ = harness._gpu_snapshot(b"k" * 32)
+        self.assertEqual(free_memory, 8000.0)
         self.assertEqual(len(run.call_args_list), 2)
         self.assertTrue(
-            all("--id=0" in call.args[0] for call in run.call_args_list)
+            all(
+                call.args[0][:2] == ("/fixture/nvidia-smi", "--id=0")
+                for call in run.call_args_list
+            )
         )
+
+    def test_harness_gpu_snapshot_rejects_missing_executable_without_running(self) -> None:
+        with patch.object(harness.shutil, "which", return_value=None), patch.object(
+            harness.subprocess, "run"
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "lab_gpu_probe_unavailable"):
+                harness._gpu_snapshot(b"k" * 32)
+        run.assert_not_called()
 
     def test_harness_preserves_only_bounded_numeric_main_timing_diagnostics(self) -> None:
         marker_names = (

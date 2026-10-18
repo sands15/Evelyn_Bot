@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import socket
@@ -10,6 +11,8 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 
@@ -34,9 +37,11 @@ def unused_tcp_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_for_port(port: int, *, timeout_sec: float = 5.0) -> bool:
+def wait_for_port(port: int, *, timeout_sec: float = 5.0, process: subprocess.Popen[str] | None = None) -> bool:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            return False
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.1)
             if sock.connect_ex(("127.0.0.1", port)) == 0:
@@ -277,10 +282,51 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('"GET": app.router.add_get', server_runtime_source)
 
+    def test_real_main_child_uses_owned_environment_and_closed_dependencies(self) -> None:
+        temp_root = self.allocate_temp_root()
+        process = Mock()
+        process.poll.return_value = 0
+        with (
+            patch.dict(os.environ, {
+                "EVELYN_TEST_PRIVATE_CANARY": "must-not-reach-child",
+                "OPENAI_API_KEY": "inherited-secret-canary",
+                "HTTP_PROXY": "http://inherited.invalid:8080",
+                "STT_SERVICE_FALLBACK_LOCAL": "true",
+                "EVELYN_PROJECT_ROOT": "inherited-project-canary",
+            }),
+            patch.object(subprocess, "Popen", return_value=process) as spawn,
+            patch(__name__ + ".wait_for_port", return_value=True),
+        ):
+            self.start_main_process(12345, temp_root=temp_root)
+        env = spawn.call_args.kwargs["env"]
+        self.assertFalse("EVELYN_TEST_PRIVATE_CANARY" in env, "inherited environment was retained")
+        self.assertFalse("HTTP_PROXY" in env, "inherited proxy was retained")
+        self.assertNotEqual(env.get("OPENAI_API_KEY"), "inherited-secret-canary")
+        self.assertEqual(env["EVELYN_PROJECT_ROOT"], str(REPO_ROOT))
+        self.assertEqual(env["STT_SERVICE_FALLBACK_LOCAL"], "false")
+        self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+        self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
+        endpoint = urlparse(env["STT_SERVICE_URL"])
+        self.assertEqual(endpoint.hostname, "127.0.0.1")
+        self.assertGreater(endpoint.port, 0)
+        with socket.socket() as probe:
+            probe.settimeout(0.1)
+            self.assertNotEqual(probe.connect_ex((endpoint.hostname, endpoint.port)), 0)
+        for key in ("LLM_SERVER_URL", "ROUTER_LLM_URL", "SUMMARY_LLM_URL", "OMNIVOICE_SERVER_URL"):
+            self.assertEqual(env[key], env["STT_SERVICE_URL"])
+        for key in ("BOT_MEMORY_DIR", "HF_HOME", "TORCH_HOME", "EVELYN_RUNTIME_ARTIFACTS_DIR"):
+            self.assertTrue(Path(env[key]).is_relative_to(temp_root))
+        # Every registry-backed config read must be overridden, not inherited.
+        config = ast.parse((RUNTIME_ROOT / "evelyn_core" / "config.py").read_text(encoding="utf-8"))
+        for node in ast.walk(config):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"_env", "_env_flag", "_env_int_set"}:
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    self.assertTrue(env.get(node.args[0].value), node.args[0].value)
+
     def allocate_temp_root(self) -> Path:
         temp_dir = tempfile.TemporaryDirectory()
         self.temp_dirs.append(temp_dir)
-        return Path(temp_dir.name)
+        return Path(temp_dir.name).resolve()
 
     def start_main_process(
         self,
@@ -291,22 +337,95 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         continuity_auth_anchor_path: Path | None = None,
     ) -> subprocess.Popen[str]:
         temp_root = temp_root or self.allocate_temp_root()
-        env = os.environ.copy()
+        # Keep this port reserved but not listening for the child's whole lifetime.
+        # A recycled 'unused port' could otherwise contact an unrelated local service.
+        closed_dependency = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(closed_dependency.close)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            closed_dependency.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        closed_dependency.bind(("127.0.0.1", 0))
+        closed_port = str(closed_dependency.getsockname()[1])
+        closed_url = f"http://127.0.0.1:{closed_port}"
+        env = {
+            key: value for key, value in os.environ.items()
+            if key.upper() in {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "OS", "PROCESSOR_ARCHITECTURE"}
+        }
+        child_temp = temp_root / "tmp"
+        child_temp.mkdir(exist_ok=True)
         env.update(
             {
+                "PATH": os.pathsep.join((str(Path(sys.executable).parent), str(Path(os.environ.get("SYSTEMROOT", "/")) / "System32"))),
+                "TEMP": str(child_temp),
+                "TMP": str(child_temp),
+                "PYTHONUTF8": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "NO_PROXY": "*",
+                "USERPROFILE": str(temp_root),
+                "APPDATA": str(temp_root / "appdata"),
+                "LOCALAPPDATA": str(temp_root / "localappdata"),
+                "HF_HOME": str(temp_root / "hf-cache"),
+                "TORCH_HOME": str(temp_root / "torch-cache"),
+                "HF_HUB_OFFLINE": "1",
+                "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "EVELYN_PROJECT_ROOT": str(REPO_ROOT),
+                "EVELYN_CORE_ROOT": str(REPO_ROOT / "evelyn_core"),
+                "EVELYN_CORE_RUNTIME": str(RUNTIME_ROOT),
                 "DISCORD_ENABLED": "false",
                 "LOCAL_ONLY": "true",
+                "EVELYN_CONVERSATION_ARCHIVE_ENABLED": "false",
                 "CONTROL_PAGE_ENABLED": "true",
                 "CONTROL_PAGE_HOST": "127.0.0.1",
                 "CONTROL_PAGE_PORT": str(port),
+                "CONTROL_PAGE_BOT_API_HOST": "127.0.0.1",
+                "CONTROL_PAGE_BOT_API_PORT": closed_port,
+                "LLM_SERVER_URL": closed_url,
+                "ROUTER_LLM_URL": closed_url,
+                "SUMMARY_LLM_URL": closed_url,
+                "OMNIVOICE_SERVER_URL": closed_url,
+                "STT_SERVICE_URL": closed_url,
+                "STT_SERVICE_TIMEOUT_SEC": "0.2",
+                "STT_SERVICE_FALLBACK_LOCAL": "false",
+                "STT_MODEL_NAME": str(temp_root / "absent-stt-model"),
+                "MINECRAFT_AUTONOMY_SERVICE_HOST": "127.0.0.1",
+                "MINECRAFT_AUTONOMY_SERVICE_PORT": closed_port,
+                "MINECRAFT_WORLD_LEASE_OWNER_URL": "",
+                "VOYAGER_CODEX_GATEWAY_URL": closed_url,
+                "VOYAGER_CODEX_GATEWAY_PORT": closed_port,
+                "VOYAGER_ACTION_BACKEND": "disabled",
+                "MINEFLAYER_PROFILES_FOLDER": str(temp_root / "minecraft-profiles"),
+                "ODYSSEY_CAPABILITY_JSON_DIR": str(temp_root / "capabilities"),
+                # Nonempty overrides also prevent config's Windows-registry fallback.
+                "OPENAI_API_KEY": "synthetic-test-key",
+                "OPENAI_CHAT_COMPLETIONS_URL": closed_url,
+                "OPENAI_NANO_MODEL": "synthetic-test-model",
+                "EVELYN_PAGE_URL": closed_url,
+                "LOCAL_MIC_DEVICE": "disabled-test-device",
+                "LOCAL_MIC_EXCLUDED_DISCORD_USER_IDS": "0",
+                "LOCAL_MIC_DISCORD_USER_IDS": "0",
                 "LOCAL_MIC_ENABLED": "false",
+                "LOCAL_MIC_VAD_FILTER_ENABLED": "false",
+                "LOCAL_MIC_ENV_NOISE_FILTER_ENABLED": "false",
+                "LOCAL_MIC_WAVEFORM_FILTER_ENABLED": "false",
+                "LOCAL_TTS_OUTPUT_ENABLED": "false",
+                "SPEAKER_VERIFICATION_ENABLED": "false",
+                "VAD_ENABLED": "false",
                 "VISION_WATCH_ENABLED": "false",
+                "AUTONOMY_ENABLED": "false",
+                "ROUTER_LLM_ENABLED": "false",
+                "OMNIVOICE_PLAYBACK_ADAPTIVE_JITTER": "false",
+                "VOYAGER_CRITIC_RULE_FIRST": "false",
+                "STT_USE_RAW_48K": "false",
+                "STT_STREAMING_ENABLED": "false",
+                "STT_FULL_RESCORING_ENABLED": "false",
+                "VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED": "false",
                 "TTS_WARMUP_GENERATE_ENABLED": "false",
                 "CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC": "0.2",
                 "CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC": "0.2",
                 "EVELYN_RUNTIME_ARTIFACTS_DIR": str(temp_root / "artifacts"),
                 "EVELYN_INSTANCE_LOCK_PATH": str(temp_root / "evelyn-test.lock"),
                 "BOT_MEMORY_DIR": str(temp_root / "bot_memory"),
+                "GUILD_SETTINGS_DIR": str(temp_root / "guild_settings"),
                 "TURN_TRACE_LOG_DIR": str(
                     temp_root / "logs" / "turn_trace"
                 ),
@@ -338,7 +457,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
             )
         self.processes.append(process)
         self.process_logs[id(process)] = (stdout_path, stderr_path)
-        if not wait_for_port(port, timeout_sec=90.0):
+        if not wait_for_port(port, timeout_sec=90.0, process=process):
             if process.poll() is None:
                 process.terminate()
                 try:

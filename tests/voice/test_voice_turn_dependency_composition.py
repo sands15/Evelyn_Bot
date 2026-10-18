@@ -10,8 +10,49 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
+from evelyn_core.runtime_mode_policy import RuntimeModeResolver
+from evelyn_core.runtime_state import RuntimeCounter
+
 
 class VoiceTurnDependencyCompositionTests(unittest.TestCase):
+    def test_main_binds_live_runtime_mode_before_voice_consumer(self) -> None:
+        tree = ast.parse((REPO_ROOT / "main.py").read_text(encoding="utf-8"))
+        namespace = {
+            "RuntimeModeResolver": RuntimeModeResolver,
+            "RuntimeCounter": RuntimeCounter,
+            # No audio is played: only the composition's pressure inputs are needed.
+            "tts_playback_tracker": [],
+            "tracked_tts_playback_count": len,
+        }
+        consumer = None
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or not isinstance(node.targets[0], ast.Name):
+                continue
+            name = node.targets[0].id
+            if name in {"inflight_llm_requests_counter", "compute_runtime_mode"}:
+                exec(compile(ast.Module(body=[node], type_ignores=[]), "main.py", "exec"), namespace)
+            elif name == "voice_turn_dependency_composition":
+                deps_call = node.value.args[0]
+                binding = next(keyword.value for keyword in deps_call.keywords if keyword.arg == "compute_runtime_mode")
+                # Evaluate the actual eager argument at its original point in startup.
+                try:
+                    consumer = eval(compile(ast.Expression(binding), "main.py", "eval"), namespace)
+                except NameError as exc:
+                    self.fail(f"voice composition references an unbound dependency: {exc}")
+
+        self.assertIsNotNone(consumer)
+        self.assertEqual(consumer(None), "normal")
+        counter = namespace["inflight_llm_requests_counter"]
+        counter.increment()
+        counter.increment()
+        self.assertEqual(consumer(None), "congested")
+        namespace["tts_playback_tracker"].extend((object(), object()))
+        self.assertEqual(consumer(None), "realtime")
+        namespace["tts_playback_tracker"].clear()
+        counter.decrement()
+        counter.decrement()
+        self.assertEqual(consumer(None), "normal")
+
     def test_main_binds_turn_composition_before_fast_path_root(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         composition_index = source.index(

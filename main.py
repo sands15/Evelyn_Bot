@@ -522,6 +522,10 @@ autonomy_last_cognitive_refresh_at: dict[int, float] = {}
 autonomy_cognitive_refresh_tasks: dict[int, asyncio.Task] = {}
 search_followup_queued_counter = RuntimeCounter()
 inflight_llm_requests_counter = RuntimeCounter()
+compute_runtime_mode = RuntimeModeResolver(
+    tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker), inflight_llm_requests_get=inflight_llm_requests_counter.get,
+)
+apply_runtime_mode = apply_runtime_mode_policy
 VOICE_BARGE_IN_CONTINUITY_TARGET = 5
 recent_skill_dispatches: dict[str, float] = {}
 recent_skill_dispatch_targets: dict[str, dict[str, Any]] = {}
@@ -757,10 +761,6 @@ build_voice_ingress_runtime_deps = (
 build_voice_ingress_entrypoint_deps = (
     voice_turn_dependency_composition.build_voice_ingress_entrypoint_deps
 )
-compute_runtime_mode = RuntimeModeResolver(
-    tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker), inflight_llm_requests_get=inflight_llm_requests_counter.get,
-)
-apply_runtime_mode = apply_runtime_mode_policy
 estimate_voice_like_probability = partial(
     estimate_voice_like_probability_policy,
     body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,

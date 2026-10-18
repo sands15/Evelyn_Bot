@@ -77,6 +77,7 @@ jobs:
     env:
       EVELYN_RUN_REAL_MAIN_INTEGRATION: "1"
       PYTHONWARNINGS: "error::ResourceWarning"
+      PYTHONUTF8: "1"
 
     steps:
       - name: Checkout
@@ -84,6 +85,7 @@ jobs:
         with:
           # Two composition-boundary tests compare signatures with historical main.py commits.
           fetch-depth: 0
+          submodules: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -91,6 +93,19 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.lock
+
+      - name: Normalize Windows test temporary paths
+        shell: python
+        run: |
+          import os
+          import tempfile
+          from pathlib import Path
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          test_temp = Path(tempfile.mkdtemp(prefix="evelyn-tests-", dir=runner_temp)).resolve()
+          assert test_temp.is_relative_to(runner_temp)
+          # Short Windows aliases must not masquerade as unsafe path redirection.
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"TEMP={test_temp}\nTMP={test_temp}\n")
 
       - name: Set up Node
         uses: actions/setup-node@v4
