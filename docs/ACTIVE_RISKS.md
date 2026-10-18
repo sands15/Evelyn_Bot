@@ -808,14 +808,18 @@ Transformers findings(2026-07-15 확인):
 - `PYSEC-2026-2288`
 - `PYSEC-2026-2289`
 
-2026-10-19 추가 발견된 root CI 감사 14건은 별도 수리 중이다. 네트워크
+2026-10-19 추가 발견된 root CI 감사 14건은 승인된 범위의 수리와 검증을 완료했다. 네트워크
 의존성 갱신 뒤 3건이 남았으며, Qwen-ASR 모델·가중치와 기존 API를 유지하기 위해
 Transformers `4.57.6+evelyn.1`과 Accelerate `1.12.0+evelyn.1`의 좁은 보안
 백포트를 root 설치 경로에 연결했다. 대상은 `PYSEC-2026-3929`,
 `PYSEC-2026-4174`, `PYSEC-2026-3804`다. 공식 wheel과 변경 파일의 해시,
 패치 출처 표식 및 실제 설치본 회귀를 검증하며 원본 감사 finding은 제거하지 않는다.
 위 기존 네 ID의 유보는 해결로 계산하지 않는다. Windows 설치본 검사 33개는
-실패 0·POSIX FIFO skip 3이며 실제 Linux와 전체 CI 검증은 아직 남아 있다.
+실패 0·POSIX FIFO skip 3이며, main `9d366925`의 실제 Linux 검사33개는
+FIFO를 포함해 PASS·skip0이다. 같은 main push CI39162589501에서 실제 POSIX fsync1개도
+PASS·skip0이고 Windows 전체5,218개는 실패0·오류0·플랫폼 skip4다. 네 job 모두 success지만
+원본 감사는 여전히10행/7ID/exit1이며 기존 유보7행/4ID와 검증된 백포트3건을 구분한다.
+새 감사 예외는 없고 `PASS_WITH_DOCUMENTED_DEFERRALS`를 취약점0으로 표현하지 않는다.
 이 변경은 root 환경 범위이고 별도 STT/Vision/TTS 이미지의 모델 런타임 보안이나
 실제 음성 인식 품질을 입증하지 않는다. [[worklog/2026-10-19#남은 보안 감사와 POSIX 수리]]
 

@@ -4,11 +4,11 @@
 
 - 목표/승인: 사용자가 남은 보안 감사14건과 POSIX 미실행1개를 해결해 기존 CI를 완전히 통과시키도록 승인했다. 모델이나 주요 의존성 변경은 먼저 질문한다. 이전 통합 기준은 main `a4082bbd`, 기존92커밋·미커밋 작업·최초 실패 원본은 계속 보존한다.
 - 적용 합의: Developer Vault `Reviews/2026-W41.md`의 첫 실패 보존·원인 구별 후 재개를 아래 실제 감사와 정상 회귀에 적용한다. 감사 예외 추가·대상 패키지 제거·Windows 검사의 skip 숨기기로 성공을 만들지 않는다.
-- [ ] 네트워크4개: 공식 advisory/PyPI를 확인한 최소 수정 버전 aiohttp3.14.3, multidict6.9.1, urllib3 2.8.0, Werkzeug3.1.9로 기존 root/host 잠금과 연결된 aiohttp 설치 경로를 맞춘다. 기존 최소 버전을 거부하는 정책 검사 RED→GREEN, 실제 감사·의존성 호환·관련 통신/종료 회귀를 확인한다. 원래 환경을 업데이트하지 않고 격리 검사 환경을 사용한다.
-- [x] POSIX: 후보 `752882c8`의 CI39160690964에서 실제 Linux/Python3.11 fsync 검사1개가 PASS/skip0이다. artifact12147754587과 원본 receipt를 별도 보존했다. Windows의 skip1/INCOMPLETE를 재작성하지 않으며 main 자동 경로 확인은 아래 전체 게이트에 남긴다.
-- [~] 모델 계열3개: 사용자가 모델·가중치 유지, 필요한 라이브러리 변경과 보안 패치, 감사 예외 없이 실제 Linux·전체 CI 검증을 명시 승인했다. Transformers5.17.0은 Qwen-ASR0.0.6의 decorator·RoPE·mask API와 충돌하므로 단순 버전 전환을 중단한다. 기존4.57.6에 공식 보안 수정2개를 이식하고 Accelerate1.12.0의 checkpoint 경계를 수리하는 최소 호환 경로를 검증한다. upstream 원본·패치·결과 해시와 명시적인 로컬 수정 버전으로 설치하며 모델·Qwen 코드/설정은 보존한다.
+- [x] 네트워크4개: 공식 수정판 aiohttp3.14.3, multidict6.9.1, urllib3 2.8.0, Werkzeug3.1.9로 기존 root/host 잠금과 관련 aiohttp 설치 경로를 맞췄다. 정책 RED→GREEN, 실제 감사14→3, 수정 설치본 통신/종료84검사와 후보9d366925의 clean Windows 전체5,218개 실패0을 확인했다. 기존 venv는 변경하지 않았다.
+- [x] POSIX: 후보 `9d366925`의 CI39161807143에서 실제 Linux/Python3.11 fsync 검사1개가 PASS/skip0이다. artifact12148674098과 원본 receipt를 별도 보존했다. 첫 후보의 최초 native PASS도 유지하며 Windows INCOMPLETE를 재작성하지 않는다.
+- [x] 모델 계열3개: 사용자가 모델·가중치 유지, 필요한 라이브러리 변경과 보안 패치를 승인했다. Qwen-ASR0.0.6 API를 깨는5.17 전환 대신 Transformers4.57.6의 공식 수정2개와 Accelerate1.12.0 checkpoint 경계를 이식했다. 원본·패치·결과 해시/수정 버전의 실제 설치, 원반례·정상 경로, clean Qwen import·전체 회귀와 native Linux33/skip0을 확인했다. 모델·Qwen 코드/설정은 보존한다.
 - 패치 검증 계약: 기존 requirements 설치에서 수정 wheel이 자동 선택되어야 한다. 원래 버전의 감사 결과를 보존하고, 실제 설치된 수정 파일의 무결성 및 취약 입력 거부·정상 경로 검사가 일치할 때만 해당 항목을 수정 확인으로 분류한다. 미설치·변조·미확인 advisory는 실패하며 새 ignore 추가·버전 위장·감사 대상 제거는 하지 않는다.
-- [ ] 위 인과 수리와 같은 독립 검토 뒤 원격 기존 workflow에서 보안 감사·Windows 전체 회귀·Linux POSIX·보호장치 결과와 첫 실패 artifact 불변성을 확인한다. 해결되지 않은 감사나 미실행 검사가 있으면 완전 통과로 기록하지 않는다.
+- [x] 같은 독립 검토와 원반례 수리 뒤 후보CI39161807143의 네 job success를 확인해 main을9d366925로 fast-forward했다. 같은 SHA의 main push 자동CI39162589501도 네 job success이며 Windows5,218개 실패0·오류0·플랫폼 skip4, 실제 Linux33+1/PASS/skip0, 보호장치37/PASS를 확인했다. 최초 실패4묶음은 원격 재다운로드도 해시가 동일하다. 기존 유보4ID는 범위 밖 미해결로 명시하고 raw 감사0이나 운영 보안 완료로 표현하지 않는다.
 - 범위 밖: 모델 교체·서비스/장치 실행·기존 venv 변경·새 감사 예외·무관한92커밋 병합. 사용자의 추가 선택 전에는 해당 경계를 넘지 않는다. 세부 근거는 기존 `docs/worklog/2026-10-19.md#verification-safeguards-remote`에 이어 기록한다.
 
 ## 검증 보호장치 원격 적용 — 2026-10-19
